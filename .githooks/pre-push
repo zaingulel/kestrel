@@ -1,0 +1,139 @@
+#!/bin/sh
+# pre-push — run the gates that must not leave the machine unchecked.
+#
+#   * the product gate — a push to main is judged first by `scripts/gates/pre-push-main <remote sha>
+#     <local sha>` as the remote's main has it, never by the pushed checkout's copy: the hook exports that
+#     commit's tree to a temporary directory and runs the gate from inside it, with replacement
+#     references off, so every file the gate loads by relative path is the one on main. A gate that is
+#     missing or not executable there, or that refuses, blocks the push. Other branches never consult it.
+#   * eslint — undefined reference, typo'd name, duplicate key.
+#   * the scripts/lib node:test suite — the guard scripts, board scripts and the pre-commit
+#     hook. Runs unconditionally: editing .claude/agents/ or AGENTS.md alone trips no
+#     staged-path trigger that runs it.
+#
+# The two gates fail differently ON PURPOSE. Lint is skipped with a warning when npm or
+# the eslint binary is missing, because a fresh or partial clone must not be hard-blocked
+# and CI still lints. The script suite is invoked through `node --test` directly, NOT
+# `npm run test:scripts`, so a missing npm cannot bypass it, and it fails CLOSED on a
+# missing node: every gate this repo has is a node program, so no-node is a broken
+# checkout, not a contributor to wave through.
+#
+# The repository's `npm test` is NOT forced on every push. Opt in with RUN_TESTS=1:
+#     RUN_TESTS=1 git push
+#
+# Escape hatch: `git push --no-verify` bypasses entirely.
+set -e
+
+# Git EXPORTS its plumbing env into every hook, and this hook runs the script suite, whose
+# test files `git init` throwaway fixture repos. An inherited GIT_DIR points that init at the
+# REAL repository and writes `core.bare = true` into the shared config, breaking every
+# checkout that shares it. `--local-env-vars` is git's own authoritative list of the
+# repository-scoped variables. GIT_NAMESPACE is not in that set, and NODE_TEST_CONTEXT is not
+# git's at all but carries the same hazard: an inner `node --test` that inherits it exits 0
+# EVEN ON RED. The trace family is scrubbed by prefix because its sub-keys are open-ended.
+git_trace_vars=$(
+  LC_ALL=C
+  set -f
+  IFS='
+'
+  for assignment in $(set); do
+    case $assignment in
+      (GIT_TRACE*=*)
+        name=${assignment%%=*}
+        case $name in
+          (*[!A-Za-z0-9_]*) ;;
+          (*) printf '%s\n' "$name" ;;
+        esac
+        ;;
+    esac
+  done
+)
+unset $(git rev-parse --local-env-vars) $git_trace_vars GIT_NAMESPACE NODE_TEST_CONTEXT \
+  GIT_CURL_VERBOSE GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# Git writes one "<local ref> <local sha> <remote ref> <remote sha>" line per pushed ref to stdin.
+main_gate=scripts/gates/pre-push-main
+
+# judge_main <remote sha> <local sha>: a subshell, so its export ends with it and its trap removes the
+# copy as soon as the push is judged. Every step is checked by hand, because `set -e` is off in a
+# function called on the left of `||`.
+judge_main() (
+  remote_sha=$1
+  local_sha=$2
+  # The scrub above removed this with the rest. Replacement refs are local: without it the repository
+  # could answer for the remote's commit, or for a pushed one, with another object.
+  export GIT_NO_REPLACE_OBJECTS=1
+  # Git's all-zero object name stands for a ref the remote lacks.
+  case $remote_sha in
+    (*[!0]*) ;;
+    (*)
+      echo "pre-push: the remote has no main yet, so there is no gate on main to judge this push; creating main is never a direct push." >&2
+      exit 1
+      ;;
+  esac
+  git_dir=$(git rev-parse --absolute-git-dir) || exit 1
+  copy=$(mktemp -d "${TMPDIR:-/tmp}/pre-push-main.XXXXXX") || exit 1
+  trap 'rm -rf "$copy"' EXIT
+  trap 'exit 1' HUP INT TERM
+  # A redirect, not a pipe into tar: POSIX sh has no pipefail, so a failed export would go unseen.
+  if ! git archive --format=tar "$remote_sha" >"$copy/main.tar"; then
+    echo "pre-push: cannot read the remote's main ($remote_sha) from this repository, so its gate cannot judge this push; fetch, rebase onto it and push again, or use a pull request." >&2
+    exit 1
+  fi
+  if ! { mkdir "$copy/main" && tar -xf "$copy/main.tar" -C "$copy/main"; }; then
+    echo "pre-push: cannot unpack the remote's main ($remote_sha), so its gate cannot judge this push; push to main through a pull request instead." >&2
+    exit 1
+  fi
+  if [ ! -x "$copy/main/$main_gate" ]; then
+    echo "pre-push: $main_gate is missing or not executable on the remote's main ($remote_sha); push to main through a pull request instead." >&2
+    exit 1
+  fi
+  # The gate starts inside the copy, so each file it loads by relative path is main's, and reaches the
+  # pushing repository only through git. The two variables sit on this one command: exported, they would
+  # send the script suite's fixture repositories to the real one. The inner subshell keeps this one out
+  # of the copy, which Windows cannot remove while it is a running process's current directory.
+  if ! ( cd "$copy/main" && GIT_DIR=$git_dir GIT_WORK_TREE=$repo_root "$main_gate" "$remote_sha" "$local_sha" ); then
+    echo "pre-push: the gate as it stands on the remote's main ($remote_sha) refused this push or could not be run; this checkout's copy of $main_gate was not consulted." >&2
+    exit 1
+  fi
+)
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  judge_main "$remote_sha" "$local_sha" </dev/null || exit 1
+done
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "pre-push: npm not found — skipping lint gate." >&2
+else
+  # Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
+  # .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
+  # main checkout's.
+  eslint_bin=""
+  dir=$repo_root
+  while :; do
+    if [ -x "$dir/node_modules/.bin/eslint" ]; then eslint_bin="$dir/node_modules/.bin/eslint"; break; fi
+    parent=$(dirname "$dir")
+    [ "$parent" = "$dir" ] && break
+    dir=$parent
+  done
+  if [ -z "$eslint_bin" ]; then
+    echo "pre-push: eslint not installed (run npm install) — skipping lint gate; CI will still lint." >&2
+  else
+    echo "pre-push: npm run lint…"
+    npm run lint --silent
+  fi
+fi
+
+echo "pre-push: node --test scripts/lib/…"
+node --test "scripts/lib/*.test.mjs"
+
+if [ "${RUN_TESTS:-0}" = "1" ]; then
+  echo "pre-push: RUN_TESTS=1 → npm test…"
+  npm test
+fi
+
+exit 0

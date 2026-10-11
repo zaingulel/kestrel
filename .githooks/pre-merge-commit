@@ -1,0 +1,6 @@
+#!/bin/sh
+# pre-merge-commit — a `git merge` that auto-commits never runs pre-commit, so a merge driver that
+# keeps one side of a generated artifact could commit it stale. Running pre-commit here gives the
+# product gate that case. Git skips this hook when the merge stops on conflicts; the commit that
+# resolves them runs pre-commit instead.
+exec sh "$(git rev-parse --show-toplevel)/.githooks/pre-commit"

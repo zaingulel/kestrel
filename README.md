@@ -61,3 +61,17 @@ MPLCONFIGDIR="$PWD/.runtime/cache/matplotlib" \
 Use `.runtime/asr-venv/bin/python` with NVIDIA's documented Transformers interface to load the local recognition model. Specify `local_files_only=True` and move the model to `cuda` to run without network downloads or a CPU fallback.
 
 Installation checks, recorded-sample pipeline checks and generated audio are available under `.runtime/`. Recorded-sample checks verify the full recognition, Saluki and browser audio transport path; they do not establish recognition accuracy on the user's voice or live microphone-to-speaker latency.
+
+## Development workflow
+
+[AGENTS.md](AGENTS.md) defines the repository contract. The [local profile](.agents/REPOSITORY.md) records repository conventions; [docs/README.md](docs/README.md) indexes the standards and tracker manual. Factory adoption preserves this conversation prototype. Product discovery and drilling with the owner precede further product implementation.
+
+Run `npm run lint`, `npm run lint:docs` and `npm run test:scripts` for the factory checks. `npm run test:speech` runs the existing Python tests with the local voice environment; `npm test` runs both suites.
+
+The git guard and the other runtime hooks run only in a runtime that has trusted this repository's hook files, and only once those files are on `main` in the root checkout. An installed hook is not proof that it fires: the proof is a live probe in each runtime, in which a command the guard refuses, such as `git commit --no-verify --dry-run`, comes back blocked. Repeat the probe after a sync changes a hook file or a runtime's hook configuration.
+
+## Privacy and runtime boundary
+
+Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally's LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. The browser service listens only on loopback at `127.0.0.1:7860`. The prototype has no tools or persistent memory.
+
+Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local server's debug output; the application does not save microphone recordings.

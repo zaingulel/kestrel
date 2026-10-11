@@ -1,0 +1,1487 @@
+{
+  "canonical": "zaingulel/fabraik",
+  "syncedFrom": "574247f2c3b3de5d6ceb5a0dd1042f49b6db1346",
+  "entries": [
+    {
+      "path": ".agents/skills/accessibility-review/SKILL.md",
+      "sha256": "ef42982af0d51238dda2ab16d08626712891bdd41864876c32d1e7b13fb3124f"
+    },
+    {
+      "path": ".agents/skills/closeout/SKILL.md",
+      "sha256": "c30c22abde9afcba198923f08f7638c4dd49dd94d03f9a4195e928ec7f70ab60"
+    },
+    {
+      "path": ".agents/skills/codebase-design/DEEPENING.md",
+      "sha256": "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1"
+    },
+    {
+      "path": ".agents/skills/codebase-design/DESIGN-IT-TWICE.md",
+      "sha256": "52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010"
+    },
+    {
+      "path": ".agents/skills/codebase-design/SKILL.md",
+      "sha256": "2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2"
+    },
+    {
+      "path": ".agents/skills/codebase-design/agents/openai.yaml",
+      "sha256": "edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f"
+    },
+    {
+      "path": ".agents/skills/cross-review/SKILL.md",
+      "sha256": "295975101f8748d0bdd27ef0ea269f3c39620e76e541f556809ed6265dd6f219"
+    },
+    {
+      "path": ".agents/skills/diagnosing-bugs/SKILL.md",
+      "sha256": "ce71d43efbf11a19c32cc585933a0ed49437a22266eaa3c5b242ab73051f450a"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/ADR-FORMAT.md",
+      "sha256": "944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/GLOSSARY-FORMAT.md",
+      "sha256": "21dcc40cdec8e151a829b98ab1517c1867bc444e3665134a98c6983411996801"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/SKILL.md",
+      "sha256": "7b925d7b1e341a2eeae33ad68a8a8c0ab889a38ddd22a7598e4c240e5a7556a3"
+    },
+    {
+      "path": ".agents/skills/domain-modeling/agents/openai.yaml",
+      "sha256": "f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b"
+    },
+    {
+      "path": ".agents/skills/frontend-design/LICENSE.txt",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "path": ".agents/skills/frontend-design/SKILL.md",
+      "sha256": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3"
+    },
+    {
+      "path": ".agents/skills/greptile/SKILL.md",
+      "sha256": "f9a9a0ccee62c030d068b89cf42bbd5740a393dc37150bafc48839ba69cbef1f"
+    },
+    {
+      "path": ".agents/skills/grill-me/SKILL.md",
+      "sha256": "caaf8b8de1684f96e26b28f3c29189db5c89cce4b73e1c93d86164f66ef88637"
+    },
+    {
+      "path": ".agents/skills/grill-me/agents/openai.yaml",
+      "sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b"
+    },
+    {
+      "path": ".agents/skills/grill-with-docs/SKILL.md",
+      "sha256": "7de372c13488f1ee96cc11cd8907b56b6809cc93eef776eeddd37de6b6cbe3fe"
+    },
+    {
+      "path": ".agents/skills/grill-with-docs/agents/openai.yaml",
+      "sha256": "94cd0ab161fb468a836349f5ed482ba58ce8e709a05c57ce533d739dbd35cca9"
+    },
+    {
+      "path": ".agents/skills/grilling/SKILL.md",
+      "sha256": "10ff989e7498b23b5acb49d5048f11dcd906757d2f79c5cdf8a00001381296f2"
+    },
+    {
+      "path": ".agents/skills/grilling/agents/openai.yaml",
+      "sha256": "1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b"
+    },
+    {
+      "path": ".agents/skills/handoff/SKILL.md",
+      "sha256": "3dc5adc6fcc262d5582a81fecb0963438ae64804ba7eec34caf053687e645ea0"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/HTML-REPORT.md",
+      "sha256": "581e8bb5a521e46bbda8ca7e19b15948bed882187108092ebb90c62513b77528"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/SKILL.md",
+      "sha256": "552240a5ab5cec6b67c15dd1ad6e9f6962b1bca6ce870059a8c2713760c20392"
+    },
+    {
+      "path": ".agents/skills/improve-codebase-architecture/agents/openai.yaml",
+      "sha256": "c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1"
+    },
+    {
+      "path": ".agents/skills/pr/CREDITS.md",
+      "sha256": "a7a087127665d7298a72280ef6e19c41ad8404523712a788c8dc3ab414bc2497"
+    },
+    {
+      "path": ".agents/skills/pr/SKILL.md",
+      "sha256": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd"
+    },
+    {
+      "path": ".agents/skills/pr/agents/openai.yaml",
+      "sha256": "2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad"
+    },
+    {
+      "path": ".agents/skills/prototype/LOGIC.md",
+      "sha256": "f61c7d249e786a79ef289018901c348271e1798dd0b0bc5607b5c6f4d4a01ab9"
+    },
+    {
+      "path": ".agents/skills/prototype/SKILL.md",
+      "sha256": "714de632d116bb73f65cdb5a882db15b9369a6713b9a47c0fad827848f0bfbe3"
+    },
+    {
+      "path": ".agents/skills/prototype/UI.md",
+      "sha256": "723211e878acbc7b6ff09755263f3295cde724ba902ff0064da41eed51d45ad3"
+    },
+    {
+      "path": ".agents/skills/prototype/agents/openai.yaml",
+      "sha256": "5af65e43ab41a350436697b81e27b7f848d36782043b73c322bb2c9fa9cc55dc"
+    },
+    {
+      "path": ".agents/skills/research/SKILL.md",
+      "sha256": "985569f15739c713d6784887c3d186d4ef9ac85bec5ad9c068d25bf0739928e4"
+    },
+    {
+      "path": ".agents/skills/research/agents/openai.yaml",
+      "sha256": "9b4c470d63221c1f68f22df70b83e2f12401b317babe0d1b7b5f24a974474d0d"
+    },
+    {
+      "path": ".agents/skills/resume/SKILL.md",
+      "sha256": "20bf372b074c630d507a229581069c1dd03fcfb70b5354ea04d6f5b0abe1dee0"
+    },
+    {
+      "path": ".agents/skills/retro/SKILL.md",
+      "sha256": "33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696"
+    },
+    {
+      "path": ".agents/skills/retro/agents/openai.yaml",
+      "sha256": "cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c"
+    },
+    {
+      "path": ".agents/skills/sync-job/SKILL.md",
+      "sha256": "e621b7bcb3ef8d4f40e56116ebdb704db917bbb888bfeb3655c189c74fa916ba"
+    },
+    {
+      "path": ".agents/skills/tdd/SKILL.md",
+      "sha256": "b39fe27b98dedfddc1071922de528d44e028efd7d7355de326c1b0a65b5fdb88"
+    },
+    {
+      "path": ".agents/skills/to-issues/SKILL.md",
+      "sha256": "641f6a31862dec887c00f9c5ad005f6678ebb3d479ebddfbe98f61fda3ac7b6a"
+    },
+    {
+      "path": ".agents/skills/to-spec/SKILL.md",
+      "sha256": "43ad9cf318e5e7d3d1fa360253a37021796dc87a0c2e595ad262661a10f85088"
+    },
+    {
+      "path": ".agents/skills/to-spec/agents/openai.yaml",
+      "sha256": "1c5b4d1e3d8e52287ef19cc2742fdbbfae1914ac75d33af3e4c8174f08cc55bb"
+    },
+    {
+      "path": ".agents/skills/wayfinder/SKILL.md",
+      "sha256": "fee6e1d0c50f0e736b4ef8a599060c959afae904c9a97d82c97f049fcc3aa0f1"
+    },
+    {
+      "path": ".agents/skills/wayfinder/agents/openai.yaml",
+      "sha256": "88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073"
+    },
+    {
+      "path": ".agents/skills/writing-for-agents/SKILL-MECHANICS.md",
+      "sha256": "c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059"
+    },
+    {
+      "path": ".agents/skills/writing-for-agents/SKILL.md",
+      "sha256": "551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a"
+    },
+    {
+      "path": ".agents/skills/writing-for-agents/agents/openai.yaml",
+      "sha256": "eacb24b2a618cfb81dacb0416f4fdd75ddf3a8060f8ddb99aae1b1e301907e4b"
+    },
+    {
+      "path": ".agents/templates/builder-handoff.md",
+      "sha256": "2b7c7314ba5013d01cc12f7252858e60cabdf7999bd92540904d66342a174491"
+    },
+    {
+      "path": ".agents/templates/planner-handoff.md",
+      "sha256": "36160a4180bbaa3648484362cccb0da7d0dda57a92b5f8be04a4d1e6a71e88be"
+    },
+    {
+      "path": ".agents/upstream/anthropics-claude-plugins-official/frontend-design/LICENSE.txt",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "path": ".agents/upstream/anthropics-claude-plugins-official/frontend-design/SKILL.md",
+      "sha256": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3"
+    },
+    {
+      "path": ".agents/upstream/anthropics-knowledge-work-plugins/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": ".agents/upstream/anthropics-knowledge-work-plugins/accessibility-review/SKILL.md",
+      "sha256": "ef42982af0d51238dda2ab16d08626712891bdd41864876c32d1e7b13fb3124f"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/LICENSE",
+      "sha256": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/codebase-design/DEEPENING.md",
+      "sha256": "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/codebase-design/DESIGN-IT-TWICE.md",
+      "sha256": "52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/codebase-design/SKILL.md",
+      "sha256": "2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/codebase-design/agents/openai.yaml",
+      "sha256": "edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/domain-modeling/ADR-FORMAT.md",
+      "sha256": "944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/domain-modeling/GLOSSARY-FORMAT.md",
+      "sha256": "21dcc40cdec8e151a829b98ab1517c1867bc444e3665134a98c6983411996801"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/domain-modeling/SKILL.md",
+      "sha256": "7b925d7b1e341a2eeae33ad68a8a8c0ab889a38ddd22a7598e4c240e5a7556a3"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/domain-modeling/agents/openai.yaml",
+      "sha256": "f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grill-me/SKILL.md",
+      "sha256": "caaf8b8de1684f96e26b28f3c29189db5c89cce4b73e1c93d86164f66ef88637"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grill-me/agents/openai.yaml",
+      "sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grill-with-docs/SKILL.md",
+      "sha256": "7de372c13488f1ee96cc11cd8907b56b6809cc93eef776eeddd37de6b6cbe3fe"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grill-with-docs/agents/openai.yaml",
+      "sha256": "94cd0ab161fb468a836349f5ed482ba58ce8e709a05c57ce533d739dbd35cca9"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grilling/SKILL.md",
+      "sha256": "10ff989e7498b23b5acb49d5048f11dcd906757d2f79c5cdf8a00001381296f2"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/grilling/agents/openai.yaml",
+      "sha256": "1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/improve-codebase-architecture/HTML-REPORT.md",
+      "sha256": "581e8bb5a521e46bbda8ca7e19b15948bed882187108092ebb90c62513b77528"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/improve-codebase-architecture/SKILL.md",
+      "sha256": "552240a5ab5cec6b67c15dd1ad6e9f6962b1bca6ce870059a8c2713760c20392"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/improve-codebase-architecture/agents/openai.yaml",
+      "sha256": "c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/pr/CREDITS.md",
+      "sha256": "a7a087127665d7298a72280ef6e19c41ad8404523712a788c8dc3ab414bc2497"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/pr/SKILL.md",
+      "sha256": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/pr/agents/openai.yaml",
+      "sha256": "2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/prototype/LOGIC.md",
+      "sha256": "f61c7d249e786a79ef289018901c348271e1798dd0b0bc5607b5c6f4d4a01ab9"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/prototype/SKILL.md",
+      "sha256": "714de632d116bb73f65cdb5a882db15b9369a6713b9a47c0fad827848f0bfbe3"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/prototype/UI.md",
+      "sha256": "723211e878acbc7b6ff09755263f3295cde724ba902ff0064da41eed51d45ad3"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/prototype/agents/openai.yaml",
+      "sha256": "5af65e43ab41a350436697b81e27b7f848d36782043b73c322bb2c9fa9cc55dc"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/research/SKILL.md",
+      "sha256": "985569f15739c713d6784887c3d186d4ef9ac85bec5ad9c068d25bf0739928e4"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/research/agents/openai.yaml",
+      "sha256": "9b4c470d63221c1f68f22df70b83e2f12401b317babe0d1b7b5f24a974474d0d"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/retro/SKILL.md",
+      "sha256": "33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/retro/agents/openai.yaml",
+      "sha256": "cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/to-spec/SKILL.md",
+      "sha256": "43ad9cf318e5e7d3d1fa360253a37021796dc87a0c2e595ad262661a10f85088"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/to-spec/agents/openai.yaml",
+      "sha256": "1c5b4d1e3d8e52287ef19cc2742fdbbfae1914ac75d33af3e4c8174f08cc55bb"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/wayfinder/SKILL.md",
+      "sha256": "fee6e1d0c50f0e736b4ef8a599060c959afae904c9a97d82c97f049fcc3aa0f1"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/wayfinder/agents/openai.yaml",
+      "sha256": "88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/writing-for-agents/SKILL-MECHANICS.md",
+      "sha256": "c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/writing-for-agents/SKILL.md",
+      "sha256": "551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a"
+    },
+    {
+      "path": ".agents/upstream/mattpocock-skills/writing-for-agents/agents/openai.yaml",
+      "sha256": "eacb24b2a618cfb81dacb0416f4fdd75ddf3a8060f8ddb99aae1b1e301907e4b"
+    },
+    {
+      "path": ".claude/agents/architect.md",
+      "sha256": "66e7b5beb5d51db2b49eb2e5e2f548868522bafd9f702fce1d57b7538ba8851b"
+    },
+    {
+      "path": ".claude/agents/builder-lite.md",
+      "sha256": "2229ac637c1633094134e04875f0724fc45d99cc987f41d28014c9f7818eb332"
+    },
+    {
+      "path": ".claude/agents/builder-max.md",
+      "sha256": "cede2c783a9dd0bb0ba8662bc57dd53d43e7b911b82ff089d4e80309f12f5fca"
+    },
+    {
+      "path": ".claude/agents/builder.md",
+      "sha256": "beaf5cd65cc5888a930da5ce8854251bf85f0d4d7ba63055df1f51fa68ec238c"
+    },
+    {
+      "path": ".claude/agents/explorer.md",
+      "sha256": "e543d8b1d85114d6b2050db128f3435766603fb831ea3358e3fda796d962b64d"
+    },
+    {
+      "path": ".claude/agents/oracle.md",
+      "sha256": "b56ae3843776b9b5691106a66e03c02d5bac5a8f5f33a3ef07e52ca95c5077a2"
+    },
+    {
+      "path": ".claude/agents/plan-reviewer.md",
+      "sha256": "ce89107ddb156c524ed3a3f21d24292a09520604f2cd25e6a7c64706c97645b3"
+    },
+    {
+      "path": ".claude/agents/reviewer.md",
+      "sha256": "202ae5fbdf37be9e7c730b8cae994863220a10676445a59df5090dea309f49a6"
+    },
+    {
+      "path": ".claude/agents/security-reviewer.md",
+      "sha256": "1c1b69f4522b9f07472bd0a4849999ec7f09cd4c90976c5ece5f571cd45ba34a"
+    },
+    {
+      "path": ".claude/hooks/.gitattributes",
+      "sha256": "a79691a93b46e49ce460c26ef22afcc03d6eca1e63bf2edbc20e96159510f6c9"
+    },
+    {
+      "path": ".claude/hooks/block-unsafe-git.mjs",
+      "sha256": "0c93ee10c8c745f524ef2dee22ff0ad582330139f40b02e5b9bff648cab92676"
+    },
+    {
+      "path": ".claude/hooks/check-builder-handoff.mjs",
+      "sha256": "7480979ee6a2fd9316111e3208cb1e2d27bcbd4f88c327e8c0e46cb01304a3f6"
+    },
+    {
+      "path": ".claude/hooks/filter-test-output.mjs",
+      "sha256": "aca4baa7e1759779d32651dfc548d750adf88bcb6de4aca45bd7b89e0a6fcfd5"
+    },
+    {
+      "path": ".claude/hooks/test-output-filter-run.mjs",
+      "sha256": "059bf173a5f577cca7a0c953f32fdf9802784d960169621c08a905284b8fad06"
+    },
+    {
+      "path": ".claude/hooks/verify-green.sh",
+      "sha256": "0892a36848cb6806c064bff60ddbd0a00a19c0f0ccd01d2c60f2d0c942a2f28f"
+    },
+    {
+      "path": ".claude/settings.json",
+      "sha256": "8ae234167cc0d3a9b79c9edd49aa6b3e9072ddf0ec12ef8c3ed60f6308b6922d"
+    },
+    {
+      "path": ".claude/skills/accessibility-review/SKILL.md",
+      "sha256": "ef42982af0d51238dda2ab16d08626712891bdd41864876c32d1e7b13fb3124f"
+    },
+    {
+      "path": ".claude/skills/closeout/SKILL.md",
+      "sha256": "c30c22abde9afcba198923f08f7638c4dd49dd94d03f9a4195e928ec7f70ab60"
+    },
+    {
+      "path": ".claude/skills/codebase-design/DEEPENING.md",
+      "sha256": "f3dd099ce99289bd213914d8ee3e2429b78309c3957ca4583f7659551b1d53c1"
+    },
+    {
+      "path": ".claude/skills/codebase-design/DESIGN-IT-TWICE.md",
+      "sha256": "52b52e75655a27aea59c6966b410bac82448968ad46ef1ebb9f07c274e3ae010"
+    },
+    {
+      "path": ".claude/skills/codebase-design/SKILL.md",
+      "sha256": "2c20617f87ec8af6a434859f381b2f061a69b530444e74eb39e78bb016a6d1e2"
+    },
+    {
+      "path": ".claude/skills/codebase-design/agents/openai.yaml",
+      "sha256": "edebc9e4fcfe102114012575eaa9600b9b5fd08c311664f389c36e7bc717740f"
+    },
+    {
+      "path": ".claude/skills/cross-review/SKILL.md",
+      "sha256": "295975101f8748d0bdd27ef0ea269f3c39620e76e541f556809ed6265dd6f219"
+    },
+    {
+      "path": ".claude/skills/diagnosing-bugs/SKILL.md",
+      "sha256": "ce71d43efbf11a19c32cc585933a0ed49437a22266eaa3c5b242ab73051f450a"
+    },
+    {
+      "path": ".claude/skills/domain-modeling/ADR-FORMAT.md",
+      "sha256": "944c92aa790e8fbdc9199640b170979abb8a34ba8d0fe18c2a01a63bce140ca0"
+    },
+    {
+      "path": ".claude/skills/domain-modeling/GLOSSARY-FORMAT.md",
+      "sha256": "21dcc40cdec8e151a829b98ab1517c1867bc444e3665134a98c6983411996801"
+    },
+    {
+      "path": ".claude/skills/domain-modeling/SKILL.md",
+      "sha256": "7b925d7b1e341a2eeae33ad68a8a8c0ab889a38ddd22a7598e4c240e5a7556a3"
+    },
+    {
+      "path": ".claude/skills/domain-modeling/agents/openai.yaml",
+      "sha256": "f6bf2aa996c6e6f53fdd0708e18a0d16a56aed8322cca59fedbe3c0d2c75f06b"
+    },
+    {
+      "path": ".claude/skills/frontend-design/LICENSE.txt",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "path": ".claude/skills/frontend-design/SKILL.md",
+      "sha256": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3"
+    },
+    {
+      "path": ".claude/skills/greptile/SKILL.md",
+      "sha256": "f9a9a0ccee62c030d068b89cf42bbd5740a393dc37150bafc48839ba69cbef1f"
+    },
+    {
+      "path": ".claude/skills/grill-me/SKILL.md",
+      "sha256": "caaf8b8de1684f96e26b28f3c29189db5c89cce4b73e1c93d86164f66ef88637"
+    },
+    {
+      "path": ".claude/skills/grill-me/agents/openai.yaml",
+      "sha256": "c061e39c3e0f9d865fb1b97556d485704af2a8a58f4b8221a8917a5c2074a32b"
+    },
+    {
+      "path": ".claude/skills/grill-with-docs/SKILL.md",
+      "sha256": "7de372c13488f1ee96cc11cd8907b56b6809cc93eef776eeddd37de6b6cbe3fe"
+    },
+    {
+      "path": ".claude/skills/grill-with-docs/agents/openai.yaml",
+      "sha256": "94cd0ab161fb468a836349f5ed482ba58ce8e709a05c57ce533d739dbd35cca9"
+    },
+    {
+      "path": ".claude/skills/grilling/SKILL.md",
+      "sha256": "10ff989e7498b23b5acb49d5048f11dcd906757d2f79c5cdf8a00001381296f2"
+    },
+    {
+      "path": ".claude/skills/grilling/agents/openai.yaml",
+      "sha256": "1411d7df7d99b7e621a1ff8283c8133cc2464be63d064e52d8ce169c6800ee9b"
+    },
+    {
+      "path": ".claude/skills/handoff/SKILL.md",
+      "sha256": "3dc5adc6fcc262d5582a81fecb0963438ae64804ba7eec34caf053687e645ea0"
+    },
+    {
+      "path": ".claude/skills/improve-codebase-architecture/HTML-REPORT.md",
+      "sha256": "581e8bb5a521e46bbda8ca7e19b15948bed882187108092ebb90c62513b77528"
+    },
+    {
+      "path": ".claude/skills/improve-codebase-architecture/SKILL.md",
+      "sha256": "552240a5ab5cec6b67c15dd1ad6e9f6962b1bca6ce870059a8c2713760c20392"
+    },
+    {
+      "path": ".claude/skills/improve-codebase-architecture/agents/openai.yaml",
+      "sha256": "c8cb20f68ebf0edb4e497bc11ae5fcaa196004e661cd189015b04f4109ced7f1"
+    },
+    {
+      "path": ".claude/skills/pr/CREDITS.md",
+      "sha256": "a7a087127665d7298a72280ef6e19c41ad8404523712a788c8dc3ab414bc2497"
+    },
+    {
+      "path": ".claude/skills/pr/SKILL.md",
+      "sha256": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd"
+    },
+    {
+      "path": ".claude/skills/pr/agents/openai.yaml",
+      "sha256": "2295b586624db4ef546f3fd4695492f039d941a46d8a1593a702ce3ca511b8ad"
+    },
+    {
+      "path": ".claude/skills/prototype/LOGIC.md",
+      "sha256": "f61c7d249e786a79ef289018901c348271e1798dd0b0bc5607b5c6f4d4a01ab9"
+    },
+    {
+      "path": ".claude/skills/prototype/SKILL.md",
+      "sha256": "714de632d116bb73f65cdb5a882db15b9369a6713b9a47c0fad827848f0bfbe3"
+    },
+    {
+      "path": ".claude/skills/prototype/UI.md",
+      "sha256": "723211e878acbc7b6ff09755263f3295cde724ba902ff0064da41eed51d45ad3"
+    },
+    {
+      "path": ".claude/skills/prototype/agents/openai.yaml",
+      "sha256": "5af65e43ab41a350436697b81e27b7f848d36782043b73c322bb2c9fa9cc55dc"
+    },
+    {
+      "path": ".claude/skills/research/SKILL.md",
+      "sha256": "985569f15739c713d6784887c3d186d4ef9ac85bec5ad9c068d25bf0739928e4"
+    },
+    {
+      "path": ".claude/skills/research/agents/openai.yaml",
+      "sha256": "9b4c470d63221c1f68f22df70b83e2f12401b317babe0d1b7b5f24a974474d0d"
+    },
+    {
+      "path": ".claude/skills/resume/SKILL.md",
+      "sha256": "20bf372b074c630d507a229581069c1dd03fcfb70b5354ea04d6f5b0abe1dee0"
+    },
+    {
+      "path": ".claude/skills/retro/SKILL.md",
+      "sha256": "33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696"
+    },
+    {
+      "path": ".claude/skills/retro/agents/openai.yaml",
+      "sha256": "cb6fb9d7e6b4be5975f41f6def1dd00a1255bad5d9b02696b124c924a8b8745c"
+    },
+    {
+      "path": ".claude/skills/sync-job/SKILL.md",
+      "sha256": "e621b7bcb3ef8d4f40e56116ebdb704db917bbb888bfeb3655c189c74fa916ba"
+    },
+    {
+      "path": ".claude/skills/tdd/SKILL.md",
+      "sha256": "b39fe27b98dedfddc1071922de528d44e028efd7d7355de326c1b0a65b5fdb88"
+    },
+    {
+      "path": ".claude/skills/to-issues/SKILL.md",
+      "sha256": "641f6a31862dec887c00f9c5ad005f6678ebb3d479ebddfbe98f61fda3ac7b6a"
+    },
+    {
+      "path": ".claude/skills/to-spec/SKILL.md",
+      "sha256": "43ad9cf318e5e7d3d1fa360253a37021796dc87a0c2e595ad262661a10f85088"
+    },
+    {
+      "path": ".claude/skills/to-spec/agents/openai.yaml",
+      "sha256": "1c5b4d1e3d8e52287ef19cc2742fdbbfae1914ac75d33af3e4c8174f08cc55bb"
+    },
+    {
+      "path": ".claude/skills/wayfinder/SKILL.md",
+      "sha256": "fee6e1d0c50f0e736b4ef8a599060c959afae904c9a97d82c97f049fcc3aa0f1"
+    },
+    {
+      "path": ".claude/skills/wayfinder/agents/openai.yaml",
+      "sha256": "88bc81a11a6d52ac67aeaa76b8b619e387020d47c5133a4dd4927fd15c4ad073"
+    },
+    {
+      "path": ".claude/skills/writing-for-agents/SKILL-MECHANICS.md",
+      "sha256": "c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059"
+    },
+    {
+      "path": ".claude/skills/writing-for-agents/SKILL.md",
+      "sha256": "551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a"
+    },
+    {
+      "path": ".claude/skills/writing-for-agents/agents/openai.yaml",
+      "sha256": "eacb24b2a618cfb81dacb0416f4fdd75ddf3a8060f8ddb99aae1b1e301907e4b"
+    },
+    {
+      "path": ".codex/agents/architect.toml",
+      "sha256": "1b56d21326845560acd5c0ea58c40e17ed0722faf2cd2a62c3abbcd7f44541f2"
+    },
+    {
+      "path": ".codex/agents/builder-lite.toml",
+      "sha256": "36ba7acbcf27c755d51f54e568e23045bfe55ec74945fbe1291c67799c4d6d6e"
+    },
+    {
+      "path": ".codex/agents/builder-max.toml",
+      "sha256": "e773e1fff45c783872c8c50c38cc31278433989f1808020e96278eb7cebf84d3"
+    },
+    {
+      "path": ".codex/agents/builder.toml",
+      "sha256": "841a4ebe42caf5196a0b61c3dd085f16db2db99f4b37d23d101ed6760998d48b"
+    },
+    {
+      "path": ".codex/agents/explorer.toml",
+      "sha256": "dcc8feda35c10f141af5431c378368f7b6183b80c4b707f96ac38930e24bc0a5"
+    },
+    {
+      "path": ".codex/agents/oracle.toml",
+      "sha256": "6d8d41c0ff040578076519e232c5b7f04baa8b725f041fe23a5089173cfe2750"
+    },
+    {
+      "path": ".codex/agents/plan-reviewer.toml",
+      "sha256": "359d8be17b2426b978062bb2e853560797d7b280564fadeaf3b7845819626074"
+    },
+    {
+      "path": ".codex/agents/reviewer.toml",
+      "sha256": "f338604f735d50a489db1fcb7be3ede001d07f5345ce3d68c729bd35477d1149"
+    },
+    {
+      "path": ".codex/agents/security-reviewer.toml",
+      "sha256": "efcd2d5a4a5b678c247fcdd2787006291e869a6db88793fe1a8f8a32b484417e"
+    },
+    {
+      "path": ".codex/hooks.json",
+      "sha256": "e99443d79aa9d3da492553d8b5df65051553619dc9e5f9d5c509c99648eb2e48"
+    },
+    {
+      "path": ".codex/hooks/.gitattributes",
+      "sha256": "a79691a93b46e49ce460c26ef22afcc03d6eca1e63bf2edbc20e96159510f6c9"
+    },
+    {
+      "path": ".codex/hooks/block-unsafe-git.mjs",
+      "sha256": "45c266ff7eb0afc205091385f03a71a924db77722c770d8e8cd92b2594188020"
+    },
+    {
+      "path": ".codex/hooks/check-builder-handoff.mjs",
+      "sha256": "b3d91ad5721b0102492a32e3e79ba8b664914d146428e423a88975e6e30c2d04"
+    },
+    {
+      "path": ".codex/hooks/verify-green.mjs",
+      "sha256": "99402924bc9200fb8a67d56dcaef3e8277f4861f1482d1dd7408e92d4760dccb"
+    },
+    {
+      "path": ".codex/hooks/verify-green.sh",
+      "sha256": "c0b2cb4e421c01383cb382379fa810501db8bc865f8f8a43eb05b7479025743f"
+    },
+    {
+      "path": ".githooks/.gitattributes",
+      "sha256": "a79691a93b46e49ce460c26ef22afcc03d6eca1e63bf2edbc20e96159510f6c9"
+    },
+    {
+      "path": ".githooks/README.md",
+      "sha256": "6a9ee1e13f95deb3861224c6c3e9739203140e77af50294d4719e5a6bdcfb6a5"
+    },
+    {
+      "path": ".githooks/pre-commit",
+      "sha256": "f4686476fd6f5788db7ad1776e87b8fd14329fb5dca3c3019eaf6d68d3b899fa",
+      "executable": true
+    },
+    {
+      "path": ".githooks/pre-merge-commit",
+      "sha256": "d54c1463d5a0cd6477c79be23b413f0c07d270099a23ccc84607a2f75478c224",
+      "executable": true
+    },
+    {
+      "path": ".githooks/pre-push",
+      "sha256": "dbd596ae9721f3acc4b8cc7abd7f1537622cfc5fc8e8a1d7879bd6406170a0e0",
+      "executable": true
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "sha256": "194d4605c60bd33e3cea06d880abd0152e5d057efedbbeaf0c1039cb0f5c9a90"
+    },
+    {
+      "path": ".github/workflows/sweep-scope.yml",
+      "sha256": "25b71caa44bf5a022edb27e5b1a6235e49065d80f27d78622c44b86a2f40886b"
+    },
+    {
+      "path": ".greptile/config.json",
+      "sha256": "7a195d3e19bb521ba1c071bc73e2f9108d667857e0fba0a2d461040aa9fe5b7e"
+    },
+    {
+      "path": "AGENTS.md",
+      "region": "factory-shared",
+      "sha256": "49efece19019e5acc81f29075bbcd6dcfdf79996e55bf5ac56da151db48698f8"
+    },
+    {
+      "path": "CLAUDE.md",
+      "sha256": "7073e17e83293a26bd26cfc0e2d1fa906fa393a63d0a442f86dece3ccd480249"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-board.md",
+      "sha256": "101c8a452be35fc64c3d034ad8f0621bafd8ed2117c7cf8d25b462b9f05e70e4"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-enforcement.md",
+      "sha256": "5dcb3f79158fe7724be6c5aee29d6a669cff30ce43efd72a2f743b0532f75472"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-evidence.md",
+      "sha256": "85b919867edb1121ff7cec8febef9b77180304fad8778252f2d243eb5ad439d6"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-job.md",
+      "sha256": "593c574c6cf6b6eab37ae95db54c309600fbb57ef7557d52e42d6410c7f08abf"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-runtimes.md",
+      "sha256": "4a28100362fa70cc67905e4e47c09637b1eff063a783c3fccd973506ae8fa720"
+    },
+    {
+      "path": "docs/AI-WORKFLOW-seats.md",
+      "sha256": "0944aa4ce94eb73147b4507759da66139781a59c66561b6d4369f69c68350289"
+    },
+    {
+      "path": "docs/AI-WORKFLOW.md",
+      "sha256": "2429c8779a3618c7397450ee5911ce158dfcd775d1bab658931ac2ca6750fa49"
+    },
+    {
+      "path": "docs/WEEKLY-RETRO.md",
+      "sha256": "a71cac6fc495bbbbb9281b1e30ea2ee969a5b9a8a165d54b67f5870cc6c31353"
+    },
+    {
+      "path": "scripts/board-add.mjs",
+      "sha256": "31ccbbc2c4bbfea1987d560104fcf43940df538959c8ad6743dc9b53f9b4b65b"
+    },
+    {
+      "path": "scripts/board-move.mjs",
+      "sha256": "147aa9a378a4be548ac1f31094c964e05a93cefdab903d88bc57b2b8fd7046c4"
+    },
+    {
+      "path": "scripts/board.mjs",
+      "sha256": "0b6814ec18ceda51883ebc8ff032a499d55d4f7eec95da63383223e0c731ef68",
+      "executable": true
+    },
+    {
+      "path": "scripts/factory-sync.mjs",
+      "sha256": "1d9722327525cba3498c144191eb4ccaa0b9ffaebdee595a6d32808a85a834cb"
+    },
+    {
+      "path": "scripts/lib/board-add.mjs",
+      "sha256": "2ddf1e607a629f68380dbb22c62a4ff436285ab1cc6cf00636c3b06821dbee1f"
+    },
+    {
+      "path": "scripts/lib/board-add.test.mjs",
+      "sha256": "d6d28231416f264af48769763a262f23c9fb59f4dde437438e755d77257aab66"
+    },
+    {
+      "path": "scripts/lib/board-cli.test.mjs",
+      "sha256": "fbd87e2e84ad84cb852e3c59bca57ec75e2c687d4113ef452e7f241bc620849b"
+    },
+    {
+      "path": "scripts/lib/board-fixtures.mjs",
+      "sha256": "fec9482b890b0160dffd85882f18710f5a1dd63e910c139089d2b204889d1ac7"
+    },
+    {
+      "path": "scripts/lib/board-move.mjs",
+      "sha256": "69096161b5dee8342d7c7fc4c63db467b626e21a0afd8ba313d619f6e90fe4f6"
+    },
+    {
+      "path": "scripts/lib/board-move.test.mjs",
+      "sha256": "1567875f2847003a1352936d1fb1339e0ad75fe0dc5ca6c28bf83f56a263e01f"
+    },
+    {
+      "path": "scripts/lib/board-portability.test.mjs",
+      "sha256": "46b028c4ffe83b3c04716b06f167b5a55973c1668f768a66048671f065915dab"
+    },
+    {
+      "path": "scripts/lib/board-rules.mjs",
+      "sha256": "173321b287129a94459a0e455ae30d61c53fb770788ad20785ce08cd95d21606"
+    },
+    {
+      "path": "scripts/lib/board-rules.test.mjs",
+      "sha256": "e3188e573fbf8f3a2af1e42919034da97e049b0c6007a19d81cd93d703eee68c"
+    },
+    {
+      "path": "scripts/lib/board.mjs",
+      "sha256": "fd4f9f5ca3b77a15bc54386beeba97e66eb2927caa5e2006b5678d3def5e0f07"
+    },
+    {
+      "path": "scripts/lib/board.test.mjs",
+      "sha256": "478c145edf32f43ac075362b262d4ddd20474a38da41cd25e08437914efa5e1e"
+    },
+    {
+      "path": "scripts/lib/check-agents.mjs",
+      "sha256": "83e63b016d70becc20529a12c44a99c7ed4d5e86c867d5286ec1664ae28c872e"
+    },
+    {
+      "path": "scripts/lib/check-agents.test.mjs",
+      "sha256": "5cf40e30eda4a4bae7670f698dd2c3bff0661cae42b1d972ecb69c301b5cca65"
+    },
+    {
+      "path": "scripts/lib/checkout-context.mjs",
+      "sha256": "25ea385ea0c03d2c5bbeddedb85a9078eb90de5a11fd454d337941e3401b4259"
+    },
+    {
+      "path": "scripts/lib/checkout-context.test.mjs",
+      "sha256": "d016e813f3052f7377ca8af86fada61dd5840d2c162bb447babe427cfae4b4a7"
+    },
+    {
+      "path": "scripts/lib/cli-flags.mjs",
+      "sha256": "3cc8e59b65511c9c52b6c2d9dd6fc39a2f177d6cdf7d3f0e3294ed9a55b4da6b"
+    },
+    {
+      "path": "scripts/lib/cli-flags.test.mjs",
+      "sha256": "6c7fb14a3372143d7572508993e31f8bc1d2fd1cb5895c016c3cd2796a7a1868"
+    },
+    {
+      "path": "scripts/lib/codex-hook-adapters.mjs",
+      "sha256": "2ec0dd212f7f4d2a6b1a92554ee966e22f2789ef615e5157d372931e53ad37a8"
+    },
+    {
+      "path": "scripts/lib/codex-hook-adapters.test.mjs",
+      "sha256": "342543e77b9c769a0695c830894a0b0913ea96f7bbdf69948339f60a8c38af22"
+    },
+    {
+      "path": "scripts/lib/codex-hooks-windows.test.mjs",
+      "sha256": "8df86ea86c9e08ab34d970932e4e445bc3e59855e8558519ae0bacf89dbd2af1"
+    },
+    {
+      "path": "scripts/lib/doc-lint-citations.mjs",
+      "sha256": "222c3f7200ab3f259a6f58487e2423dde3343a724f240df925bbcf94934573bd"
+    },
+    {
+      "path": "scripts/lib/doc-lint-citations.test.mjs",
+      "sha256": "25332a3a28c2e0845609ce4b77bc5163197748711ddf98acbbaf959eb8c708ae"
+    },
+    {
+      "path": "scripts/lib/doc-lint-links.mjs",
+      "sha256": "a3502bf34a7d78b3da890d8ea1990c7e0e75dbac67ec3f3fed97b5eb32e72dd0"
+    },
+    {
+      "path": "scripts/lib/doc-lint-links.test.mjs",
+      "sha256": "e563d4ff6a531d234d943d6e27d831fe104d9408c8197b69b9390b6ffacd17c6"
+    },
+    {
+      "path": "scripts/lib/factory-sync.mjs",
+      "sha256": "c4e5d3ba09602a2559050e5a45bec3c9c1fd697ddd43fa616cf910e2fe2d5f09"
+    },
+    {
+      "path": "scripts/lib/factory-sync.test.mjs",
+      "sha256": "dd0e6d059f23a6248f57c6127b8ca4f01d369be746b40ecb953fee8d48c9e061"
+    },
+    {
+      "path": "scripts/lib/fake-gh.mjs",
+      "sha256": "6d89cdbd0b64424d224c87d9631856613c13ed97c652c5aa03d3201c7b36f5b4"
+    },
+    {
+      "path": "scripts/lib/gh-exec.mjs",
+      "sha256": "10418ff736ed53d02046890ec34a9069059cddb33535818d0361a475f88ab484"
+    },
+    {
+      "path": "scripts/lib/gh-exec.test.mjs",
+      "sha256": "6a8f58fc2b0bf9c8bbf3c99082d2f975656aa87f155b5030fe6a639e438891ef"
+    },
+    {
+      "path": "scripts/lib/handoff-check.mjs",
+      "sha256": "4e5e467e37d5ff62124be4427318602a1f9e97a1793abad591ea4979c0a3ce81"
+    },
+    {
+      "path": "scripts/lib/handoff-check.test.mjs",
+      "sha256": "6692913e0b92e3101a791ef58bf7d1c655c7a504956cfe6f2073f07ad6a1db7e"
+    },
+    {
+      "path": "scripts/lib/issue-publish.mjs",
+      "sha256": "ea3b70abf9a6fed21dca9fea5382e6bdc8f336b68ba4f4e78a6fea0e588f78ce"
+    },
+    {
+      "path": "scripts/lib/issue-publish.test.mjs",
+      "sha256": "75f6f90198ed34a66053a444197ac7031ef9a8a2c74802334faf347c5c728451"
+    },
+    {
+      "path": "scripts/lib/merge-watch.mjs",
+      "sha256": "d85ffc4de4d185ec4ca3b04cee407e374d911c47f6346f42e2d869936bc1178d"
+    },
+    {
+      "path": "scripts/lib/merge-watch.test.mjs",
+      "sha256": "e1d67db5f4db4ad9b1de8934062a980cc96d695ccbc305c20203ea5b00228b5c"
+    },
+    {
+      "path": "scripts/lib/posix-shell.mjs",
+      "sha256": "41b2f7f4a38c1422370a0a9b307036ee4ae91736e095f6c3d9e9d5d49e6160d9"
+    },
+    {
+      "path": "scripts/lib/posix-shell.test.mjs",
+      "sha256": "8891f14c326a80ec5259739bcd3f4c48907f05a52e771101e27f9be8e2d8a15c"
+    },
+    {
+      "path": "scripts/lib/precommit.test.mjs",
+      "sha256": "039e5cbafaa72e2e75c87f25286c32715fa44f09e3e2e538369c39d4302643c5"
+    },
+    {
+      "path": "scripts/lib/prepush.test.mjs",
+      "sha256": "1194b5862e09922354b92360083af0425c307432a1785b3fc76ebb6f824532ab"
+    },
+    {
+      "path": "scripts/lib/run-log.test.mjs",
+      "sha256": "cf2d4606255c675d59fcec51963090779aab2a354f8bedd2d19226d86ca34006"
+    },
+    {
+      "path": "scripts/lib/runtimes.mjs",
+      "sha256": "0e6a1189ba04e2f2dfd0dc8bb940ba56c2f263b98fee346f5569270970d06eab"
+    },
+    {
+      "path": "scripts/lib/runtimes.test.mjs",
+      "sha256": "ea68e9884cfb9ba066959eaf6c055efdfc6b8a0bea355e67c9ab0836a0e4410b"
+    },
+    {
+      "path": "scripts/lib/seat-settings.mjs",
+      "sha256": "43861660d47be03a4302789f36b66e8b37b67dc3087661930d71f5e2c1e7df09"
+    },
+    {
+      "path": "scripts/lib/seat-settings.test.mjs",
+      "sha256": "85d5d9fea72d94b0a21b7a22871d00cab1da4da9d3be031208bba65ad23178c2"
+    },
+    {
+      "path": "scripts/lib/settings-policy.test.mjs",
+      "sha256": "469163193b456d6c24635ac6c70072bb1d3c918c8cd37ac544cc38a81ce4469d"
+    },
+    {
+      "path": "scripts/lib/sweep-scope-corpus.mjs",
+      "sha256": "db87805665b77c1d1d94fa32346ca8ccf4ff465314af500281713dee28604214"
+    },
+    {
+      "path": "scripts/lib/sweep-scope-evaluate.mjs",
+      "sha256": "fa355359d4df625f76fa46980fe445c56575a0de9d41f22bb5bb3c59a9867f93"
+    },
+    {
+      "path": "scripts/lib/sweep-scope.mjs",
+      "sha256": "22c88ea9d37084426f9aea3c3b2e73b781be9097bb0c0b5a3a6f9314e0618a70"
+    },
+    {
+      "path": "scripts/lib/sweep-scope.test.mjs",
+      "sha256": "9c18b511da8a67f43e4b57f7f65ce0932c9baaa4213b904e85f727e83d70d6d6"
+    },
+    {
+      "path": "scripts/lib/test-output-filter.mjs",
+      "sha256": "d24a646cc1b725c590f72f2d681f1c525eef39a67dd71ddd57c34468092ccff2"
+    },
+    {
+      "path": "scripts/lib/test-output-filter.test.mjs",
+      "sha256": "91839a4a48edf9cf300988f666f8a2e296a304f3d855380aa71c8710acd721d7"
+    },
+    {
+      "path": "scripts/lib/unsafe-git.mjs",
+      "sha256": "49efb9e3c687e82355ef93edde942e207266ff4d92c53742ad0f165f1f9bd0f1"
+    },
+    {
+      "path": "scripts/lib/unsafe-git.test.mjs",
+      "sha256": "5ba695a306f3e64c579aedfafac8c994a944df6758431a2e2d3aae1d1f7d7caf"
+    },
+    {
+      "path": "scripts/lib/verify-green.test.mjs",
+      "sha256": "b3f0a66e7b544ea9d91c2f22f03e953c996aa7a52d13aa05e904d9271421cd99"
+    },
+    {
+      "path": "scripts/lib/workflow-contract.test.mjs",
+      "sha256": "a4b932f3b8766419ba95f32e210947c16698336ddb9558fd52879261fb7e0442"
+    },
+    {
+      "path": "scripts/merge-watch.mjs",
+      "sha256": "0ffb2d23c9836d76bca754319f919d2bcb5643832ac21b7b72243f4d9d7941b6"
+    },
+    {
+      "path": "scripts/run-log.mjs",
+      "sha256": "ad6cdb5dbb29909a289f5f8ed8ac4e2129e1545bb0946553ff556cb0e9c353c2"
+    },
+    {
+      "path": "scripts/sweep-scope-check.mjs",
+      "sha256": "bd3268ca4021cf868f44ed3fad37e5e09778a3c7506a90869a8d2eeb8b18b589"
+    },
+    {
+      "path": "scripts/verify-issue-publish.mjs",
+      "sha256": "10f495da003808b07df19f8d79a6c6fa10daedd6b0563bcececfa47625d3917e"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/CHANGELOG.md",
+      "sha256": "751ad110037c85d400018c9894716a04fa46357ff55c22b1169b280752e19e88"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/SKILL.md",
+      "sha256": "ad65e776f45e761bafc609d3f506c77c1032225aa65e0c4c02f241b8071e5855"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/_contributing.md",
+      "sha256": "191e039e7d94764e6073410b513b559f9a594e0fdf0252a30c2a2986df2ab3bc"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/_sections.md",
+      "sha256": "c9e992612b422c7122de0b7542ebc2450db283edaab08cfe86c6d657fcccccd5"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/_template.md",
+      "sha256": "6299954250f212caabe339d752c3e5313a8e07d1a182a4e4b425baee91df1bd2"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/advanced-full-text-search.md",
+      "sha256": "40c2606bbb4c4dce31308f201b24cc7f58c7df05b1d9c6856fe2b888d3b7cf28"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/advanced-jsonb-indexing.md",
+      "sha256": "24cacf6a8bc35901dd566d24502ce8e57f810a5c196b897e61d52726e521d106"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/conn-idle-timeout.md",
+      "sha256": "630588902c00fcec59a5988cc5d042f76dcf2c923a535abfd8c47dca205eaed5"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/conn-limits.md",
+      "sha256": "11b2a67a7c7679cbbc5d807bbb17e69c98484a581d0c8b929c03408f412b81b2"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/conn-pooling.md",
+      "sha256": "88cf086bf98ba865d2e9d0579974e1366b14157619d6a93e7da77be91084e4a5"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/conn-prepared-statements.md",
+      "sha256": "174e9332fe3dda5c99b2b00159fb1915ae36c00bab3a7882c14e73e4344e946e"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/data-batch-inserts.md",
+      "sha256": "531933b82d6a622d0fae29e0ea80be6fe5d78655adf2804c271ea84a1930de37"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/data-n-plus-one.md",
+      "sha256": "21a44905e5b16a42741892ec34bb1bfef124d049b140a76934a9acd0f46f5fc2"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/data-pagination.md",
+      "sha256": "73c9fa10a3d439bedea0e11b640bd25bf30dd50f0d9006cf85baf7c3151543fa"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/data-upsert.md",
+      "sha256": "2612af83b20a2701dde30ef1f8d7efd26b7e9eef84717226b8f038a2d2150ff7"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/lock-advisory.md",
+      "sha256": "c88d259dbf81c3771438f59a165f7eab8acd09999dd370bdf807521c73f35aab"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/lock-deadlock-prevention.md",
+      "sha256": "09aee46f51d7178c8e55fe056cd5a94a64ba2c122fe418e6900cd99f297b2347"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/lock-short-transactions.md",
+      "sha256": "5aa7f61095916986d39644b446cdbcd2bacca7ef698a3bb50b3f82dd60207602"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/lock-skip-locked.md",
+      "sha256": "6c45077f430f29cd9cd8f448c94d578e827e7bd023fcdaf717a756acb116fa4b"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/monitor-explain-analyze.md",
+      "sha256": "4cb67ffbf8e57f2e5b380b0beb4242528b513723ce314a2c2ffcf083bd4203d7"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/monitor-pg-stat-statements.md",
+      "sha256": "89dca99d4e894fcbdcac136be7ad9fbc03d1342904f065c1b198dc9cf495f098"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/monitor-vacuum-analyze.md",
+      "sha256": "2892272011710eb49b3f185ec12f15ce9ce4c365792c672f6e2a9c90da426a1a"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/query-composite-indexes.md",
+      "sha256": "73e42424e671f0266e74fdb220db3196790f69fb43e2b19c7b9483eb4971b554"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/query-covering-indexes.md",
+      "sha256": "daf2a7f0477fb7357b62b5fb5b185b1995a77a186347e45cb780e25e7a7589b6"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/query-index-types.md",
+      "sha256": "472a74f22c2df203bd0154999b3a5a0187cca2ab3d9a3978e305bb7c32f1a282"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/query-missing-indexes.md",
+      "sha256": "91ad8b0ff4365704b4830a7f077c6f140f7140fd5d3ce5cd0b92b160cf9e25f1"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/query-partial-indexes.md",
+      "sha256": "6448982bc8558c6555284958edc331b29239c6a0130e6b4501dd6d4da607a6dd"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-constraints.md",
+      "sha256": "90e8efda3e9e81095e642911ad4aae2809d160f29414338fa997253238f510f8"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-data-types.md",
+      "sha256": "e01b58c14c7f3f65d8ead580b9a4fcf70b83baaab0f9a5f83c569c9fd113e8c8"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-foreign-key-indexes.md",
+      "sha256": "7587713d12a65a212365459b3d39e4717d8a79e4073b10bd62f1054d8192c0dd"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-lowercase-identifiers.md",
+      "sha256": "4bc80f70865f2390872591f326c8a6be6456a0aeb5a7e5a2475d7cd9d43059ab"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-partitioning.md",
+      "sha256": "541e13fbeaf4bb1485c9059d4c9417dbdb766cf16f4237cd63a04ada7ec45b90"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/schema-primary-keys.md",
+      "sha256": "3c8beabef82066f9a0838b926da0885117fd2d9a263aaf84cb5ca9e5f0d400e9"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/security-privileges.md",
+      "sha256": "095909274a4fb43df785d7144cf674eeb40284d2d45628f14af4108737b93663"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/security-rls-basics.md",
+      "sha256": "e04dd1a3a382aafdaaa73fe9f7976352acdde6e90c2a2470d281b94d4f44b096"
+    },
+    {
+      "path": ".agents/skills/supabase-postgres-best-practices/references/security-rls-performance.md",
+      "sha256": "2e1faeca7d5746e246b1c78f9492fe2a9cfa41c4d7fa1e23c402d58fa18ea014"
+    },
+    {
+      "path": ".agents/skills/supabase/CHANGELOG.md",
+      "sha256": "4b9c9387871d7888f18e9c97a7d5691ea38e333401ccdcb0161d2140cb16b2d8"
+    },
+    {
+      "path": ".agents/skills/supabase/SKILL.md",
+      "sha256": "697e0e949f97621c6fc1784169eb3ccbf673747d6bb8299a52962d3d84d93dc6"
+    },
+    {
+      "path": ".agents/skills/supabase/assets/feedback-issue-template.md",
+      "sha256": "ea211aa174c5a096fe76461f25143b8bc23f3bde3adc9e727cda38218cc8c282"
+    },
+    {
+      "path": ".agents/skills/supabase/references/skill-feedback.md",
+      "sha256": "09ad94c0291735dfc04c92557c8734fa259ec39e1d56bf2bd5c6a6529d838717"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/LICENSE",
+      "sha256": "b65e575eb4f04a13c187d64e958321298e2ab84d67aa8428819f362056ba292c"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/CHANGELOG.md",
+      "sha256": "751ad110037c85d400018c9894716a04fa46357ff55c22b1169b280752e19e88"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/SKILL.md",
+      "sha256": "ad65e776f45e761bafc609d3f506c77c1032225aa65e0c4c02f241b8071e5855"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/_contributing.md",
+      "sha256": "191e039e7d94764e6073410b513b559f9a594e0fdf0252a30c2a2986df2ab3bc"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/_sections.md",
+      "sha256": "c9e992612b422c7122de0b7542ebc2450db283edaab08cfe86c6d657fcccccd5"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/_template.md",
+      "sha256": "6299954250f212caabe339d752c3e5313a8e07d1a182a4e4b425baee91df1bd2"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/advanced-full-text-search.md",
+      "sha256": "40c2606bbb4c4dce31308f201b24cc7f58c7df05b1d9c6856fe2b888d3b7cf28"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/advanced-jsonb-indexing.md",
+      "sha256": "24cacf6a8bc35901dd566d24502ce8e57f810a5c196b897e61d52726e521d106"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/conn-idle-timeout.md",
+      "sha256": "630588902c00fcec59a5988cc5d042f76dcf2c923a535abfd8c47dca205eaed5"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/conn-limits.md",
+      "sha256": "11b2a67a7c7679cbbc5d807bbb17e69c98484a581d0c8b929c03408f412b81b2"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/conn-pooling.md",
+      "sha256": "88cf086bf98ba865d2e9d0579974e1366b14157619d6a93e7da77be91084e4a5"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/conn-prepared-statements.md",
+      "sha256": "174e9332fe3dda5c99b2b00159fb1915ae36c00bab3a7882c14e73e4344e946e"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/data-batch-inserts.md",
+      "sha256": "531933b82d6a622d0fae29e0ea80be6fe5d78655adf2804c271ea84a1930de37"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/data-n-plus-one.md",
+      "sha256": "21a44905e5b16a42741892ec34bb1bfef124d049b140a76934a9acd0f46f5fc2"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/data-pagination.md",
+      "sha256": "73c9fa10a3d439bedea0e11b640bd25bf30dd50f0d9006cf85baf7c3151543fa"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/data-upsert.md",
+      "sha256": "2612af83b20a2701dde30ef1f8d7efd26b7e9eef84717226b8f038a2d2150ff7"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/lock-advisory.md",
+      "sha256": "c88d259dbf81c3771438f59a165f7eab8acd09999dd370bdf807521c73f35aab"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/lock-deadlock-prevention.md",
+      "sha256": "09aee46f51d7178c8e55fe056cd5a94a64ba2c122fe418e6900cd99f297b2347"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/lock-short-transactions.md",
+      "sha256": "5aa7f61095916986d39644b446cdbcd2bacca7ef698a3bb50b3f82dd60207602"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/lock-skip-locked.md",
+      "sha256": "6c45077f430f29cd9cd8f448c94d578e827e7bd023fcdaf717a756acb116fa4b"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/monitor-explain-analyze.md",
+      "sha256": "4cb67ffbf8e57f2e5b380b0beb4242528b513723ce314a2c2ffcf083bd4203d7"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/monitor-pg-stat-statements.md",
+      "sha256": "89dca99d4e894fcbdcac136be7ad9fbc03d1342904f065c1b198dc9cf495f098"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/monitor-vacuum-analyze.md",
+      "sha256": "2892272011710eb49b3f185ec12f15ce9ce4c365792c672f6e2a9c90da426a1a"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/query-composite-indexes.md",
+      "sha256": "73e42424e671f0266e74fdb220db3196790f69fb43e2b19c7b9483eb4971b554"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/query-covering-indexes.md",
+      "sha256": "daf2a7f0477fb7357b62b5fb5b185b1995a77a186347e45cb780e25e7a7589b6"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/query-index-types.md",
+      "sha256": "472a74f22c2df203bd0154999b3a5a0187cca2ab3d9a3978e305bb7c32f1a282"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/query-missing-indexes.md",
+      "sha256": "91ad8b0ff4365704b4830a7f077c6f140f7140fd5d3ce5cd0b92b160cf9e25f1"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/query-partial-indexes.md",
+      "sha256": "6448982bc8558c6555284958edc331b29239c6a0130e6b4501dd6d4da607a6dd"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-constraints.md",
+      "sha256": "90e8efda3e9e81095e642911ad4aae2809d160f29414338fa997253238f510f8"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-data-types.md",
+      "sha256": "e01b58c14c7f3f65d8ead580b9a4fcf70b83baaab0f9a5f83c569c9fd113e8c8"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-foreign-key-indexes.md",
+      "sha256": "7587713d12a65a212365459b3d39e4717d8a79e4073b10bd62f1054d8192c0dd"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-lowercase-identifiers.md",
+      "sha256": "4bc80f70865f2390872591f326c8a6be6456a0aeb5a7e5a2475d7cd9d43059ab"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-partitioning.md",
+      "sha256": "541e13fbeaf4bb1485c9059d4c9417dbdb766cf16f4237cd63a04ada7ec45b90"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/schema-primary-keys.md",
+      "sha256": "3c8beabef82066f9a0838b926da0885117fd2d9a263aaf84cb5ca9e5f0d400e9"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/security-privileges.md",
+      "sha256": "095909274a4fb43df785d7144cf674eeb40284d2d45628f14af4108737b93663"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/security-rls-basics.md",
+      "sha256": "e04dd1a3a382aafdaaa73fe9f7976352acdde6e90c2a2470d281b94d4f44b096"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase-postgres-best-practices/references/security-rls-performance.md",
+      "sha256": "2e1faeca7d5746e246b1c78f9492fe2a9cfa41c4d7fa1e23c402d58fa18ea014"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase/CHANGELOG.md",
+      "sha256": "4b9c9387871d7888f18e9c97a7d5691ea38e333401ccdcb0161d2140cb16b2d8"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase/SKILL.md",
+      "sha256": "697e0e949f97621c6fc1784169eb3ccbf673747d6bb8299a52962d3d84d93dc6"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase/assets/feedback-issue-template.md",
+      "sha256": "ea211aa174c5a096fe76461f25143b8bc23f3bde3adc9e727cda38218cc8c282"
+    },
+    {
+      "path": ".agents/upstream/supabase-agent-skills/supabase/references/skill-feedback.md",
+      "sha256": "09ad94c0291735dfc04c92557c8734fa259ec39e1d56bf2bd5c6a6529d838717"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/CHANGELOG.md",
+      "sha256": "751ad110037c85d400018c9894716a04fa46357ff55c22b1169b280752e19e88"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/SKILL.md",
+      "sha256": "ad65e776f45e761bafc609d3f506c77c1032225aa65e0c4c02f241b8071e5855"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/_contributing.md",
+      "sha256": "191e039e7d94764e6073410b513b559f9a594e0fdf0252a30c2a2986df2ab3bc"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/_sections.md",
+      "sha256": "c9e992612b422c7122de0b7542ebc2450db283edaab08cfe86c6d657fcccccd5"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/_template.md",
+      "sha256": "6299954250f212caabe339d752c3e5313a8e07d1a182a4e4b425baee91df1bd2"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/advanced-full-text-search.md",
+      "sha256": "40c2606bbb4c4dce31308f201b24cc7f58c7df05b1d9c6856fe2b888d3b7cf28"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/advanced-jsonb-indexing.md",
+      "sha256": "24cacf6a8bc35901dd566d24502ce8e57f810a5c196b897e61d52726e521d106"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/conn-idle-timeout.md",
+      "sha256": "630588902c00fcec59a5988cc5d042f76dcf2c923a535abfd8c47dca205eaed5"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/conn-limits.md",
+      "sha256": "11b2a67a7c7679cbbc5d807bbb17e69c98484a581d0c8b929c03408f412b81b2"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/conn-pooling.md",
+      "sha256": "88cf086bf98ba865d2e9d0579974e1366b14157619d6a93e7da77be91084e4a5"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/conn-prepared-statements.md",
+      "sha256": "174e9332fe3dda5c99b2b00159fb1915ae36c00bab3a7882c14e73e4344e946e"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/data-batch-inserts.md",
+      "sha256": "531933b82d6a622d0fae29e0ea80be6fe5d78655adf2804c271ea84a1930de37"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/data-n-plus-one.md",
+      "sha256": "21a44905e5b16a42741892ec34bb1bfef124d049b140a76934a9acd0f46f5fc2"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/data-pagination.md",
+      "sha256": "73c9fa10a3d439bedea0e11b640bd25bf30dd50f0d9006cf85baf7c3151543fa"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/data-upsert.md",
+      "sha256": "2612af83b20a2701dde30ef1f8d7efd26b7e9eef84717226b8f038a2d2150ff7"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/lock-advisory.md",
+      "sha256": "c88d259dbf81c3771438f59a165f7eab8acd09999dd370bdf807521c73f35aab"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/lock-deadlock-prevention.md",
+      "sha256": "09aee46f51d7178c8e55fe056cd5a94a64ba2c122fe418e6900cd99f297b2347"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/lock-short-transactions.md",
+      "sha256": "5aa7f61095916986d39644b446cdbcd2bacca7ef698a3bb50b3f82dd60207602"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/lock-skip-locked.md",
+      "sha256": "6c45077f430f29cd9cd8f448c94d578e827e7bd023fcdaf717a756acb116fa4b"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/monitor-explain-analyze.md",
+      "sha256": "4cb67ffbf8e57f2e5b380b0beb4242528b513723ce314a2c2ffcf083bd4203d7"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/monitor-pg-stat-statements.md",
+      "sha256": "89dca99d4e894fcbdcac136be7ad9fbc03d1342904f065c1b198dc9cf495f098"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/monitor-vacuum-analyze.md",
+      "sha256": "2892272011710eb49b3f185ec12f15ce9ce4c365792c672f6e2a9c90da426a1a"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/query-composite-indexes.md",
+      "sha256": "73e42424e671f0266e74fdb220db3196790f69fb43e2b19c7b9483eb4971b554"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/query-covering-indexes.md",
+      "sha256": "daf2a7f0477fb7357b62b5fb5b185b1995a77a186347e45cb780e25e7a7589b6"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/query-index-types.md",
+      "sha256": "472a74f22c2df203bd0154999b3a5a0187cca2ab3d9a3978e305bb7c32f1a282"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/query-missing-indexes.md",
+      "sha256": "91ad8b0ff4365704b4830a7f077c6f140f7140fd5d3ce5cd0b92b160cf9e25f1"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/query-partial-indexes.md",
+      "sha256": "6448982bc8558c6555284958edc331b29239c6a0130e6b4501dd6d4da607a6dd"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-constraints.md",
+      "sha256": "90e8efda3e9e81095e642911ad4aae2809d160f29414338fa997253238f510f8"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-data-types.md",
+      "sha256": "e01b58c14c7f3f65d8ead580b9a4fcf70b83baaab0f9a5f83c569c9fd113e8c8"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-foreign-key-indexes.md",
+      "sha256": "7587713d12a65a212365459b3d39e4717d8a79e4073b10bd62f1054d8192c0dd"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-lowercase-identifiers.md",
+      "sha256": "4bc80f70865f2390872591f326c8a6be6456a0aeb5a7e5a2475d7cd9d43059ab"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-partitioning.md",
+      "sha256": "541e13fbeaf4bb1485c9059d4c9417dbdb766cf16f4237cd63a04ada7ec45b90"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/schema-primary-keys.md",
+      "sha256": "3c8beabef82066f9a0838b926da0885117fd2d9a263aaf84cb5ca9e5f0d400e9"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/security-privileges.md",
+      "sha256": "095909274a4fb43df785d7144cf674eeb40284d2d45628f14af4108737b93663"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/security-rls-basics.md",
+      "sha256": "e04dd1a3a382aafdaaa73fe9f7976352acdde6e90c2a2470d281b94d4f44b096"
+    },
+    {
+      "path": ".claude/skills/supabase-postgres-best-practices/references/security-rls-performance.md",
+      "sha256": "2e1faeca7d5746e246b1c78f9492fe2a9cfa41c4d7fa1e23c402d58fa18ea014"
+    },
+    {
+      "path": ".claude/skills/supabase/CHANGELOG.md",
+      "sha256": "4b9c9387871d7888f18e9c97a7d5691ea38e333401ccdcb0161d2140cb16b2d8"
+    },
+    {
+      "path": ".claude/skills/supabase/SKILL.md",
+      "sha256": "697e0e949f97621c6fc1784169eb3ccbf673747d6bb8299a52962d3d84d93dc6"
+    },
+    {
+      "path": ".claude/skills/supabase/assets/feedback-issue-template.md",
+      "sha256": "ea211aa174c5a096fe76461f25143b8bc23f3bde3adc9e727cda38218cc8c282"
+    },
+    {
+      "path": ".claude/skills/supabase/references/skill-feedback.md",
+      "sha256": "09ad94c0291735dfc04c92557c8734fa259ec39e1d56bf2bd5c6a6529d838717"
+    }
+  ]
+}

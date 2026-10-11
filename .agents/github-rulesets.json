@@ -1,0 +1,64 @@
+{
+  "repository": "zaingulel/kestrel",
+  "rulesets": [
+    {
+      "id": 24885496,
+      "name": "main: no force-push or deletion",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/heads/main"
+          ]
+        }
+      },
+      "rules": [
+        {
+          "type": "non_fast_forward"
+        },
+        {
+          "type": "deletion"
+        }
+      ],
+      "bypass_actors": []
+    },
+    {
+      "id": 24885497,
+      "name": "main: required checks",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/heads/main"
+          ]
+        }
+      },
+      "rules": [
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "strict_required_status_checks_policy": true,
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              {
+                "context": "test",
+                "integration_id": 15368
+              }
+            ]
+          }
+        }
+      ],
+      "bypass_actors": [
+        {
+          "actor_id": 5,
+          "actor_type": "RepositoryRole",
+          "bypass_mode": "always"
+        }
+      ]
+    }
+  ]
+}

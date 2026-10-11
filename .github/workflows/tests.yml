@@ -1,0 +1,154 @@
+# CI: lint, documentation, script and speech tests on every ready pull request, with the Windows hook suite
+# added when the change can reach the hooks, all behind one required check named `test`.
+#
+# Runs on pull_request ONLY, and only once the pull request is NOT a draft. GitHub builds
+# the PR's MERGE RESULT (PR head + current base), so a textually-clean-but-semantically-
+# broken combination fails HERE, on the required `test` check, before the merge button.
+#
+# A draft runs only the two-second gate job under its control name (see `test` below), so
+# Greptile reviews the draft first and marking the pull request ready (or pushing to a ready
+# pull request) is what starts the suite. That ordering is the whole review policy — no label,
+# admission job, or evidence marker is involved.
+name: tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+# Cancel a PR's in-flight suite when a newer commit lands on the same PR.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Which suites the change can reach. Every lane that needs `reach` is conditional; everything
+  # else in this file is unconditional.
+  reach:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      hooks: ${{ steps.classify.outputs.hooks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify the base-to-head change set
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # core.quotePath=false: a path with a non-ASCII byte is otherwise printed C-quoted with a
+          # leading double quote, which the anchored pattern below would never match.
+          changed=$(git -c core.quotePath=false diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          printf '%s\n' "$changed"
+          hooks=false
+          if grep -qE '^(\.codex/hooks/|\.codex/hooks\.json$|\.claude/hooks/|\.claude/settings\.json$|\.claude/templates/|\.agents/templates/|\.githooks/|scripts/lib/|scripts/gates/|scripts/run-log\.mjs$|\.gitattributes$|\.github/workflows/tests\.yml$)' <<<"$changed"; then
+            hooks=true
+          fi
+          echo "hooks=$hooks" >> "$GITHUB_OUTPUT"
+          echo "hooks=$hooks"
+
+  quality:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install speech test dependencies
+        run: |
+          python -m venv .runtime/voice-venv
+          .runtime/voice-venv/bin/python -m pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          .runtime/voice-venv/bin/python -m pip install -r requirements-test.txt
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:scripts
+      - run: npm run lint:docs
+      - run: .runtime/voice-venv/bin/python -m ruff check --select F bot.py speech.py asr_worker.py tests
+      - run: npm run test:speech
+        env:
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+          HF_HOME: .runtime/cache/huggingface
+          MPLCONFIGDIR: .runtime/cache/matplotlib
+
+  # The hooks must run on native Windows (Codex under PowerShell, Claude under Git Bash), which no
+  # macOS or Linux job observes, so this runs when the change can reach the hooks. A hook test that
+  # reads a repository path outside the hooks pattern extends the pattern.
+  # The run-log test rides here: its npm and npx start exists only on Windows.
+  hooks_windows:
+    needs: reach
+    if: needs.reach.outputs.hooks == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+      - name: Run the hook tests
+        run: >-
+          node --test
+          scripts/lib/posix-shell.test.mjs
+          scripts/lib/verify-green.test.mjs
+          scripts/lib/precommit.test.mjs
+          scripts/lib/prepush.test.mjs
+          scripts/lib/test-output-filter.test.mjs
+          scripts/lib/settings-policy.test.mjs
+          scripts/lib/unsafe-git.test.mjs
+          scripts/lib/handoff-check.test.mjs
+          scripts/lib/codex-hook-adapters.test.mjs
+          scripts/lib/checkout-context.test.mjs
+          scripts/lib/codex-hooks-windows.test.mjs
+          scripts/lib/run-log.test.mjs
+
+  # Branch protection requires the stable `test` check. It passes only when every
+  # unconditional lane succeeded and the conditional lane either succeeded or was
+  # skipped because `reach` said the change cannot touch it. GitHub reports a SKIPPED
+  # required job as success, so this job never skips: on a draft it runs under the name
+  # `ci-control-no-test`, emitting no check named `test` at all, and `always()` keeps a
+  # cancelled or failed dependency from turning into a skip.
+  test:
+    name: ${{ github.event.pull_request.draft == false && 'test' || 'ci-control-no-test' }}
+    needs: [reach, quality, hooks_windows]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Record a draft event without exposing the required check
+        if: github.event.pull_request.draft == true
+        run: echo "Draft pull request; no suite runs and no check named test is emitted."
+      - name: Confirm every CI lane passed
+        if: github.event.pull_request.draft == false
+        env:
+          REACH: ${{ needs.reach.result }}
+          HOOKS_REACH: ${{ needs.reach.outputs.hooks }}
+          QUALITY: ${{ needs.quality.result }}
+          HOOKS_WINDOWS: ${{ needs.hooks_windows.result }}
+        run: |
+          ok=true
+          [[ "$REACH" == "success" && "$QUALITY" == "success" ]] || ok=false
+          if [[ "$HOOKS_REACH" == "true" ]]; then
+            [[ "$HOOKS_WINDOWS" == "success" ]] || ok=false
+          else
+            [[ "$HOOKS_WINDOWS" == "skipped" ]] || ok=false
+          fi
+          echo "reach=$REACH hooks_reach=$HOOKS_REACH quality=$QUALITY hooks_windows=$HOOKS_WINDOWS"
+          [[ "$ok" == true ]]

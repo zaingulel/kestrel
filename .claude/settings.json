@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/board.mjs *)",
+      "Bash(node scripts/board-move.mjs *)",
+      "Bash(node scripts/board-add.mjs *)",
+      "Bash(node scripts/merge-watch.mjs *)",
+      "Bash(gh pr ready *)",
+      "Bash(gh pr merge --auto --squash --delete-branch *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-unsafe-git.mjs\""
+          },
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/filter-test-output.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-builder-handoff.mjs\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify-green.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
