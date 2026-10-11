@@ -1,0 +1,12 @@
+.runtime
+__pycache__/
+node_modules/
+.claude/worktrees/
+.claude/worklog/
+.claude/launch.json
+.claude/settings.local.json
+.codex/worktrees/
+.codex/worklog/
+.codex/launch.json
+.env
+.env.local

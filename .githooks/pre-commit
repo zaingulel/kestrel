@@ -1,0 +1,85 @@
+#!/bin/sh
+# pre-commit — a deterministic guard scoped to what is staged, an advisory, and a product gate hook point.
+#
+# 1. Doc-lint advisory (never blocks): a staged document, skill, or agent definition is linted for
+#    prose rot.
+# 2. Agent definitions must parse. Both harnesses DROP an agent file silently when its
+#    definition fails to parse (that is how `reviewer` once vanished for a whole session),
+#    so a staged .claude/agents/*.md or .codex/agents/*.toml triggers a check of the STAGED
+#    definitions with a named cause. Which seat folders it requires comes from the STAGED
+#    .agents/factory-settings.json, read by the STAGED scripts/lib/runtimes.mjs.
+# 3. Then an executable scripts/gates/pre-commit (the product gate) runs on every commit, its
+#    output on stderr; a non-zero exit, or a gate file that is not executable, blocks.
+#
+# Escape hatch: `git commit --no-verify` bypasses (use only when you know better).
+set -e
+
+staged=$(git diff --cached --name-only --no-renames --diff-filter=ACMRD)
+repo_root=$(git rev-parse --show-toplevel)
+
+# --- Doc-lint advisory (never blocks) -----------------------------------------
+# Prose is advisory. A staged document, skill, or agent definition is still linted for dangling
+# path references, dead links, and phantom manual citations, so the writer hears about rot at
+# commit time — but the answer is printed, not enforced. Existence-guarded like the guards below.
+if echo "$staged" | grep -qE '^(docs/.*\.md|CLAUDE\.md|README\.md|AGENTS\.md|\.claude/(rules|agents)/.*\.md|\.agents/skills/.*\.md|\.agents/REPOSITORY\.md|\.agents/upstream/[^/]+/[^/]+/SKILL\.md|\.codex/agents/[^/]+\.toml)$'; then
+  if [ -f "$repo_root/scripts/doc-lint.mjs" ]; then
+    node "$repo_root/scripts/doc-lint.mjs" --staged || echo "⚠ pre-commit: doc-lint found prose rot (advisory, not blocking); fix it when you touch the file next." >&2
+  fi
+fi
+
+# --- Agent-definition guard (BLOCKS) -----------------------------------------
+# Existence-guarded, reading the index, so it is a no-op in the fixture repos precommit.test.mjs creates;
+# a validator present in HEAD but deleted in the index blocks.
+if echo "$staged" | grep -qE '^\.(claude|codex)/agents/.*\.(md|toml)$'; then
+  if git -C "$repo_root" cat-file -e :scripts/lib/check-agents.mjs 2>/dev/null; then
+    # Validate the STAGED definitions with the STAGED validator, never the working tree. The
+    # snapshot writes the raw staged blobs, so no staged attribute (export-ignore, filter, eol) can
+    # change or hide what is validated; the path list goes through a file because sh has no
+    # pipefail, and xargs stops on the first failed copy (exit 255). The snapshot path is resolved
+    # physically: on macOS mktemp's root is a symlink, and the validator's CLI self-check never
+    # matches through it, so it would silently pass.
+    if ! agent_snap_allocated=$(mktemp -d); then
+      echo "✖ pre-commit: could not allocate a temporary directory for staged agent validation." >&2
+      exit 1
+    fi
+    if ! agent_snap=$(cd "$agent_snap_allocated" && pwd -P); then
+      echo "✖ pre-commit: could not resolve the temporary directory for staged agent validation." >&2
+      exit 1
+    fi
+    if [ -z "$agent_snap" ] || [ "$agent_snap" = "$repo_root" ]; then
+      echo "✖ pre-commit: refused an unsafe temporary directory for staged agent validation." >&2
+      exit 1
+    fi
+    if ! git -C "$repo_root" ls-files -z -- .claude/agents .codex/agents scripts/lib/check-agents.mjs scripts/lib/runtimes.mjs .agents/factory-settings.json >"$agent_snap/staged.list" \
+      || ! xargs -0 sh -c 'snap=$1 root=$2; shift 2; for p; do mkdir -p "$snap/$(dirname "$p")" && git -C "$root" cat-file blob ":$p" >"$snap/$p" || exit 255; done' sh "$agent_snap" "$repo_root" <"$agent_snap/staged.list"; then
+      rm -rf "$agent_snap"
+      echo "✖ pre-commit: could not copy the staged .claude/agents, .codex/agents, scripts/lib/check-agents.mjs, scripts/lib/runtimes.mjs and .agents/factory-settings.json to validate them." >&2
+      exit 1
+    fi
+    agents_status=0
+    (cd "$agent_snap" && node "$agent_snap/scripts/lib/check-agents.mjs") || agents_status=$?
+    rm -rf "$agent_snap"
+    [ "$agents_status" -eq 0 ] || exit 1
+  elif git -C "$repo_root" cat-file -e HEAD:scripts/lib/check-agents.mjs 2>/dev/null; then
+    echo "✖ pre-commit: scripts/lib/check-agents.mjs is staged for deletion while agent definitions are staged; the agent guard cannot run. Restore it (git restore --staged --worktree scripts/lib/check-agents.mjs) or commit the deletion on its own." >&2
+    exit 1
+  fi
+fi
+
+# --- Product gate (BLOCKS) ----------------------------------------------------
+# The repository's own commit checks, run on every commit; the gate recomputes what is staged
+# itself. A lost file mode must not silently switch it off, so a non-executable gate blocks. Its
+# status is captured so `set -e` cannot exit before the reason prints.
+gate="$repo_root/scripts/gates/pre-commit"
+if [ -e "$gate" ]; then
+  if [ ! -x "$gate" ]; then
+    echo "✖ pre-commit: $gate is not executable, so the product gate cannot run. Fix: chmod +x $gate" >&2
+    exit 1
+  fi
+  gate_status=0
+  (cd "$repo_root" && "$gate") >&2 || gate_status=$?
+  if [ "$gate_status" -ne 0 ]; then
+    echo "✖ pre-commit: product gate scripts/gates/pre-commit exited $gate_status." >&2
+    exit 1
+  fi
+fi

@@ -1,0 +1,67 @@
+# This tracked guard runs on pull-request events. It evaluates documentation-sweep and day-after
+# triage branches against the scope rules in docs/DOC-SWEEP.md, and exits successfully without
+# checking scope on ordinary branches. Committing this file does not establish a required check or
+# activate the maintenance routine, its schedule, or its publication environment.
+#
+# pull_request_target keeps the workflow file, check script, and library on `main`, never the pull
+# request it judges. The packages the check parses Markdown with are installed from the base tree's
+# own lock; the pull request's commits are read as git objects and nothing from its tree is executed.
+# Only a sweep or triage branch reaches the install, so only those pull requests depend on
+# registry.npmjs.org, and an outage fails this check closed until someone re-runs it.
+name: sweep-scope
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-scope-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sweep-scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The gate carries no `if:` and the job no condition, so an ordinary pull request still runs this
+      # job and exits 0: a required check that never starts stays pending for ever. A fork names its
+      # own branch, so HEAD_REF arrives through `env:` and is read as a quoted shell variable; a `${{ }}`
+      # expression would be pasted into the script text before bash saw it.
+      - id: gate
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$HEAD_REF" != docs-sweep/* && "$HEAD_REF" != docs-triage/* ]]; then
+            echo "sweep-scope: $HEAD_REF is not a sweep or triage branch; nothing to check"
+            echo "judge=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "judge=true" >> "$GITHUB_OUTPUT"
+      # No `ref`: on pull_request_target the checkout is the base branch, which is the point.
+      # fetch-depth 0 brings every branch head, so the pull request's commits are present as objects.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.gate.outputs.judge == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.gate.outputs.judge == 'true'
+        with:
+          node-version: 22
+      - if: steps.gate.outputs.judge == 'true'
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - if: steps.gate.outputs.judge == 'true'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$HEAD_SHA^{commit}"; then
+            echo "sweep-scope: head $HEAD_SHA was not fetched; a later push re-runs this check" >&2
+            exit 1
+          fi
+          node scripts/sweep-scope-check.mjs "$BASE_SHA" "$HEAD_SHA"
