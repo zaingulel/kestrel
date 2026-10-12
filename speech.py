@@ -29,6 +29,8 @@ BOUND_TO_KESTREL = [
     "setpriv", "--pdeathsig", "TERM",
     "sh", "-c", 'test "$PPID" = "$1" && shift && exec "$@"', "sh",
 ]
+# Seconds a terminated echo removal process is given before it is killed.
+ECHO_REMOVAL_STOP_WAIT = 5
 
 
 class EchoRemoval:
@@ -83,7 +85,11 @@ class EchoRemoval:
     def close(self):
         self._closing = True
         self.process.terminate()
-        self.process.wait()
+        try:
+            self.process.wait(timeout=ECHO_REMOVAL_STOP_WAIT)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
 
 
 class NemotronSTT(SegmentedSTTService):

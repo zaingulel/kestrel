@@ -4,7 +4,7 @@ import os
 import subprocess
 import threading
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
 from loguru import logger
@@ -234,8 +234,17 @@ class EchoRemovalTests(unittest.TestCase):
         echo_removal.close()
         thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
         popen.return_value.terminate.assert_called_once_with()
+        popen.return_value.kill.assert_not_called()
         on_stopped.assert_not_called()
         self.assertEqual(self.messages, [])
+
+    def test_closing_echo_removal_kills_a_process_that_does_not_stop(self):
+        echo_removal, popen, _, _ = self.start()
+        popen.return_value.wait.side_effect = [subprocess.TimeoutExpired("pipewire", speech.ECHO_REMOVAL_STOP_WAIT), 0]
+        echo_removal.close()
+        popen.return_value.terminate.assert_called_once_with()
+        popen.return_value.kill.assert_called_once_with()
+        self.assertEqual(popen.return_value.wait.call_args_list, [call(timeout=speech.ECHO_REMOVAL_STOP_WAIT), call()])
 
     @staticmethod
     def node(node_id, name):
