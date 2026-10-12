@@ -1,8 +1,9 @@
 // runtime-boundary.test.mjs — the privacy and runtime boundary the README promises.
 //
-// The service binds to loopback, the only remote endpoint is LM Studio on the Ally, and the
-// README's disclosure says exactly that. Each assertion reads the committed bytes, so widening
-// the bind, pointing the conversation elsewhere or rewording the promise goes red here.
+// The service binds to loopback, the only remote endpoint is LM Studio on the Ally, the echo removal
+// process loads only local PipeWire modules, and the README's disclosure says exactly that. Each
+// assertion reads the committed bytes, so widening the bind, pointing the conversation elsewhere or
+// rewording the promise goes red here.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,6 +28,18 @@ test('the voice service binds to loopback only', () => {
 test('the conversation goes only to LM Studio on the Ally', () => {
   const urls = read('bot.py').match(/https?:\/\/[^"'\s]+/g);
   assert.deepEqual(urls, ['http://192.168.0.150:1234/v1']);
+});
+
+test('the echo removal process loads only local PipeWire modules', () => {
+  const config = JSON.parse(read('echo-removal.conf'));
+  assert.deepEqual(Object.keys(config).sort(), ['context.modules', 'context.properties', 'context.spa-libs']);
+  assert.deepEqual(config['context.modules'].map((entry) => entry.name), [
+    'libpipewire-module-rt',
+    'libpipewire-module-protocol-native',
+    'libpipewire-module-client-node',
+    'libpipewire-module-adapter',
+    'libpipewire-module-echo-cancel',
+  ]);
 });
 
 test('the README states the privacy and runtime boundary in its exact words', () => {
