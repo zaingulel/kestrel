@@ -9,7 +9,7 @@ Zain's voice assistant for his Omarchy desktop, as he experiences it, whatever i
 _Avoid_: the prototype, the bot
 
 **Voice**:
-The part that listens to speech and speaks replies, running on the laptop.
+The part that listens to speech and speaks replies.
 _Avoid_: speech stack, audio pipeline
 
 **Brain**:
@@ -25,7 +25,7 @@ One bounded thing Kestrel can do, with a result it can observe.
 _Avoid_: skill, command, action
 
 **Delegation**:
-Kestrel passing a spoken instruction to a coding agent after reading it back.
+Kestrel passing a spoken instruction to a coding agent after reading it back and hearing the owner confirm it.
 _Avoid_: handoff, which belongs to the workflow
 
 **Note**:
