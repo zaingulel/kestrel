@@ -19,7 +19,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
-from speech import NemotronSTT, ROOT, VoxCPMTTS
+from speech import EchoRemoval, NemotronSTT, ROOT, VoxCPMTTS
 
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
@@ -29,6 +29,7 @@ SYSTEM_PROMPT = (
     "or persistent memory. Be honest about that and never claim to have performed an action."
 )
 SESSION_LOCK = asyncio.Lock()
+ECHO_REMOVAL = EchoRemoval()
 VOICE_MODEL = None
 
 
@@ -59,6 +60,10 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             disconnected.set()
 
         try:
+            fault = await asyncio.to_thread(ECHO_REMOVAL.fault)
+            if fault:
+                logger.error(f"Refusing the microphone session: {fault}")
+                return
             logger.info("Loading local speech models for the microphone session")
             await stt.load()
             torch.set_num_threads(4)

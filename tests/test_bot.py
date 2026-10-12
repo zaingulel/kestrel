@@ -1,10 +1,17 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from loguru import logger
+
 import bot
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        fault = patch.object(bot.ECHO_REMOVAL, "fault", return_value=None)
+        fault.start()
+        self.addCleanup(fault.stop)
+
     def arguments(self):
         connection = Mock()
         connection.event_handler.side_effect = lambda name: lambda handler: handler
@@ -38,6 +45,23 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 await bot.bot(args)
         stt.close.assert_awaited_once()
         args.webrtc_connection.disconnect.assert_awaited_once()
+        self.assertFalse(bot.SESSION_LOCK.locked())
+
+    async def test_microphone_session_is_refused_when_echo_removal_is_off(self):
+        messages = []
+        self.addCleanup(logger.remove, logger.add(messages.append, level="ERROR"))
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        args = self.arguments()
+        with (
+            patch.object(bot.ECHO_REMOVAL, "fault", return_value="Echo removal has stopped. Restart Kestrel."),
+            patch.object(bot, "NemotronSTT", return_value=stt),
+            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
+        ):
+            await bot.bot(args)
+        stt.load.assert_not_awaited()
+        conversation.assert_not_awaited()
+        args.webrtc_connection.disconnect.assert_awaited_once()
+        self.assertIn("Echo removal has stopped. Restart Kestrel.", messages[0])
         self.assertFalse(bot.SESSION_LOCK.locked())
 
     async def test_second_simultaneous_client_is_disconnected(self):
