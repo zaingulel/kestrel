@@ -67,7 +67,7 @@ user, so its named anti-regression test keeps pinning it.
 For reply-text sequences spanning multiple turns, interruption and follow-up, drive the real
 `run_conversation(runner_args, stt, voice, *, transport=None, user_params=None)` session in
 [bot.py](../bot.py). Its keyword-only dependencies let a test supply a forwarding transport and native
-user-turn strategies while preserving the production defaults. Keep the real worker, context aggregators,
+user-turn strategies while preserving the production defaults. Keep the real pipeline worker, context aggregators,
 cancellation and speech adapters; do not replace the conversation with a fake engine.
 
 [WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
