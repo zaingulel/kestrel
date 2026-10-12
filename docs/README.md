@@ -6,6 +6,7 @@
 | [AGENTS.md](../AGENTS.md) | Shared workflow and local product boundary. |
 | [Repository profile](../.agents/REPOSITORY.md) | Local facts and conventions. |
 | [Glossary](../GLOSSARY.md) | Local terms. |
+| [Decision records](adr/) | Decisions that are hard to reverse, with the alternatives rejected. |
 | [Coding standards](CODING-STANDARDS.md) | First-party code conventions. |
 | [Testing strategy](TESTING-STRATEGY.md) | Claim evidence and local suites. |
 | [Design system](DESIGN-SYSTEM.md) | Current interface ownership and design boundary. |
