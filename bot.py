@@ -1,6 +1,8 @@
 """First local Kestrel conversation trial."""
 
 import asyncio
+import os
+import signal
 
 import torch
 from loguru import logger
@@ -29,8 +31,20 @@ SYSTEM_PROMPT = (
     "or persistent memory. Be honest about that and never claim to have performed an action."
 )
 SESSION_LOCK = asyncio.Lock()
+# The event loop and WebRTC connection of the conversation holding the lock.
+CONVERSATION = None
 ECHO_REMOVAL = EchoRemoval()
 VOICE_MODEL = None
+
+
+def stop_kestrel():
+    # Runs on the echo removal watcher thread. Uvicorn waits for a running conversation
+    # before it exits on SIGTERM, so the conversation is ended first.
+    conversation = CONVERSATION
+    if conversation:
+        loop, connection = conversation
+        asyncio.run_coroutine_threadsafe(connection.disconnect(), loop)
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def make_llm():
@@ -46,7 +60,7 @@ def make_llm():
 
 
 async def bot(runner_args: SmallWebRTCRunnerArguments):
-    global VOICE_MODEL
+    global CONVERSATION, VOICE_MODEL
     if SESSION_LOCK.locked():
         logger.warning("A microphone session is already running; disconnecting the second client")
         await runner_args.webrtc_connection.disconnect()
@@ -59,6 +73,9 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
         async def on_closed(connection):
             disconnected.set()
 
+        # Set before the check: a stop reported at any moment either ends this conversation
+        # or fails the check.
+        CONVERSATION = (asyncio.get_running_loop(), runner_args.webrtc_connection)
         try:
             fault = await asyncio.to_thread(ECHO_REMOVAL.fault)
             if fault:
@@ -75,6 +92,7 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             if not disconnected.is_set():
                 await run_conversation(runner_args, stt, VOICE_MODEL)
         finally:
+            CONVERSATION = None
             await stt.close()
             await runner_args.webrtc_connection.disconnect()
 

@@ -1,3 +1,6 @@
+import asyncio
+import os
+import signal
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -71,6 +74,38 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 await bot.bot(args)
                 stt.assert_not_called()
         args.webrtc_connection.disconnect.assert_awaited_once()
+
+    async def test_active_conversation_ends_when_echo_removal_stops(self):
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        args = self.arguments()
+        started = asyncio.Event()
+        ended = asyncio.Event()
+        args.webrtc_connection.disconnect.side_effect = ended.set
+
+        async def conversation(runner_args, stt, voice):
+            started.set()
+            await ended.wait()
+
+        with (
+            patch.object(bot, "VOICE_MODEL", object()),
+            patch.object(bot, "NemotronSTT", return_value=stt),
+            patch.object(bot, "run_conversation", conversation),
+            patch.object(bot.torch, "set_num_threads"),
+            patch.object(bot.os, "kill") as kill,
+        ):
+            task = asyncio.create_task(bot.bot(args))
+            # Both waits are hang guards, not timing assertions.
+            await asyncio.wait_for(started.wait(), 5)
+            await asyncio.to_thread(bot.stop_kestrel)
+            await asyncio.wait_for(task, 5)
+        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        self.assertFalse(bot.SESSION_LOCK.locked())
+        self.assertIsNone(bot.CONVERSATION)
+
+    def test_idle_kestrel_is_told_to_stop_when_echo_removal_stops(self):
+        with patch.object(bot.os, "kill") as kill:
+            bot.stop_kestrel()
+        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
 
 if __name__ == "__main__":
