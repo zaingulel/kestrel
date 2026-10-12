@@ -70,7 +70,7 @@ While Kestrel runs, that process can keep the laptop's microphone in use even wh
 
 Whatever captures speech for Kestrel must record from the Kestrel microphone and play Kestrel's voice on the default output. In the browser page, choose it in the microphone menu, leave the speaker on the default and connect with the microphone on; the page remembers the choice.
 
-Kestrel checks once, when a conversation starts, that some program is recording from the Kestrel microphone, and refuses the conversation if none is. The check cannot tell which program is recording and does not run again. It misses a page that uses another microphone while a different program records from the Kestrel microphone, and a microphone changed in the page after the conversation has started. The last sign below shows both.
+When a conversation starts, Kestrel checks that some program is recording from the Kestrel microphone, looks again for up to ten seconds because a page starts recording a moment after it connects, and refuses the conversation if none is by then. The check cannot tell which program is recording and does not run again once the conversation is accepted. It misses a page that uses another microphone while a different program records from the Kestrel microphone, and a microphone changed in the page after the conversation has started. The last sign below shows both.
 
 Echo removal is off when any of these is true:
 

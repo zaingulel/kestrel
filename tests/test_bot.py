@@ -14,10 +14,21 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         fault = patch.object(bot.ECHO_REMOVAL, "fault", return_value=None)
         fault.start()
         self.addCleanup(fault.stop)
+        retry = patch.object(bot, "ECHO_REMOVAL_RETRY", 0)
+        retry.start()
+        self.addCleanup(retry.stop)
 
     def arguments(self):
         connection = Mock()
-        connection.event_handler.side_effect = lambda name: lambda handler: handler
+        connection.handlers = {}
+
+        def event_handler(name):
+            def register(handler):
+                connection.handlers[name] = handler
+                return handler
+            return register
+
+        connection.event_handler.side_effect = event_handler
         connection.disconnect = AsyncMock()
         return Mock(webrtc_connection=connection)
 
@@ -56,15 +67,58 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         args = self.arguments()
         with (
+            patch.object(bot, "ECHO_REMOVAL_WAIT", 0),
             patch.object(bot.ECHO_REMOVAL, "fault", return_value="Echo removal has stopped. Restart Kestrel."),
             patch.object(bot, "NemotronSTT", return_value=stt),
             patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
         ):
-            await bot.bot(args)
+            # A hang guard, not a timing assertion.
+            await asyncio.wait_for(bot.bot(args), 5)
         stt.load.assert_not_awaited()
         conversation.assert_not_awaited()
         args.webrtc_connection.disconnect.assert_awaited_once()
         self.assertIn("Echo removal has stopped. Restart Kestrel.", messages[0])
+        self.assertFalse(bot.SESSION_LOCK.locked())
+
+    async def test_microphone_session_is_accepted_once_the_page_starts_recording(self):
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        args = self.arguments()
+        with (
+            patch.object(
+                bot.ECHO_REMOVAL, "fault", side_effect=["Nothing is recording.", None]
+            ) as fault,
+            patch.object(bot, "VOICE_MODEL", object()),
+            patch.object(bot, "NemotronSTT", return_value=stt),
+            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
+            patch.object(bot.torch, "set_num_threads"),
+        ):
+            await bot.bot(args)
+        conversation.assert_awaited_once()
+        self.assertEqual(fault.call_count, 2)
+
+    async def test_the_wait_for_echo_removal_ends_when_the_page_goes_away(self):
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        args = self.arguments()
+        loop = asyncio.get_running_loop()
+        looked = asyncio.Event()
+
+        def fault():
+            # Runs on a worker thread.
+            loop.call_soon_threadsafe(looked.set)
+            return "Nothing is recording."
+
+        with (
+            patch.object(bot.ECHO_REMOVAL, "fault", side_effect=fault),
+            patch.object(bot, "NemotronSTT", return_value=stt),
+            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
+        ):
+            task = asyncio.create_task(bot.bot(args))
+            # Both waits are hang guards, not timing assertions.
+            await asyncio.wait_for(looked.wait(), 5)
+            await args.webrtc_connection.handlers["closed"](args.webrtc_connection)
+            await asyncio.wait_for(task, 5)
+        stt.load.assert_not_awaited()
+        conversation.assert_not_awaited()
         self.assertFalse(bot.SESSION_LOCK.locked())
 
     async def test_second_simultaneous_client_is_disconnected(self):

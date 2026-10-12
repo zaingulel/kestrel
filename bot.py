@@ -34,6 +34,10 @@ SESSION_LOCK = asyncio.Lock()
 # The event loop and WebRTC connection of the conversation holding the lock.
 CONVERSATION = None
 ECHO_REMOVAL = EchoRemoval()
+# A page starts recording from the microphone it was given a moment after it connects, so the
+# check is repeated for this many seconds before the conversation is refused.
+ECHO_REMOVAL_WAIT = 10
+ECHO_REMOVAL_RETRY = 0.5
 VOICE_MODEL = None
 
 
@@ -59,6 +63,16 @@ def make_llm():
     )
 
 
+async def echo_removal_fault(disconnected):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + ECHO_REMOVAL_WAIT
+    while True:
+        fault = await asyncio.to_thread(ECHO_REMOVAL.fault)
+        if not fault or disconnected.is_set() or loop.time() >= deadline:
+            return fault
+        await asyncio.sleep(ECHO_REMOVAL_RETRY)
+
+
 async def bot(runner_args: SmallWebRTCRunnerArguments):
     global CONVERSATION, VOICE_MODEL
     if SESSION_LOCK.locked():
@@ -77,7 +91,7 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
         # or fails the check.
         CONVERSATION = (asyncio.get_running_loop(), runner_args.webrtc_connection)
         try:
-            fault = await asyncio.to_thread(ECHO_REMOVAL.fault)
+            fault = await echo_removal_fault(disconnected)
             if fault:
                 logger.error(f"Refusing the microphone session: {fault}")
                 return
