@@ -21,6 +21,7 @@ VOICE_REFERENCE = ROOT / ".runtime/voices/kestrel.wav"
 VOICE_REFERENCE_TEXT = "Hello. Speech recognition and voice generation are now running locally."
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
 ECHO_REMOVAL_CONFIG = "echo-removal.conf"
+ECHO_REMOVAL_MICROPHONE = "kestrel-microphone"
 # `setpriv` arms the parent-death signal without checking that its parent is still alive, and
 # Linux sends nothing for a parent that died first, so the shell starts the command only while
 # the process whose identifier follows is still its parent.
@@ -51,6 +52,33 @@ class EchoRemoval:
                 f"Echo removal stopped (exit code {code}); stopping Kestrel, which never listens without it"
             )
             on_stopped()
+
+    def fault(self):
+        """Return why echo removal is not in use, or None when a program records from its microphone."""
+        if self.process.poll() is not None:
+            return "Echo removal has stopped. Restart Kestrel."
+        try:
+            graph = json.loads(subprocess.run(["pw-dump"], capture_output=True, check=True, timeout=5).stdout)
+            microphones = {
+                item["id"] for item in graph
+                if item["type"] == "PipeWire:Interface:Node"
+                and item["info"]["props"].get("node.name") == ECHO_REMOVAL_MICROPHONE
+            }
+            recording = any(
+                item["type"] == "PipeWire:Interface:Link"
+                and item["info"]["output-node-id"] in microphones and item["info"]["state"] == "active"
+                for item in graph
+            )
+        except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError, AttributeError) as exc:
+            return f"Echo removal could not be checked: {exc!r}"
+        if not microphones:
+            return "The Kestrel microphone is missing from the audio system. Restart Kestrel."
+        if not recording:
+            return (
+                'No program is recording from "Kestrel microphone (echo removed)". '
+                "Choose it as the microphone in the page and connect again."
+            )
+        return None
 
     def close(self):
         self._closing = True

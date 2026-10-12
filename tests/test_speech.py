@@ -237,6 +237,79 @@ class EchoRemovalTests(unittest.TestCase):
         on_stopped.assert_not_called()
         self.assertEqual(self.messages, [])
 
+    @staticmethod
+    def node(node_id, name):
+        return {"id": node_id, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": name}}}
+
+    @staticmethod
+    def link(output_node, input_node, state):
+        return {
+            "id": 100 + output_node, "type": "PipeWire:Interface:Link",
+            "info": {"output-node-id": output_node, "input-node-id": input_node, "state": state},
+        }
+
+    def fault(self, graph=None, exit_code=None, **run_result):
+        """Check an echo removal on doubles; return the fault and the patched `subprocess.run`."""
+        echo_removal = speech.EchoRemoval()
+        echo_removal.process = Mock()
+        echo_removal.process.poll.return_value = exit_code
+        if graph is not None:
+            run_result["return_value"] = Mock(stdout=json.dumps(graph).encode())
+        with patch.object(speech.subprocess, "run", **run_result) as run:
+            return echo_removal.fault(), run
+
+    def test_no_fault_when_a_program_records_from_the_kestrel_microphone(self):
+        fault, run = self.fault([
+            self.node(7, "alsa_output"), self.node(8, "kestrel-microphone"), self.node(9, "parec"),
+            self.link(7, 8, "active"), self.link(8, 9, "active"),
+        ])
+        self.assertIsNone(fault)
+        run.assert_called_once_with(["pw-dump"], capture_output=True, check=True, timeout=5)
+
+    def test_fault_when_echo_removal_has_stopped(self):
+        fault, run = self.fault(exit_code=1)
+        self.assertEqual(fault, "Echo removal has stopped. Restart Kestrel.")
+        run.assert_not_called()
+
+    def test_fault_when_the_kestrel_microphone_is_missing(self):
+        fault, _ = self.fault([self.node(7, "alsa_output"), self.node(9, "parec"), self.link(7, 9, "active")])
+        self.assertEqual(
+            fault, "The Kestrel microphone is missing from the audio system. Restart Kestrel."
+        )
+
+    def test_fault_when_no_program_records_from_the_kestrel_microphone(self):
+        reason = (
+            'No program is recording from "Kestrel microphone (echo removed)". '
+            "Choose it as the microphone in the page and connect again."
+        )
+        for case, link in {
+            "an active link from another node": self.link(7, 9, "active"),
+            "a paused link from the Kestrel microphone": self.link(8, 9, "paused"),
+        }.items():
+            with self.subTest(case):
+                fault, _ = self.fault([
+                    self.node(7, "alsa_output"), self.node(8, "kestrel-microphone"), self.node(9, "parec"), link,
+                ])
+                self.assertEqual(fault, reason)
+
+    def test_fault_when_the_audio_graph_cannot_be_read(self):
+        unreadable = {
+            "a non-zero exit": {"side_effect": subprocess.CalledProcessError(1, "pw-dump")},
+            "a missing binary": {"side_effect": FileNotFoundError("pw-dump")},
+            "a timeout": {"side_effect": subprocess.TimeoutExpired("pw-dump", 5)},
+            "output that is not JSON": {"return_value": Mock(stdout=b"not json")},
+            "JSON of another shape": {"return_value": Mock(stdout=b'{"unexpected": true}')},
+            "a node with no information": {
+                "return_value": Mock(stdout=json.dumps([
+                    {"id": 8, "type": "PipeWire:Interface:Node", "info": None},
+                ]).encode()),
+            },
+        }
+        for case, run_result in unreadable.items():
+            with self.subTest(case):
+                fault, _ = self.fault(**run_result)
+                self.assertTrue(fault.startswith("Echo removal could not be checked: "))
+
 
 if __name__ == "__main__":
     unittest.main()
