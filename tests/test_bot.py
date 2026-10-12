@@ -121,6 +121,31 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         conversation.assert_not_awaited()
         self.assertFalse(bot.SESSION_LOCK.locked())
 
+    async def test_no_model_loads_when_the_page_goes_away_during_the_check(self):
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        args = self.arguments()
+        loop = asyncio.get_running_loop()
+
+        def fault():
+            # Runs on a worker thread: the page closes while this look is still running.
+            connection = args.webrtc_connection
+            asyncio.run_coroutine_threadsafe(connection.handlers["closed"](connection), loop).result()
+            return None
+
+        with (
+            patch.object(bot.ECHO_REMOVAL, "fault", side_effect=fault),
+            patch.object(bot, "VOICE_MODEL", object()),
+            patch.object(bot, "NemotronSTT", return_value=stt),
+            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
+            patch.object(bot.torch, "set_num_threads"),
+        ):
+            # A hang guard, not a timing assertion.
+            await asyncio.wait_for(bot.bot(args), 5)
+        stt.load.assert_not_awaited()
+        conversation.assert_not_awaited()
+        args.webrtc_connection.disconnect.assert_awaited_once()
+        self.assertFalse(bot.SESSION_LOCK.locked())
+
     async def test_second_simultaneous_client_is_disconnected(self):
         args = self.arguments()
         async with bot.SESSION_LOCK:

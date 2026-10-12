@@ -35,7 +35,7 @@ SESSION_LOCK = asyncio.Lock()
 CONVERSATION = None
 ECHO_REMOVAL = EchoRemoval()
 # A page starts recording from the microphone it was given a moment after it connects, so the
-# check is repeated for this many seconds before the conversation is refused.
+# check is repeated until this many seconds have passed before the conversation is refused.
 ECHO_REMOVAL_WAIT = 10
 ECHO_REMOVAL_RETRY = 0.5
 VOICE_MODEL = None
@@ -94,6 +94,8 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             fault = await echo_removal_fault(disconnected)
             if fault:
                 logger.error(f"Refusing the microphone session: {fault}")
+                return
+            if disconnected.is_set():
                 return
             logger.info("Loading local speech models for the microphone session")
             await stt.load()
