@@ -6,7 +6,7 @@
 | [AGENTS.md](../AGENTS.md) | Shared workflow and local product boundary. |
 | [Repository profile](../.agents/REPOSITORY.md) | Local facts and conventions. |
 | [Glossary](../GLOSSARY.md) | Local terms. |
-| [Decision 0001](adr/0001-own-voice-borrowed-runtime.md) | Why Kestrel keeps its own voice and borrows its runtime. |
+| [Decision 0001](adr/0001-own-voice-borrowed-engine.md) | Why Kestrel keeps its own voice and borrows its engine. |
 | [Coding standards](CODING-STANDARDS.md) | First-party code conventions. |
 | [Testing strategy](TESTING-STRATEGY.md) | Claim evidence and local suites. |
 | [Design system](DESIGN-SYSTEM.md) | Current interface ownership and design boundary. |

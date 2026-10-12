@@ -16,9 +16,9 @@ _Avoid_: speech stack, audio pipeline
 The model that understands a request and chooses what to do. A role that different models can fill.
 _Avoid_: the model, the assistant, the name of whichever model fills the role
 
-**Runtime**:
+**Engine**:
 The software that gives the brain its tools and memory and carries out what it chooses.
-_Avoid_: agent framework, hands
+_Avoid_: runtime, which belongs to the workflow; agent framework, hands
 
 **Tool**:
 One bounded thing Kestrel can do, with a result it can observe.
