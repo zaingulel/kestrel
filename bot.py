@@ -131,7 +131,15 @@ async def run_conversation(runner_args, stt, voice):
     await runner.run()
 
 
+def run_voice_service(main):
+    ECHO_REMOVAL.start(stop_kestrel)
+    try:
+        main()
+    finally:
+        ECHO_REMOVAL.close()
+
+
 if __name__ == "__main__":
     from pipecat.runner.run import main
 
-    main()
+    run_voice_service(main)

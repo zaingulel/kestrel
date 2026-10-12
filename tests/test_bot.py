@@ -2,7 +2,7 @@ import asyncio
 import os
 import signal
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from loguru import logger
 
@@ -106,6 +106,24 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(bot.os, "kill") as kill:
             bot.stop_kestrel()
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_echo_removal_runs_for_the_whole_voice_service(self):
+        calls = Mock()
+        with (
+            patch.object(bot.ECHO_REMOVAL, "start", calls.start),
+            patch.object(bot.ECHO_REMOVAL, "close", calls.close),
+        ):
+            bot.run_voice_service(calls.serve)
+            self.assertEqual(
+                calls.mock_calls, [call.start(bot.stop_kestrel), call.serve(), call.close()]
+            )
+            calls.reset_mock()
+            calls.serve.side_effect = RuntimeError("serve failed")
+            with self.assertRaisesRegex(RuntimeError, "serve failed"):
+                bot.run_voice_service(calls.serve)
+            self.assertEqual(
+                calls.mock_calls, [call.start(bot.stop_kestrel), call.serve(), call.close()]
+            )
 
 
 if __name__ == "__main__":
