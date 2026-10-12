@@ -4,7 +4,7 @@ import os
 import subprocess
 import threading
 import unittest
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from loguru import logger
@@ -244,7 +244,10 @@ class EchoRemovalTests(unittest.TestCase):
         echo_removal.close()
         popen.return_value.terminate.assert_called_once_with()
         popen.return_value.kill.assert_called_once_with()
-        self.assertEqual(popen.return_value.wait.call_args_list, [call(timeout=speech.ECHO_REMOVAL_STOP_WAIT), call()])
+        self.assertEqual(
+            popen.return_value.wait.call_args_list,
+            [((), {"timeout": speech.ECHO_REMOVAL_STOP_WAIT}), ((), {})],
+        )
 
     @staticmethod
     def node(node_id, name):
