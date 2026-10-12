@@ -113,18 +113,18 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             await runner_args.webrtc_connection.disconnect()
 
 
-async def run_conversation(runner_args, stt, voice):
-    transport = SmallWebRTCTransport(
-        webrtc_connection=runner_args.webrtc_connection,
-        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
-    )
-    context = LLMContext([])
-    aggregators = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
+async def run_conversation(runner_args, stt, voice, *, transport=None, user_params=None):
+    if transport is None:
+        transport = SmallWebRTCTransport(
+            webrtc_connection=runner_args.webrtc_connection,
+            params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+        )
+    if user_params is None:
+        user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(), empty_user_turn=None,
-        ),
-    )
+        )
+    context = LLMContext([])
+    aggregators = LLMContextAggregatorPair(context, user_params=user_params)
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), make_llm(),
         VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
