@@ -1,10 +1,13 @@
 import asyncio
 import json
+import os
+import subprocess
 import threading
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
+from loguru import logger
 from pipecat.frames.frames import (
     EndFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStoppedFrame, TTSTextFrame,
@@ -14,6 +17,7 @@ from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
+import speech
 from speech import NemotronSTT, VOICE_REFERENCE, VOICE_REFERENCE_TEXT, VoxCPMTTS
 
 
@@ -175,6 +179,63 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(new_frames), 3)
         finally:
             release.set()
+
+
+class EchoRemovalTests(unittest.TestCase):
+    def setUp(self):
+        self.messages = []
+        self.addCleanup(logger.remove, logger.add(self.messages.append, level="ERROR"))
+
+    def start(self):
+        """Start echo removal on doubles; return it, the process start, the watcher and the callback."""
+        on_stopped = Mock()
+        with patch.object(speech.subprocess, "Popen") as popen, \
+                patch.object(speech.threading, "Thread") as thread:
+            popen.return_value.wait.return_value = 3
+            echo_removal = speech.EchoRemoval()
+            echo_removal.start(on_stopped)
+        return echo_removal, popen, thread, on_stopped
+
+    def test_echo_removal_process_is_bound_to_kestrel(self):
+        _, popen, _, _ = self.start()
+        self.assertEqual(
+            popen.call_args.args[0],
+            [*speech.BOUND_TO_KESTREL, str(os.getpid()), "pipewire", "-c", "echo-removal.conf"],
+        )
+        self.assertEqual(popen.call_args.kwargs["env"]["PIPEWIRE_CONFIG_DIR"], str(speech.ROOT))
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertTrue((speech.ROOT / "echo-removal.conf").is_file())
+
+    def test_a_command_bound_to_kestrel_keeps_the_parent_death_signal(self):
+        result = subprocess.run(
+            [*speech.BOUND_TO_KESTREL, str(os.getpid()), "setpriv", "--dump"],
+            capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"},
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Parent death signal: TERM", result.stdout)
+
+    def test_nothing_starts_when_kestrel_is_not_the_parent(self):
+        result = subprocess.run(
+            [*speech.BOUND_TO_KESTREL, str(os.getppid()), "echo", "started"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+
+    def test_an_unexpected_stop_is_reported(self):
+        _, _, thread, on_stopped = self.start()
+        thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
+        on_stopped.assert_called_once_with()
+        self.assertEqual(len(self.messages), 1)
+        self.assertIn("Echo removal stopped (exit code 3)", self.messages[0])
+
+    def test_closing_echo_removal_reports_nothing(self):
+        echo_removal, popen, thread, on_stopped = self.start()
+        echo_removal.close()
+        thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
+        popen.return_value.terminate.assert_called_once_with()
+        on_stopped.assert_not_called()
+        self.assertEqual(self.messages, [])
 
 
 if __name__ == "__main__":

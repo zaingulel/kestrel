@@ -3,9 +3,13 @@
 import asyncio
 import base64
 import json
+import os
+import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
 from pipecat.frames.frames import TranscriptionFrame, TTSAudioRawFrame
 from pipecat.services.settings import STTSettings, TTSSettings
 from pipecat.services.stt_service import SegmentedSTTService
@@ -15,6 +19,43 @@ from pipecat.utils.time import time_now_iso8601
 ROOT = Path(__file__).parent
 VOICE_REFERENCE = ROOT / ".runtime/voices/kestrel.wav"
 VOICE_REFERENCE_TEXT = "Hello. Speech recognition and voice generation are now running locally."
+# Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
+ECHO_REMOVAL_CONFIG = "echo-removal.conf"
+# `setpriv` arms the parent-death signal without checking that its parent is still alive, and
+# Linux sends nothing for a parent that died first, so the shell starts the command only while
+# the process whose identifier follows is still its parent.
+BOUND_TO_KESTREL = [
+    "setpriv", "--pdeathsig", "TERM",
+    "sh", "-c", 'test "$PPID" = "$1" && shift && exec "$@"', "sh",
+]
+
+
+class EchoRemoval:
+    def __init__(self):
+        self.process = None
+        self._closing = False
+
+    def start(self, on_stopped):
+        # The parent-death signal follows the spawning thread, so this runs on the main thread,
+        # and the new session keeps a terminal Ctrl+C from stopping echo removal first.
+        self.process = subprocess.Popen(
+            [*BOUND_TO_KESTREL, str(os.getpid()), "pipewire", "-c", ECHO_REMOVAL_CONFIG],
+            env={**os.environ, "PIPEWIRE_CONFIG_DIR": str(ROOT)}, start_new_session=True,
+        )
+        threading.Thread(target=self._report_stop, args=(on_stopped,), daemon=True).start()
+
+    def _report_stop(self, on_stopped):
+        code = self.process.wait()
+        if not self._closing:
+            logger.error(
+                f"Echo removal stopped (exit code {code}); stopping Kestrel, which never listens without it"
+            )
+            on_stopped()
+
+    def close(self):
+        self._closing = True
+        self.process.terminate()
+        self.process.wait()
 
 
 class NemotronSTT(SegmentedSTTService):
