@@ -63,6 +63,16 @@ class WorkerProcess:
         import hermes_worker
         self.home = home
         self.stderr = (home / 'worker-stderr.txt').open('w+')
+        self.process = subprocess.Popen(
+            self.command(home, brain), env=hermes_worker.child_environment(home),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
+        )
+        self.selector = selectors.DefaultSelector()
+        self.selector.register(self.process.stdout, selectors.EVENT_READ)
+        self.buffer = b''
+
+    @staticmethod
+    def command(home, brain):
         # Test-only containment observes even caught attempts, before permitting only this provider.
         bootstrap = '''
 import json, pathlib, sys
@@ -80,15 +90,8 @@ sys.addaudithook(audit)
 import hermes_worker
 hermes_worker.main(base_url=sys.argv[4])
 '''
-        self.process = subprocess.Popen(
-            [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
-             str(brain.server.server_port), brain.url],
-            env=hermes_worker.child_environment(home), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=self.stderr,
-        )
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.process.stdout, selectors.EVENT_READ)
-        self.buffer = b''
+        return [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
+                str(brain.server.server_port), brain.url]
 
     def event(self):
         while b'\n' not in self.buffer:
@@ -259,6 +262,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertFalse(any(path.name in ('MEMORY.md', 'USER.md', 'trajectory_samples.jsonl') for path in files))
 
     def test_poisoned_home_credentials_and_proxy_cannot_change_provider_or_context(self):
+        original_home = os.environ['HOME']
         with tempfile.TemporaryDirectory(prefix='hermes-poison-', dir=ROOT / '.runtime') as directory:
             normal_home = Path(directory).resolve()
             normal_hermes = normal_home / '.hermes'
@@ -276,7 +280,7 @@ class NativeHermesTests(unittest.TestCase):
             (normal_hermes / '.env').write_text('OPENAI_API_KEY=synthetic-poison-key\n')
             (normal_home / '.env').write_text('OPENAI_BASE_URL=http://127.0.0.1:9/v1\n')
             poison = {
-                'HOME': str(normal_home), 'HERMES_HOME': str(normal_hermes),
+                'HERMES_HOME': str(normal_hermes),
                 'HERMES_MANAGED_DIR': str(normal_home / 'managed-poison'),
                 'OPENAI_API_KEY': 'synthetic-poison-key', 'OPENROUTER_API_KEY': 'synthetic-poison-key',
                 'ANTHROPIC_API_KEY': 'synthetic-poison-key', 'OPENAI_BASE_URL': 'http://127.0.0.1:9/v1',
@@ -300,10 +304,10 @@ class NativeHermesTests(unittest.TestCase):
                     self.assertEqual(os.environ['OPENAI_API_KEY'], 'synthetic-poison-key')
                     import hermes_worker
                     environment = hermes_worker.child_environment(worker.home)
-                    self.assertEqual(environment['HOME'], str(normal_home))
+                    self.assertEqual(environment['HOME'], original_home)
                     self.assertEqual(environment['PYTHON_DOTENV_DISABLED'], '1')
                     self.assertEqual(environment['HERMES_MANAGED_DIR'], str(worker.home / 'managed'))
-                    self.assertFalse(set(poison) - {'HOME', 'HERMES_HOME', 'HERMES_MANAGED_DIR', 'PYTHON_DOTENV_DISABLED'} & set(environment))
+                    self.assertFalse(set(poison) - {'HERMES_HOME', 'HERMES_MANAGED_DIR', 'PYTHON_DOTENV_DISABLED'} & set(environment))
 
     def test_provider_failure_is_explicit_and_owned_diagnostics_are_removed_after_exit(self):
         with native_worker([400]) as (worker, brain):

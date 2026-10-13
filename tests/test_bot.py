@@ -1,13 +1,14 @@
 import asyncio
-from copy import deepcopy
 import os
 import signal
+import sys
+import threading
+from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
 from loguru import logger
-from openai.types.chat import ChatCompletionChunk
 from pipecat.frames.frames import (
     InterruptionFrame, LLMContextAssistantTurnFrame, ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
@@ -16,6 +17,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 import bot
+from test_hermes import NATIVE_PYTHON, ScriptedBrain, WorkerProcess
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
@@ -215,16 +217,15 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_conversation_preserves_context_and_interrupts_reply(self):
+    async def open_session(self, brain, *, wire=None):
+        if brain is not None and not NATIVE_PYTHON.exists():
+            if os.environ.get('CI'):
+                self.skipTest('Installed Hermes interpreter absent in hosted environment')
+            self.fail('Local installed Hermes interpreter unavailable')
         started = asyncio.Event()
-        second_blocked = asyncio.Event()
-        second_closed = asyncio.Event()
+        spoken = asyncio.Queue()
+        committed = asyncio.Queue()
         interrupted = asyncio.Event()
-        release_second = asyncio.Event()
-        spoken_sentences = asyncio.Queue()
-        committed_turns = asyncio.Queue()
-        spoken = []
-        requests = []
 
         class Input(FrameProcessor):
             async def process_frame(self, frame, direction):
@@ -237,18 +238,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, StartFrame):
                     started.set()
                 elif isinstance(frame, TTSTextFrame) and direction == FrameDirection.DOWNSTREAM:
-                    spoken.append(frame.text)
-                    spoken_sentences.put_nowait(frame.text)
-                elif (
-                    isinstance(frame, LLMContextAssistantTurnFrame)
-                    and direction == FrameDirection.UPSTREAM
-                ):
-                    committed_turns.put_nowait(frame.text)
-                elif (
-                    isinstance(frame, InterruptionFrame)
-                    and direction == FrameDirection.DOWNSTREAM
-                    and second_blocked.is_set()
-                ):
+                    spoken.put_nowait(frame.text)
+                elif isinstance(frame, LLMContextAssistantTurnFrame) and direction == FrameDirection.UPSTREAM:
+                    committed.put_nowait(frame.text.strip())
+                elif isinstance(frame, InterruptionFrame):
                     interrupted.set()
                 await self.push_frame(frame, direction)
 
@@ -268,92 +261,237 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         def chunks(**kwargs):
             yield np.zeros(4800, dtype=np.float32)
 
-        llm = bot.make_llm()
+        real_spawn = asyncio.create_subprocess_exec
+        processes = []
 
-        async def get_chat_completions(context):
-            requests.append(deepcopy(context.messages))
-            turn = len(requests)
+        async def spawn(*command, **kwargs):
+            home = Path(kwargs['env']['HERMES_HOME'])
+            logger.debug(f'Owned session test home: {home}')
+            if wire is not None:
+                command = (sys.executable, '-c', wire)
+            elif command[0] == str(NATIVE_PYTHON):
+                command = WorkerProcess.command(home, brain)
+            try:
+                process = await real_spawn(*command, **kwargs)
+            except OSError:
+                processes.append((None, home))
+                raise
+            processes.append((process, home))
+            return process
 
-            def chunk(text):
-                return ChatCompletionChunk(
-                    id=f"reply-{turn}", created=0, model="underdog-saluki-27b-1.0",
-                    object="chat.completion.chunk",
-                    choices=[{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-                )
-
-            async def stream():
-                if turn == 1:
-                    yield chunk("Hello.")
-                elif turn == 2:
-                    try:
-                        yield chunk("One fact. Obsolete continuation")
-                        second_blocked.set()
-                        await release_second.wait()
-                        yield chunk(" must not be spoken.")
-                    finally:
-                        second_closed.set()
-                else:
-                    yield chunk("Next step.")
-
-            return stream()
-
-        async def finish_user_turn(text):
-            await transport.input().queue_frame(
-                TranscriptionFrame(text, "", "2026-01-01T00:00:00Z", finalized=True)
-            )
-            # The native stop is a control frame, ordered behind the transcript.
-            await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
-
+        direct = patch('pipecat.services.openai.llm.OpenAILLMService.get_chat_completions',
+                       side_effect=RuntimeError('Direct brain bypass is prohibited in this native-session proof'))
+        direct.start()
+        self.addCleanup(direct.stop)
+        spawn_patch = patch.object(bot.asyncio, 'create_subprocess_exec', spawn)
+        spawn_patch.start()
+        self.addCleanup(spawn_patch.stop)
         user_params = bot.LLMUserAggregatorParams(
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
-        with (
-            patch.object(bot, "make_llm", return_value=llm),
-            patch.object(llm, "get_chat_completions", get_chat_completions),
-        ):
-            session = asyncio.create_task(bot.run_conversation(
-                Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
-                transport=transport, user_params=user_params,
-            ))
-            try:
-                # All five-second waits are hang guards, never timing assertions.
-                await asyncio.wait_for(started.wait(), 5)
-                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                await finish_user_turn("Hello Kestrel.")
-                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "Hello.")
-                self.assertEqual(await asyncio.wait_for(spoken_sentences.get(), 5), "Hello.")
+        session = asyncio.create_task(bot.run_conversation(
+            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
+            transport=transport, user_params=user_params,
+        ))
 
-                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                await finish_user_turn("Tell me more.")
-                self.assertEqual(await asyncio.wait_for(spoken_sentences.get(), 5), "One fact.")
-                await asyncio.wait_for(second_blocked.wait(), 5)
-                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                await asyncio.wait_for(second_closed.wait(), 5)
-                await asyncio.wait_for(interrupted.wait(), 5)
-                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "One fact.")
-                release_second.set()
-                await finish_user_turn("Stop. What next?")
-                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "Next step.")
+        async def close():
+            if not session.done():
+                await handlers['on_client_disconnected'](transport, None)
+            await asyncio.wait_for(session, 5)
+            for process, home in processes:
+                if process is not None:
+                    self.assertIsNotNone(process.returncode)
+                self.assertFalse(home.exists())
+            spawn_patch.stop()
 
-                self.assertEqual(spoken, ["Hello.", "One fact.", "Next step."])
-                self.assertEqual(
-                    [[(message["role"], message["content"].strip()) for message in history]
-                     for history in requests],
-                    [
-                        [("user", "Hello Kestrel.")],
-                        [("user", "Hello Kestrel."), ("assistant", "Hello."),
-                         ("user", "Tell me more.")],
-                        [("user", "Hello Kestrel."), ("assistant", "Hello."),
-                         ("user", "Tell me more."), ("assistant", "One fact."),
-                         ("user", "Stop. What next?")],
-                    ],
-                )
-            finally:
-                release_second.set()
-                if not session.done():
-                    await handlers["on_client_disconnected"](transport, None)
-                await asyncio.wait_for(session, 5)
+        self.addAsyncCleanup(close)
+        await asyncio.wait_for(started.wait(), 45)
+        return transport, spoken, committed, interrupted, processes, close
+
+    async def finish_user_turn(self, transport, text):
+        await transport.input().queue_frame(
+            TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
+        )
+        await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_missing_engine_waits_for_user_then_speaks_failure(self):
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, _, processes, _ = await self.open_session(None)
+            self.assertTrue(spoken.empty(), 'Startup failure must not make Kestrel speak first')
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Hello unavailable engine.')
+            failure = await asyncio.wait_for(spoken.get(), 5)
+            self.assertIn("couldn't reach Kestrel's engine", failure)
+            self.assertIn('Reconnect', await asyncio.wait_for(spoken.get(), 5))
+            self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(committed.get(), 5))
+            self.assertEqual(len(processes), 1)
+            self.assertIsNone(processes[0][0])
+
+    async def assert_failed_reply(self, transport, spoken, committed, text):
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, text)
+        context = await asyncio.wait_for(committed.get(), 5)
+        self.assertIn("couldn't get a complete reply", context)
+        self.assertIn('Check LM Studio', context)
+        heard = []
+        while not spoken.empty():
+            heard.append(spoken.get_nowait())
+        self.assertIn("couldn't get a complete reply", ' '.join(heard))
+        return context
+
+    async def test_dead_native_engine_speaks_failure(self):
+        brain = ScriptedBrain([])
+        self.addCleanup(brain.close)
+        transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        process, _ = processes[0]
+        process.kill()
+        await process.wait()
+        await self.assert_failed_reply(transport, spoken, committed, 'Is anyone there?')
+        self.assertEqual(brain.requests, [])
+
+    async def test_brain_refusal_speaks_failure_without_retry(self):
+        brain = ScriptedBrain([400])
+        self.addCleanup(brain.close)
+        transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.')
+        self.assertIsNotNone(processes[0][0].returncode)
+        await self.assert_failed_reply(transport, spoken, committed, 'Try another request.')
+        self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
+
+    async def test_partial_native_reply_speaks_failure(self):
+        brain = ScriptedBrain([[({'content': 'Incomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
+        self.addCleanup(brain.close)
+        transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.')
+        self.assertIn('Incomplete synthetic reply.', context)
+        self.assertIsNotNone(processes[0][0].returncode)
+
+    async def test_corrupt_worker_response_speaks_failure(self):
+        # External process stand-ins cover malformed JSON and wrongly typed terminal events.
+        cases = [
+            ('malformed JSON', '{"ready":true}', 'not json'),
+            ('wrong done type', '{"ready":true}', '{"text":"Synthetic prefix."}\n{"done":1}'),
+            ('wrong ready type', '{"ready":1}', ''),
+        ]
+        for name, ready, response in cases:
+            with self.subTest(name=name):
+                wire = (f'import sys; print({ready!r}, flush=True); sys.stdin.readline(); '
+                        f'print({response!r}, flush=True); sys.stdin.read()')
+                transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
+                self.assertTrue(spoken.empty(), 'Even corrupt startup must not speak first')
+                if name == 'wrong ready type':
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'Answer over the wire.')
+                    self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(committed.get(), 5))
+                    self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(spoken.get(), 5))
+                else:
+                    await self.assert_failed_reply(transport, spoken, committed, 'Answer over the wire.')
+                self.assertIsNotNone(processes[0][0].returncode)
+                await close()
+
+    async def test_interrupted_partial_failure_is_reported_before_next_answer(self):
+        blocked = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def partial_reply():
+            yield {'content': 'One fact. Unheard continuation'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Scripted partial reply was never released')
+            yield {}, 'length'
+            finished.set()
+
+        brain = ScriptedBrain([partial_reply()] + [[({'content': 'Unheard tail.'}, None), ({}, 'length')]] * 3)
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        transport, spoken, committed, interrupted, processes, _ = await self.open_session(brain)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Tell me something.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+        self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+        interrupted.clear()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await asyncio.wait_for(interrupted.wait(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+        await self.finish_user_turn(transport, 'What next?')
+        release.set()
+        self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+        context = await asyncio.wait_for(committed.get(), 5)
+        self.assertIn("couldn't get a complete reply", context)
+        self.assertNotIn('Unheard', context)
+        heard = []
+        while not spoken.empty():
+            heard.append(spoken.get_nowait())
+        self.assertIn("couldn't get a complete reply", ' '.join(heard))
+        self.assertNotIn('Unheard', ' '.join(heard))
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(any(m.get('content') == 'What next?' for request in brain.requests
+                             for m in request[2]['messages']), 'A failed drain cannot accept another engine turn')
+
+    async def test_conversation_preserves_context_and_interrupts_reply(self):
+        if not NATIVE_PYTHON.exists():
+            if os.environ.get('CI'):
+                self.skipTest('Installed Hermes interpreter absent in hosted environment')
+            self.fail('Local installed Hermes interpreter unavailable')
+        blocked = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def second_reply():
+            yield {'content': 'One fact. Obsolete continuation'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Scripted reply was never released')
+            yield {'content': ' must not be spoken.'}, None
+            yield {}, 'stop'
+            finished.set()
+
+        brain = ScriptedBrain([
+            [({'content': 'Hello.'}, None), ({}, 'stop')], second_reply(),
+            [({'content': 'Next step.'}, None), ({}, 'stop')],
+            [({'content': 'Fresh session.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        transport, spoken, committed, interrupted, processes, close = await self.open_session(brain)
+        self.assertTrue(spoken.empty(), 'Kestrel never speaks first')
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Hello Kestrel.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Hello.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Hello.')
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Tell me more.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+        self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+        interrupted.clear()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await asyncio.wait_for(interrupted.wait(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+        self.assertIsNone(processes[0][0].returncode)
+        await self.finish_user_turn(transport, 'Stop. What next?')
+        release.set()
+        self.assertTrue(await asyncio.to_thread(finished.wait, 5), 'Native generation must finish')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Next step.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Next step.')
+        self.assertTrue(spoken.empty())
+        histories = [[(m['role'], m['content'].strip()) for m in request[2]['messages']
+                      if m['role'] != 'system'] for request in brain.requests]
+        self.assertEqual(histories, [
+            [('user', 'Hello Kestrel.')],
+            [('user', 'Hello Kestrel.'), ('assistant', 'Hello.'), ('user', 'Tell me more.')],
+            [('user', 'Hello Kestrel.'), ('assistant', 'Hello.'), ('user', 'Tell me more.'),
+             ('assistant', 'One fact.'), ('user', 'Stop. What next?')],
+        ])
+        await close()
+        transport, spoken, committed, _, _, _ = await self.open_session(brain)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'A new conversation.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh session.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh session.')
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'A new conversation.'}])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
