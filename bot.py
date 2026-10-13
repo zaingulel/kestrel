@@ -2,8 +2,11 @@
 
 import asyncio
 from copy import deepcopy
+from dataclasses import dataclass
+from enum import Enum
 import json
 import os
+import re
 import signal
 import tempfile
 
@@ -13,6 +16,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
@@ -20,6 +24,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import SmallWebRTCRunnerArguments
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    TTSSpeakFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
@@ -41,6 +46,165 @@ ECHO_REMOVAL_WAIT = 10
 ECHO_REMOVAL_RETRY = 0.5
 VOICE_MODEL = None
 ENGINE_TIMEOUT = 45
+MUTE_TIMEOUT = 5
+LOCAL_COMMAND_TIMEOUT = 2
+LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
+
+
+class PermissionTier(Enum):
+    FREE = 'free'
+    ASK = 'ask'
+    FORBIDDEN = 'forbidden'
+
+
+@dataclass(frozen=True)
+class LocalTool:
+    permission: PermissionTier
+    run: object
+
+
+@dataclass(frozen=True)
+class MuteResult:
+    confirmed: bool
+    attempted: bool
+    reason: str
+
+
+async def run_local_command(argv):
+    uid = os.getuid()
+    env = {
+        'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+        'XDG_RUNTIME_DIR': f'/run/user/{uid}',
+        'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
+        'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',
+    }
+    process = None
+
+    async def reap():
+        if process is None:
+            return
+        # Closing the read pipe prevents buffered output from holding process.wait open.
+        process.stdout._transport.close()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), LOCAL_COMMAND_CLEANUP_TIMEOUT)
+        except TimeoutError:
+            pass
+        # The leader may exit while descendants still own the session's pipes.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
+
+    async def finish_cleanup():
+        cleanup = asyncio.create_task(reap())
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        await cleanup
+        if cancelled:
+            raise asyncio.CancelledError
+
+    try:
+        async with asyncio.timeout(LOCAL_COMMAND_TIMEOUT):
+            process = await asyncio.create_subprocess_exec(
+                *argv, env=env, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            output = bytearray()
+            while chunk := await process.stdout.read(4097 - len(output)):
+                output.extend(chunk)
+                if len(output) > 4096:
+                    raise RuntimeError('output too large')
+            if await process.wait() != 0:
+                raise RuntimeError('command failed')
+            try:
+                return output.decode('utf-8', errors='strict')
+            except UnicodeDecodeError:
+                raise RuntimeError('invalid output') from None
+    except asyncio.CancelledError:
+        await finish_cleanup()
+        raise
+    except (OSError, RuntimeError, TimeoutError) as error:
+        await finish_cleanup()
+        if isinstance(error, TimeoutError):
+            reason = 'command timeout'
+        elif isinstance(error, OSError):
+            reason = 'command unavailable'
+        else:
+            reason = str(error)
+        raise RuntimeError(reason) from None
+
+
+async def mute_output(*, command=run_local_command):
+    attempted = False
+
+    async def sink_name(argv):
+        name = (await command(argv)).removesuffix('\n')
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]{0,255}', name):
+            raise ValueError('invalid sink')
+        return name
+
+    async def mute_status(sink):
+        status = (await command(('/usr/bin/pactl', 'get-sink-mute', sink))).removesuffix('\n')
+        if status not in ('Mute: yes', 'Mute: no'):
+            raise ValueError('invalid status')
+        return status
+
+    try:
+        async with asyncio.timeout(MUTE_TIMEOUT):
+            default = await sink_name(('/usr/bin/pactl', 'get-default-sink'))
+            sink = await sink_name(('/usr/bin/omarchy-audio-output-sink', default))
+            already_muted = await mute_status(sink) == 'Mute: yes'
+            if not already_muted:
+                attempted = True
+                await command(('/usr/bin/pactl', 'set-sink-mute', sink, '1'))
+            after_default = await sink_name(('/usr/bin/pactl', 'get-default-sink'))
+            after_sink = await sink_name(('/usr/bin/omarchy-audio-output-sink', after_default))
+            status = await mute_status(sink)
+            if default != after_default or sink != after_sink:
+                return MuteResult(False, attempted, 'target changed')
+            if status != 'Mute: yes':
+                return MuteResult(False, attempted, 'readback unconfirmed')
+            return MuteResult(True, attempted, 'already muted' if already_muted else 'confirmed')
+    except TimeoutError:
+        return MuteResult(False, attempted, 'mute timeout')
+    except ValueError as error:
+        return MuteResult(False, attempted, str(error))
+    except RuntimeError:
+        return MuteResult(False, attempted, 'command failed')
+
+
+async def notify_mute_failure(*, command=run_local_command):
+    try:
+        await command((
+            '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+            '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
+            'Check the audio control. Kestrel will not retry.',
+        ))
+    except RuntimeError:
+        logger.error('Mute failure notification unavailable')
+        return False
+    # Command acceptance does not establish visible delivery by the desktop.
+    return True
+
+
+LOCAL_TOOLS = {'mute': LocalTool(PermissionTier.FREE, mute_output)}
+
+
+def match_instant_tool(text):
+    if text.strip().lower() not in ('mute', 'mute.', 'mute!'):
+        return None
+    tool = LOCAL_TOOLS['mute']
+    return tool if tool.permission is PermissionTier.FREE else None
 
 
 def stop_kestrel():
@@ -54,7 +218,7 @@ def stop_kestrel():
 
 
 class HermesLLMService(LLMService):
-    def __init__(self):
+    def __init__(self, *, local_command=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -66,6 +230,21 @@ class HermesLLMService(LLMService):
         self.output = None
         self.failure = None
         self.failure_advisory = None
+        self.local_command = local_command if local_command is not None else run_local_command
+        self.local_tasks = set()
+
+    async def run_mute(self, tool):
+        result = await tool.run(command=self.local_command)
+        if not result.confirmed:
+            logger.error(f'Mute could not be confirmed: {result.reason}')
+            await notify_mute_failure(command=self.local_command)
+        return result
+
+    async def close_local_tools(self):
+        tasks = tuple(self.local_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def open_engine(self):
         try:
@@ -153,6 +332,23 @@ class HermesLLMService(LLMService):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
+        messages = frame.context.get_messages()
+        if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
+                and messages[-1].get('role') == 'user'
+                and isinstance(messages[-1].get('content'), str)):
+            tool = match_instant_tool(messages[-1]['content'])
+            if tool is not None:
+                messages.pop()
+                task = asyncio.create_task(self.run_mute(tool))
+                self.local_tasks.add(task)
+                task.add_done_callback(self.local_tasks.discard)
+                result = await asyncio.shield(task)
+                if not result.confirmed:
+                    await self.push_frame(TTSSpeakFrame(
+                        "I couldn't confirm mute. Check the audio control. I won't retry.",
+                        append_to_context=False,
+                    ))
+                return
         output = None
         try:
             if self.reader is not None:
@@ -271,6 +467,7 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
         await runner.run()
     finally:
+        await llm.close_local_tools()
         await llm.close_engine()
 
 
