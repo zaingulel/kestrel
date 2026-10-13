@@ -13,6 +13,7 @@ import tempfile
 import torch
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -439,7 +440,7 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         )
     if user_params is None:
         user_params = LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(), empty_user_turn=None,
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
         )
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
