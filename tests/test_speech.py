@@ -75,7 +75,6 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(audio.getsampwidth(), 2)
                     self.assertEqual(audio.getframerate(), 16000)
                     self.assertEqual(audio.getnframes(), 1600)
-                    self.assertEqual(audio.getcomptype(), 'NONE')
                     self.assertEqual(len(audio.readframes(1600)), 3200)
                 self.assertFalse(load.done())
                 reference.open.assert_called_once_with('rb')

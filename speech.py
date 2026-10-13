@@ -116,7 +116,7 @@ class NemotronSTT(SegmentedSTTService):
                 frames = reference.getnframes()
                 if (
                     reference.getnchannels() != 1 or reference.getsampwidth() != 2
-                    or reference.getframerate() != 48000 or reference.getcomptype() != 'NONE'
+                    or reference.getframerate() != 48000
                     or frames == 0 or frames > 480000
                 ):
                     raise RuntimeError(

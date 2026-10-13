@@ -549,7 +549,7 @@ class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(bot, 'LLMContextAggregatorPair', side_effect=capture):
             with self.assertRaises(AnalyzerSelected):
-                await bot.run_conversation(None, None, None, transport=object())
+                await bot.run_conversation(None, None, None, llm=object(), transport=object())
         return analyzer
 
     async def test_measured_first_short_greeting_is_admitted_once(self):
@@ -638,7 +638,7 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(UserTurnStrategies, '__post_init__', capture_selection), \
                     patch.object(bot, 'SileroVADAnalyzer', capture_vad):
                 with self.assertRaises(SelectionCaptured):
-                    await bot.run_conversation(None, None, None, transport=object())
+                    await bot.run_conversation(None, None, None, llm=object(), transport=object())
             self.assertEqual(len(captured), 1)
             strategies = captured[0]
             self.assertEqual(len(strategies.stop), 1)
@@ -695,7 +695,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         retry.start()
         self.addCleanup(retry.stop)
         engine = patch.object(bot, 'make_llm', side_effect=lambda: Mock(
-            prepare_engine=AsyncMock(), close_local_tools=AsyncMock(), close_engine=AsyncMock(),
+            start_preparation=Mock(), close_local_tools=AsyncMock(), close_engine=AsyncMock(),
         ))
         engine.start()
         self.addCleanup(engine.stop)
@@ -1165,53 +1165,48 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         spawn_patch = patch.object(bot.asyncio, 'create_subprocess_exec', spawn)
         spawn_patch.start()
         self.addCleanup(spawn_patch.stop)
-        if local_command is not None:
-            def make_llm():
-                transport.llm = bot.HermesLLMService(local_command=local_command)
-                return transport.llm
-
-            make_llm_patch = patch.object(bot, 'make_llm', make_llm)
-            make_llm_patch.start()
-            self.addCleanup(make_llm_patch.stop)
-        supplied_llm = None
-        if prepare_engine:
-            supplied_llm = bot.make_llm()
-            transport.llm = supplied_llm
-            supplied_llm.reader = asyncio.create_task(supplied_llm.prepare_engine())
-        user_params = bot.LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
-        )
-        session = asyncio.create_task(bot.run_conversation(
-            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
-            transport=transport, user_params=user_params, llm=supplied_llm,
-        ))
+        supplied_llm = bot.HermesLLMService(local_command=local_command)
+        transport.llm = supplied_llm
+        session = None
 
         async def close():
-            if not session.done():
-                if not started.is_set():
-                    session.cancel()
-                else:
-                    await handlers['on_client_disconnected'](transport, None)
             try:
-                try:
-                    await asyncio.wait_for(session, 5)
-                except asyncio.CancelledError:
-                    pass
-            finally:
-                if supplied_llm is not None:
+                if session is not None:
                     try:
-                        await supplied_llm.close_local_tools()
+                        if not session.done():
+                            if not started.is_set():
+                                session.cancel()
+                            else:
+                                await handlers['on_client_disconnected'](transport, None)
                     finally:
-                        await supplied_llm.close_engine()
+                        try:
+                            await asyncio.wait_for(session, 5)
+                        except asyncio.CancelledError:
+                            pass
+            finally:
+                try:
+                    await supplied_llm.close_local_tools()
+                finally:
+                    await supplied_llm.close_engine()
             for process, home in processes:
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
                 self.assertFalse(home.exists())
             spawn_patch.stop()
-            if local_command is not None:
-                make_llm_patch.stop()
 
         self.addAsyncCleanup(close)
+        if prepare_engine:
+            supplied_llm.start_preparation()
+        else:
+            # Unrelated turn/history cases project an already-ready worker, not production startup.
+            await supplied_llm.open_engine()
+        user_params = bot.LLMUserAggregatorParams(
+            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
+        )
+        session = asyncio.create_task(bot.run_conversation(
+            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
+            llm=supplied_llm, transport=transport, user_params=user_params,
+        ))
         await asyncio.wait_for(started.wait(), 45)
         return transport, spoken, committed, interrupted, processes, close
 

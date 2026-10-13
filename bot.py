@@ -270,6 +270,9 @@ class HermesLLMService(LLMService):
             logger.error(self.failure)
             await self.reap_engine()
 
+    def start_preparation(self):
+        self.reader = asyncio.create_task(self.prepare_engine())
+
     async def prepare_engine(self):
         await self.open_engine()
         if not self.failure:
@@ -427,7 +430,7 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             if disconnected.is_set():
                 return
             llm = make_llm()
-            llm.reader = asyncio.create_task(llm.prepare_engine())
+            llm.start_preparation()
             logger.info("Loading local speech models for the microphone session")
             await stt.load()
             torch.set_num_threads(4)
@@ -459,7 +462,7 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
                     await runner_args.webrtc_connection.disconnect()
 
 
-async def run_conversation(runner_args, stt, voice, *, transport=None, user_params=None, llm=None):
+async def run_conversation(runner_args, stt, voice, *, llm, transport=None, user_params=None):
     if transport is None:
         transport = SmallWebRTCTransport(
             webrtc_connection=runner_args.webrtc_connection,
@@ -476,9 +479,6 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         )
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
-    owns_llm = llm is None
-    if owns_llm:
-        llm = make_llm()
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
         VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
@@ -497,15 +497,8 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
-    try:
-        if owns_llm:
-            await llm.open_engine()
-        logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
-        await runner.run()
-    finally:
-        if owns_llm:
-            await llm.close_local_tools()
-            await llm.close_engine()
+    logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
+    await runner.run()
 
 
 def run_voice_service(main):
