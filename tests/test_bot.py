@@ -11,13 +11,16 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
 from loguru import logger
+from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     DataFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
 import bot
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
@@ -608,6 +611,78 @@ class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertNotEqual(state, VADState.SPEAKING)
                     self.assertEqual(state, VADState.QUIET)
                 finally:
+                    await analyzer.cleanup()
+
+
+class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uncertain_turn_uses_600ms_fallback_and_keeps_semantic_completion(self):
+        class SelectionCaptured(Exception):
+            pass
+
+        captured = []
+        vad_analyzers = []
+        original_post_init = UserTurnStrategies.__post_init__
+        original_vad = bot.SileroVADAnalyzer
+
+        def capture_selection(strategies):
+            original_post_init(strategies)
+            captured.append(strategies)
+            raise SelectionCaptured
+
+        def capture_vad(*args, **kwargs):
+            analyzer = original_vad(*args, **kwargs)
+            vad_analyzers.append(analyzer)
+            return analyzer
+
+        try:
+            with patch.object(UserTurnStrategies, '__post_init__', capture_selection), \
+                    patch.object(bot, 'SileroVADAnalyzer', capture_vad):
+                with self.assertRaises(SelectionCaptured):
+                    await bot.run_conversation(None, None, None, transport=object())
+            self.assertEqual(len(captured), 1)
+            strategies = captured[0]
+            self.assertEqual(len(strategies.stop), 1)
+            self.assertIsInstance(strategies.stop[0], TurnAnalyzerUserTurnStopStrategy)
+            self.assertEqual(
+                [type(strategy) for strategy in strategies.start],
+                [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy],
+            )
+            analyzer = strategies.stop[0]._turn_analyzer
+            analyzer.set_sample_rate(16000)
+            # 320 PCM16 samples at 16 kHz are 20 ms per chunk.
+            chunk = bytes(640)
+            predictions = [
+                {'prediction': 0, 'probability': 0.0},
+                {'prediction': 1, 'probability': 1.0},
+            ]
+            with patch.object(analyzer, '_predict_endpoint', side_effect=predictions) as predict:
+                for _ in range(2):
+                    analyzer.append_audio(chunk, is_speech=True)
+                state, _ = await analyzer.analyze_end_of_turn()
+                self.assertEqual(state, EndOfTurnState.INCOMPLETE)
+                for _ in range(29):
+                    self.assertEqual(
+                        analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.INCOMPLETE,
+                    )
+                self.assertEqual(
+                    analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.COMPLETE,
+                )
+                self.assertFalse(analyzer.speech_triggered)
+                for _ in range(2):
+                    analyzer.append_audio(chunk, is_speech=True)
+                self.assertEqual(
+                    analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.INCOMPLETE,
+                )
+                state, _ = await analyzer.analyze_end_of_turn()
+                self.assertEqual(state, EndOfTurnState.COMPLETE)
+                self.assertEqual(predict.call_count, 2)
+        finally:
+            try:
+                for strategies in captured:
+                    for strategy in strategies.start + strategies.stop:
+                        await strategy.cleanup()
+            finally:
+                for analyzer in vad_analyzers:
                     await analyzer.cleanup()
 
 
