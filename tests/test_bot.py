@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 import os
 import signal
 import sys
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import numpy as np
 from loguru import logger
 from pipecat.frames.frames import (
-    InterruptionFrame, LLMContextAssistantTurnFrame, ProposedUserStartedSpeakingFrame,
+    DataFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -22,6 +23,64 @@ from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, requi
 
 
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_processor_excludes_speculative_nonuser_and_upstream_mute(self):
+        cases = [
+            ([{'role': 'user', 'content': 'mute'}], True, FrameDirection.DOWNSTREAM),
+            ([{'role': 'user', 'content': 'mute'}], False, FrameDirection.UPSTREAM),
+            ([{'role': 'assistant', 'content': 'mute'}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'system', 'content': 'mute'}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'assistant', 'content': '', 'tool_calls': [
+                {'type': 'function', 'function': {'name': 'mute', 'arguments': '{}'}},
+            ]}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'user', 'content': [{'type': 'text', 'text': 'mute'}]}], False, FrameDirection.DOWNSTREAM),
+            ([], False, FrameDirection.DOWNSTREAM),
+        ]
+        for messages, speculative, direction in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Only a completed downstream text-user turn may act'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'This direct processor fixture has no engine'
+                context = bot.LLMContext(deepcopy(messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                command.assert_not_awaited()
+                self.assertEqual(context.get_messages(), messages)
+
+    async def test_processor_consumes_mute_before_await_and_cannot_replay_context(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
+
+        async def command(argv):
+            calls.append(argv)
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+            return next(replies)
+
+        service = bot.HermesLLMService(local_command=command)
+        service.failure = 'This direct processor fixture has no engine'
+        context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
+        frame = LLMContextFrame(context)
+        processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            self.assertEqual(context.get_messages(), [], 'Consumption precedes the first native-command await')
+            await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+            self.assertEqual(len(calls), 1, 'Replayed context cannot start another action while the first is pending')
+            release.set()
+            await asyncio.wait_for(processing, 5)
+            await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+            self.assertEqual(len(calls), 7)
+            self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
+            self.assertFalse(service.local_tasks)
+        finally:
+            release.set()
+            await service.close_local_tools()
+            if not processing.done():
+                processing.cancel()
+            await asyncio.gather(processing, return_exceptions=True)
+
     def test_only_exact_mute_selects_a_free_tool(self):
         self.assertEqual(set(bot.LOCAL_TOOLS), {'mute'})
         tool = bot.LOCAL_TOOLS['mute']
@@ -543,13 +602,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def open_session(self, brain, *, wire=None):
+    async def open_session(self, brain, *, wire=None, local_command=None):
         if brain is not None:
             require_native_hermes()
         started = asyncio.Event()
         spoken = asyncio.Queue()
         committed = asyncio.Queue()
         interrupted = asyncio.Event()
+        processed = asyncio.Queue()
 
         class Input(FrameProcessor):
             async def process_frame(self, frame, direction):
@@ -567,11 +627,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     committed.put_nowait(frame.text.strip())
                 elif isinstance(frame, InterruptionFrame):
                     interrupted.set()
+                elif type(frame) is DataFrame:
+                    processed.put_nowait(frame)
                 await self.push_frame(frame, direction)
 
         transport = Mock()
         transport.input.return_value = Input()
         transport.output.return_value = Output()
+        transport.processed = processed
         handlers = {}
 
         def event_handler(name):
@@ -611,6 +674,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         spawn_patch = patch.object(bot.asyncio, 'create_subprocess_exec', spawn)
         spawn_patch.start()
         self.addCleanup(spawn_patch.stop)
+        if local_command is not None:
+            def make_llm():
+                transport.llm = bot.HermesLLMService(local_command=local_command)
+                return transport.llm
+
+            make_llm_patch = patch.object(bot, 'make_llm', make_llm)
+            make_llm_patch.start()
+            self.addCleanup(make_llm_patch.stop)
         user_params = bot.LLMUserAggregatorParams(
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
@@ -634,6 +705,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(process.returncode)
                 self.assertFalse(home.exists())
             spawn_patch.stop()
+            if local_command is not None:
+                make_llm_patch.stop()
 
         self.addAsyncCleanup(close)
         await asyncio.wait_for(started.wait(), 45)
@@ -644,6 +717,272 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_exact_mute_is_silent_with_an_unreachable_brain_and_stays_out_of_history(self):
+        brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        completed = asyncio.Event()
+        replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
+        calls = []
+
+        async def command(argv):
+            calls.append(argv)
+            result = next(replies)
+            if len(calls) == 7:
+                completed.set()
+            return result
+
+        transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, ' MUTE! ')
+        await asyncio.wait_for(completed.wait(), 5)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'An ordinary conversation turn.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Ordinary reply.')
+        self.assertTrue(spoken.empty(), 'Confirmed mute emits no acknowledgement')
+        self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
+        self.assertEqual(len(brain.requests), 1)
+        request = brain.requests[0][2]
+        self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
+            {'role': 'user', 'content': 'An ordinary conversation turn.'},
+        ])
+        self.assertFalse(request.get('tools'))
+        self.assertIn(
+            'Kestrel handles the exact spoken command mute locally. You cannot invoke that action; '
+            'for a request to mute, explain that the owner must say mute on its own.',
+            ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
+        )
+
+    async def test_exact_mute_works_when_the_local_engine_is_missing(self):
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, _, _, processes, _ = await self.open_session(None, local_command=command)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute.')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(spoken.empty(), 'A handled mute must not speak an engine error')
+            self.assertEqual(command.await_count, 7)
+            self.assertEqual(command.await_args_list.count(
+                call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')),
+            ), 1)
+            self.assertEqual(len(processes), 1)
+            self.assertIsNone(processes[0][0])
+
+    async def test_longer_mute_turn_waits_for_completion_and_reaches_brain_unchanged(self):
+        brain = ScriptedBrain([[({'content': 'Ordinary longer reply.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=AssertionError('A longer turn cannot invoke a local command'))
+        transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await transport.input().queue_frame(
+            TranscriptionFrame('mute', '', '2026-01-01T00:00:00Z', finalized=True),
+        )
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        command.assert_not_awaited()
+        self.assertEqual(brain.requests, [], 'A finalized segment is not a completed user turn')
+        await self.finish_user_turn(transport, 'this phrase is ordinary conversation.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary longer reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Ordinary longer reply.')
+        command.assert_not_awaited()
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+            {'role': 'user', 'content': 'mute this phrase is ordinary conversation.'},
+        ])
+
+    async def test_mute_does_not_wait_for_interrupted_brain_work(self):
+        blocked = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def reply():
+            yield {'content': 'One fact. Obsolete continuation'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Scripted interrupted reply was never released')
+            yield {'content': ' must not be spoken.'}, None
+            yield {}, 'stop'
+            finished.set()
+
+        brain = ScriptedBrain([reply()])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        transport, spoken, committed, interrupted, _, _ = await self.open_session(brain, local_command=command)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Tell me something.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+        self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+        interrupted.clear()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await asyncio.wait_for(interrupted.wait(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+        await self.finish_user_turn(transport, 'mute')
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual(command.await_count, 7, 'Local mute completes before the blocked provider is released')
+        self.assertFalse(release.is_set())
+        release.set()
+        self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+        await asyncio.wait_for(asyncio.shield(transport.llm.reader), 5)
+        self.assertTrue(spoken.empty(), 'Neither mute acknowledgement nor obsolete tail may be spoken')
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+            {'role': 'user', 'content': 'Tell me something.'},
+        ])
+
+    async def test_unconfirmed_mute_speaks_and_notifies_without_retry(self):
+        notification = (
+            '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+            '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
+            'Check the audio control. Kestrel will not retry.',
+        )
+        failure = "I couldn't confirm mute. Check the audio control. I won't retry."
+        for reason in ('readback', 'timeout', 'notification unavailable'):
+            with self.subTest(reason=reason):
+                calls = []
+                replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: no'])
+
+                async def command(argv):
+                    calls.append(argv)
+                    if argv[0] == '/usr/bin/notify-send':
+                        if reason == 'notification unavailable':
+                            raise RuntimeError('notification unavailable')
+                        return ''
+                    if reason == 'timeout' and argv[1] == 'set-sink-mute':
+                        await asyncio.Event().wait()
+                    return next(replies)
+
+                with (patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')),
+                      patch.object(bot, 'MUTE_TIMEOUT', 0.01 if reason == 'timeout' else 5)):
+                    transport, spoken, committed, _, processes, close = await self.open_session(
+                        None, local_command=command,
+                    )
+                    try:
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'mute')
+                        barrier = DataFrame()
+                        await transport.input().queue_frame(barrier)
+                        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                        self.assertEqual([argv for argv in calls if argv[0] == '/usr/bin/notify-send'],
+                                         [notification])
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), failure)
+                        self.assertTrue(spoken.empty())
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'An ordinary unavailable-engine turn.')
+                        context = await asyncio.wait_for(committed.get(), 5)
+                        self.assertIn("couldn't reach Kestrel's engine", context)
+                        self.assertNotIn(failure, context, 'Local failure speech is never committed to history')
+                        self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
+                        self.assertEqual(len(processes), 1)
+                        self.assertIsNone(processes[0][0])
+                    finally:
+                        await close()
+
+    async def test_interruption_finishes_attempted_mute_without_replay_and_disconnect_reaps_it(self):
+        writes_started = asyncio.Event()
+        release_write = asyncio.Event()
+        cancelled = asyncio.Event()
+        notified = asyncio.Event()
+        calls = []
+        action_tasks = []
+        replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: no'])
+
+        async def command(argv):
+            calls.append(argv)
+            if argv[0] == '/usr/bin/notify-send':
+                notified.set()
+                return ''
+            if argv[1] == 'set-sink-mute':
+                action_tasks.append(asyncio.current_task())
+                writes_started.set()
+                try:
+                    await release_write.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            return next(replies)
+
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, interrupted, _, close = await self.open_session(None, local_command=command)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'mute')
+                await asyncio.wait_for(writes_started.wait(), 5)
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                self.assertFalse(cancelled.is_set(), 'Speech interruption must not cancel an attempted local action')
+                release_write.set()
+                await asyncio.wait_for(notified.wait(), 5)
+                await asyncio.wait_for(asyncio.shield(action_tasks[0]), 5)
+                await self.finish_user_turn(transport, 'An ordinary follow-up after interruption.')
+                context = await asyncio.wait_for(committed.get(), 5)
+                self.assertIn("couldn't reach Kestrel's engine", context)
+                heard = []
+                while not spoken.empty():
+                    heard.append(spoken.get_nowait())
+                self.assertNotIn("couldn't confirm mute", ' '.join(heard), 'Detached actions cannot queue stale speech')
+                self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
+                self.assertEqual(sum(argv[0] == '/usr/bin/notify-send' for argv in calls), 1)
+                self.assertFalse(transport.llm.local_tasks)
+            finally:
+                release_write.set()
+                await close()
+
+            writes_started = asyncio.Event()
+            cancelled = asyncio.Event()
+            release_cleanup = asyncio.Event()
+            cleaned = asyncio.Event()
+            calls = []
+            action_tasks = []
+            replies = iter(['selected', 'physical', 'Mute: no'])
+
+            async def hanging_command(argv):
+                calls.append(argv)
+                if argv[1] == 'set-sink-mute':
+                    action_tasks.append(asyncio.current_task())
+                    writes_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        await release_cleanup.wait()
+                        cleaned.set()
+                        raise
+                return next(replies)
+
+            transport, _, _, _, _, close = await self.open_session(None, local_command=hanging_command)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'mute')
+                await asyncio.wait_for(writes_started.wait(), 5)
+                closing = asyncio.create_task(close())
+                await asyncio.wait_for(cancelled.wait(), 5)
+                self.assertFalse(closing.done(), 'Disconnect must join command cleanup before finishing')
+                release_cleanup.set()
+                await asyncio.wait_for(closing, 5)
+                self.assertTrue(cleaned.is_set())
+                self.assertTrue(action_tasks[0].cancelled())
+                self.assertFalse(transport.llm.local_tasks)
+                self.assertEqual(calls, [
+                    ('/usr/bin/pactl', 'get-default-sink'),
+                    ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+                    ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+                    ('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'),
+                ], 'Disconnect launches no readback, retry, notification or unmute')
+            finally:
+                release_cleanup.set()
+                await close()
 
     async def test_missing_engine_waits_for_user_then_speaks_failure(self):
         with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):

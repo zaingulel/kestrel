@@ -14,7 +14,9 @@ SYSTEM_PROMPT = (
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Use plain spoken text without markdown, lists, or stage directions. "
     "This session is a conversation trial. You have no tools, desktop access, web access, "
-    "or persistent memory. Be honest about that and never claim to have performed an action."
+    "or persistent memory. Be honest about that and never claim to have performed an action. "
+    "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
+    "for a request to mute, explain that the owner must say mute on its own."
 )
 
 

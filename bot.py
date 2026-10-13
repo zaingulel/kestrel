@@ -16,6 +16,7 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
@@ -23,6 +24,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.runner.types import SmallWebRTCRunnerArguments
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    TTSSpeakFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
@@ -216,7 +218,7 @@ def stop_kestrel():
 
 
 class HermesLLMService(LLMService):
-    def __init__(self):
+    def __init__(self, *, local_command=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -228,6 +230,21 @@ class HermesLLMService(LLMService):
         self.output = None
         self.failure = None
         self.failure_advisory = None
+        self.local_command = local_command if local_command is not None else run_local_command
+        self.local_tasks = set()
+
+    async def run_local_tool(self, tool):
+        result = await tool.run(command=self.local_command)
+        if not result.confirmed:
+            logger.error(f'Mute could not be confirmed: {result.reason}')
+            await notify_mute_failure(command=self.local_command)
+        return result
+
+    async def close_local_tools(self):
+        tasks = tuple(self.local_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def open_engine(self):
         try:
@@ -315,6 +332,23 @@ class HermesLLMService(LLMService):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
+        messages = frame.context.get_messages()
+        if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
+                and messages[-1].get('role') == 'user'
+                and isinstance(messages[-1].get('content'), str)):
+            tool = match_instant_tool(messages[-1]['content'])
+            if tool is not None:
+                messages.pop()
+                task = asyncio.create_task(self.run_local_tool(tool))
+                self.local_tasks.add(task)
+                task.add_done_callback(self.local_tasks.discard)
+                result = await asyncio.shield(task)
+                if not result.confirmed:
+                    await self.push_frame(TTSSpeakFrame(
+                        "I couldn't confirm mute. Check the audio control. I won't retry.",
+                        append_to_context=False,
+                    ))
+                return
         output = None
         try:
             if self.reader is not None:
@@ -433,6 +467,7 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
         await runner.run()
     finally:
+        await llm.close_local_tools()
         await llm.close_engine()
 
 
