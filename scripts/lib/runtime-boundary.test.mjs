@@ -27,7 +27,7 @@ test('the voice service binds to loopback only', () => {
 });
 
 test('the conversation goes only to LM Studio on the Ally', () => {
-  const urls = read('bot.py').match(/https?:\/\/[^"'\s]+/g);
+  const urls = (read('bot.py') + '\n' + read('hermes_worker.py')).match(/https?:\/\/[^"'\s]+/g);
   assert.deepEqual(urls, ['http://192.168.0.150:1234/v1']);
 });
 
