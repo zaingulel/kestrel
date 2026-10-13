@@ -1,10 +1,19 @@
 import asyncio
+from copy import deepcopy
 import os
 import signal
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 
+import numpy as np
 from loguru import logger
+from openai.types.chat import ChatCompletionChunk
+from pipecat.frames.frames import (
+    InterruptionFrame, LLMContextAssistantTurnFrame, ProposedUserStartedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 import bot
 
@@ -203,6 +212,147 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 calls.mock_calls, [call.start(bot.stop_kestrel), call.serve(), call.close()]
             )
+
+
+class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_preserves_context_and_interrupts_reply(self):
+        started = asyncio.Event()
+        second_blocked = asyncio.Event()
+        second_closed = asyncio.Event()
+        interrupted = asyncio.Event()
+        release_second = asyncio.Event()
+        spoken_sentences = asyncio.Queue()
+        committed_turns = asyncio.Queue()
+        spoken = []
+        requests = []
+
+        class Input(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                await self.push_frame(frame, direction)
+
+        class Output(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, StartFrame):
+                    started.set()
+                elif isinstance(frame, TTSTextFrame) and direction == FrameDirection.DOWNSTREAM:
+                    spoken.append(frame.text)
+                    spoken_sentences.put_nowait(frame.text)
+                elif (
+                    isinstance(frame, LLMContextAssistantTurnFrame)
+                    and direction == FrameDirection.UPSTREAM
+                ):
+                    committed_turns.put_nowait(frame.text)
+                elif (
+                    isinstance(frame, InterruptionFrame)
+                    and direction == FrameDirection.DOWNSTREAM
+                    and second_blocked.is_set()
+                ):
+                    interrupted.set()
+                await self.push_frame(frame, direction)
+
+        transport = Mock()
+        transport.input.return_value = Input()
+        transport.output.return_value = Output()
+        handlers = {}
+
+        def event_handler(name):
+            def register(handler):
+                handlers[name] = handler
+                return handler
+            return register
+
+        transport.event_handler.side_effect = event_handler
+
+        def chunks(**kwargs):
+            yield np.zeros(4800, dtype=np.float32)
+
+        llm = bot.make_llm()
+
+        async def get_chat_completions(context):
+            requests.append(deepcopy(context.messages))
+            turn = len(requests)
+
+            def chunk(text):
+                return ChatCompletionChunk(
+                    id=f"reply-{turn}", created=0, model="underdog-saluki-27b-1.0",
+                    object="chat.completion.chunk",
+                    choices=[{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                )
+
+            async def stream():
+                if turn == 1:
+                    yield chunk("Hello.")
+                elif turn == 2:
+                    try:
+                        yield chunk("One fact. Obsolete continuation")
+                        second_blocked.set()
+                        await release_second.wait()
+                        yield chunk(" must not be spoken.")
+                    finally:
+                        second_closed.set()
+                else:
+                    yield chunk("Next step.")
+
+            return stream()
+
+        async def finish_user_turn(text):
+            await transport.input().queue_frame(
+                TranscriptionFrame(text, "", "2026-01-01T00:00:00Z", finalized=True)
+            )
+            # The native stop is a control frame, ordered behind the transcript.
+            await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+        user_params = bot.LLMUserAggregatorParams(
+            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
+        )
+        with (
+            patch.object(bot, "make_llm", return_value=llm),
+            patch.object(llm, "get_chat_completions", get_chat_completions),
+        ):
+            session = asyncio.create_task(bot.run_conversation(
+                Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
+                transport=transport, user_params=user_params,
+            ))
+            try:
+                # All five-second waits are hang guards, never timing assertions.
+                await asyncio.wait_for(started.wait(), 5)
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await finish_user_turn("Hello Kestrel.")
+                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "Hello.")
+                self.assertEqual(await asyncio.wait_for(spoken_sentences.get(), 5), "Hello.")
+
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await finish_user_turn("Tell me more.")
+                self.assertEqual(await asyncio.wait_for(spoken_sentences.get(), 5), "One fact.")
+                await asyncio.wait_for(second_blocked.wait(), 5)
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(second_closed.wait(), 5)
+                await asyncio.wait_for(interrupted.wait(), 5)
+                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "One fact.")
+                release_second.set()
+                await finish_user_turn("Stop. What next?")
+                self.assertEqual((await asyncio.wait_for(committed_turns.get(), 5)).strip(), "Next step.")
+
+                self.assertEqual(spoken, ["Hello.", "One fact.", "Next step."])
+                self.assertEqual(
+                    [[(message["role"], message["content"].strip()) for message in history]
+                     for history in requests],
+                    [
+                        [("user", "Hello Kestrel.")],
+                        [("user", "Hello Kestrel."), ("assistant", "Hello."),
+                         ("user", "Tell me more.")],
+                        [("user", "Hello Kestrel."), ("assistant", "Hello."),
+                         ("user", "Tell me more."), ("assistant", "One fact."),
+                         ("user", "Stop. What next?")],
+                    ],
+                )
+            finally:
+                release_second.set()
+                if not session.done():
+                    await handlers["on_client_disconnected"](transport, None)
+                await asyncio.wait_for(session, 5)
 
 
 if __name__ == "__main__":

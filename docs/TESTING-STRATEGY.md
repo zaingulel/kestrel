@@ -62,6 +62,27 @@ match. It never pins wording or step order, which prove that a sentence exists a
 The one exception is a privacy or security disclosure sentence: its exact wording is the promise made to the
 user, so its named anti-regression test keeps pinning it.
 
+### Whole-conversation evidence
+
+For reply-text sequences spanning multiple turns, interruption and follow-up, drive the real
+`run_conversation(runner_args, stt, voice, *, transport=None, user_params=None)` session in
+[bot.py](../bot.py). Its keyword-only dependencies let a test supply a forwarding transport and native
+user-turn strategies while preserving the production defaults. Keep the real pipeline worker, context aggregators,
+cancellation and speech adapters; do not replace the conversation with a fake engine.
+
+[WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
+supplies finalized heard text through native `ProposedUserStartedSpeakingFrame`, `TranscriptionFrame` and
+`ProposedUserStoppedSpeakingFrame` inputs. It observes downstream `TTSTextFrame` at the transport output for
+spoken text and upstream `LLMContextAssistantTurnFrame` for committed assistant context. Captured brain
+requests establish ordered history, including only the spoken prefix of an interrupted reply. A synthesis
+log alone does not establish spoken output or context commitment.
+
+The test replaces the real brain service's public `get_chat_completions(context)` method with scripted
+`ChatCompletionChunk` streams, uses an unloaded `NemotronSTT` without audio input, and supplies a finite
+voice-generator double to the real `VoxCPMTTS` adapter. This proves the session's reply-text sequence with
+those stand-ins. Microphone accuracy, physical playback, live network or brain behaviour, and brain outcome
+types other than reply text remain unproven.
+
 ## 3. Evidence classes stay distinct
 
 Functional green never substitutes for structural, lint, generated-artifact, documentation, accessibility,
