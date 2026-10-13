@@ -101,7 +101,7 @@ The git guard and the other runtime hooks run only in a runtime that has trusted
 
 ## Privacy and runtime boundary
 
-Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally's LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. The browser service listens only on loopback at `127.0.0.1:7860`. The prototype has no tools or persistent memory.
+Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally's LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. The browser service listens only on loopback at `127.0.0.1:7860`. Kestrel's only desktop tool is local mute of the selected audio output. The brain cannot invoke it or any other tool. Mute failure notifications contain fixed status text, never conversation text. Kestrel has no browser research or persistent conversation memory and adds no network destination. Deleting, sending messages, publishing and arbitrary command execution are not available by voice.
 
 Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local server's debug output; the application does not save microphone recordings.
 
