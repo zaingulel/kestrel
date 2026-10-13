@@ -8,4 +8,4 @@ Adopting Herald-OS whole, which bundles Hermes Agent with an Omarchy interface, 
 
 ## Consequences
 
-The standing promises "no tools" and "no persistent memory" end when the first tool is built, replaced by the privacy promises on issue #1, with owner sign-off and a security review at that point. The engine's general terminal tool stays off.
+The first local mute tool ends only the standing no-tools promise. It adds no persistent conversation memory. Changes to this boundary require owner sign-off and security review. Any future persistent-memory boundary requires separate owner sign-off and security review. The engine's general terminal tool stays off.

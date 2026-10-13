@@ -33,7 +33,7 @@ A short remembered preference or correction.
 _Avoid_: memory, fact
 
 **Prototype**:
-The current conversation-only build of Kestrel.
+The current build of Kestrel.
 _Avoid_: trial
 
 **Experiment**:
