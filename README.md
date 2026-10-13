@@ -84,7 +84,7 @@ If mute cannot be confirmed, Kestrel attempts to say **I couldn't confirm mute. 
 
 Speaking again can interrupt the failure speech while the attempted mute, readback and failure-notification attempt finish. Kestrel does not replay the request or speak a stale failure over the newer turn; if speech is interrupted and the notification is unavailable, only the local diagnostic may remain. Disconnect cancels and joins outstanding local work without undoing an attempted mute.
 
-Mute works without an Ally answer once the conversation pipeline has started. Startup still loads the local speech models and waits for local engine readiness or its existing failure deadline; mute does not bypass that startup wait. After startup, a missing or failed engine does not prevent local dispatch. Local mute adds no engine tools, browser research or persistent conversation memory.
+Startup prepares local speech and the engine concurrently. The engine receives one fixed public greeting whose reply is discarded. Once local speech is ready, the conversation pipeline starts and local mute works even while engine preparation is pending. The first ordinary turn waits for any remaining preparation, or receives the existing failure advisory if preparation fails. Local mute adds no engine tools, browser research or persistent conversation memory.
 
 ## Echo removal
 

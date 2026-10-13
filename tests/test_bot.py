@@ -619,6 +619,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         retry = patch.object(bot, "ECHO_REMOVAL_RETRY", 0)
         retry.start()
         self.addCleanup(retry.stop)
+        engine = patch.object(bot, 'make_llm', side_effect=lambda: Mock(
+            prepare_engine=AsyncMock(), close_local_tools=AsyncMock(), close_engine=AsyncMock(),
+        ))
+        engine.start()
+        self.addCleanup(engine.stop)
 
     def arguments(self):
         connection = Mock()
@@ -633,6 +638,108 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         connection.event_handler.side_effect = event_handler
         connection.disconnect = AsyncMock()
         return Mock(webrtc_connection=connection)
+
+    async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
+        preparing = asyncio.Event()
+        loading = asyncio.Event()
+        release_local = asyncio.Event()
+        hold_preparation = asyncio.Event()
+        received_services = []
+        preparation_pending = []
+
+        async def prepare():
+            preparing.set()
+            await hold_preparation.wait()
+
+        async def load_local():
+            loading.set()
+            await release_local.wait()
+
+        service = bot.HermesLLMService()
+        service.prepare_engine = AsyncMock(side_effect=prepare)
+        service.close_local_tools = AsyncMock(wraps=service.close_local_tools)
+        service.close_engine = AsyncMock(wraps=service.close_engine)
+        stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
+        args = self.arguments()
+
+        async def conversation(runner_args, stt, voice, *, llm=None):
+            received_services.append(llm)
+            preparation_pending.append(llm is not None and not llm.reader.done())
+
+        with (
+            patch.object(bot, 'VOICE_MODEL', object()),
+            patch.object(bot, 'NemotronSTT', return_value=stt),
+            patch.object(bot, 'make_llm', return_value=service),
+            patch.object(bot, 'run_conversation', conversation),
+            patch.object(bot.torch, 'set_num_threads'),
+        ):
+            task = asyncio.create_task(bot.bot(args))
+            try:
+                await asyncio.wait_for(loading.wait(), 5)
+                self.assertTrue(preparing.is_set(), 'Engine preparation starts while local loading is held')
+                reader = service.reader
+                self.assertFalse(reader.done())
+                release_local.set()
+                await asyncio.wait_for(task, 5)
+                self.assertEqual(received_services, [service])
+                self.assertEqual(preparation_pending, [True])
+                self.assertTrue(reader.done())
+                service.close_local_tools.assert_awaited_once()
+                service.close_engine.assert_awaited_once()
+                stt.close.assert_awaited_once()
+                args.webrtc_connection.disconnect.assert_awaited_once()
+            finally:
+                release_local.set()
+                hold_preparation.set()
+                await asyncio.wait_for(task, 5)
+
+        for failure in ('local_model_failure', 'early_disconnect', 'conversation_failure'):
+            with self.subTest(failure=failure):
+                service = bot.HermesLLMService()
+                service.prepare_engine = AsyncMock(side_effect=asyncio.Event().wait)
+                service.close_local_tools = AsyncMock(wraps=service.close_local_tools)
+                native_close = service.close_engine
+                readers = []
+
+                async def close_engine():
+                    readers.append(service.reader)
+                    await native_close()
+
+                service.close_engine = AsyncMock(side_effect=close_engine)
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                args = self.arguments()
+                if failure == 'local_model_failure':
+                    stt.load.side_effect = RuntimeError('local model failed')
+                elif failure == 'early_disconnect':
+                    async def disconnect_during_load():
+                        await args.webrtc_connection.handlers['closed'](args.webrtc_connection)
+
+                    stt.load.side_effect = disconnect_during_load
+                conversation = AsyncMock(
+                    side_effect=RuntimeError('conversation construction failed')
+                    if failure == 'conversation_failure' else None,
+                )
+                with (
+                    patch.object(bot, 'VOICE_MODEL', object()),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'make_llm', return_value=service),
+                    patch.object(bot, 'run_conversation', conversation),
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    if failure == 'early_disconnect':
+                        await bot.bot(args)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            await bot.bot(args)
+                    service.close_local_tools.assert_awaited_once()
+                    service.close_engine.assert_awaited_once()
+                    self.assertTrue(readers[0].done())
+                    stt.close.assert_awaited_once()
+                    args.webrtc_connection.disconnect.assert_awaited_once()
+                    if failure == 'conversation_failure':
+                        self.assertIs(conversation.await_args.kwargs['llm'], service)
+                    else:
+                        conversation.assert_not_awaited()
 
     async def test_voice_weights_are_reused_between_sessions(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
@@ -659,7 +766,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, "set_num_threads"),
         ):
-            conversation.side_effect = lambda *args: events.append('conversation')
+            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
             await bot.bot(args)
             await bot.bot(args)
             load.assert_called_once()
@@ -701,7 +808,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, 'set_num_threads'),
         ):
-            conversation.side_effect = lambda *args: events.append('conversation')
+            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
             task = asyncio.create_task(bot.bot(args))
             task.add_done_callback(lambda completed: activity.set())
             try:
@@ -866,7 +973,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         ended = asyncio.Event()
         args.webrtc_connection.disconnect.side_effect = ended.set
 
-        async def conversation(runner_args, stt, voice):
+        async def conversation(runner_args, stt, voice, *, llm=None):
             started.set()
             await ended.wait()
 
@@ -911,7 +1018,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def open_session(self, brain, *, wire=None, local_command=None):
+    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False):
         if brain is not None:
             require_native_hermes()
         started = asyncio.Event()
@@ -991,12 +1098,17 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             make_llm_patch = patch.object(bot, 'make_llm', make_llm)
             make_llm_patch.start()
             self.addCleanup(make_llm_patch.stop)
+        supplied_llm = None
+        if prepare_engine:
+            supplied_llm = bot.make_llm()
+            transport.llm = supplied_llm
+            supplied_llm.reader = asyncio.create_task(supplied_llm.prepare_engine())
         user_params = bot.LLMUserAggregatorParams(
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
         session = asyncio.create_task(bot.run_conversation(
             Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
-            transport=transport, user_params=user_params,
+            transport=transport, user_params=user_params, llm=supplied_llm,
         ))
 
         async def close():
@@ -1006,9 +1118,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     await handlers['on_client_disconnected'](transport, None)
             try:
-                await asyncio.wait_for(session, 5)
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await asyncio.wait_for(session, 5)
+                except asyncio.CancelledError:
+                    pass
+            finally:
+                if supplied_llm is not None:
+                    try:
+                        await supplied_llm.close_local_tools()
+                    finally:
+                        await supplied_llm.close_engine()
             for process, home in processes:
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
@@ -1026,6 +1145,146 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_native_preparation_is_silent_private_and_does_not_block_mute(self):
+        held = threading.Event()
+        release = threading.Event()
+
+        def preparation_reply():
+            yield {'content': 'Preparation nonce 731.'}, None
+            held.set()
+            if not release.wait(45):
+                raise AssertionError('Preparation reply was not released')
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            preparation_reply(), [({'content': 'Actual caller reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, local_command=command, prepare_engine=True,
+        )
+        preparation = transport.llm.reader
+        try:
+            self.assertTrue(await asyncio.to_thread(held.wait, 5))
+            self.assertFalse(preparation.done())
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Hello.'},
+            ])
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(command.await_count, 7)
+            self.assertFalse(preparation.done())
+            self.assertFalse(release.is_set())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+
+            release.set()
+            await asyncio.wait_for(asyncio.shield(preparation), 5)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Answer the genuine user turn.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Answer the genuine user turn.'},
+            ])
+        finally:
+            release.set()
+            await close()
+        self.assertTrue(preparation.done())
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(processes[0][1].exists())
+
+    async def test_failed_native_preparation_preserves_local_mute_and_reports_on_user_turn(self):
+        brain = ScriptedBrain([400])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, local_command=command, prepare_engine=True,
+        )
+        preparation = transport.llm.reader
+        try:
+            await asyncio.wait_for(asyncio.shield(preparation), 5)
+            self.assertTrue(transport.llm.failure)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(command.await_count, 7)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            await self.assert_failed_reply(
+                transport, spoken, committed, 'Answer after failed preparation.',
+                expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.",
+            )
+            self.assertEqual(len(brain.requests), 1)
+        finally:
+            await close()
+        self.assertTrue(preparation.done())
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(processes[0][1].exists())
+
+    async def test_preparation_timeout_and_disconnect_reap_owned_worker(self):
+        wire = (
+            'import sys; print(\'{"ready":true}\', flush=True); '
+            'sys.stdin.readline(); sys.stdin.read()'
+        )
+        for outcome in ('timeout', 'disconnect'):
+            with self.subTest(outcome=outcome):
+                pending = asyncio.Event()
+                reads = 0
+                native_read = bot.HermesLLMService.read_event
+
+                async def read_event(service):
+                    nonlocal reads
+                    reads += 1
+                    if reads == 2:
+                        pending.set()
+                    return await native_read(service)
+
+                with (
+                    patch.object(bot, 'ENGINE_TIMEOUT', 1),
+                    patch.object(bot.HermesLLMService, 'read_event', read_event),
+                ):
+                    transport, spoken, committed, _, processes, close = await self.open_session(
+                        None, wire=wire, prepare_engine=True,
+                    )
+                    preparation = transport.llm.reader
+                    try:
+                        await asyncio.wait_for(pending.wait(), 5)
+                        self.assertFalse(preparation.done())
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        if outcome == 'timeout':
+                            await asyncio.wait_for(asyncio.shield(preparation), 5)
+                            self.assertTrue(transport.llm.failure)
+                            self.assertIsNotNone(processes[0][0].returncode)
+                    finally:
+                        await close()
+                    self.assertTrue(preparation.done())
+                    self.assertIsNotNone(processes[0][0].returncode)
+                    self.assertFalse(processes[0][1].exists())
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
 
     async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
         brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
