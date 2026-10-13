@@ -23,7 +23,7 @@ installed-copy, guard, test, review, and publication contracts.
   modules in the hook directories); unused first-party
   variables are blocking unless they
   follow a documented intentional-discard convention. The hosted quality lane runs Python Ruff F checks over
-  `bot.py`, `speech.py`, `asr_worker.py` and `tests/` for undefined names, unused imports and related Pyflakes errors. A lint that is wrong for the code is allowed at its site
+  `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py` and `tests/` for undefined names, unused imports and related Pyflakes errors. A lint that is wrong for the code is allowed at its site
   with a one-line reason, never restructured around.
 - **Byte-significant line endings.** The hook directories' own `.gitattributes` files and their invariant tests own
   the deterministic LF (line feed) policy for hook files; Kestrel has no exceptions.
