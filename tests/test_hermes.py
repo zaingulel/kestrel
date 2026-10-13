@@ -59,12 +59,13 @@ class ScriptedBrain:
 
 
 class WorkerProcess:
-    def __init__(self, home, brain):
+    def __init__(self, home, brain, *, synthetic_default_home=None):
         import hermes_worker
         self.home = home
         self.stderr = (home / 'worker-stderr.txt').open('w+')
         self.process = subprocess.Popen(
-            self.command(home, brain), env=hermes_worker.child_environment(home),
+            self.command(home, brain, synthetic_default_home=synthetic_default_home),
+            env=hermes_worker.child_environment(home),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
         )
         self.selector = selectors.DefaultSelector()
@@ -72,10 +73,12 @@ class WorkerProcess:
         self.buffer = b''
 
     @staticmethod
-    def command(home, brain):
+    def command(home, brain, *, synthetic_default_home=None):
         # Test-only containment observes even caught attempts, before permitting only this provider.
         bootstrap = '''
 import json, pathlib, sys
+from contextlib import nullcontext
+from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 home = pathlib.Path(sys.argv[2])
 allowed = ('127.0.0.1', int(sys.argv[3]))
@@ -87,11 +90,16 @@ def audit(event, args):
         if address != allowed:
             raise RuntimeError('Non-provider connection refused by test containment')
 sys.addaudithook(audit)
-import hermes_worker
-hermes_worker.main(base_url=sys.argv[4])
+with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
+      if len(sys.argv) > 5 else nullcontext()):
+    import hermes_worker
+    hermes_worker.main(base_url=sys.argv[4])
 '''
-        return [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
-                str(brain.server.server_port), brain.url]
+        command = [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
+                   str(brain.server.server_port), brain.url]
+        if synthetic_default_home is not None:
+            command.append(str(synthetic_default_home))
+        return command
 
     def event(self):
         while b'\n' not in self.buffer:
@@ -140,13 +148,13 @@ def require_native_hermes():
 
 
 @contextmanager
-def native_worker(replies):
+def native_worker(replies, *, synthetic_default_home=None):
     require_native_hermes()
     brain = ScriptedBrain(replies)
     try:
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
             home = Path(directory).resolve()
-            worker = WorkerProcess(home, brain)
+            worker = WorkerProcess(home, brain, synthetic_default_home=synthetic_default_home)
             try:
                 yield worker, brain
             finally:
@@ -313,15 +321,16 @@ class NativeHermesTests(unittest.TestCase):
             }
             (normal_home / 'sitecustomize.py').write_text("raise RuntimeError('Python injection loaded')")
             with patch.dict(os.environ, poison):
-                with native_worker([[({'content': 'Clean nonce-27.'}, None), ({}, 'stop')]]) as (worker, brain):
+                with native_worker([[({'content': 'Clean nonce-27.'}, None), ({}, 'stop')]],
+                                   synthetic_default_home=normal_home) as (worker, brain):
                     self.assertEqual(worker.event(), {'ready': True})
+                    self.assertFalse(list(normal_hermes.glob('state.db*')))
+                    self.assertFalse((normal_home / 'managed-poison').exists())
                     self.assertEqual(worker.request([{'role': 'user', 'content': 'Clean caller.'}]),
                                      [{'text': 'Clean nonce-27.'}, {'done': True}])
                     self.assertEqual(len(brain.requests), 1)
                     self.assertNotIn('normal-home-private-nonce', json.dumps(brain.requests))
                     self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
-                    self.assertFalse(list(normal_hermes.glob('state.db*')))
-                    self.assertFalse((normal_home / 'managed-poison').exists())
                     self.assertEqual(os.environ['OPENAI_API_KEY'], 'synthetic-poison-key')
                     import hermes_worker
                     environment = hermes_worker.child_environment(worker.home)
