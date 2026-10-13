@@ -1,5 +1,5 @@
 # kestrel
-A local voice assistant experiment for Omarchy: natural conversation, desktop control, web research and running-work status.
+A local conversation prototype for Omarchy, with speech on the laptop and Saluki on the Ally.
 
 Saluki runs through LM Studio on the ROG Ally X with the Radeon RX 9060 XT. Its server is reachable at `http://192.168.0.150:1234`. The laptop connects to that server; it does not need another LM Studio installation for speech.
 
@@ -11,6 +11,10 @@ The laptop's local speech models use the NVIDIA RTX 5080:
 | [VoxCPM2](https://github.com/OpenBMB/VoxCPM), text to speech | `.runtime/models/voxcpm2` | `.runtime/voice-venv` |
 
 Both environments use project-local Python 3.12 and CUDA-enabled PyTorch 2.11. Recognition uses Transformers 5.19, which supports Nemotron's streaming model. Voice generation uses Transformers 4.57 in a separate environment to keep its dependencies independent. Model revisions are recorded in `.runtime/models/manifest.json`; installed package versions are in `.runtime/asr-installed.txt` and `.runtime/voice-installed.txt`. Runtime files are excluded from Git.
+
+Conversation runs through a direct Hermes Agent 0.19.0 child process, started by `bot.py` through `hermes_worker.py`. It requires the installed interpreter at `/home/zain/.local/share/mise/installs/pipx-hermes-agent/0.19.0/hermes-agent/bin/python`; a missing interpreter or different Hermes version is refused explicitly. Hermes connects to Saluki through the Ally endpoint above. It enables no tools, including the terminal, and has no fallback provider.
+
+Each connection gets a new temporary Hermes home under ignored `.runtime/`, with isolated configuration. The child does not load the normal Hermes configuration, memories or context files, and does not inherit provider credentials or proxy settings. Conversation history comes from Pipecat's committed context; reusable conversation storage, session snapshots and memory are disabled. Disconnect terminates the child, waits for it to exit and removes only that connection's temporary home. A new connection starts with empty conversation history.
 
 Run commands from this directory. Start the conversation trial as a user service so it stays running independently of the launching terminal or chat command:
 
@@ -32,13 +36,19 @@ Open [the local voice interface](http://127.0.0.1:7860/client/) in a browser wit
 
 Only one conversation can run at a time. VoxCPM2 stays loaded in the laptop's graphics memory between connections to avoid reloading its weights. Shut down the server to release that memory. VoxType can stay running.
 
-Speech goes from the microphone through echo removal to the browser, then to local Nemotron recognition, then to Saluki on the Ally, then through local VoxCPM2 and back to browser playback. Recognition processes speech segments after detected pauses; this trial does not provide word-by-word partial transcripts. Pipecat's local Silero speech detector and Smart Turn model control turn-taking, and incoming speech interrupts reply generation and playback. VoxCPM2 receives completed sentences and streams their audio. The brain request disables reasoning output with `reasoning_effort: "none"` for responsive conversation.
+Speech goes from the microphone through echo removal to the browser, then to local Nemotron recognition, then through the local Hermes worker to Saluki on the Ally, then through local VoxCPM2 and back to browser playback. Recognition processes speech segments after detected pauses; this trial does not provide word-by-word partial transcripts. Pipecat's local Silero speech detector and Smart Turn model control turn-taking. VoxCPM2 receives completed sentences and streams their audio. The brain request disables reasoning output with `reasoning_effort: "none"` for responsive conversation.
+
+Hermes can continue a long reply with successive output caps of 180, 360, 720 and 1,440 tokens, a total budget of up to 2,700 tokens across four calls. If it still cannot finish, Kestrel speaks an incomplete-reply warning and requires reconnecting. This output budget is separate from the 64,000-token context capacity, which holds conversation history, instructions and replies. Long conversations can eventually fill that context.
+
+Speaking over a reply stops its speech and playback. Hermes continues the current brain request until it finishes; the next turn waits for that work to drain, which can add a delay. Unheard text from the interrupted reply is discarded, so only the heard prefix enters the next turn's context. Disconnect ends the worker rather than draining another conversational turn.
+
+If the engine is unavailable, Kestrel explains that after you speak. Brain failures, incomplete replies and invalid worker responses also produce a spoken explanation, with the diagnostic reason in the server log. A partial reply already spoken is not treated as a complete answer. Kestrel does not automatically submit a failed user turn again or restart a broken engine session; follow the spoken advice and consult the diagnostic reason in the server log before reconnecting. Hermes may retry transient provider errors within a turn. Engine startup and each turn, including native retries or an interrupted turn draining, are bounded at 45 seconds.
 
 Every sentence uses the same generated speaker reference at `.runtime/voices/kestrel.wav`, paired with its exact transcript in `speech.py`. This anchors speaker identity across sentences, replies and reconnections. Keep the reference fixed; replacing it changes Kestrel's voice. The reference uses [VoxCPM2's audio and transcript cloning mode](https://github.com/OpenBMB/VoxCPM#-ultimate-cloning).
 
 This trial supports conversation only. It has no desktop tools, browser research or persistent memory. Transcript text can appear in the server's debug output; microphone recordings are not saved by the application. The server listens only on `127.0.0.1`.
 
-Run the adapter and sentence-ordering tests:
+Run the speech adapters, native Hermes boundary and whole-conversation tests:
 
 ```sh
 .runtime/voice-venv/bin/python -m unittest discover -s tests -v
@@ -96,3 +106,5 @@ Microphone recognition and voice generation run locally on the laptop. Conversat
 Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local server's debug output; the application does not save microphone recordings.
 
 Echo removal runs on the laptop in a PipeWire process that starts and stops with the voice service. While the voice service runs, that process can open the default microphone and read it at any time, whether or not a conversation is connected: it does so whenever any program is sending sound to the default output or recording from the `kestrel-microphone` source. Treat the microphone as in use for as long as Kestrel runs. The process also reads the sound sent to the default output. It holds both in memory only, passes on the microphone signal with that sound removed, sends nothing over the network and saves nothing.
+
+Hermes provider-error diagnostics can also contain transcript text in `sessions/request_dump_*.json` inside the connection's owned temporary Hermes home under `.runtime/`. On an orderly disconnect or shutdown, these local diagnostics are removed with that home after the worker exits; a hard-killed service or power loss can leave the folder behind. They are not reusable conversation storage. Do not publish them.

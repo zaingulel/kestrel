@@ -1,8 +1,11 @@
 """First local Kestrel conversation trial."""
 
 import asyncio
+from copy import deepcopy
+import json
 import os
 import signal
+import tempfile
 
 import torch
 from loguru import logger
@@ -15,21 +18,19 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.runner.types import SmallWebRTCRunnerArguments
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.frames.frames import (
+    LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+)
+from pipecat.services.llm_service import LLMService
+from pipecat.services.settings import LLMSettings
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
+from hermes_worker import HERMES_PYTHON, child_environment
 from speech import EchoRemoval, NemotronSTT, ROOT, VoxCPMTTS
 
-SYSTEM_PROMPT = (
-    "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
-    "Usually answer in one or two short sentences, beginning with a short complete sentence. "
-    "Use plain spoken text without markdown, lists, or stage directions. "
-    "This session is a conversation trial. You have no tools, desktop access, web access, "
-    "or persistent memory. Be honest about that and never claim to have performed an action."
-)
 SESSION_LOCK = asyncio.Lock()
 # The event loop and WebRTC connection of the conversation holding the lock.
 CONVERSATION = None
@@ -39,6 +40,7 @@ ECHO_REMOVAL = EchoRemoval()
 ECHO_REMOVAL_WAIT = 10
 ECHO_REMOVAL_RETRY = 0.5
 VOICE_MODEL = None
+ENGINE_TIMEOUT = 45
 
 
 def stop_kestrel():
@@ -51,16 +53,136 @@ def stop_kestrel():
     os.kill(os.getpid(), signal.SIGTERM)
 
 
+class HermesLLMService(LLMService):
+    def __init__(self):
+        super().__init__(settings=LLMSettings(
+            model=None, system_instruction=None, temperature=None, max_tokens=None,
+            top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
+            filter_incomplete_user_turns=False, user_turn_completion_config=None,
+        ))
+        self.process = None
+        self.home = None
+        self.reader = None
+        self.output = None
+        self.failure = None
+        self.failure_advisory = None
+
+    async def open_engine(self):
+        try:
+            self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
+            async with asyncio.timeout(ENGINE_TIMEOUT):
+                self.process = await asyncio.create_subprocess_exec(
+                    str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
+                    env=child_environment(self.home.name),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024 + 1,
+                )
+                event = await self.read_event()
+                if set(event) != {'ready'} or event['ready'] is not True:
+                    raise RuntimeError(event.get('error') or 'Hermes did not become ready')
+        except Exception as error:
+            self.failure_advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
+            self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
+            logger.error(self.failure)
+            await self.reap_engine()
+
+    async def read_event(self):
+        line = await self.process.stdout.readline()
+        if not line or len(line) > 1024 * 1024:
+            raise RuntimeError('Hermes exited or returned an oversized response')
+        event = json.loads(line)
+        if not isinstance(event, dict):
+            raise RuntimeError('Invalid Hermes response')
+        return event
+
+    async def reap_engine(self):
+        if self.process is not None and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 5)
+            except TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+
+    async def close_engine(self):
+        if self.reader is not None:
+            self.reader.cancel()
+            try:
+                await self.reader
+            except asyncio.CancelledError:
+                pass
+        await self.reap_engine()
+        self.process = None
+        self.reader = None
+        self.output = None
+        if self.home is not None:
+            self.home.cleanup()
+            self.home = None
+
+    async def exchange(self, messages, output):
+        advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
+        try:
+            async with asyncio.timeout(ENGINE_TIMEOUT):
+                self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
+                await self.process.stdin.drain()
+                has_text = False
+                while True:
+                    event = await self.read_event()
+                    if set(event) == {'text'} and isinstance(event['text'], str) and event['text']:
+                        has_text = has_text or bool(event['text'].strip())
+                        if self.output is output:
+                            output.put_nowait(event)
+                    elif set(event) == {'done'} and event['done'] is True and has_text:
+                        break
+                    elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
+                        advisory = "I couldn't get a complete reply from the brain on the Ally. Reconnect and try again."
+                        raise RuntimeError(event['error'])
+                    else:
+                        raise RuntimeError('Invalid or incomplete Hermes response')
+        except Exception as error:
+            self.failure_advisory = advisory
+            self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
+            logger.error(self.failure)
+            await self.reap_engine()
+        finally:
+            if self.output is output:
+                output.put_nowait(None)
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if not isinstance(frame, LLMContextFrame):
+            await self.push_frame(frame, direction)
+            return
+        output = None
+        try:
+            if self.reader is not None:
+                # Speech cancellation detaches output; native work still reaches a terminal event.
+                await asyncio.shield(self.reader)
+            await self.push_frame(LLMFullResponseStartFrame())
+            await self.start_processing_metrics()
+            if self.failure:
+                raise RuntimeError(self.failure)
+            output = asyncio.Queue()
+            self.output = output
+            self.reader = asyncio.create_task(self.exchange(deepcopy(frame.context.get_messages()), output))
+            while event := await output.get():
+                await self.push_frame(LLMTextFrame(event['text']))
+            await asyncio.shield(self.reader)
+            if self.failure:
+                raise RuntimeError(self.failure)
+        except Exception as error:
+            logger.error(f'Hermes session cannot answer: {error}')
+            advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Reconnect and try again."
+            await self.push_frame(LLMTextFrame(' ' + advisory))
+        finally:
+            if self.output is output:
+                self.output = None
+            await self.stop_processing_metrics()
+            await self.push_frame(LLMFullResponseEndFrame())
+
+
 def make_llm():
-    return OpenAILLMService(
-        api_key="lm-studio",
-        base_url="http://192.168.0.150:1234/v1",
-        settings=OpenAILLMService.Settings(
-            model="underdog-saluki-27b-1.0", temperature=0.4, max_tokens=180,
-            system_instruction=SYSTEM_PROMPT,
-            extra={"reasoning_effort": "none"},
-        ),
-    )
+    return HermesLLMService()
 
 
 async def echo_removal_fault(disconnected):
@@ -125,8 +247,9 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         )
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
+    llm = make_llm()
     pipeline = Pipeline([
-        transport.input(), stt, aggregators.user(), make_llm(),
+        transport.input(), stt, aggregators.user(), llm,
         VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
     ])
     worker = PipelineWorker(
@@ -143,8 +266,12 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
-    logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
-    await runner.run()
+    try:
+        await llm.open_engine()
+        logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
+        await runner.run()
+    finally:
+        await llm.close_engine()
 
 
 def run_voice_service(main):

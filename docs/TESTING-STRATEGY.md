@@ -77,11 +77,35 @@ spoken text and upstream `LLMContextAssistantTurnFrame` for committed assistant 
 requests establish ordered history, including only the spoken prefix of an interrupted reply. A synthesis
 log alone does not establish spoken output or context commitment.
 
-The test replaces the real brain service's public `get_chat_completions(context)` method with scripted
-`ChatCompletionChunk` streams, uses an unloaded `NemotronSTT` without audio input, and supplies a finite
-voice-generator double to the real `VoxCPMTTS` adapter. This proves the session's reply-text sequence with
-those stand-ins. Microphone accuracy, physical playback, live network or brain behaviour, and brain outcome
-types other than reply text remain unproven.
+The test starts the real installed Hermes 0.19.0 worker against a controlled loopback HTTP (Hypertext
+Transfer Protocol) brain with scripted streaming replies. It refuses any direct OpenAI service bypass,
+blocks an interrupted provider response until the test releases it, and observes native work finish before
+the next request. Captured provider requests exclude the unheard tail; reconnect starts with empty history.
+It uses an unloaded `NemotronSTT` without audio input and a finite voice-generator double through the real
+`VoxCPMTTS` adapter. Related session cases exercise engine absence or death, provider refusal, incomplete
+replies and corrupt worker output, asserting spoken failures and no automatic session restart or user-turn retry.
+
+The startup and turn-timeout cases use short test deadlines and assert spoken failure, worker exit and
+owned-home removal, rather than elapsed time. The turn-timeout case also covers an interrupted reply draining.
+
+[NativeHermesTests](../tests/test_hermes.py) separately drives the installed worker's JSON-lines boundary,
+observing unsolicited tool refusal, isolated configuration and environment, absent reusable conversation
+state, and attempted network destinations limited to the controlled provider. Its
+`test_production_worker_entrypoint_becomes_ready_without_a_turn` starts the actual worker script with the
+installed interpreter and closed standard input, observing readiness and clean exit without a conversation
+or inference.
+
+Provider-error request dumps are permitted local diagnostics in the owned ignored home. Their placement is
+checked by `NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
+Removal after worker exit on orderly disconnect is checked through production-session cleanup in
+`WholeConversationTests.test_brain_refusal_speaks_failure_without_retry`. A hard-killed parent or power loss
+can leave the home behind; these tests do not establish cleanup after forced parent death.
+
+These native cases require the installed interpreter locally; missing native evidence blocks delivery.
+Hosted continuous integration explicitly skips the native cases when that interpreter is absent. Those
+skips do not establish installed-engine behaviour, and local native results do not establish hosted execution.
+The controlled brain and speech doubles do not prove microphone accuracy, physical playback, the live Ally
+network or Saluki's answers, or live spoken latency.
 
 ## 3. Evidence classes stay distinct
 
@@ -145,7 +169,7 @@ A commit added on top of one whose checks passed reruns a convergence check wher
 | `npm run lint` | A path under `scripts/`, `.claude/hooks/` or `.codex/hooks/`; `eslint.config.mjs`; or `package.json`, `package-lock.json` or `.npmrc` |
 | `npm run test:scripts` | Any path, and any new head even when no path changed: the suite reads the tracked tree as a whole and queries git about the repository itself |
 | `npm run lint:docs`, in a job that changes documentation | Any path: it resolves every cited path and link against the whole tracked tree |
-| `npm run test:speech` | `bot.py`, `speech.py`, `asr_worker.py`, a path under `tests/`, `requirements-test.txt` or `package.json` |
+| `npm run test:speech` | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, a path under `tests/`, `requirements-test.txt` or `package.json` |
 
 The other inputs show in no path: the installed Node packages, which an unchanged `package-lock.json` shows unchanged, and the local voice environment in `.runtime/`, which no job rebuilds. Installing packages again or changing that environment after a receipt was written runs the affected check again.
 
