@@ -28,7 +28,7 @@ from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
-from hermes_worker import HERMES_PYTHON, SYSTEM_PROMPT, child_environment
+from hermes_worker import HERMES_PYTHON, child_environment
 from speech import EchoRemoval, NemotronSTT, ROOT, VoxCPMTTS
 
 SESSION_LOCK = asyncio.Lock()
@@ -56,13 +56,12 @@ def stop_kestrel():
 class HermesLLMService(LLMService):
     def __init__(self):
         super().__init__(settings=LLMSettings(
-            model=None, system_instruction=SYSTEM_PROMPT, temperature=None, max_tokens=None,
+            model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
             filter_incomplete_user_turns=False, user_turn_completion_config=None,
         ))
         self.process = None
         self.home = None
-        self.exchange_lock = asyncio.Lock()
         self.reader = None
         self.output = None
         self.failure = None
@@ -122,33 +121,32 @@ class HermesLLMService(LLMService):
 
     async def exchange(self, messages, output):
         advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
-        async with self.exchange_lock:
-            try:
-                async with asyncio.timeout(ENGINE_TIMEOUT):
-                    self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
-                    await self.process.stdin.drain()
-                    has_text = False
-                    while True:
-                        event = await self.read_event()
-                        if set(event) == {'text'} and isinstance(event['text'], str) and event['text']:
-                            has_text = has_text or bool(event['text'].strip())
-                            if self.output is output:
-                                output.put_nowait(event)
-                        elif set(event) == {'done'} and event['done'] is True and has_text:
-                            break
-                        elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                            advisory = "I couldn't get a complete reply from the brain on the Ally. Reconnect and try again."
-                            raise RuntimeError(event['error'])
-                        else:
-                            raise RuntimeError('Invalid or incomplete Hermes response')
-            except Exception as error:
-                self.failure_advisory = advisory
-                self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
-                logger.error(self.failure)
-                await self.reap_engine()
-            finally:
-                if self.output is output:
-                    output.put_nowait(None)
+        try:
+            async with asyncio.timeout(ENGINE_TIMEOUT):
+                self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
+                await self.process.stdin.drain()
+                has_text = False
+                while True:
+                    event = await self.read_event()
+                    if set(event) == {'text'} and isinstance(event['text'], str) and event['text']:
+                        has_text = has_text or bool(event['text'].strip())
+                        if self.output is output:
+                            output.put_nowait(event)
+                    elif set(event) == {'done'} and event['done'] is True and has_text:
+                        break
+                    elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
+                        advisory = "I couldn't get a complete reply from the brain on the Ally. Reconnect and try again."
+                        raise RuntimeError(event['error'])
+                    else:
+                        raise RuntimeError('Invalid or incomplete Hermes response')
+        except Exception as error:
+            self.failure_advisory = advisory
+            self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
+            logger.error(self.failure)
+            await self.reap_engine()
+        finally:
+            if self.output is output:
+                output.put_nowait(None)
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)

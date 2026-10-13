@@ -17,7 +17,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 import bot
-from test_hermes import NATIVE_PYTHON, ScriptedBrain, WorkerProcess
+from test_hermes import NATIVE_PYTHON, ScriptedBrain, WorkerProcess, require_native_hermes
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
@@ -218,10 +218,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None):
-        if brain is not None and not NATIVE_PYTHON.exists():
-            if os.environ.get('CI'):
-                self.skipTest('Installed Hermes interpreter absent in hosted environment')
-            self.fail('Local installed Hermes interpreter unavailable')
+        if brain is not None:
+            require_native_hermes()
         started = asyncio.Event()
         spoken = asyncio.Queue()
         committed = asyncio.Queue()
@@ -486,10 +484,6 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(home.exists())
 
     async def test_conversation_preserves_context_and_interrupts_reply(self):
-        if not NATIVE_PYTHON.exists():
-            if os.environ.get('CI'):
-                self.skipTest('Installed Hermes interpreter absent in hosted environment')
-            self.fail('Local installed Hermes interpreter unavailable')
         blocked = threading.Event()
         release = threading.Event()
         finished = threading.Event()

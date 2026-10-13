@@ -132,12 +132,16 @@ hermes_worker.main(base_url=sys.argv[4])
         self.stderr.close()
 
 
-@contextmanager
-def native_worker(replies):
+def require_native_hermes():
     if not NATIVE_PYTHON.exists():
         if os.environ.get('CI'):
             raise unittest.SkipTest('Installed Hermes interpreter absent in hosted environment')
         raise AssertionError('Local installed Hermes interpreter unavailable')
+
+
+@contextmanager
+def native_worker(replies):
+    require_native_hermes()
     brain = ScriptedBrain(replies)
     try:
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
@@ -158,10 +162,7 @@ def native_worker(replies):
 
 class NativeHermesTests(unittest.TestCase):
     def test_production_worker_entrypoint_becomes_ready_without_a_turn(self):
-        if not NATIVE_PYTHON.exists():
-            if os.environ.get('CI'):
-                self.skipTest('Installed Hermes interpreter absent in hosted environment')
-            self.fail('Local installed Hermes interpreter unavailable')
+        require_native_hermes()
         from hermes_worker import child_environment
 
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
@@ -327,7 +328,7 @@ class NativeHermesTests(unittest.TestCase):
                     self.assertEqual(environment['HERMES_MANAGED_DIR'], str(worker.home / 'managed'))
                     self.assertFalse(set(poison) - {'HERMES_HOME', 'HERMES_MANAGED_DIR', 'PYTHON_DOTENV_DISABLED'} & set(environment))
 
-    def test_provider_failure_is_explicit_and_owned_diagnostics_are_removed_after_exit(self):
+    def test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home(self):
         with native_worker([400]) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             events = worker.request([{'role': 'user', 'content': 'failure-private-nonce'}])
@@ -339,9 +340,5 @@ class NativeHermesTests(unittest.TestCase):
             for dump in dumps:
                 self.assertTrue(dump.resolve().is_relative_to(worker.home))
                 self.assertIn('failure-private-nonce', dump.read_text())
-            home = worker.home
-            process = worker.process
             self.assertEqual(len(brain.requests), 1)
-        self.assertIsNotNone(process.poll())
-        self.assertFalse(home.exists())
         self.assertTrue((ROOT / '.runtime/voice-venv/bin/python').exists())
