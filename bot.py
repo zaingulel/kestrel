@@ -181,6 +181,20 @@ async def mute_output(*, command=run_local_command):
         return MuteResult(False, attempted, 'command failed')
 
 
+async def notify_mute_failure(*, command=run_local_command):
+    try:
+        await command((
+            '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+            '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
+            'Check the audio control. Kestrel will not retry.',
+        ))
+    except (OSError, RuntimeError):
+        logger.error('Mute failure notification unavailable')
+        return False
+    # Command acceptance does not establish visible delivery by the desktop.
+    return True
+
+
 LOCAL_TOOLS = {'mute': LocalTool(PermissionTier.FREE, mute_output)}
 
 

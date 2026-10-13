@@ -323,6 +323,29 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                         await process.wait()
 
 
+    async def test_notification_is_fixed_local_and_reports_unavailability(self):
+        argv = ('/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+                '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
+                'Check the audio control. Kestrel will not retry.')
+        command = AsyncMock(return_value='')
+        with patch.object(bot.logger, 'error') as error:
+            self.assertTrue(await bot.notify_mute_failure(command=command))
+            command.assert_awaited_once_with(argv)
+            error.assert_not_called()
+        for failure in (OSError('private missing executable'), RuntimeError('private external output')):
+            command = AsyncMock(side_effect=failure)
+            with patch.object(bot.logger, 'error') as error:
+                self.assertFalse(await bot.notify_mute_failure(command=command))
+                command.assert_awaited_once_with(argv)
+                error.assert_called_once_with('Mute failure notification unavailable')
+        command = AsyncMock(side_effect=asyncio.CancelledError)
+        with patch.object(bot.logger, 'error') as error:
+            with self.assertRaises(asyncio.CancelledError):
+                await bot.notify_mute_failure(command=command)
+            command.assert_awaited_once_with(argv)
+            error.assert_not_called()
+
+
 class SessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         fault = patch.object(bot.ECHO_REMOVAL, "fault", return_value=None)
