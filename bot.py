@@ -179,7 +179,7 @@ async def mute_output(*, command=run_local_command):
         return MuteResult(False, attempted, 'mute timeout')
     except ValueError as error:
         return MuteResult(False, attempted, str(error))
-    except (OSError, RuntimeError):
+    except RuntimeError:
         return MuteResult(False, attempted, 'command failed')
 
 
@@ -190,7 +190,7 @@ async def notify_mute_failure(*, command=run_local_command):
             '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
             'Check the audio control. Kestrel will not retry.',
         ))
-    except (OSError, RuntimeError):
+    except RuntimeError:
         logger.error('Mute failure notification unavailable')
         return False
     # Command acceptance does not establish visible delivery by the desktop.
@@ -203,8 +203,8 @@ LOCAL_TOOLS = {'mute': LocalTool(PermissionTier.FREE, mute_output)}
 def match_instant_tool(text):
     if text.strip().lower() not in ('mute', 'mute.', 'mute!'):
         return None
-    tool = LOCAL_TOOLS.get('mute')
-    return tool if tool is not None and tool.permission is PermissionTier.FREE else None
+    tool = LOCAL_TOOLS['mute']
+    return tool if tool.permission is PermissionTier.FREE else None
 
 
 def stop_kestrel():
@@ -233,7 +233,7 @@ class HermesLLMService(LLMService):
         self.local_command = local_command if local_command is not None else run_local_command
         self.local_tasks = set()
 
-    async def run_local_tool(self, tool):
+    async def run_mute(self, tool):
         result = await tool.run(command=self.local_command)
         if not result.confirmed:
             logger.error(f'Mute could not be confirmed: {result.reason}')
@@ -339,7 +339,7 @@ class HermesLLMService(LLMService):
             tool = match_instant_tool(messages[-1]['content'])
             if tool is not None:
                 messages.pop()
-                task = asyncio.create_task(self.run_local_tool(tool))
+                task = asyncio.create_task(self.run_mute(tool))
                 self.local_tasks.add(task)
                 task.add_done_callback(self.local_tasks.discard)
                 result = await asyncio.shield(task)

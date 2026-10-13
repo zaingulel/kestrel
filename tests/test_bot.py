@@ -156,8 +156,8 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             (prefix + ['selected', 'different', 'Mute: yes'], True, 7, 'target changed'),
             (prefix + ['selected', 'physical', 'Mute: no'], True, 7, 'readback unconfirmed'),
             (prefix + ['selected', 'physical', 'bad status'], True, 7, 'invalid status'),
-            (['selected', 'physical', 'Mute: no', OSError('private error')], True, 4, 'command failed'),
-            ([OSError('missing')], False, 1, 'command failed'),
+            (['selected', 'physical', 'Mute: no', RuntimeError('private error')], True, 4, 'command failed'),
+            ([RuntimeError('missing')], False, 1, 'command failed'),
             (prefix + [RuntimeError('private output')], True, 5, 'command failed'),
         ])
         for outputs, attempted, count, reason in cases:
@@ -391,7 +391,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await bot.notify_mute_failure(command=command))
             command.assert_awaited_once_with(argv)
             error.assert_not_called()
-        for failure in (OSError('private missing executable'), RuntimeError('private external output')):
+        for failure in (RuntimeError('private missing executable'), RuntimeError('private external output')):
             command = AsyncMock(side_effect=failure)
             with patch.object(bot.logger, 'error') as error:
                 self.assertFalse(await bot.notify_mute_failure(command=command))
@@ -718,7 +718,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
 
-    async def test_exact_mute_is_silent_with_an_unreachable_brain_and_stays_out_of_history(self):
+    async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
         brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         completed = asyncio.Event()

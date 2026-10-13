@@ -21,6 +21,6 @@ Use the installed Fabraik contract and canonical sync prerequisites for workflow
 | Convention | Kestrel |
 |---|---|
 | generated artifacts | Shared files and `.agents/factory-manifest.json` are installed by canonical sync; never edit them locally. `package-lock.json` is generated from `package.json` by npm and committed with dependency changes. |
-| visual verification | The prototype uses the Pipecat browser test interface. Adoption changes no interface. Any later visual work follows AGENTS and the resume skill; no local design tokens or component patterns have been approved. |
+| visual verification | The browser uses Pipecat's test interface; no local browser design tokens or component patterns have been approved. The native mute-failure notification pattern is defined in [docs/DESIGN-SYSTEM.md](../docs/DESIGN-SYSTEM.md). Visual work follows AGENTS and the resume skill. |
 | fixtures | The existing Python adapter tests use doubles; factory tests build their own isolated fixtures. Local recorded samples and model assets remain ignored in `.runtime/`. |
 | documentation routines | Inactive: no documentation sweep, day-after triage or weekly retro is scheduled or authorised. The inactive sweep and triage manuals require owner activation before any routine runs. |
