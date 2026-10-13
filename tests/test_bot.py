@@ -636,22 +636,125 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_voice_weights_are_reused_between_sessions(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
-        model = object()
+        events = []
+
+        def chunks(**kwargs):
+            events.append('warm')
+            try:
+                yield np.zeros(8, dtype=np.float32)
+            finally:
+                events.append('closed')
+
+        model = Mock(generate_streaming=Mock(side_effect=chunks))
+
+        def load_model(*args, **kwargs):
+            events.append('load')
+            return model
+
         args = self.arguments()
         with (
             patch.object(bot, "VOICE_MODEL", None),
             patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot.VoxCPM, "from_pretrained", return_value=model) as load,
+            patch.object(bot.VoxCPM, "from_pretrained", side_effect=load_model) as load,
             patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, "set_num_threads"),
         ):
+            conversation.side_effect = lambda *args: events.append('conversation')
             await bot.bot(args)
             await bot.bot(args)
             load.assert_called_once()
+            model.generate_streaming.assert_called_once()
+            self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
+            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
             self.assertIs(conversation.await_args.args[2], model)
             self.assertEqual(stt.close.await_count, 2)
             self.assertEqual(args.webrtc_connection.disconnect.await_count, 2)
+
+    async def test_voice_preparation_finishes_before_conversation_and_failure_is_not_cached(self):
+        loop = asyncio.get_running_loop()
+        activity = asyncio.Event()
+        release = threading.Event()
+        events = []
+
+        def gated_chunks(**kwargs):
+            try:
+                events.append('first_chunk')
+                yield np.zeros(8, dtype=np.float32)
+                events.append('gated')
+                loop.call_soon_threadsafe(activity.set)
+                if not release.wait(5):
+                    raise AssertionError('Voice preparation gate was not released')
+                events.append('remaining_chunk')
+                yield np.zeros(8, dtype=np.float32)
+                events.append('exhausted')
+            finally:
+                events.append('closed')
+
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        model = Mock(generate_streaming=Mock(side_effect=gated_chunks))
+        args = self.arguments()
+        with (
+            patch.object(bot, 'VOICE_MODEL', None),
+            patch.object(bot, 'NemotronSTT', return_value=stt),
+            patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+            patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+            patch.object(bot.torch, 'set_num_threads'),
+        ):
+            conversation.side_effect = lambda *args: events.append('conversation')
+            task = asyncio.create_task(bot.bot(args))
+            task.add_done_callback(lambda completed: activity.set())
+            try:
+                await asyncio.wait_for(activity.wait(), 5)
+                self.assertIsNone(bot.VOICE_MODEL)
+                conversation.assert_not_awaited()
+                self.assertFalse(task.done())
+                self.assertEqual(events, ['first_chunk', 'gated'])
+                release.set()
+                await asyncio.wait_for(task, 5)
+                self.assertEqual(events, [
+                    'first_chunk', 'gated', 'remaining_chunk', 'exhausted', 'closed', 'conversation',
+                ])
+                self.assertIs(bot.VOICE_MODEL, model)
+                conversation.assert_awaited_once()
+            finally:
+                release.set()
+                await asyncio.wait_for(task, 5)
+
+        for label in ('late_failure', 'empty'):
+            with self.subTest(label=label):
+                failed_events = []
+
+                def failed_chunks(**kwargs):
+                    try:
+                        failed_events.append('first_chunk')
+                        yield np.zeros(8, dtype=np.float32)
+                        raise RuntimeError('Voice preparation failed')
+                    finally:
+                        failed_events.append('closed')
+
+                def empty_chunks(**kwargs):
+                    yield from ()
+
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                generator = failed_chunks if label == 'late_failure' else empty_chunks
+                model = Mock(generate_streaming=Mock(side_effect=generator))
+                args = self.arguments()
+                with (
+                    patch.object(bot, 'VOICE_MODEL', None),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+                    patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, '[Pp]reparation'):
+                        await bot.bot(args)
+                    self.assertIsNone(bot.VOICE_MODEL)
+                    conversation.assert_not_awaited()
+                    if label == 'late_failure':
+                        self.assertEqual(failed_events, ['first_chunk', 'closed'])
+                    stt.close.assert_awaited_once()
+                    args.webrtc_connection.disconnect.assert_awaited_once()
 
     async def test_model_load_failure_closes_worker_and_connection(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())

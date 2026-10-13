@@ -420,10 +420,16 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
             await stt.load()
             torch.set_num_threads(4)
             if VOICE_MODEL is None:
-                VOICE_MODEL = await asyncio.to_thread(
+                model = await asyncio.to_thread(
                     VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
                     load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
                 )
+                has_audio = False
+                async for frame in VoxCPMTTS(model).run_tts('Hello.', 'warmup'):
+                    has_audio = has_audio or bool(frame.audio)
+                if not has_audio:
+                    raise RuntimeError('VoxCPM preparation produced no audio')
+                VOICE_MODEL = model
             if not disconnected.is_set():
                 await run_conversation(runner_args, stt, VOICE_MODEL)
         finally:
