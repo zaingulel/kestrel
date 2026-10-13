@@ -40,6 +40,7 @@ ECHO_REMOVAL = EchoRemoval()
 ECHO_REMOVAL_WAIT = 10
 ECHO_REMOVAL_RETRY = 0.5
 VOICE_MODEL = None
+ENGINE_TIMEOUT = 45
 
 
 def stop_kestrel():
@@ -65,11 +66,12 @@ class HermesLLMService(LLMService):
         self.reader = None
         self.output = None
         self.failure = None
+        self.failure_advisory = None
 
     async def open_engine(self):
         try:
             self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
-            async with asyncio.timeout(45):
+            async with asyncio.timeout(ENGINE_TIMEOUT):
                 self.process = await asyncio.create_subprocess_exec(
                     str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
                     env=child_environment(self.home.name),
@@ -80,6 +82,7 @@ class HermesLLMService(LLMService):
                 if set(event) != {'ready'} or event['ready'] is not True:
                     raise RuntimeError(event.get('error') or 'Hermes did not become ready')
         except Exception as error:
+            self.failure_advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
             self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
             logger.error(self.failure)
             await self.reap_engine()
@@ -118,9 +121,10 @@ class HermesLLMService(LLMService):
             self.home = None
 
     async def exchange(self, messages, output):
+        advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
         async with self.exchange_lock:
             try:
-                async with asyncio.timeout(45):
+                async with asyncio.timeout(ENGINE_TIMEOUT):
                     self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
                     await self.process.stdin.drain()
                     has_text = False
@@ -133,10 +137,12 @@ class HermesLLMService(LLMService):
                         elif set(event) == {'done'} and event['done'] is True and has_text:
                             break
                         elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
+                            advisory = "I couldn't get a complete reply from the brain on the Ally. Reconnect and try again."
                             raise RuntimeError(event['error'])
                         else:
                             raise RuntimeError('Invalid or incomplete Hermes response')
             except Exception as error:
+                self.failure_advisory = advisory
                 self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
                 logger.error(self.failure)
                 await self.reap_engine()
@@ -168,10 +174,7 @@ class HermesLLMService(LLMService):
                 raise RuntimeError(self.failure)
         except Exception as error:
             logger.error(f'Hermes session cannot answer: {error}')
-            if self.failure and self.failure.startswith('Hermes engine unavailable:'):
-                advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
-            else:
-                advisory = "I couldn't get a complete reply from the brain on the Ally. Check LM Studio and reconnect to try again."
+            advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Reconnect and try again."
             await self.push_frame(LLMTextFrame(' ' + advisory))
         finally:
             if self.output is output:

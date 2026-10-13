@@ -296,8 +296,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         async def close():
             if not session.done():
-                await handlers['on_client_disconnected'](transport, None)
-            await asyncio.wait_for(session, 5)
+                if not started.is_set():
+                    session.cancel()
+                else:
+                    await handlers['on_client_disconnected'](transport, None)
+            try:
+                await asyncio.wait_for(session, 5)
+            except asyncio.CancelledError:
+                pass
             for process, home in processes:
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
@@ -327,16 +333,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(processes), 1)
             self.assertIsNone(processes[0][0])
 
-    async def assert_failed_reply(self, transport, spoken, committed, text):
+    async def assert_failed_reply(self, transport, spoken, committed, text, *, expected_advisory):
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, text)
         context = await asyncio.wait_for(committed.get(), 5)
-        self.assertIn("couldn't get a complete reply", context)
-        self.assertIn('Check LM Studio', context)
+        self.assertIn(expected_advisory, context)
         heard = []
         while not spoken.empty():
             heard.append(spoken.get_nowait())
-        self.assertIn("couldn't get a complete reply", ' '.join(heard))
+        self.assertIn(expected_advisory, ' '.join(heard))
         return context
 
     async def test_dead_native_engine_speaks_failure(self):
@@ -346,23 +351,27 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         process, _ = processes[0]
         process.kill()
         await process.wait()
-        await self.assert_failed_reply(transport, spoken, committed, 'Is anyone there?')
+        await self.assert_failed_reply(transport, spoken, committed, 'Is anyone there?',
+                                         expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.")
         self.assertEqual(brain.requests, [])
 
     async def test_brain_refusal_speaks_failure_without_retry(self):
         brain = ScriptedBrain([400])
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
-        await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.')
+        await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.',
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
         self.assertIsNotNone(processes[0][0].returncode)
-        await self.assert_failed_reply(transport, spoken, committed, 'Try another request.')
+        await self.assert_failed_reply(transport, spoken, committed, 'Try another request.',
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
         self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
 
     async def test_partial_native_reply_speaks_failure(self):
         brain = ScriptedBrain([[({'content': 'Incomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
-        context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.')
+        context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.',
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
         self.assertIn('Incomplete synthetic reply.', context)
         self.assertIsNotNone(processes[0][0].returncode)
 
@@ -378,16 +387,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 wire = (f'import sys; print({ready!r}, flush=True); sys.stdin.readline(); '
                         f'print({response!r}, flush=True); sys.stdin.read()')
                 transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
-                self.assertTrue(spoken.empty(), 'Even corrupt startup must not speak first')
-                if name == 'wrong ready type':
-                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                    await self.finish_user_turn(transport, 'Answer over the wire.')
-                    self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(committed.get(), 5))
-                    self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(spoken.get(), 5))
-                else:
-                    await self.assert_failed_reply(transport, spoken, committed, 'Answer over the wire.')
-                self.assertIsNotNone(processes[0][0].returncode)
-                await close()
+                try:
+                    self.assertTrue(spoken.empty(), 'Even corrupt startup must not speak first')
+                    if name == 'wrong ready type':
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'Answer over the wire.')
+                        self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(committed.get(), 5))
+                        self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(spoken.get(), 5))
+                    else:
+                        await self.assert_failed_reply(transport, spoken, committed, 'Answer over the wire.',
+                                             expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.")
+                    self.assertIsNotNone(processes[0][0].returncode)
+                finally:
+                    await close()
 
     async def test_interrupted_partial_failure_is_reported_before_next_answer(self):
         blocked = threading.Event()
@@ -428,6 +440,50 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(processes[0][0].returncode)
         self.assertFalse(any(m.get('content') == 'What next?' for request in brain.requests
                              for m in request[2]['messages']), 'A failed drain cannot accept another engine turn')
+
+    async def test_engine_startup_timeout_waits_for_user_then_speaks_failure(self):
+        with patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
+            transport, spoken, committed, _, processes, close = await asyncio.wait_for(
+                self.open_session(None, wire='import sys; sys.stdin.read()'), 5,
+            )
+            self.assertTrue(spoken.empty(), 'A hung startup must not speak first')
+            await self.assert_failed_reply(
+                transport, spoken, committed, 'Hello hung engine.',
+                expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.",
+            )
+            process, home = processes[0]
+            self.assertIsNotNone(process.returncode)
+            await close()
+            self.assertFalse(home.exists())
+
+    async def test_engine_turn_timeout_speaks_failure_and_reaps_worker(self):
+        for interrupt in (False, True):
+            with self.subTest(interrupted=interrupt), patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
+                wire = ("import sys; print('{\"ready\":true}', flush=True); sys.stdin.readline(); "
+                        + ("print('{\"text\":\"One fact. Unheard continuation\"}', flush=True); " if interrupt else '')
+                        + 'sys.stdin.read()')
+                transport, spoken, committed, interrupted, processes, close = await asyncio.wait_for(
+                    self.open_session(None, wire=wire), 5,
+                )
+                process, home = processes[0]
+                try:
+                    if interrupt:
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'Start the hung reply.')
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+                        interrupted.clear()
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await asyncio.wait_for(interrupted.wait(), 5)
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+                    context = await self.assert_failed_reply(
+                        transport, spoken, committed, 'Answer while the engine is hung.',
+                        expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.",
+                    )
+                    self.assertNotIn('Unheard continuation', context)
+                    self.assertIsNotNone(process.returncode)
+                finally:
+                    await close()
+                self.assertFalse(home.exists())
 
     async def test_conversation_preserves_context_and_interrupts_reply(self):
         if not NATIVE_PYTHON.exists():

@@ -95,10 +95,10 @@ def main(*, base_url=ALLY_URL):
                     if (not isinstance(result, dict) or result.get('completed') is not True
                             or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
                         reason = result.get('error') if isinstance(result, dict) else None
-                        raise RuntimeError(reason or 'Hermes did not complete the reply. Check LM Studio and try again.')
+                        raise RuntimeError(reason or 'Hermes did not complete the reply.')
                     final = result.get('final_response')
                     if not isinstance(final, str) or not final.strip():
-                        raise RuntimeError('Hermes returned an empty reply. Check LM Studio and try again.')
+                        raise RuntimeError('Hermes returned an empty reply.')
                     if not streamed:
                         emit({'text': final})
                     emit({'done': True})
@@ -107,7 +107,7 @@ def main(*, base_url=ALLY_URL):
                     emit({'error': str(error) or type(error).__name__})
         except Exception as error:
             print(f'Hermes engine unavailable: {error}', file=sys.stderr, flush=True)
-            emit({'error': f'Hermes engine unavailable: {error}'})
+            emit({'error': str(error) or type(error).__name__})
         finally:
             if agent is not None:
                 agent.close()
