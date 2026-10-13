@@ -17,7 +17,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 import bot
-from test_hermes import NATIVE_PYTHON, ScriptedBrain, WorkerProcess, require_native_hermes
+from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
@@ -263,6 +263,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         processes = []
 
         async def spawn(*command, **kwargs):
+            self.assertEqual(command, (str(bot.HERMES_PYTHON), str(ROOT / 'hermes_worker.py')))
             home = Path(kwargs['env']['HERMES_HOME'])
             logger.debug(f'Owned session test home: {home}')
             if wire is not None:
