@@ -736,6 +736,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, ' MUTE! ')
         await asyncio.wait_for(completed.wait(), 5)
+        # TTS serializes this barrier after earlier speech, before a new turn can interrupt it.
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertTrue(spoken.empty(), 'Confirmed mute must be silent before the next user turn')
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'An ordinary conversation turn.')
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary reply.')
