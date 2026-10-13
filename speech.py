@@ -2,14 +2,17 @@
 
 import asyncio
 import base64
+import io
 import json
 import os
 import subprocess
 import threading
+import wave
 from pathlib import Path
 
 import numpy as np
 from loguru import logger
+from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import TranscriptionFrame, TTSAudioRawFrame
 from pipecat.services.settings import STTSettings, TTSSettings
 from pipecat.services.stt_service import SegmentedSTTService
@@ -108,6 +111,33 @@ class NemotronSTT(SegmentedSTTService):
         response = await asyncio.wait_for(self.process.stdout.readline(), timeout=60)
         if not response or json.loads(response) != {"ready": True}:
             raise RuntimeError("Nemotron failed to load; see the server log")
+        try:
+            with VOICE_REFERENCE.open('rb') as source, wave.open(source, 'rb') as reference:
+                frames = reference.getnframes()
+                if (
+                    reference.getnchannels() != 1 or reference.getsampwidth() != 2
+                    or reference.getframerate() != 48000 or reference.getcomptype() != 'NONE'
+                    or frames == 0 or frames > 480000
+                ):
+                    raise RuntimeError(
+                        'Nemotron preparation requires a nonempty mono 48 kHz PCM16 reference '
+                        'of at most ten seconds'
+                    )
+                pcm = reference.readframes(frames)
+                if len(pcm) != frames * 2:
+                    raise RuntimeError('Nemotron preparation reference is truncated')
+        except (OSError, EOFError, wave.Error) as error:
+            raise RuntimeError('Nemotron preparation could not read the voice reference') from error
+        pcm = await SOXRAudioResampler().resample(pcm, 48000, 16000)
+        prepared = io.BytesIO()
+        with wave.open(prepared, 'wb') as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16000)
+            audio.writeframes(pcm)
+        async with asyncio.timeout(60):
+            async for _ in self.run_stt(prepared.getvalue()):
+                pass
 
     async def close(self):
         if self.process is not None and self.process.returncode is None:
