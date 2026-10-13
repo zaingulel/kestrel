@@ -157,6 +157,24 @@ def native_worker(replies):
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_production_worker_entrypoint_becomes_ready_without_a_turn(self):
+        if not NATIVE_PYTHON.exists():
+            if os.environ.get('CI'):
+                self.skipTest('Installed Hermes interpreter absent in hosted environment')
+            self.fail('Local installed Hermes interpreter unavailable')
+        from hermes_worker import child_environment
+
+        with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory).resolve()
+            result = subprocess.run(
+                [str(NATIVE_PYTHON), str(ROOT / 'hermes_worker.py')],
+                env=child_environment(home), input='', capture_output=True, text=True, timeout=45,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ready = json.loads(result.stdout)
+            self.assertEqual(ready, {'ready': True})
+            self.assertIs(ready['ready'], True)
+
     def test_native_reply_streams_once_and_uses_caller_history(self):
         replies = [[({'content': 'Hello nonce-22.'}, None), ({}, 'stop')],
                    [({'content': 'Next nonce-23.'}, None), ({}, 'stop')]]
