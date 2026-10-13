@@ -85,10 +85,21 @@ It uses an unloaded `NemotronSTT` without audio input and a finite voice-generat
 `VoxCPMTTS` adapter. Related session cases exercise engine absence or death, provider refusal, incomplete
 replies and corrupt worker output, asserting spoken failures and no automatic session restart or user-turn retry.
 
+The startup and turn-timeout cases use short test deadlines and assert spoken failure, worker exit and
+owned-home removal, rather than elapsed time. The turn-timeout case also covers an interrupted reply draining.
+
 [NativeHermesTests](../tests/test_hermes.py) separately drives the installed worker's JSON-lines boundary,
 observing unsolicited tool refusal, isolated configuration and environment, absent reusable conversation
-state, and attempted network destinations limited to the controlled provider. Provider-error request dumps
-are permitted local diagnostics in the owned ignored home; the failure case verifies removal after worker exit.
+state, and attempted network destinations limited to the controlled provider. Its
+`test_production_worker_entrypoint_becomes_ready_without_a_turn` starts the actual worker script with the
+installed interpreter and closed standard input, observing readiness and clean exit without a conversation
+or inference.
+
+Provider-error request dumps are permitted local diagnostics in the owned ignored home. Their placement is
+checked by `NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
+Removal after worker exit on orderly disconnect is checked through production-session cleanup in
+`WholeConversationTests.test_brain_refusal_speaks_failure_without_retry`. A hard-killed parent or power loss
+can leave the home behind; these tests do not establish cleanup after forced parent death.
 
 These native cases require the installed interpreter locally; missing native evidence blocks delivery.
 Hosted continuous integration explicitly skips the native cases when that interpreter is absent. Those
