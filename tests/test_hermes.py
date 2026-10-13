@@ -231,13 +231,13 @@ class NativeHermesTests(unittest.TestCase):
                                   [({'content': 'Fresh caller nonce-26.'}, None), ({}, 'stop')]])
             self.assertEqual(worker.event(), {'ready': True})
             events = worker.request([{'role': 'user', 'content': 'Use tools private-nonce.'}])
-            self.assertEqual(events, [{'text': 'Conversation only nonce-25.'}, {'done': True}])
+            self.assertFalse(terminal_marker.exists())
+            self.assertFalse(file_marker.exists())
             refusals = [m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool']
             self.assertEqual(len(refusals), 3)
             for message, name in zip(refusals, ('terminal', 'write_file', 'session_search')):
                 self.assertIn(f"Tool '{name}' does not exist", message['content'])
-            self.assertFalse(terminal_marker.exists())
-            self.assertFalse(file_marker.exists())
+            self.assertEqual(events, [{'text': 'Conversation only nonce-25.'}, {'done': True}])
             events = worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}])
             self.assertEqual(events, [{'text': 'Fresh caller nonce-26.'}, {'done': True}])
             self.assertNotIn('private-nonce', json.dumps(brain.requests[-1][2]))
