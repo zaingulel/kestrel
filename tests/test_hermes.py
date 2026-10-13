@@ -231,6 +231,8 @@ class NativeHermesTests(unittest.TestCase):
             self.assertTrue(events[-1]['error'].strip())
             self.assertNotIn({'done': True}, events)
             self.assertIn('truncated', events[-1]['error'].lower())
+            self.assertEqual([request[2]['max_tokens'] for request in brain.requests],
+                             [180, 360, 720, 1440])
 
     def test_unsolicited_tools_are_refused_without_effects_or_reusable_state(self):
         # These names are native installed tools, offered unsolicited by the scripted provider.
