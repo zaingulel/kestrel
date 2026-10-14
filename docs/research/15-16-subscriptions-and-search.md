@@ -1,6 +1,6 @@
 # Subscription sign-in and search findings
 
-Research answer for [issue 15](https://github.com/zaingulel/kestrel/issues/15) and [issue 16](https://github.com/zaingulel/kestrel/issues/16). This is a local research artifact, retained on a throwaway branch. It is not an operating manual or an enabled configuration.
+Research answer for [issue 15](https://github.com/zaingulel/kestrel/issues/15) and [issue 16](https://github.com/zaingulel/kestrel/issues/16). This is a research record from sources read on 13 October 2026; prices, plans and eligibility may have changed since. It is not an operating manual or an enabled configuration.
 
 ## Recommendation
 
