@@ -495,15 +495,19 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                         await bot.run_local_command((sys.executable, '-c', leader))
                     self.assertEqual(len(processes), 1)
                     self.assertEqual(processes[0].returncode, 0)
-                    fd = os.pidfd_open(int(pid_path.read_text()))
-                    exited = asyncio.Event()
-                    loop = asyncio.get_running_loop()
-                    loop.add_reader(fd, exited.set)
                     try:
-                        await asyncio.wait_for(exited.wait(), 5)
-                    finally:
-                        loop.remove_reader(fd)
-                        os.close(fd)
+                        fd = os.pidfd_open(int(pid_path.read_text()))
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        exited = asyncio.Event()
+                        loop = asyncio.get_running_loop()
+                        loop.add_reader(fd, exited.set)
+                        try:
+                            await asyncio.wait_for(exited.wait(), 5)
+                        finally:
+                            loop.remove_reader(fd)
+                            os.close(fd)
                 finally:
                     for process in processes:
                         try:
