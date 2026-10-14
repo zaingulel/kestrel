@@ -37,6 +37,7 @@ Kestrel defines no colour of its own. Every colour is a role read from the activ
 | Accent | none | `accent` |
 | Tooltip background, text and border | `tooltip.background`, `tooltip.text`, `tooltip.border` | `background`, `foreground`, `foreground` |
 
+- A background role and the tooltip border are composed with the theme's alpha companion key where the theme sets one, and are fully opaque otherwise: `bar.background-alpha`, `popups.background-alpha`, `tooltip.background-alpha` and `tooltip.border-alpha`.
 - Colours are read again when Omarchy switches theme. Omarchy replaces the theme directory whole and then rewrites `theme.name` beside it, so the reload watches `theme.name`; a watch on the files inside the directory does not survive the switch.
 - Resting marks use their text role at 0.6 opacity. No other colour is derived.
 - State is never carried by colour alone. Bar active marks trouble only; every other indicator state uses bar text.
@@ -71,6 +72,8 @@ Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above
 | Thinking | Three squares, one raised by 5 | The raised square steps to the next position every 280 ms |
 | Speaking | Three bars of unequal height | Each bar eases between 4 and 12 high, on periods of 420, 520 and 610 ms |
 | Trouble | Two squares and an exclamation mark, a 7 high bar above a square, in bar active | None |
+
+Where the desktop asks for reduced motion, nothing loops: thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 
 A click on the indicator opens the panel, and a second click closes it. Hovering shows the state in words:
 
