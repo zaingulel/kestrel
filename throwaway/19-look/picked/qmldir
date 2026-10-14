@@ -1,0 +1,16 @@
+singleton Theme Theme.qml
+BarRow BarRow.qml
+CloseButton CloseButton.qml
+FocusRing FocusRing.qml
+HoverRule HoverRule.qml
+IndicatorA IndicatorA.qml
+Message Message.qml
+PanelA PanelA.qml
+PanelHead PanelHead.qml
+SendButton SendButton.qml
+SourceLink SourceLink.qml
+StateLayer StateLayer.qml
+Tooltip Tooltip.qml
+Transcript Transcript.qml
+TroubleGlyph TroubleGlyph.qml
+TypingField TypingField.qml
