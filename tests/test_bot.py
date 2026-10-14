@@ -1260,18 +1260,53 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(spoken.empty())
             self.assertTrue(committed.empty())
 
-            release.set()
-            await asyncio.wait_for(asyncio.shield(preparation), 5)
-            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-            await self.finish_user_turn(transport, 'Answer the genuine user turn.')
-            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
-            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
-            self.assertTrue(spoken.empty())
-            self.assertTrue(committed.empty())
-            self.assertEqual(len(brain.requests), 2)
-            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
-                {'role': 'user', 'content': 'Answer the genuine user turn.'},
-            ])
+            checkpoint = asyncio.Event()
+            driver = asyncio.current_task()
+            native_shield = asyncio.shield
+            worker_input = processes[0][0].stdin
+            native_write = worker_input.write
+            ordinary_writes = 0
+            pending_writes = 0
+
+            def observe_shield(task):
+                future = native_shield(task)
+                if task is preparation and asyncio.current_task() is not driver:
+                    checkpoint.set()
+                return future
+
+            def observe_write(data):
+                nonlocal ordinary_writes, pending_writes
+                ordinary_writes += 1
+                pending_writes += not preparation.done()
+                checkpoint.set()
+                return native_write(data)
+
+            with (
+                patch.object(asyncio, 'shield', observe_shield),
+                patch.object(worker_input, 'write', observe_write),
+            ):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'Answer the genuine user turn.')
+                await asyncio.wait_for(checkpoint.wait(), 5)
+                self.assertEqual(ordinary_writes, 0, 'Ordinary worker request preceded preparation completion')
+                self.assertFalse(preparation.done())
+                self.assertFalse(release.is_set())
+                self.assertEqual(len(brain.requests), 1)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+
+                release.set()
+                await asyncio.wait_for(asyncio.shield(preparation), 5)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                self.assertEqual(len(brain.requests), 2)
+                self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                    {'role': 'user', 'content': 'Answer the genuine user turn.'},
+                ])
+                self.assertEqual(ordinary_writes, 1)
+                self.assertEqual(pending_writes, 0)
         finally:
             release.set()
             await close()
