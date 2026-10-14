@@ -246,6 +246,6 @@ Product discovery and drilling with the owner must precede any further product i
 Standing security guarantees:
 
 1. Microphone recognition and voice generation stay on the laptop; conversation transcripts and system context go to LM Studio on the Ally over the local network.
-2. The browser service remains bound to loopback. Kestrel's only desktop tool is local mute of the selected audio output. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
+2. Kestrel opens no listening network service. Kestrel's only desktop tool is local mute of the selected audio output. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
 3. Runtime model weights, reference audio and logs remain ignored and are never published. Transcript text may appear in local debug logs.
 4. Shared workflow bytes retain canonical integrity through sync; the repository administrator bypass remains owner-only and no write deploy key is allowed.

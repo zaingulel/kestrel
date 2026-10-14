@@ -14,10 +14,11 @@ from loguru import logger
 from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
-    DataFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
-    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
+    BotStartedSpeakingFrame, DataFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
@@ -549,7 +550,7 @@ class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(bot, 'LLMContextAggregatorPair', side_effect=capture):
             with self.assertRaises(AnalyzerSelected):
-                await bot.run_conversation(None, None, None, llm=object(), transport=object())
+                await bot.run_conversation(None, None, llm=object(), transport=object())
         return analyzer
 
     async def test_measured_first_short_greeting_is_admitted_once(self):
@@ -638,7 +639,7 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(UserTurnStrategies, '__post_init__', capture_selection), \
                     patch.object(bot, 'SileroVADAnalyzer', capture_vad):
                 with self.assertRaises(SelectionCaptured):
-                    await bot.run_conversation(None, None, None, llm=object(), transport=object())
+                    await bot.run_conversation(None, None, llm=object(), transport=object())
             self.assertEqual(len(captured), 1)
             strategies = captured[0]
             self.assertEqual(len(strategies.stop), 1)
@@ -688,31 +689,22 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        fault = patch.object(bot.ECHO_REMOVAL, "fault", return_value=None)
-        fault.start()
-        self.addCleanup(fault.stop)
-        retry = patch.object(bot, "ECHO_REMOVAL_RETRY", 0)
-        retry.start()
-        self.addCleanup(retry.stop)
+        self.audio = Mock(open=AsyncMock(), close=AsyncMock(), failure=None)
+        audio = patch.object(bot, "LaptopAudioTransport", return_value=self.audio)
+        audio.start()
+        self.addCleanup(audio.stop)
+        def chunks(**kwargs):
+            yield np.zeros(8, dtype=np.float32)
+
+        self.voice = Mock(generate_streaming=Mock(side_effect=chunks))
+        voice = patch.object(bot.VoxCPM, "from_pretrained", return_value=self.voice)
+        voice.start()
+        self.addCleanup(voice.stop)
         engine = patch.object(bot, 'make_llm', side_effect=lambda: Mock(
             start_preparation=Mock(), close_local_tools=AsyncMock(), close_engine=AsyncMock(),
         ))
         engine.start()
         self.addCleanup(engine.stop)
-
-    def arguments(self):
-        connection = Mock()
-        connection.handlers = {}
-
-        def event_handler(name):
-            def register(handler):
-                connection.handlers[name] = handler
-                return handler
-            return register
-
-        connection.event_handler.side_effect = event_handler
-        connection.disconnect = AsyncMock()
-        return Mock(webrtc_connection=connection)
 
     async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
         preparing = asyncio.Event()
@@ -735,20 +727,18 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.close_local_tools = AsyncMock(wraps=service.close_local_tools)
         service.close_engine = AsyncMock(wraps=service.close_engine)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
-        args = self.arguments()
 
-        async def conversation(runner_args, stt, voice, *, llm=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.reader.done())
 
         with (
-            patch.object(bot, 'VOICE_MODEL', object()),
             patch.object(bot, 'NemotronSTT', return_value=stt),
             patch.object(bot, 'make_llm', return_value=service),
             patch.object(bot, 'run_conversation', conversation),
             patch.object(bot.torch, 'set_num_threads'),
         ):
-            task = asyncio.create_task(bot.bot(args))
+            task = asyncio.create_task(bot.bot())
             try:
                 await asyncio.wait_for(loading.wait(), 5)
                 self.assertTrue(preparing.is_set(), 'Engine preparation starts while local loading is held')
@@ -762,13 +752,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 service.close_local_tools.assert_awaited_once()
                 service.close_engine.assert_awaited_once()
                 stt.close.assert_awaited_once()
-                args.webrtc_connection.disconnect.assert_awaited_once()
+                self.audio.close.assert_awaited()
             finally:
                 release_local.set()
                 hold_preparation.set()
                 await asyncio.wait_for(task, 5)
 
-        for failure in ('local_model_failure', 'early_disconnect', 'conversation_failure'):
+        for failure in ('local_model_failure', 'early_shutdown', 'conversation_failure'):
             with self.subTest(failure=failure):
                 service = bot.HermesLLMService()
                 service.prepare_engine = AsyncMock(side_effect=asyncio.Event().wait)
@@ -782,41 +772,37 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
                 service.close_engine = AsyncMock(side_effect=close_engine)
                 stt = Mock(load=AsyncMock(), close=AsyncMock())
-                args = self.arguments()
                 if failure == 'local_model_failure':
                     stt.load.side_effect = RuntimeError('local model failed')
-                elif failure == 'early_disconnect':
-                    async def disconnect_during_load():
-                        await args.webrtc_connection.handlers['closed'](args.webrtc_connection)
-
-                    stt.load.side_effect = disconnect_during_load
+                elif failure == 'early_shutdown':
+                    stt.load.side_effect = asyncio.CancelledError
                 conversation = AsyncMock(
                     side_effect=RuntimeError('conversation construction failed')
                     if failure == 'conversation_failure' else None,
                 )
                 with (
-                    patch.object(bot, 'VOICE_MODEL', object()),
                     patch.object(bot, 'NemotronSTT', return_value=stt),
                     patch.object(bot, 'make_llm', return_value=service),
                     patch.object(bot, 'run_conversation', conversation),
                     patch.object(bot.torch, 'set_num_threads'),
                 ):
-                    if failure == 'early_disconnect':
-                        await bot.bot(args)
+                    if failure == 'early_shutdown':
+                        with self.assertRaises(asyncio.CancelledError):
+                            await bot.bot()
                     else:
                         with self.assertRaises(RuntimeError):
-                            await bot.bot(args)
+                            await bot.bot()
                     service.close_local_tools.assert_awaited_once()
                     service.close_engine.assert_awaited_once()
                     self.assertTrue(readers[0].done())
                     stt.close.assert_awaited_once()
-                    args.webrtc_connection.disconnect.assert_awaited_once()
+                    self.audio.close.assert_awaited()
                     if failure == 'conversation_failure':
                         self.assertIs(conversation.await_args.kwargs['llm'], service)
                     else:
                         conversation.assert_not_awaited()
 
-    async def test_voice_weights_are_reused_between_sessions(self):
+    async def test_voice_weights_are_prepared_once_per_service_lifetime(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         events = []
 
@@ -833,27 +819,25 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             events.append('load')
             return model
 
-        args = self.arguments()
         with (
-            patch.object(bot, "VOICE_MODEL", None),
             patch.object(bot, "NemotronSTT", return_value=stt),
             patch.object(bot.VoxCPM, "from_pretrained", side_effect=load_model) as load,
             patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, "set_num_threads"),
         ):
-            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
-            await bot.bot(args)
-            await bot.bot(args)
-            load.assert_called_once()
-            model.generate_streaming.assert_called_once()
+            conversation.side_effect = lambda *args, **kwargs: events.append('conversation')
+            await bot.bot()
+            await bot.bot()
+            self.assertEqual(load.call_count, 2)
+            self.assertEqual(model.generate_streaming.call_count, 2)
             self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
-            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'conversation'])
+            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'load', 'warm', 'closed', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
-            self.assertIs(conversation.await_args.args[2], model)
+            self.assertIs(conversation.await_args.args[1], model)
             self.assertEqual(stt.close.await_count, 2)
-            self.assertEqual(args.webrtc_connection.disconnect.await_count, 2)
+            self.assertEqual(self.audio.close.await_count, 2)
 
-    async def test_voice_preparation_finishes_before_conversation_and_failure_is_not_cached(self):
+    async def test_voice_preparation_finishes_before_conversation_and_failure_stops_startup(self):
         loop = asyncio.get_running_loop()
         activity = asyncio.Event()
         release = threading.Event()
@@ -875,20 +859,17 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         model = Mock(generate_streaming=Mock(side_effect=gated_chunks))
-        args = self.arguments()
         with (
-            patch.object(bot, 'VOICE_MODEL', None),
             patch.object(bot, 'NemotronSTT', return_value=stt),
             patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
             patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, 'set_num_threads'),
         ):
-            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
-            task = asyncio.create_task(bot.bot(args))
+            conversation.side_effect = lambda *args, **kwargs: events.append('conversation')
+            task = asyncio.create_task(bot.bot())
             task.add_done_callback(lambda completed: activity.set())
             try:
                 await asyncio.wait_for(activity.wait(), 5)
-                self.assertIsNone(bot.VOICE_MODEL)
                 conversation.assert_not_awaited()
                 self.assertFalse(task.done())
                 self.assertEqual(events, ['first_chunk', 'gated'])
@@ -897,7 +878,6 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(events, [
                     'first_chunk', 'gated', 'remaining_chunk', 'exhausted', 'closed', 'conversation',
                 ])
-                self.assertIs(bot.VOICE_MODEL, model)
                 conversation.assert_awaited_once()
             finally:
                 release.set()
@@ -921,175 +901,183 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 stt = Mock(load=AsyncMock(), close=AsyncMock())
                 generator = failed_chunks if label == 'late_failure' else empty_chunks
                 model = Mock(generate_streaming=Mock(side_effect=generator))
-                args = self.arguments()
                 with (
-                    patch.object(bot, 'VOICE_MODEL', None),
                     patch.object(bot, 'NemotronSTT', return_value=stt),
                     patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
                     patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
                     patch.object(bot.torch, 'set_num_threads'),
                 ):
                     with self.assertRaisesRegex(RuntimeError, '[Pp]reparation'):
-                        await bot.bot(args)
-                    self.assertIsNone(bot.VOICE_MODEL)
+                        await bot.bot()
                     conversation.assert_not_awaited()
                     if label == 'late_failure':
                         self.assertEqual(failed_events, ['first_chunk', 'closed'])
                     stt.close.assert_awaited_once()
-                    args.webrtc_connection.disconnect.assert_awaited_once()
+                    self.audio.close.assert_awaited()
 
-    async def test_model_load_failure_closes_worker_and_connection(self):
+    async def test_model_load_failure_closes_recognition_and_audio(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())
-        args = self.arguments()
         with patch.object(bot, "NemotronSTT", return_value=stt):
             with self.assertRaisesRegex(RuntimeError, "load failed"):
-                await bot.bot(args)
+                await bot.bot()
         stt.close.assert_awaited_once()
-        args.webrtc_connection.disconnect.assert_awaited_once()
-        self.assertFalse(bot.SESSION_LOCK.locked())
+        self.audio.close.assert_awaited_once()
 
-    async def test_microphone_session_is_refused_when_echo_removal_is_off(self):
+    async def test_native_startup_and_stop_release_resources_without_listening(self):
+        for phase, echo_failure in (("preparation", False), ("conversation", False), ("conversation", True)):
+            with self.subTest(phase=phase, echo_failure=echo_failure):
+                preparing, active, loading = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                held = asyncio.Event()
+                service = bot.HermesLLMService()
+                home = tempfile.TemporaryDirectory(prefix="kestrel-native-test-")
+                home_path = Path(home.name)
+                service.home = home
+                child = Mock(returncode=None)
+
+                async def reap():
+                    child.returncode = 0
+                    return 0
+
+                child.wait = AsyncMock(side_effect=reap)
+                service.process = child
+                mute_work = asyncio.create_task(held.wait())
+                service.local_tasks.add(mute_work)
+
+                async def prepare():
+                    preparing.set()
+                    await held.wait()
+
+                async def load():
+                    loading.set()
+                    if phase == "preparation":
+                        await held.wait()
+
+                class Forward(FrameProcessor):
+                    def __init__(self, *, output=False):
+                        super().__init__()
+                        self.output = output
+
+                    async def process_frame(self, frame, direction):
+                        await super().process_frame(frame, direction)
+                        if self.output and isinstance(frame, StartFrame):
+                            active.set()
+                        await self.push_frame(frame, direction)
+
+                self.audio.input.return_value = Forward()
+                self.audio.output.return_value = Forward(output=True)
+                native_conversation = bot.run_conversation
+
+                async def conversation(stt, voice, *, llm, transport, handle_signals):
+                    self.assertIs(llm, service)
+                    self.assertIs(transport, self.audio)
+                    self.assertTrue(handle_signals)
+                    await native_conversation(stt, voice, llm=llm, transport=transport,
+                        handle_signals=handle_signals, user_params=bot.LLMUserAggregatorParams(
+                            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
+                        ))
+
+                service.prepare_engine = AsyncMock(side_effect=prepare)
+                stt = Forward()
+                stt.load = AsyncMock(side_effect=load)
+                stt.close = AsyncMock()
+                self.audio.reset_mock()
+                handlers = {}
+                loop = asyncio.get_running_loop()
+
+                def register(sig, handler):
+                    handlers[sig] = handler
+
+                def start_echo(callback):
+                    self.assertEqual(set(handlers), {signal.SIGINT, signal.SIGTERM})
+
+                def signal_request(pid, sig):
+                    self.assertEqual(pid, os.getpid())
+                    handlers[sig]()
+
+                with (
+                    patch.object(bot, "make_llm", return_value=service),
+                    patch.object(bot, "NemotronSTT", return_value=stt),
+                    patch.object(bot, "run_conversation", conversation),
+                    patch.object(bot.ECHO_REMOVAL, "start", side_effect=start_echo) as echo_start,
+                    patch.object(bot.ECHO_REMOVAL, "close") as echo_close,
+                    patch.object(loop, "add_signal_handler", side_effect=register),
+                    patch.object(loop, "remove_signal_handler") as remove_signal,
+                    patch.object(bot.os, "kill", side_effect=signal_request),
+                    patch("socket.socket.bind", side_effect=AssertionError("A native service must never listen")) as bind,
+                    patch.object(bot.torch, "set_num_threads"),
+                ):
+                    task = asyncio.create_task(bot.run_voice_service())
+                    try:
+                        await asyncio.wait_for((loading if phase == "preparation" else active).wait(), 5)
+                        self.assertTrue(preparing.is_set())
+                        if echo_failure:
+                            echo_start.call_args.args[0]()
+                            with self.assertRaisesRegex(RuntimeError, "Echo removal has stopped. Restart Kestrel"):
+                                await asyncio.wait_for(task, 5)
+                        else:
+                            handlers[signal.SIGTERM]()
+                            handlers[signal.SIGTERM]()
+                            await asyncio.wait_for(task, 5)
+                        bind.assert_not_called()
+                        self.audio.open.assert_awaited_once()
+                        self.audio.close.assert_awaited_once()
+                        stt.close.assert_awaited_once()
+                        child.terminate.assert_called_once_with()
+                        child.wait.assert_awaited_once()
+                        self.assertIsNone(service.reader)
+                        self.assertTrue(mute_work.done())
+                        self.assertFalse(home_path.exists())
+                        echo_close.assert_called_once_with()
+                        self.assertEqual(remove_signal.call_count, 2)
+                    finally:
+                        held.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        await service.close_local_tools()
+                        await service.close_engine()
+
+    async def test_pipeline_latency_log_contains_only_numeric_measurement(self):
+        started, measured = asyncio.Event(), asyncio.Event()
         messages = []
-        self.addCleanup(logger.remove, logger.add(messages.append, level="ERROR"))
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        args = self.arguments()
-        with (
-            patch.object(bot, "ECHO_REMOVAL_WAIT", 0),
-            patch.object(bot.ECHO_REMOVAL, "fault", return_value="Echo removal has stopped. Restart Kestrel."),
-            patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
-        ):
-            # A hang guard, not a timing assertion.
-            await asyncio.wait_for(bot.bot(args), 5)
-        stt.load.assert_not_awaited()
-        conversation.assert_not_awaited()
-        args.webrtc_connection.disconnect.assert_awaited_once()
-        self.assertIn("Echo removal has stopped. Restart Kestrel.", messages[0])
-        self.assertFalse(bot.SESSION_LOCK.locked())
 
-    async def test_microphone_session_is_accepted_once_the_page_starts_recording(self):
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        args = self.arguments()
-        with (
-            patch.object(
-                bot.ECHO_REMOVAL, "fault", side_effect=["Nothing is recording.", None]
-            ) as fault,
-            patch.object(bot, "VOICE_MODEL", object()),
-            patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
-            patch.object(bot.torch, "set_num_threads"),
-        ):
-            await bot.bot(args)
-        conversation.assert_awaited_once()
-        self.assertEqual(fault.call_count, 2)
+        class Forward(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                if isinstance(frame, StartFrame):
+                    started.set()
+                await self.push_frame(frame, direction)
 
-    async def test_the_wait_for_echo_removal_ends_when_the_page_goes_away(self):
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        args = self.arguments()
-        loop = asyncio.get_running_loop()
-        looked = asyncio.Event()
+        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
+        observer = UserBotLatencyObserver(time_source=lambda: 100.25)
 
-        def fault():
-            # Runs on a worker thread.
-            loop.call_soon_threadsafe(looked.set)
-            return "Nothing is recording."
+        def log(message):
+            messages.append(message)
+            if message == "0.250":
+                measured.set()
 
-        with (
-            patch.object(bot.ECHO_REMOVAL, "fault", side_effect=fault),
-            patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
-        ):
-            task = asyncio.create_task(bot.bot(args))
-            # Both waits are hang guards, not timing assertions.
-            await asyncio.wait_for(looked.wait(), 5)
-            await args.webrtc_connection.handlers["closed"](args.webrtc_connection)
-            await asyncio.wait_for(task, 5)
-        stt.load.assert_not_awaited()
-        conversation.assert_not_awaited()
-        self.assertFalse(bot.SESSION_LOCK.locked())
+        params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
+        with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
+              patch.object(bot.logger, "info", side_effect=log)):
+            task = asyncio.create_task(bot.run_conversation(
+                Forward(), self.voice, llm=Forward(), transport=transport, user_params=params,
+            ))
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                await transport.input().queue_frame(VADUserStoppedSpeakingFrame(timestamp=100.0))
+                await transport.input().queue_frame(BotStartedSpeakingFrame())
+                await asyncio.wait_for(measured.wait(), 5)
+                self.assertEqual([message for message in messages if message == "0.250"], ["0.250"])
+                self.assertEqual(float(messages[-1]), 0.25)
+                self.assertNotIn("private transcript", " ".join(messages))
+            finally:
+                task.cancel()
+                await asyncio.wait_for(task, 5)
 
-    async def test_no_model_loads_when_the_page_goes_away_during_the_check(self):
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        args = self.arguments()
-        loop = asyncio.get_running_loop()
-
-        def fault():
-            # Runs on a worker thread: the page closes while this look is still running.
-            connection = args.webrtc_connection
-            asyncio.run_coroutine_threadsafe(connection.handlers["closed"](connection), loop).result()
-            return None
-
-        with (
-            patch.object(bot.ECHO_REMOVAL, "fault", side_effect=fault),
-            patch.object(bot, "VOICE_MODEL", object()),
-            patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
-            patch.object(bot.torch, "set_num_threads"),
-        ):
-            # A hang guard, not a timing assertion.
-            await asyncio.wait_for(bot.bot(args), 5)
-        stt.load.assert_not_awaited()
-        conversation.assert_not_awaited()
-        args.webrtc_connection.disconnect.assert_awaited_once()
-        self.assertFalse(bot.SESSION_LOCK.locked())
-
-    async def test_second_simultaneous_client_is_disconnected(self):
-        args = self.arguments()
-        async with bot.SESSION_LOCK:
-            with patch.object(bot, "NemotronSTT") as stt:
-                await bot.bot(args)
-                stt.assert_not_called()
-        args.webrtc_connection.disconnect.assert_awaited_once()
-
-    async def test_active_conversation_ends_when_echo_removal_stops(self):
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        args = self.arguments()
-        started = asyncio.Event()
-        ended = asyncio.Event()
-        args.webrtc_connection.disconnect.side_effect = ended.set
-
-        async def conversation(runner_args, stt, voice, *, llm=None):
-            started.set()
-            await ended.wait()
-
-        with (
-            patch.object(bot, "VOICE_MODEL", object()),
-            patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot, "run_conversation", conversation),
-            patch.object(bot.torch, "set_num_threads"),
-            patch.object(bot.os, "kill") as kill,
-        ):
-            task = asyncio.create_task(bot.bot(args))
-            # Both waits are hang guards, not timing assertions.
-            await asyncio.wait_for(started.wait(), 5)
-            await asyncio.to_thread(bot.stop_kestrel)
-            await asyncio.wait_for(task, 5)
-        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
-        self.assertFalse(bot.SESSION_LOCK.locked())
-        self.assertIsNone(bot.CONVERSATION)
-
-    def test_idle_kestrel_is_told_to_stop_when_echo_removal_stops(self):
+    def test_kestrel_is_told_to_stop_when_echo_removal_stops(self):
         with patch.object(bot.os, "kill") as kill:
             bot.stop_kestrel()
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
-
-    def test_echo_removal_runs_for_the_whole_voice_service(self):
-        calls = Mock()
-        with (
-            patch.object(bot.ECHO_REMOVAL, "start", calls.start),
-            patch.object(bot.ECHO_REMOVAL, "close", calls.close),
-        ):
-            bot.run_voice_service(calls.serve)
-            self.assertEqual(
-                calls.mock_calls, [call.start(bot.stop_kestrel), call.serve(), call.close()]
-            )
-            calls.reset_mock()
-            calls.serve.side_effect = RuntimeError("serve failed")
-            with self.assertRaisesRegex(RuntimeError, "serve failed"):
-                bot.run_voice_service(calls.serve)
-            self.assertEqual(
-                calls.mock_calls, [call.start(bot.stop_kestrel), call.serve(), call.close()]
-            )
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
@@ -1126,16 +1114,6 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         transport.input.return_value = Input()
         transport.output.return_value = Output()
         transport.processed = processed
-        handlers = {}
-
-        def event_handler(name):
-            def register(handler):
-                handlers[name] = handler
-                return handler
-            return register
-
-        transport.event_handler.side_effect = event_handler
-
         def chunks(**kwargs):
             yield np.zeros(4800, dtype=np.float32)
 
@@ -1174,10 +1152,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if session is not None:
                     try:
                         if not session.done():
-                            if not started.is_set():
-                                session.cancel()
-                            else:
-                                await handlers['on_client_disconnected'](transport, None)
+                            session.cancel()
                     finally:
                         try:
                             await asyncio.wait_for(session, 5)
@@ -1204,7 +1179,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
         session = asyncio.create_task(bot.run_conversation(
-            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
+            bot.NemotronSTT(), Mock(generate_streaming=chunks),
             llm=supplied_llm, transport=transport, user_params=user_params,
         ))
         await asyncio.wait_for(started.wait(), 45)
@@ -1339,7 +1314,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(committed.empty())
             await self.assert_failed_reply(
                 transport, spoken, committed, 'Answer after failed preparation.',
-                expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.",
+                expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.",
             )
             self.assertEqual(len(brain.requests), 1)
         finally:
@@ -1348,12 +1323,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(processes[0][0].returncode)
         self.assertFalse(processes[0][1].exists())
 
-    async def test_preparation_timeout_and_disconnect_reap_owned_worker(self):
+    async def test_preparation_timeout_and_shutdown_reap_owned_worker(self):
         wire = (
             'import sys; print(\'{"ready":true}\', flush=True); '
             'sys.stdin.readline(); sys.stdin.read()'
         )
-        for outcome in ('timeout', 'disconnect'):
+        for outcome in ('timeout', 'shutdown'):
             with self.subTest(outcome=outcome):
                 pending = asyncio.Event()
                 reads = 0
@@ -1566,7 +1541,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         await close()
 
-    async def test_interruption_finishes_attempted_mute_without_replay_and_disconnect_reaps_it(self):
+    async def test_interruption_finishes_attempted_mute_without_replay_and_shutdown_reaps_it(self):
         writes_started = asyncio.Event()
         release_write = asyncio.Event()
         cancelled = asyncio.Event()
@@ -1646,7 +1621,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(writes_started.wait(), 5)
                 closing = asyncio.create_task(close())
                 await asyncio.wait_for(cancelled.wait(), 5)
-                self.assertFalse(closing.done(), 'Disconnect must join command cleanup before finishing')
+                self.assertFalse(closing.done(), 'Shutdown must join command cleanup before finishing')
                 release_cleanup.set()
                 await asyncio.wait_for(closing, 5)
                 self.assertTrue(cleaned.is_set())
@@ -1657,7 +1632,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     ('/usr/bin/omarchy-audio-output-sink', 'selected'),
                     ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
                     ('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'),
-                ], 'Disconnect launches no readback, retry, notification or unmute')
+                ], 'Shutdown launches no readback, retry, notification or unmute')
             finally:
                 release_cleanup.set()
                 await close()
@@ -1670,7 +1645,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await self.finish_user_turn(transport, 'Hello unavailable engine.')
             failure = await asyncio.wait_for(spoken.get(), 5)
             self.assertIn("couldn't reach Kestrel's engine", failure)
-            self.assertIn('Reconnect', await asyncio.wait_for(spoken.get(), 5))
+            self.assertIn('Restart Kestrel', await asyncio.wait_for(spoken.get(), 5))
             self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(committed.get(), 5))
             self.assertEqual(len(processes), 1)
             self.assertIsNone(processes[0][0])
@@ -1694,7 +1669,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         process.kill()
         await process.wait()
         await self.assert_failed_reply(transport, spoken, committed, 'Is anyone there?',
-                                         expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.")
+                                         expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.")
         self.assertEqual(brain.requests, [])
 
     async def test_brain_refusal_speaks_failure_without_retry(self):
@@ -1702,10 +1677,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
         self.assertIsNotNone(processes[0][0].returncode)
         await self.assert_failed_reply(transport, spoken, committed, 'Try another request.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
         self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
 
     async def test_partial_native_reply_speaks_failure(self):
@@ -1713,7 +1688,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
         self.assertIn('Incomplete synthetic reply.', context)
         self.assertIsNotNone(processes[0][0].returncode)
 
@@ -1738,7 +1713,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("couldn't reach Kestrel's engine", await asyncio.wait_for(spoken.get(), 5))
                     else:
                         await self.assert_failed_reply(transport, spoken, committed, 'Answer over the wire.',
-                                             expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.")
+                                             expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.")
                     self.assertIsNotNone(processes[0][0].returncode)
                 finally:
                     await close()
@@ -1791,7 +1766,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(spoken.empty(), 'A hung startup must not speak first')
             await self.assert_failed_reply(
                 transport, spoken, committed, 'Hello hung engine.',
-                expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.",
+                expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.",
             )
             process, home = processes[0]
             self.assertIsNotNone(process.returncode)
@@ -1819,7 +1794,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
                     context = await self.assert_failed_reply(
                         transport, spoken, committed, 'Answer while the engine is hung.',
-                        expected_advisory="I couldn't reach Kestrel's engine. Reconnect and try again.",
+                        expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.",
                     )
                     self.assertNotIn('Unheard continuation', context)
                     self.assertIsNotNone(process.returncode)

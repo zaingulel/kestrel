@@ -1,30 +1,39 @@
 // runtime-boundary.test.mjs — the privacy and runtime boundary the README promises.
 //
-// The service binds to loopback, the only remote endpoint is LM Studio on the Ally, the echo removal
-// process loads only local PipeWire modules, and the README's disclosure says exactly that. Each
-// assertion reads the committed bytes, so widening the bind, pointing the conversation elsewhere or
-// rewording the promise goes red here.
+// The native service opens no listening network service, the only remote endpoint is LM Studio
+// on the Ally, and local echo removal loads only local PipeWire modules. The exact privacy
+// disclosure is the user promise; the executed launcher fixture observes its real arguments.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const read = (path) => readFileSync(resolve(ROOT, path), 'utf8');
 
 const DISCLOSURE = [
-  'Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally\'s LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. On connect, Kestrel starts a preparation request to the Ally with the fixed public text `Hello.`. Its reply is discarded, and neither preparation message enters caller conversation history. The browser service listens only on loopback at `127.0.0.1:7860`. Kestrel\'s only desktop tool is local mute of the selected audio output. The brain cannot invoke it or any other tool. Mute failure notifications contain fixed status text, never conversation text. Kestrel has no browser research or persistent conversation memory and adds no network destination. Deleting, sending messages, publishing and arbitrary command execution are not available by voice.',
-  'Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local server\'s debug output; the application does not save microphone recordings.',
-  'Echo removal runs on the laptop in a PipeWire process that starts and stops with the voice service. While the voice service runs, that process can open the default microphone and read it at any time, whether or not a conversation is connected: it does so whenever any program is sending sound to the default output or recording from the `kestrel-microphone` source. Treat the microphone as in use for as long as Kestrel runs. The process also reads the sound sent to the default output. It holds both in memory only, passes on the microphone signal with that sound removed, sends nothing over the network and saves nothing.',
-  'Hermes provider-error diagnostics can also contain transcript text in `sessions/request_dump_*.json` inside the connection\'s owned temporary Hermes home under `.runtime/`. On an orderly disconnect or shutdown, these local diagnostics are removed with that home after the worker exits; a hard-killed service or power loss can leave the folder behind. They are not reusable conversation storage. Do not publish them.',
+  'Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally\'s LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. On startup, Kestrel starts a preparation request to the Ally with the fixed public text `Hello.`. Its reply is discarded, and neither preparation message enters caller conversation history. Kestrel opens no listening network service. It captures only from its verified owned echo-removed microphone and refuses unverified capture without falling back to a raw microphone. Kestrel\'s only desktop tool is local mute of the selected audio output. The brain cannot invoke it or any other tool. Mute failure notifications contain fixed status text, never conversation text. Kestrel has no browser research or persistent conversation memory and adds no network destination. Deleting, sending messages, publishing and arbitrary command execution are not available by voice.',
+  'Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local service\'s debug output; the application does not save microphone recordings.',
+  'Echo removal runs on the laptop in a PipeWire process that starts and stops with the voice service. While the voice service runs, that process can open the default microphone and read it at any time, including during startup: it does so whenever any program is sending sound to the default output or recording from the `kestrel-microphone` source. Treat the microphone as in use for as long as Kestrel runs. The process also reads the sound sent to the default output. It holds both in memory only, passes on the microphone signal with that sound removed, sends nothing over the network and saves nothing.',
+  'Hermes provider-error diagnostics can also contain transcript text in `sessions/request_dump_*.json` inside the service\'s owned temporary Hermes home under `.runtime/`. On an orderly shutdown, these local diagnostics are removed with that home after the worker exits; a hard-killed service or power loss can leave the folder behind. They are not reusable conversation storage. Do not publish them.',
 ];
 
-test('the voice service binds to loopback only', () => {
-  const hosts = read('run-voice.sh').match(/--host \S+/g);
-  assert.deepEqual(hosts, ['--host 127.0.0.1']);
-  assert.match(read('run-voice.sh'), / --port 7860 /);
+test('the launcher starts the native conversation without a browser service', (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'kestrel-native-launcher-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  copyFileSync(resolve(ROOT, 'run-voice.sh'), join(fixture, 'run-voice.sh'));
+  mkdirSync(join(fixture, '.runtime/voice-venv/bin'), { recursive: true });
+  const interpreter = join(fixture, '.runtime/voice-venv/bin/python');
+  writeFileSync(interpreter, `#!/usr/bin/env bash\nprintf '%s\\n' "$@"\n`);
+  chmodSync(interpreter, 0o755);
+  const output = execFileSync('/usr/bin/bash', [join(fixture, 'run-voice.sh')], {
+    cwd: '/', encoding: 'utf8',
+  });
+  assert.deepEqual(output.trim().split('\n'), ['bot.py']);
 });
 
 test('the conversation goes only to LM Studio on the Ally', () => {
