@@ -1,6 +1,7 @@
 import QtQuick
 
-// Panel title with the close target, then the persistent status line (with the trouble triangle).
+// Panel title with the close target, then the persistent status line: the state's marks (the bar indicator's
+// drawing, base line on the text baseline) and the sentence.
 Item {
   id: root
 
@@ -29,15 +30,21 @@ Item {
     width: parent.width
     height: Theme.bodyLine
 
-    TroubleGlyph {
-      id: glyph
-      visible: root.stateName === "trouble"
-      anchors.verticalCenter: parent.verticalCenter
-      strokeColor: Theme.accent
+    Marks {
+      // The drawing sits 5 px inside its frame and is 15 px wide; shift the frame so the marks start at the row's edge.
+      x: -5
+      y: sentence.baselineOffset - markBase
+      kind: root.stateName
+      ink: Theme.popupsText
+      restingInk: Qt.alpha(Theme.popupsText, 0.6)
+      troubleInk: Theme.barActive
+      Accessible.ignored: true
     }
 
     Text {
-      x: glyph.visible ? glyph.width + Theme.controlGap : 0
+      id: sentence
+      // After the marks' 15 px drawing, one labelGap.
+      x: 15 + Theme.labelGap
       height: parent.height
       verticalAlignment: Text.AlignVCenter
       text: Theme.statuses[root.stateName]

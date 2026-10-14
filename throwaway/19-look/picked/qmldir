@@ -4,6 +4,7 @@ CloseButton CloseButton.qml
 FocusRing FocusRing.qml
 HoverRule HoverRule.qml
 IndicatorA IndicatorA.qml
+Marks Marks.qml
 Message Message.qml
 PanelA PanelA.qml
 PanelHead PanelHead.qml
