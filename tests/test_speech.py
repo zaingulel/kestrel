@@ -537,6 +537,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         async def spawn(*argv, **kwargs):
             child = capture if "--record" in argv else playback
             if child is capture:
+                self.assertEqual(argv[-1], "-")
+                self.assertEqual(kwargs["stdout"], asyncio.subprocess.PIPE)
                 self.assertIn("stdbuf", argv)
                 self.assertEqual(argv[argv.index("stdbuf") + 1:argv.index("pw-cat")], ("-o0",))
                 self.assertEqual(argv[argv.index("--target") + 1], "900")
