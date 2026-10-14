@@ -610,7 +610,6 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.object(speech.asyncio, "create_subprocess_exec", spawn),
                     patch.object(speech, "LAPTOP_AUDIO_START_TIMEOUT", 0.05 if case == "missing" else 10),
-                    patch.object(speech, "LAPTOP_CAPTURE_STALL_TIMEOUT", 0.05 if case == "timeout" else 5),
                 ):
                     try:
                         if case == "missing":
@@ -626,7 +625,10 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                                 else:
                                     capture.stdout.feed_data(b"X" * 639)
                                     capture.stdout.feed_eof()
-                        await asyncio.wait_for(stopped.wait(), 5)
+                        with patch.object(speech, "LAPTOP_CAPTURE_STALL_TIMEOUT", 0.05 if case == "timeout" else 5):
+                            if case == "timeout":
+                                capture.stdout.feed_data(bytes(640))
+                            await asyncio.wait_for(stopped.wait(), 5)
                         self.assertEqual(transport.failure, "Laptop microphone capture failed. Restart Kestrel.")
                         first_failure = transport.failure
                         transport.fail("later private payload")
