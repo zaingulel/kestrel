@@ -12,7 +12,10 @@ import tempfile
 
 import torch
 from loguru import logger
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -28,6 +31,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
@@ -265,6 +270,14 @@ class HermesLLMService(LLMService):
             logger.error(self.failure)
             await self.reap_engine()
 
+    def start_preparation(self):
+        self.reader = asyncio.create_task(self.prepare_engine())
+
+    async def prepare_engine(self):
+        await self.open_engine()
+        if not self.failure:
+            await self.exchange([{'role': 'user', 'content': 'Hello.'}], asyncio.Queue())
+
     async def read_event(self):
         line = await self.process.stdout.readline()
         if not line or len(line) > 1024 * 1024:
@@ -408,6 +421,7 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
         # Set before the check: a stop reported at any moment either ends this conversation
         # or fails the check.
         CONVERSATION = (asyncio.get_running_loop(), runner_args.webrtc_connection)
+        llm = None
         try:
             fault = await echo_removal_fault(disconnected)
             if fault:
@@ -415,23 +429,40 @@ async def bot(runner_args: SmallWebRTCRunnerArguments):
                 return
             if disconnected.is_set():
                 return
+            llm = make_llm()
+            llm.start_preparation()
             logger.info("Loading local speech models for the microphone session")
             await stt.load()
             torch.set_num_threads(4)
             if VOICE_MODEL is None:
-                VOICE_MODEL = await asyncio.to_thread(
+                model = await asyncio.to_thread(
                     VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
                     load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
                 )
+                has_audio = False
+                async for frame in VoxCPMTTS(model).run_tts('Hello.', 'warmup'):
+                    has_audio = has_audio or bool(frame.audio)
+                if not has_audio:
+                    raise RuntimeError('VoxCPM preparation produced no audio')
+                VOICE_MODEL = model
             if not disconnected.is_set():
-                await run_conversation(runner_args, stt, VOICE_MODEL)
+                await run_conversation(runner_args, stt, VOICE_MODEL, llm=llm)
         finally:
             CONVERSATION = None
-            await stt.close()
-            await runner_args.webrtc_connection.disconnect()
+            try:
+                if llm is not None:
+                    try:
+                        await llm.close_local_tools()
+                    finally:
+                        await llm.close_engine()
+            finally:
+                try:
+                    await stt.close()
+                finally:
+                    await runner_args.webrtc_connection.disconnect()
 
 
-async def run_conversation(runner_args, stt, voice, *, transport=None, user_params=None):
+async def run_conversation(runner_args, stt, voice, *, llm, transport=None, user_params=None):
     if transport is None:
         transport = SmallWebRTCTransport(
             webrtc_connection=runner_args.webrtc_connection,
@@ -439,11 +470,15 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
         )
     if user_params is None:
         user_params = LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(), empty_user_turn=None,
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
+            user_turn_strategies=UserTurnStrategies(stop=[
+                TurnAnalyzerUserTurnStopStrategy(
+                    turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=0.6)),
+                ),
+            ]),
         )
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
-    llm = make_llm()
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
         VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
@@ -462,13 +497,8 @@ async def run_conversation(runner_args, stt, voice, *, transport=None, user_para
 
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(worker)
-    try:
-        await llm.open_engine()
-        logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
-        await runner.run()
-    finally:
-        await llm.close_local_tools()
-        await llm.close_engine()
+    logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
+    await runner.run()
 
 
 def run_voice_service(main):

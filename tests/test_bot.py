@@ -11,15 +11,145 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import numpy as np
 from loguru import logger
+from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
+from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     DataFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
 import bot
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
+
+
+# Owner-reported missed first Hi: 120 native 16 kHz confidence/volume pairs.
+# Original grouping: 608 bytes, then 192 calls of 640 bytes; no audio retained.
+MEASURED_FIRST_HI_SCORES = (
+    (0.035760074853897095, 0.0),
+    (0.042612940073013306, 0.0),
+    (0.015511929988861084, 0.0),
+    (0.007798254489898682, 0.0),
+    (0.0035187900066375732, 0.0),
+    (0.0022649765014648438, 0.0),
+    (0.001963675022125244, 0.0),
+    (0.002105116844177246, 0.0),
+    (0.002015054225921631, 0.0),
+    (0.0016650557518005371, 0.0),
+    (0.0014693140983581543, 0.0),
+    (0.0017132759094238281, 0.0),
+    (0.001630246639251709, 0.0),
+    (0.0014463961124420166, 0.0),
+    (0.0014960169792175293, 0.0),
+    (0.0015066266059875488, 0.0),
+    (0.0015057623386383057, 0.0),
+    (0.0013019144535064697, 0.0),
+    (0.0014729797840118408, 0.0),
+    (0.0016672313213348389, 0.0),
+    (0.001694321632385254, 0.0),
+    (0.0019553005695343018, 0.0),
+    (0.002029716968536377, 0.0),
+    (0.0018465220928192139, 0.0),
+    (0.0016760528087615967, 0.0),
+    (0.0018802285194396973, 0.0),
+    (0.0017756521701812744, 0.0),
+    (0.0016661584377288818, 0.0),
+    (0.001847296953201294, 0.0),
+    (0.002141594886779785, 0.0),
+    (0.0023184120655059814, 0.0),
+    (0.002285301685333252, 0.0),
+    (0.001959860324859619, 0.0),
+    (0.0018923580646514893, 0.0),
+    (0.0019429028034210205, 0.0),
+    (0.0019373297691345215, 0.0),
+    (0.0017479956150054932, 0.0),
+    (0.0017497539520263672, 0.0),
+    (0.0017401576042175293, 0.0),
+    (0.0016838908195495605, 0.0),
+    (0.002042055130004883, 0.0),
+    (0.0026062726974487305, 0.0),
+    (0.0031073391437530518, 0.0),
+    (0.002686738967895508, 0.0),
+    (0.00195467472076416, 0.0),
+    (0.0020296573638916016, 0.0),
+    (0.0023779571056365967, 0.0),
+    (0.0041973888874053955, 0.0),
+    (0.00376051664352417, 0.0),
+    (0.002471715211868286, 0.0),
+    (0.006078243255615234, 0.0),
+    (0.0034498274326324463, 0.0),
+    (0.0025340616703033447, 0.0),
+    (0.0023952722549438477, 0.0),
+    (0.002611815929412842, 0.0),
+    (0.0022572875022888184, 0.0),
+    (0.0022135674953460693, 0.0),
+    (0.002370983362197876, 0.0),
+    (0.002327054738998413, 0.0),
+    (0.0022734403610229492, 0.0),
+    (0.0028052330017089844, 0.0),
+    (0.004387080669403076, 0.0),
+    (0.009391814470291138, 0.0),
+    (0.0062309205532073975, 0.0),
+    (0.0035817325115203857, 0.0),
+    (0.0025302469730377197, 0.0),
+    (0.002326756715774536, 0.0),
+    (0.002389371395111084, 0.0),
+    (0.002673536539077759, 0.0),
+    (0.0025735199451446533, 0.0),
+    (0.0026831328868865967, 0.0),
+    (0.0027323663234710693, 0.0),
+    (0.0022645890712738037, 0.0),
+    (0.0020789802074432373, 0.0),
+    (0.0022986233234405518, 0.0),
+    (0.002722442150115967, 0.0),
+    (0.004207879304885864, 0.0),
+    (0.0038622617721557617, 0.0),
+    (0.0033617615699768066, 0.0),
+    (0.011775791645050049, 0.0),
+    (0.00656282901763916, 0.0),
+    (0.004483073949813843, 0.0),
+    (0.003920257091522217, 0.0),
+    (0.005175530910491943, 0.0),
+    (0.004033148288726807, 0.0),
+    (0.0031639933586120605, 0.0),
+    (0.0031841695308685303, 0.0),
+    (0.021679610013961792, 0.0),
+    (0.5163999795913696, 0.1417),
+    (0.8240758180618286, 0.27426),
+    (0.8167110681533813, 0.386508),
+    (0.8132230043411255, 0.4783064),
+    (0.7796355485916138, 0.55334512),
+    (0.7537122964859009, 0.614976096),
+    (0.7427810430526733, 0.6646808768),
+    (0.7743226289749146, 0.7044447014399999),
+    (0.7462644577026367, 0.736455761152),
+    (0.648710310459137, 0.7620646089216),
+    (0.5401208400726318, 0.78255168713728),
+    (0.33245888352394104, 0.798941349709824),
+    (0.1715717315673828, 0.8120530797678592),
+    (0.09255599975585938, 0.8213424638142874),
+    (0.05153355002403259, 0.82497397105143),
+    (0.03331121802330017, 0.824879176841144),
+    (0.024947047233581543, 0.8218033414729152),
+    (0.019566744565963745, 0.8121426731783322),
+    (0.01666972041130066, 0.7944141385426657),
+    (0.014286190271377563, 0.7692313108341325),
+    (0.014123111963272095, 0.738285048667306),
+    (0.011937946081161499, 0.7035280389338449),
+    (0.011484354734420776, 0.6583224311470759),
+    (0.011275827884674072, 0.5266579449176607),
+    (0.010425686836242676, 0.4213263559341286),
+    (0.009507685899734497, 0.3370610847473029),
+    (0.00925135612487793, 0.2696488677978423),
+    (0.009106159210205078, 0.21571909423827385),
+    (0.008544832468032837, 0.17257527539061907),
+    (0.008592069149017334, 0.13806022031249526),
+    (0.035856425762176514, 0.11044817624999621),
+    (0.0331246554851532, 0.08835854099999697),
+)
 
 
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
@@ -405,6 +535,157 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             error.assert_not_called()
 
 
+class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def configured_analyzer(self):
+        analyzer = None
+
+        class AnalyzerSelected(Exception):
+            pass
+
+        def capture(context, *, user_params):
+            nonlocal analyzer
+            analyzer = user_params.vad_analyzer
+            raise AnalyzerSelected()
+
+        with patch.object(bot, 'LLMContextAggregatorPair', side_effect=capture):
+            with self.assertRaises(AnalyzerSelected):
+                await bot.run_conversation(None, None, None, llm=object(), transport=object())
+        return analyzer
+
+    async def test_measured_first_short_greeting_is_admitted_once(self):
+        analyzer = await self.configured_analyzer()
+        try:
+            analyzer.set_sample_rate(16000)
+            confidence_scores = iter(pair[0] for pair in MEASURED_FIRST_HI_SCORES)
+            volume_scores = iter(pair[1] for pair in MEASURED_FIRST_HI_SCORES)
+            episodes = 0
+            previous = VADState.QUIET
+            with (
+                patch.object(analyzer, 'voice_confidence', side_effect=lambda buffer: np.array(
+                    [next(confidence_scores)], dtype=np.float32,
+                )) as confidence,
+                patch.object(analyzer, '_get_smoothed_volume', side_effect=lambda audio: next(
+                    volume_scores,
+                )) as volume,
+            ):
+                for index, byte_count in enumerate([608] + [640] * 192):
+                    state = analyzer._run_analyzer(bytes(byte_count))
+                    if index < 50:
+                        self.assertNotEqual(state, VADState.SPEAKING)
+                    if state == VADState.SPEAKING and previous in (VADState.QUIET, VADState.STARTING):
+                        episodes += 1
+                    previous = state
+            self.assertEqual(confidence.call_count, 120)
+            self.assertEqual(volume.call_count, 120)
+            with self.assertRaises(StopIteration):
+                next(confidence_scores)
+            with self.assertRaises(StopIteration):
+                next(volume_scores)
+            self.assertEqual(episodes, 1)
+            self.assertEqual(state, VADState.QUIET)
+        finally:
+            await analyzer.cleanup()
+
+    async def test_brief_or_quiet_sound_does_not_start_speech(self):
+        for label, confidence_score, volume_score, windows in [
+            ('brief', 1.0, 1.0, 5),
+            ('quiet', 1.0, 0.59, 8),
+            ('low_confidence', 0.49, 1.0, 8),
+        ]:
+            with self.subTest(label=label):
+                analyzer = await self.configured_analyzer()
+                try:
+                    analyzer.set_sample_rate(16000)
+                    confidence_scores = iter([confidence_score] * windows + [0.0] * 8)
+                    volume_scores = iter([volume_score] * windows + [0.0] * 8)
+                    with (
+                        patch.object(analyzer, 'voice_confidence', side_effect=lambda buffer: np.array(
+                            [next(confidence_scores)], dtype=np.float32,
+                        )),
+                        patch.object(analyzer, '_get_smoothed_volume', side_effect=lambda audio: next(
+                            volume_scores,
+                        )),
+                    ):
+                        for _ in range(windows + 8):
+                            state = analyzer._run_analyzer(bytes(1024))
+                            self.assertNotEqual(state, VADState.SPEAKING)
+                    self.assertEqual(state, VADState.QUIET)
+                finally:
+                    await analyzer.cleanup()
+
+
+class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_uncertain_turn_uses_600ms_fallback_and_keeps_semantic_completion(self):
+        class SelectionCaptured(Exception):
+            pass
+
+        captured = []
+        vad_analyzers = []
+        original_post_init = UserTurnStrategies.__post_init__
+        original_vad = bot.SileroVADAnalyzer
+
+        def capture_selection(strategies):
+            original_post_init(strategies)
+            captured.append(strategies)
+            raise SelectionCaptured
+
+        def capture_vad(*args, **kwargs):
+            analyzer = original_vad(*args, **kwargs)
+            vad_analyzers.append(analyzer)
+            return analyzer
+
+        try:
+            with patch.object(UserTurnStrategies, '__post_init__', capture_selection), \
+                    patch.object(bot, 'SileroVADAnalyzer', capture_vad):
+                with self.assertRaises(SelectionCaptured):
+                    await bot.run_conversation(None, None, None, llm=object(), transport=object())
+            self.assertEqual(len(captured), 1)
+            strategies = captured[0]
+            self.assertEqual(len(strategies.stop), 1)
+            self.assertIsInstance(strategies.stop[0], TurnAnalyzerUserTurnStopStrategy)
+            self.assertEqual(
+                [type(strategy) for strategy in strategies.start],
+                [VADUserTurnStartStrategy, TranscriptionUserTurnStartStrategy],
+            )
+            analyzer = strategies.stop[0]._turn_analyzer
+            analyzer.set_sample_rate(16000)
+            # 320 PCM16 samples at 16 kHz are 20 ms per chunk.
+            chunk = bytes(640)
+            predictions = [
+                {'prediction': 0, 'probability': 0.0},
+                {'prediction': 1, 'probability': 1.0},
+            ]
+            with patch.object(analyzer, '_predict_endpoint', side_effect=predictions) as predict:
+                for _ in range(2):
+                    analyzer.append_audio(chunk, is_speech=True)
+                state, _ = await analyzer.analyze_end_of_turn()
+                self.assertEqual(state, EndOfTurnState.INCOMPLETE)
+                for _ in range(29):
+                    self.assertEqual(
+                        analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.INCOMPLETE,
+                    )
+                self.assertEqual(
+                    analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.COMPLETE,
+                )
+                self.assertFalse(analyzer.speech_triggered)
+                for _ in range(2):
+                    analyzer.append_audio(chunk, is_speech=True)
+                self.assertEqual(
+                    analyzer.append_audio(chunk, is_speech=False), EndOfTurnState.INCOMPLETE,
+                )
+                state, _ = await analyzer.analyze_end_of_turn()
+                self.assertEqual(state, EndOfTurnState.COMPLETE)
+                self.assertEqual(predict.call_count, 2)
+        finally:
+            try:
+                for strategies in captured:
+                    for strategy in strategies.start + strategies.stop:
+                        await strategy.cleanup()
+            finally:
+                for analyzer in vad_analyzers:
+                    await analyzer.cleanup()
+
+
 class SessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         fault = patch.object(bot.ECHO_REMOVAL, "fault", return_value=None)
@@ -413,6 +694,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         retry = patch.object(bot, "ECHO_REMOVAL_RETRY", 0)
         retry.start()
         self.addCleanup(retry.stop)
+        engine = patch.object(bot, 'make_llm', side_effect=lambda: Mock(
+            start_preparation=Mock(), close_local_tools=AsyncMock(), close_engine=AsyncMock(),
+        ))
+        engine.start()
+        self.addCleanup(engine.stop)
 
     def arguments(self):
         connection = Mock()
@@ -428,24 +714,229 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         connection.disconnect = AsyncMock()
         return Mock(webrtc_connection=connection)
 
+    async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
+        preparing = asyncio.Event()
+        loading = asyncio.Event()
+        release_local = asyncio.Event()
+        hold_preparation = asyncio.Event()
+        received_services = []
+        preparation_pending = []
+
+        async def prepare():
+            preparing.set()
+            await hold_preparation.wait()
+
+        async def load_local():
+            loading.set()
+            await release_local.wait()
+
+        service = bot.HermesLLMService()
+        service.prepare_engine = AsyncMock(side_effect=prepare)
+        service.close_local_tools = AsyncMock(wraps=service.close_local_tools)
+        service.close_engine = AsyncMock(wraps=service.close_engine)
+        stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
+        args = self.arguments()
+
+        async def conversation(runner_args, stt, voice, *, llm=None):
+            received_services.append(llm)
+            preparation_pending.append(llm is not None and not llm.reader.done())
+
+        with (
+            patch.object(bot, 'VOICE_MODEL', object()),
+            patch.object(bot, 'NemotronSTT', return_value=stt),
+            patch.object(bot, 'make_llm', return_value=service),
+            patch.object(bot, 'run_conversation', conversation),
+            patch.object(bot.torch, 'set_num_threads'),
+        ):
+            task = asyncio.create_task(bot.bot(args))
+            try:
+                await asyncio.wait_for(loading.wait(), 5)
+                self.assertTrue(preparing.is_set(), 'Engine preparation starts while local loading is held')
+                reader = service.reader
+                self.assertFalse(reader.done())
+                release_local.set()
+                await asyncio.wait_for(task, 5)
+                self.assertEqual(received_services, [service])
+                self.assertEqual(preparation_pending, [True])
+                self.assertTrue(reader.done())
+                service.close_local_tools.assert_awaited_once()
+                service.close_engine.assert_awaited_once()
+                stt.close.assert_awaited_once()
+                args.webrtc_connection.disconnect.assert_awaited_once()
+            finally:
+                release_local.set()
+                hold_preparation.set()
+                await asyncio.wait_for(task, 5)
+
+        for failure in ('local_model_failure', 'early_disconnect', 'conversation_failure'):
+            with self.subTest(failure=failure):
+                service = bot.HermesLLMService()
+                service.prepare_engine = AsyncMock(side_effect=asyncio.Event().wait)
+                service.close_local_tools = AsyncMock(wraps=service.close_local_tools)
+                native_close = service.close_engine
+                readers = []
+
+                async def close_engine():
+                    readers.append(service.reader)
+                    await native_close()
+
+                service.close_engine = AsyncMock(side_effect=close_engine)
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                args = self.arguments()
+                if failure == 'local_model_failure':
+                    stt.load.side_effect = RuntimeError('local model failed')
+                elif failure == 'early_disconnect':
+                    async def disconnect_during_load():
+                        await args.webrtc_connection.handlers['closed'](args.webrtc_connection)
+
+                    stt.load.side_effect = disconnect_during_load
+                conversation = AsyncMock(
+                    side_effect=RuntimeError('conversation construction failed')
+                    if failure == 'conversation_failure' else None,
+                )
+                with (
+                    patch.object(bot, 'VOICE_MODEL', object()),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'make_llm', return_value=service),
+                    patch.object(bot, 'run_conversation', conversation),
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    if failure == 'early_disconnect':
+                        await bot.bot(args)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            await bot.bot(args)
+                    service.close_local_tools.assert_awaited_once()
+                    service.close_engine.assert_awaited_once()
+                    self.assertTrue(readers[0].done())
+                    stt.close.assert_awaited_once()
+                    args.webrtc_connection.disconnect.assert_awaited_once()
+                    if failure == 'conversation_failure':
+                        self.assertIs(conversation.await_args.kwargs['llm'], service)
+                    else:
+                        conversation.assert_not_awaited()
+
     async def test_voice_weights_are_reused_between_sessions(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
-        model = object()
+        events = []
+
+        def chunks(**kwargs):
+            events.append('warm')
+            try:
+                yield np.zeros(8, dtype=np.float32)
+            finally:
+                events.append('closed')
+
+        model = Mock(generate_streaming=Mock(side_effect=chunks))
+
+        def load_model(*args, **kwargs):
+            events.append('load')
+            return model
+
         args = self.arguments()
         with (
             patch.object(bot, "VOICE_MODEL", None),
             patch.object(bot, "NemotronSTT", return_value=stt),
-            patch.object(bot.VoxCPM, "from_pretrained", return_value=model) as load,
+            patch.object(bot.VoxCPM, "from_pretrained", side_effect=load_model) as load,
             patch.object(bot, "run_conversation", new_callable=AsyncMock) as conversation,
             patch.object(bot.torch, "set_num_threads"),
         ):
+            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
             await bot.bot(args)
             await bot.bot(args)
             load.assert_called_once()
+            model.generate_streaming.assert_called_once()
+            self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
+            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
             self.assertIs(conversation.await_args.args[2], model)
             self.assertEqual(stt.close.await_count, 2)
             self.assertEqual(args.webrtc_connection.disconnect.await_count, 2)
+
+    async def test_voice_preparation_finishes_before_conversation_and_failure_is_not_cached(self):
+        loop = asyncio.get_running_loop()
+        activity = asyncio.Event()
+        release = threading.Event()
+        events = []
+
+        def gated_chunks(**kwargs):
+            try:
+                events.append('first_chunk')
+                yield np.zeros(8, dtype=np.float32)
+                events.append('gated')
+                loop.call_soon_threadsafe(activity.set)
+                if not release.wait(5):
+                    raise AssertionError('Voice preparation gate was not released')
+                events.append('remaining_chunk')
+                yield np.zeros(8, dtype=np.float32)
+                events.append('exhausted')
+            finally:
+                events.append('closed')
+
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        model = Mock(generate_streaming=Mock(side_effect=gated_chunks))
+        args = self.arguments()
+        with (
+            patch.object(bot, 'VOICE_MODEL', None),
+            patch.object(bot, 'NemotronSTT', return_value=stt),
+            patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+            patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+            patch.object(bot.torch, 'set_num_threads'),
+        ):
+            conversation.side_effect = lambda *args, llm=None: events.append('conversation')
+            task = asyncio.create_task(bot.bot(args))
+            task.add_done_callback(lambda completed: activity.set())
+            try:
+                await asyncio.wait_for(activity.wait(), 5)
+                self.assertIsNone(bot.VOICE_MODEL)
+                conversation.assert_not_awaited()
+                self.assertFalse(task.done())
+                self.assertEqual(events, ['first_chunk', 'gated'])
+                release.set()
+                await asyncio.wait_for(task, 5)
+                self.assertEqual(events, [
+                    'first_chunk', 'gated', 'remaining_chunk', 'exhausted', 'closed', 'conversation',
+                ])
+                self.assertIs(bot.VOICE_MODEL, model)
+                conversation.assert_awaited_once()
+            finally:
+                release.set()
+                await asyncio.wait_for(task, 5)
+
+        for label in ('late_failure', 'empty'):
+            with self.subTest(label=label):
+                failed_events = []
+
+                def failed_chunks(**kwargs):
+                    try:
+                        failed_events.append('first_chunk')
+                        yield np.zeros(8, dtype=np.float32)
+                        raise RuntimeError('Voice preparation failed')
+                    finally:
+                        failed_events.append('closed')
+
+                def empty_chunks(**kwargs):
+                    yield from ()
+
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                generator = failed_chunks if label == 'late_failure' else empty_chunks
+                model = Mock(generate_streaming=Mock(side_effect=generator))
+                args = self.arguments()
+                with (
+                    patch.object(bot, 'VOICE_MODEL', None),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+                    patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, '[Pp]reparation'):
+                        await bot.bot(args)
+                    self.assertIsNone(bot.VOICE_MODEL)
+                    conversation.assert_not_awaited()
+                    if label == 'late_failure':
+                        self.assertEqual(failed_events, ['first_chunk', 'closed'])
+                    stt.close.assert_awaited_once()
+                    args.webrtc_connection.disconnect.assert_awaited_once()
 
     async def test_model_load_failure_closes_worker_and_connection(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())
@@ -557,7 +1048,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         ended = asyncio.Event()
         args.webrtc_connection.disconnect.side_effect = ended.set
 
-        async def conversation(runner_args, stt, voice):
+        async def conversation(runner_args, stt, voice, *, llm=None):
             started.set()
             await ended.wait()
 
@@ -602,7 +1093,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def open_session(self, brain, *, wire=None, local_command=None):
+    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False):
         if brain is not None:
             require_native_hermes()
         started = asyncio.Event()
@@ -674,41 +1165,48 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         spawn_patch = patch.object(bot.asyncio, 'create_subprocess_exec', spawn)
         spawn_patch.start()
         self.addCleanup(spawn_patch.stop)
-        if local_command is not None:
-            def make_llm():
-                transport.llm = bot.HermesLLMService(local_command=local_command)
-                return transport.llm
-
-            make_llm_patch = patch.object(bot, 'make_llm', make_llm)
-            make_llm_patch.start()
-            self.addCleanup(make_llm_patch.stop)
-        user_params = bot.LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
-        )
-        session = asyncio.create_task(bot.run_conversation(
-            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
-            transport=transport, user_params=user_params,
-        ))
+        supplied_llm = bot.HermesLLMService(local_command=local_command)
+        transport.llm = supplied_llm
+        session = None
 
         async def close():
-            if not session.done():
-                if not started.is_set():
-                    session.cancel()
-                else:
-                    await handlers['on_client_disconnected'](transport, None)
             try:
-                await asyncio.wait_for(session, 5)
-            except asyncio.CancelledError:
-                pass
+                if session is not None:
+                    try:
+                        if not session.done():
+                            if not started.is_set():
+                                session.cancel()
+                            else:
+                                await handlers['on_client_disconnected'](transport, None)
+                    finally:
+                        try:
+                            await asyncio.wait_for(session, 5)
+                        except asyncio.CancelledError:
+                            pass
+            finally:
+                try:
+                    await supplied_llm.close_local_tools()
+                finally:
+                    await supplied_llm.close_engine()
             for process, home in processes:
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
                 self.assertFalse(home.exists())
             spawn_patch.stop()
-            if local_command is not None:
-                make_llm_patch.stop()
 
         self.addAsyncCleanup(close)
+        if prepare_engine:
+            supplied_llm.start_preparation()
+        else:
+            # Unrelated turn/history cases project an already-ready worker, not production startup.
+            await supplied_llm.open_engine()
+        user_params = bot.LLMUserAggregatorParams(
+            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
+        )
+        session = asyncio.create_task(bot.run_conversation(
+            Mock(), bot.NemotronSTT(), Mock(generate_streaming=chunks),
+            llm=supplied_llm, transport=transport, user_params=user_params,
+        ))
         await asyncio.wait_for(started.wait(), 45)
         return transport, spoken, committed, interrupted, processes, close
 
@@ -717,6 +1215,181 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_native_preparation_is_silent_private_and_does_not_block_mute(self):
+        held = threading.Event()
+        release = threading.Event()
+
+        def preparation_reply():
+            yield {'content': 'Preparation nonce 731.'}, None
+            held.set()
+            if not release.wait(45):
+                raise AssertionError('Preparation reply was not released')
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            preparation_reply(), [({'content': 'Actual caller reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, local_command=command, prepare_engine=True,
+        )
+        preparation = transport.llm.reader
+        try:
+            self.assertTrue(await asyncio.to_thread(held.wait, 5))
+            self.assertFalse(preparation.done())
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Hello.'},
+            ])
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(command.await_count, 7)
+            self.assertFalse(preparation.done())
+            self.assertFalse(release.is_set())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+
+            checkpoint = asyncio.Event()
+            driver = asyncio.current_task()
+            native_shield = asyncio.shield
+            worker_input = processes[0][0].stdin
+            native_write = worker_input.write
+            ordinary_writes = 0
+            pending_writes = 0
+
+            def observe_shield(task):
+                future = native_shield(task)
+                if task is preparation and asyncio.current_task() is not driver:
+                    checkpoint.set()
+                return future
+
+            def observe_write(data):
+                nonlocal ordinary_writes, pending_writes
+                ordinary_writes += 1
+                pending_writes += not preparation.done()
+                checkpoint.set()
+                return native_write(data)
+
+            with (
+                patch.object(asyncio, 'shield', observe_shield),
+                patch.object(worker_input, 'write', observe_write),
+            ):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'Answer the genuine user turn.')
+                await asyncio.wait_for(checkpoint.wait(), 5)
+                self.assertEqual(ordinary_writes, 0, 'Ordinary worker request preceded preparation completion')
+                self.assertFalse(preparation.done())
+                self.assertFalse(release.is_set())
+                self.assertEqual(len(brain.requests), 1)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+
+                release.set()
+                await asyncio.wait_for(asyncio.shield(preparation), 5)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                self.assertEqual(len(brain.requests), 2)
+                self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                    {'role': 'user', 'content': 'Answer the genuine user turn.'},
+                ])
+                self.assertEqual(ordinary_writes, 1)
+                self.assertEqual(pending_writes, 0)
+        finally:
+            release.set()
+            await close()
+        self.assertTrue(preparation.done())
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(processes[0][1].exists())
+
+    async def test_failed_native_preparation_preserves_local_mute_and_reports_on_user_turn(self):
+        brain = ScriptedBrain([400])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, local_command=command, prepare_engine=True,
+        )
+        preparation = transport.llm.reader
+        try:
+            await asyncio.wait_for(asyncio.shield(preparation), 5)
+            self.assertTrue(transport.llm.failure)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(command.await_count, 7)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            await self.assert_failed_reply(
+                transport, spoken, committed, 'Answer after failed preparation.',
+                expected_advisory="I couldn't get a complete reply from the brain on the Ally. Reconnect and try again.",
+            )
+            self.assertEqual(len(brain.requests), 1)
+        finally:
+            await close()
+        self.assertTrue(preparation.done())
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(processes[0][1].exists())
+
+    async def test_preparation_timeout_and_disconnect_reap_owned_worker(self):
+        wire = (
+            'import sys; print(\'{"ready":true}\', flush=True); '
+            'sys.stdin.readline(); sys.stdin.read()'
+        )
+        for outcome in ('timeout', 'disconnect'):
+            with self.subTest(outcome=outcome):
+                pending = asyncio.Event()
+                reads = 0
+                native_read = bot.HermesLLMService.read_event
+
+                async def read_event(service):
+                    nonlocal reads
+                    reads += 1
+                    if reads == 2:
+                        pending.set()
+                    return await native_read(service)
+
+                with (
+                    patch.object(bot, 'ENGINE_TIMEOUT', 1),
+                    patch.object(bot.HermesLLMService, 'read_event', read_event),
+                ):
+                    transport, spoken, committed, _, processes, close = await self.open_session(
+                        None, wire=wire, prepare_engine=True,
+                    )
+                    preparation = transport.llm.reader
+                    try:
+                        await asyncio.wait_for(pending.wait(), 5)
+                        self.assertFalse(preparation.done())
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        if outcome == 'timeout':
+                            await asyncio.wait_for(asyncio.shield(preparation), 5)
+                            self.assertTrue(transport.llm.failure)
+                            self.assertIsNotNone(processes[0][0].returncode)
+                    finally:
+                        await close()
+                    self.assertTrue(preparation.done())
+                    self.assertIsNotNone(processes[0][0].returncode)
+                    self.assertFalse(processes[0][1].exists())
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
 
     async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
         brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])

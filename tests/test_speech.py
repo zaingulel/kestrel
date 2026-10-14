@@ -1,9 +1,13 @@
 import asyncio
+import base64
+import io
 import json
 import os
 import subprocess
+import struct
 import threading
 import unittest
+import wave
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
@@ -28,6 +32,118 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
         service.process.stdin.drain = AsyncMock()
         service.process.stdout.readline = AsyncMock(return_value=response)
         return service
+
+    def reference_wav(self, rate=48000):
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as reference:
+            reference.setnchannels(1)
+            reference.setsampwidth(2)
+            reference.setframerate(rate)
+            reference.writeframes(bytes(9600))
+        return output.getvalue()
+
+    async def test_load_finishes_reference_inference_before_returning(self):
+        service = NemotronSTT()
+        process = Mock(returncode=None)
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        activity = asyncio.Event()
+        release = asyncio.Event()
+        responses = iter([b'{"ready":true}\n', b'{"text":"discarded preparation"}\n'])
+
+        async def read_response():
+            response = next(responses)
+            if b'"text"' in response:
+                await release.wait()
+            return response
+
+        process.stdout.readline = AsyncMock(side_effect=read_response)
+        process.stdin.write.side_effect = lambda request: activity.set()
+        reference = Mock(open=Mock(return_value=io.BytesIO(self.reference_wav())))
+        with (
+            patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
+            patch.object(speech, 'VOICE_REFERENCE', reference),
+        ):
+            load = asyncio.create_task(service.load())
+            load.add_done_callback(lambda completed: activity.set())
+            try:
+                await asyncio.wait_for(activity.wait(), 5)
+                self.assertEqual(process.stdin.write.call_count, 1)
+                request = json.loads(process.stdin.write.call_args.args[0])
+                with wave.open(io.BytesIO(base64.b64decode(request['audio'])), 'rb') as audio:
+                    self.assertEqual(audio.getnchannels(), 1)
+                    self.assertEqual(audio.getsampwidth(), 2)
+                    self.assertEqual(audio.getframerate(), 16000)
+                    self.assertEqual(audio.getnframes(), 1600)
+                    self.assertEqual(len(audio.readframes(1600)), 3200)
+                self.assertFalse(load.done())
+                reference.open.assert_called_once_with('rb')
+                release.set()
+                self.assertIsNone(await load)
+                self.assertEqual(process.stdin.write.call_count, 1)
+            finally:
+                release.set()
+                await load
+                await service.close()
+
+    async def test_load_rejects_unusable_reference_or_warmup_failure(self):
+        valid = self.reference_wav()
+        declared_bytes = 480001 * 2
+        oversized = (
+            b'RIFF' + struct.pack('<I', 36 + declared_bytes) + b'WAVEfmt '
+            + struct.pack('<IHHIIHH', 16, 1, 1, 48000, 96000, 2, 16)
+            + b'data' + struct.pack('<I', declared_bytes) + bytes(2)
+        )
+
+        class ObservedReference(io.BytesIO):
+            def __init__(self, data):
+                super().__init__(data)
+                self.reads = []
+
+            def read(self, size=-1):
+                self.reads.append((self.tell(), size))
+                return super().read(size)
+
+        for label, data in [
+            ('malformed', b'not a WAV'),
+            ('oversized', oversized),
+            ('truncated', valid[:-2]),
+            ('wrong_rate', self.reference_wav(rate=44100)),
+            ('worker_error', valid),
+        ]:
+            with self.subTest(label=label):
+                reference = ObservedReference(data)
+                process = Mock(returncode=None)
+                process.stdin.drain = AsyncMock()
+                process.wait = AsyncMock()
+                process.stdout.readline = AsyncMock(side_effect=[
+                    b'{"ready":true}\n', b'{"error":"preparation inference failed"}\n',
+                ])
+                service = NemotronSTT()
+                native_resample = speech.SOXRAudioResampler.resample
+                with (
+                    patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
+                    patch.object(speech, 'VOICE_REFERENCE', Mock(open=Mock(return_value=reference))),
+                    patch.object(
+                        speech.SOXRAudioResampler, 'resample', autospec=True,
+                        side_effect=native_resample,
+                    ) as resample,
+                    patch.object(speech.wave, 'Wave_write', wraps=wave.Wave_write) as encoder,
+                ):
+                    try:
+                        with self.assertRaises(RuntimeError) as failure:
+                            await service.load()
+                        self.assertTrue(str(failure.exception).strip())
+                        if label == 'worker_error':
+                            self.assertEqual(process.stdin.write.call_count, 1)
+                        else:
+                            process.stdin.write.assert_not_called()
+                        if label == 'oversized':
+                            self.assertFalse(any(position >= 44 for position, size in reference.reads))
+                            resample.assert_not_called()
+                            encoder.assert_not_called()
+                    finally:
+                        await service.close()
 
     async def test_transcript_is_finalized_and_audio_is_sent(self):
         service = self.service(b'{"text":"hello kestrel"}\n')

@@ -65,10 +65,19 @@ user, so its named anti-regression test keeps pinning it.
 ### Whole-conversation evidence
 
 For reply-text sequences spanning multiple turns, interruption and follow-up, drive the real
-`run_conversation(runner_args, stt, voice, *, transport=None, user_params=None)` session in
-[bot.py](../bot.py). Its keyword-only dependencies let a test supply a forwarding transport and native
+`run_conversation(runner_args, stt, voice, *, llm, transport=None, user_params=None)` session in
+[bot.py](../bot.py). Its caller creates and cleans up the required service; the service owns its preparation reader
+through `start_preparation()`. Keyword-only dependencies let a test supply a forwarding transport and native
 user-turn strategies while preserving the production defaults. Keep the real pipeline worker, context aggregators,
 cancellation and speech adapters; do not replace the conversation with a fake engine.
+
+[WholeConversationTests.open_session](../tests/test_bot.py) always owns and supplies one real Hermes service,
+registering cleanup before awaiting startup. Dedicated preparation cases start real preparation without awaiting it,
+proving concurrent preparation, private provider requests/history, pending mute and cleanup. Unrelated turn/history
+cases await `open_engine()` first as an already-ready projection, not a production startup path. Empty caller history,
+a ready worker or sticky startup failure, and no pending reader preserve those cases' observations: completed
+preparation's reader wait is immediate and its messages never enter caller history. Timing and preparation claims
+must use the dedicated pending-preparation cases, never this projection.
 
 [WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
 supplies finalized heard text through native `ProposedUserStartedSpeakingFrame`, `TranscriptionFrame` and
