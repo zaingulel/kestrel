@@ -10,6 +10,7 @@ import subprocess
 import threading
 import wave
 from pathlib import Path
+from time import monotonic
 
 import numpy as np
 from loguru import logger
@@ -171,6 +172,7 @@ class LaptopOutput(BaseOutputTransport):
         self.audio = audio
         self.write_lock = asyncio.Lock()
         self.playback_written = False
+        self.playback_deadline: float | None = None
         self.write_gate = asyncio.Event()
         self.write_gate.set()
 
@@ -188,6 +190,7 @@ class LaptopOutput(BaseOutputTransport):
                     if self.playback_written:
                         await self.audio._discard_playback()
                         self.playback_written = False
+                        self.playback_deadline = None
             finally:
                 self.write_gate.set()
         else:
@@ -201,10 +204,16 @@ class LaptopOutput(BaseOutputTransport):
             try:
                 if self.audio.playback is None:
                     await self.audio._open_playback()
+                duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+                deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
                 self.playback_written = True
                 self.audio.playback.stdin.write(frame.audio)
                 await self.audio.playback.stdin.drain()
-                await sleep(len(frame.audio) / (2 * frame.num_channels * frame.sample_rate))
+                now = monotonic()
+                if deadline <= now:
+                    deadline = now + duration
+                await sleep(deadline - now)
+                self.playback_deadline = deadline
                 return True
             except (OSError, RuntimeError):
                 self.audio.fail(LAPTOP_PLAYBACK_FAILURE)

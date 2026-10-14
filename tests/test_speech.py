@@ -643,12 +643,47 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                         if child.wait.await_count:
                             self.assertIsNotNone(child.returncode)
 
+    async def test_playback_clock_compensates_overhead_and_rebases_after_gaps(self):
+        now = 100.000
+        waits = []
+        drain_delays = iter([0.003, 0.003, 0.003, 0.100])
+        playback = self.child(3300)
+
+        async def drain():
+            nonlocal now
+            now += next(drain_delays)
+
+        async def paced(duration):
+            nonlocal now
+            waits.append(duration)
+            now += duration + 0.002
+
+        playback.stdin.drain = AsyncMock(side_effect=drain)
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock())
+        transport.playback = playback
+        self.addAsyncCleanup(transport.close)
+        audio = [b"A" * 3840, b"B" * 3840, b"C" * 3840, b"D" * 3840]
+        with (patch.object(speech, "monotonic", lambda: now),
+              patch.object(speech, "sleep", paced)):
+            self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(audio[0], 48000, 1)))
+            now += 0.005
+            self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(audio[1], 48000, 1)))
+            now = 101.000
+            self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(audio[2], 48000, 1)))
+            self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(audio[3], 48000, 1)))
+        self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list], audio)
+        self.assertEqual(len(waits), 4)
+        for actual, expected in zip(waits, [0.037, 0.030, 0.040, 0.040]):
+            self.assertAlmostEqual(actual, expected)
+        self.assertIsNone(transport.failure)
+
     async def test_interruption_discards_old_playback_before_new_audio(self):
         capture, old, new = self.child(3200), self.child(3300), self.child(3400)
         waits = asyncio.Queue()
         release = asyncio.Event()
         processes = iter([old, new])
         spawn_events = []
+        now = 100.000
 
         async def spawn(*argv, **kwargs):
             if "--record" in argv:
@@ -666,7 +701,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
         transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock())
         self.addAsyncCleanup(transport.close)
-        with (patch.object(speech.asyncio, "create_subprocess_exec", spawn), patch.object(speech, "sleep", paced)):
+        with (patch.object(speech.asyncio, "create_subprocess_exec", spawn),
+              patch.object(speech, "monotonic", lambda: now), patch.object(speech, "sleep", paced)):
             await transport.open()
             worker, observed = await self.pipeline(transport.output())
             unwritten_interrupted = asyncio.Event()
@@ -680,26 +716,35 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(transport.playback, old)
             old.kill.assert_not_called()
             old.stdin.write.assert_not_called()
+            await worker.queue_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1))
+            self.assertAlmostEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
+            now = 100.040
+            release.set()
+            completed = await self.next_frame(observed, TTSAudioRawFrame)
+            self.assertEqual(completed.audio, b"P" * 3840)
+            release.clear()
             await worker.queue_frames([TTSAudioRawFrame(b"A" * 7680, 48000, 1), TTSTextFrame("unheard old tail", aggregated_by="sentence")])
-            self.assertEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
-            self.assertEqual(old.stdin.write.call_args_list, [((b"A" * 3840,), {})])
+            self.assertAlmostEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
+            self.assertEqual(old.stdin.write.call_args_list, [((b"P" * 3840,), {}), ((b"A" * 3840,), {})])
             self.assertFalse(any(isinstance(frame, (TTSTextFrame, TTSAudioRawFrame)) for frame in observed._queue))
+            now = 100.050
             await worker.queue_frame(InterruptionFrame())
             await self.next_frame(observed, InterruptionFrame)
             await worker.queue_frames([TTSAudioRawFrame(b"B" * 3840, 48000, 1), TTSTextFrame("new spoken reply", aggregated_by="sentence")])
-            self.assertEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
+            self.assertAlmostEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
             self.assertEqual(spawn_events, [3300, 3400])
             old.kill.assert_called_once_with()
             old.wait.assert_awaited()
             old.stdin.close.assert_called_once_with()
             self.assertEqual(new.stdin.write.call_args_list, [((b"B" * 3840,), {})])
             self.assertFalse(any(isinstance(frame, (TTSTextFrame, TTSAudioRawFrame)) for frame in observed._queue))
+            now = 100.090
             release.set()
             frame = await self.next_frame(observed, TTSAudioRawFrame)
             self.assertEqual(frame.audio, b"B" * 3840)
             spoken = await self.next_frame(observed, TTSTextFrame)
             self.assertEqual(spoken.text, "new spoken reply")
-            self.assertEqual(old.stdin.write.call_count, 1, "Native interruption must drop the queued old chunk")
+            self.assertEqual(old.stdin.write.call_count, 2, "Native interruption must drop the queued old chunk")
             self.assertIsNone(transport.failure)
             await worker.cancel()
 

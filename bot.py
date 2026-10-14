@@ -439,6 +439,7 @@ async def run_conversation(stt, voice, *, llm, transport, user_params=None, hand
 
     worker = PipelineWorker(
         pipeline,
+        idle_timeout_secs=None,
         observers=[latency_observer],
         params=PipelineParams(
             audio_in_sample_rate=16000, audio_out_sample_rate=48000,

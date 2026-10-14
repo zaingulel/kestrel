@@ -1041,6 +1041,48 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         await service.close_local_tools()
                         await service.close_engine()
 
+    async def test_conversation_has_no_idle_deadline_and_stops_on_request(self):
+        started = asyncio.Event()
+        worker = None
+        native_worker = bot.PipelineWorker
+
+        class Forward(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                await self.push_frame(frame, direction)
+
+        def capture_worker(*args, **kwargs):
+            nonlocal worker
+            worker = native_worker(*args, **kwargs)
+
+            @worker.event_handler("on_pipeline_started")
+            async def on_pipeline_started(worker, frame):
+                started.set()
+
+            return worker
+
+        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
+        params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
+        with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
+            task = asyncio.create_task(bot.run_conversation(
+                Forward(), self.voice, llm=Forward(), transport=transport, user_params=params,
+            ))
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                # Pipecat 1.12.0 starts its idle monitor before the started event; no public getter exists.
+                self.assertIsNone(worker._idle_timeout_secs)
+                self.assertIsNone(worker._idle_monitor_task)
+                self.assertFalse(task.done())
+                await worker.cancel()
+                await asyncio.wait_for(task, 5)
+            finally:
+                if not task.done():
+                    if worker is not None:
+                        await worker.cancel()
+                    else:
+                        task.cancel()
+                    await asyncio.wait_for(task, 5)
+
     async def test_pipeline_latency_log_contains_only_numeric_measurement(self):
         started, measured = asyncio.Event(), asyncio.Event()
         messages = []
