@@ -37,7 +37,7 @@ The current build of Kestrel.
 _Avoid_: trial
 
 **Experiment**:
-The work issue #1 describes, ending in a measured choice of brain and shape.
+The work the [specification (#11)](https://github.com/zaingulel/kestrel/issues/11) describes, ending in a measured choice of brain and shape.
 _Avoid_: trial, prototype
 
 ## Workflow
