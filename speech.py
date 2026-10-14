@@ -290,9 +290,7 @@ class LaptopAudioTransport:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), 5)
                 self.received_audio.set()
                 if self.verified and self._input.ready and not self.closed:
-                    await asyncio.to_thread(self.echo_removal.microphone_serial, self.capture.pid)
-                    if self.verified and not self.closed:
-                        await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
+                    await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
             self.fail("Laptop microphone capture failed. Restart Kestrel.")
 

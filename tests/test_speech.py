@@ -547,7 +547,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 spawned.set()
             return child
 
-        transport = speech.LaptopAudioTransport(Mock(microphone_serial=serial), on_stopped=Mock())
+        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(side_effect=serial)), on_stopped=Mock())
         self.addAsyncCleanup(transport.close)
         with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
             opening = asyncio.create_task(transport.open())
@@ -558,13 +558,15 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.to_thread(checked.wait, 5), 5)
                 release.set()
                 await asyncio.wait_for(opening, 5)
+                startup_graph_calls = transport.echo_removal.microphone_serial.call_count
                 capture.stdout.feed_data(b"B" * 640)
                 self.assertEqual(await asyncio.wait_for(consumed.get(), 5), b"B" * 640)
                 worker, observed = await self.pipeline(transport.input())
-                capture.stdout.feed_data(b"C" * 640)
-                frame = await self.next_frame(observed, InputAudioRawFrame)
-                self.assertEqual(frame.audio, b"C" * 640)
-                self.assertEqual((frame.sample_rate, frame.num_channels), (16000, 1))
+                capture.stdout.feed_data(b"C" * 640 + b"D" * 640)
+                frames = [await self.next_frame(observed, InputAudioRawFrame) for _ in range(2)]
+                self.assertEqual([frame.audio for frame in frames], [b"C" * 640, b"D" * 640])
+                self.assertEqual([(frame.sample_rate, frame.num_channels) for frame in frames], [(16000, 1)] * 2)
+                self.assertEqual(transport.echo_removal.microphone_serial.call_count, startup_graph_calls)
                 await worker.cancel()
             finally:
                 release.set()
@@ -572,17 +574,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(transport.failure)
 
     async def test_capture_failure_stops_without_fallback(self):
-        for case in ("eof", "truncated", "missing", "removed", "timeout"):
+        for case in ("eof", "truncated", "missing", "timeout"):
             with self.subTest(case=case):
                 capture, playback = self.child(3200), self.child(3300)
                 stopped = asyncio.Event()
                 requests = []
-                source_calls = 0
 
                 def serial(pid=None):
-                    nonlocal source_calls
-                    source_calls += 1
-                    if case == "missing" or (case == "removed" and source_calls > 2):
+                    if case == "missing":
                         raise RuntimeError("The owned microphone is missing. Restart Kestrel.")
                     return 900
 
@@ -610,8 +609,6 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             elif case == "truncated":
                                 capture.stdout.feed_data(b"X" * 639)
                                 capture.stdout.feed_eof()
-                            elif case == "removed":
-                                capture.stdout.feed_data(b"X" * 640)
                             else:
                                 capture.stdout.set_exception(TimeoutError())
                         await asyncio.wait_for(stopped.wait(), 5)
