@@ -403,7 +403,13 @@ class EchoRemovalTests(unittest.TestCase):
     def test_capture_requires_the_owned_echo_source_and_client(self):
         self.assertEqual(self.serial(self.graph(), None), 900)
         self.assertEqual(self.serial(self.graph()), 900)
-        for case in ("foreign_source", "foreign_capture", "extra_incoming", "paused", "missing_source"):
+        graph = self.graph()
+        second_channel = self.link(8, 9, "active")
+        second_channel["id"] = 109
+        graph.append(second_channel)
+        self.assertEqual(self.serial(graph), 900)
+        for case in ("foreign_source", "foreign_capture", "extra_incoming", "paused", "missing_source",
+                     "paused_second", "no_incoming"):
             with self.subTest(case=case):
                 graph = self.graph()
                 if case == "foreign_source":
@@ -414,6 +420,12 @@ class EchoRemovalTests(unittest.TestCase):
                     graph += [self.node(10, "raw-microphone", 30, 902), self.link(10, 9, "active")]
                 elif case == "paused":
                     graph[-1]["info"]["state"] = "paused"
+                elif case == "paused_second":
+                    second_channel = self.link(8, 9, "paused")
+                    second_channel["id"] = 109
+                    graph.append(second_channel)
+                elif case == "no_incoming":
+                    graph.pop()
                 else:
                     graph.pop(2)
                 with self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
@@ -595,26 +607,27 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     return playback
 
                 transport = speech.LaptopAudioTransport(Mock(microphone_serial=serial), on_stopped=Mock(side_effect=stopped.set))
-                with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
+                with (
+                    patch.object(speech.asyncio, "create_subprocess_exec", spawn),
+                    patch.object(speech, "LAPTOP_AUDIO_START_TIMEOUT", 0.05 if case == "missing" else 10),
+                    patch.object(speech, "LAPTOP_CAPTURE_STALL_TIMEOUT", 0.05 if case == "timeout" else 5),
+                ):
                     try:
                         if case == "missing":
-                            # A controlled expiry at the external wait, without ten seconds of real delay.
-                            with patch.object(speech.asyncio, "sleep", AsyncMock(side_effect=TimeoutError)):
-                                with self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
-                                    await transport.open()
+                            with self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
+                                await asyncio.wait_for(transport.open(), 5)
                             self.assertEqual(requests, [])
                         else:
-                            await transport.open()
-                            await self.pipeline(transport.input())
-                            if case == "eof":
-                                capture.stdout.feed_eof()
-                            elif case == "truncated":
-                                capture.stdout.feed_data(b"X" * 639)
-                                capture.stdout.feed_eof()
-                            else:
-                                capture.stdout.set_exception(TimeoutError())
+                            await asyncio.wait_for(transport.open(), 5)
+                            if case != "timeout":
+                                await self.pipeline(transport.input())
+                                if case == "eof":
+                                    capture.stdout.feed_eof()
+                                else:
+                                    capture.stdout.feed_data(b"X" * 639)
+                                    capture.stdout.feed_eof()
                         await asyncio.wait_for(stopped.wait(), 5)
-                        self.assertIn("Restart Kestrel.", transport.failure)
+                        self.assertEqual(transport.failure, "Laptop microphone capture failed. Restart Kestrel.")
                         first_failure = transport.failure
                         transport.fail("later private payload")
                         self.assertEqual(transport.failure, first_failure)
@@ -654,6 +667,17 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(speech.asyncio, "create_subprocess_exec", spawn), patch.object(speech, "sleep", paced)):
             await transport.open()
             worker, observed = await self.pipeline(transport.output())
+            unwritten_interrupted = asyncio.Event()
+
+            async def interruption_processed(processor, frame, direction):
+                unwritten_interrupted.set()
+
+            await transport.output().queue_frame(InterruptionFrame(), callback=interruption_processed)
+            await self.next_frame(observed, InterruptionFrame)
+            await asyncio.wait_for(unwritten_interrupted.wait(), 5)
+            self.assertIs(transport.playback, old)
+            old.kill.assert_not_called()
+            old.stdin.write.assert_not_called()
             await worker.queue_frames([TTSAudioRawFrame(b"A" * 7680, 48000, 1), TTSTextFrame("unheard old tail", aggregated_by="sentence")])
             self.assertEqual(await asyncio.wait_for(waits.get(), 5), 0.04)
             self.assertEqual(old.stdin.write.call_args_list, [((b"A" * 3840,), {})])
@@ -848,9 +872,9 @@ async def main():
     async def spawn(*argv, **kwargs):
         prefix = argv[:argv.index("stdbuf")] if "--record" in argv else argv[:argv.index("pw-cat")]
         if "--record" in argv:
-            code = 'import sys,signal;sys.stdout.buffer.write(bytes(640));sys.stdout.flush();signal.pause()'
+            code = 'import sys,signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);sys.stdout.buffer.write(bytes(640));sys.stdout.flush();signal.pause()'
         else:
-            code = 'import sys,signal;print("ready",flush=True);signal.pause()'
+            code = 'import sys,signal;signal.signal(signal.SIGTERM,signal.SIG_IGN);print("ready",flush=True);signal.pause()'
             kwargs["stdout"] = asyncio.subprocess.PIPE
         return await original_spawn(*prefix, sys.executable, "-c", code, **kwargs)
     asyncio.create_subprocess_exec = spawn

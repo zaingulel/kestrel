@@ -38,6 +38,10 @@ BOUND_TO_KESTREL = [
 ]
 # Seconds a terminated echo removal process is given before it is killed.
 ECHO_REMOVAL_STOP_WAIT = 5
+LAPTOP_AUDIO_START_TIMEOUT = 10
+LAPTOP_CAPTURE_STALL_TIMEOUT = 5
+LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
+LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
 
 
 class EchoRemoval:
@@ -46,7 +50,6 @@ class EchoRemoval:
         self._closing = False
 
     def start(self, on_stopped):
-        self._closing = False
         # The parent-death signal follows the spawning thread, so this runs on the main thread,
         # and the new session keeps a terminal Ctrl+C from stopping echo removal first.
         self.process = subprocess.Popen(
@@ -120,14 +123,16 @@ class EchoRemoval:
                 if len(captures) != 1:
                     raise ValueError
                 incoming = [info for info in links if info["input-node-id"] == captures[0]["id"]]
-                if len(incoming) != 1 or incoming[0]["output-node-id"] != source["id"] or incoming[0]["state"] != "active":
+                if not incoming or not all(
+                    info["output-node-id"] == source["id"] and info["state"] == "active" for info in incoming
+                ):
                     raise ValueError
             return serial
         except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError, AttributeError):
             raise RuntimeError("The owned echo-removed microphone could not be verified. Restart Kestrel.") from None
 
     def close(self):
-        if self._closing or self.process is None:
+        if self.process is None:
             return
         self._closing = True
         self.process.terminate()
@@ -165,6 +170,7 @@ class LaptopOutput(BaseOutputTransport):
         super().__init__(params)
         self.audio = audio
         self.write_lock = asyncio.Lock()
+        self.playback_written = False
         self.write_gate = asyncio.Event()
         self.write_gate.set()
 
@@ -179,7 +185,9 @@ class LaptopOutput(BaseOutputTransport):
                 # Native sender cancellation discards its queued audio and cancels the pacing wait.
                 await super().process_frame(frame, direction)
                 async with self.write_lock:
-                    await self.audio._discard_playback()
+                    if self.playback_written:
+                        await self.audio._discard_playback()
+                        self.playback_written = False
             finally:
                 self.write_gate.set()
         else:
@@ -193,12 +201,13 @@ class LaptopOutput(BaseOutputTransport):
             try:
                 if self.audio.playback is None:
                     await self.audio._open_playback()
+                self.playback_written = True
                 self.audio.playback.stdin.write(frame.audio)
                 await self.audio.playback.stdin.drain()
                 await sleep(len(frame.audio) / (2 * frame.num_channels * frame.sample_rate))
                 return True
             except (OSError, RuntimeError):
-                self.audio.fail("Laptop audio playback failed. Restart Kestrel.")
+                self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
                 return False
 
 
@@ -223,7 +232,7 @@ class LaptopAudioTransport:
         @self._output.event_handler("on_error")
         async def on_output_error(processor, frame):
             if not processor.is_usable:
-                self.fail("Laptop audio playback failed. Restart Kestrel.")
+                self.fail(LAPTOP_PLAYBACK_FAILURE)
 
     def input(self):
         return self._input
@@ -258,7 +267,7 @@ class LaptopAudioTransport:
 
     async def open(self):
         try:
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(LAPTOP_AUDIO_START_TIMEOUT):
                 serial = await self._source()
                 props = {"node.name": f"kestrel-capture-{os.getpid()}", "node.dont-fallback": True,
                          "node.dont-move": True, "node.dont-reconnect": True}
@@ -272,7 +281,7 @@ class LaptopAudioTransport:
                 if self.failure:
                     raise RuntimeError(self.failure)
                 self.verified = True
-                await asyncio.wait_for(self.received_audio.wait(), 5)
+                await asyncio.wait_for(self.received_audio.wait(), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 if self.failure:
                     raise RuntimeError(self.failure)
                 await self._open_playback()
@@ -280,19 +289,19 @@ class LaptopAudioTransport:
             await self.close()
             raise
         except (OSError, RuntimeError, TimeoutError):
-            self.fail("Laptop microphone capture failed. Restart Kestrel.")
+            self.fail(LAPTOP_CAPTURE_FAILURE)
             await self.close()
             raise RuntimeError(self.failure) from None
 
     async def _read(self):
         try:
             while True:
-                pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), 5)
+                pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 self.received_audio.set()
                 if self.verified and self._input.ready and not self.closed:
                     await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
-            self.fail("Laptop microphone capture failed. Restart Kestrel.")
+            self.fail(LAPTOP_CAPTURE_FAILURE)
 
     async def _open_playback(self):
         try:
@@ -301,14 +310,14 @@ class LaptopAudioTransport:
                 "--format", "s16", "--latency", "20ms", "-", stdin=asyncio.subprocess.PIPE,
             )
         except OSError:
-            self.fail("Laptop audio playback failed. Restart Kestrel.")
+            self.fail(LAPTOP_PLAYBACK_FAILURE)
             raise RuntimeError(self.failure) from None
         self.playback_watcher = asyncio.create_task(self._watch_playback(self.playback))
 
     async def _watch_playback(self, process):
         await process.wait()
         if process is self.playback:
-            self.fail("Laptop audio playback failed. Restart Kestrel.")
+            self.fail(LAPTOP_PLAYBACK_FAILURE)
 
     async def _reap_audio(self, process):
         if process is None:
