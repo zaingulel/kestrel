@@ -258,6 +258,43 @@ test('Kestrel direct gate judges every changed path in commit history', () => {
     assert.equal(merged.git('rev-parse', 'HEAD^{tree}'), merged.git('rev-parse', 'side^{tree}'));
     refused(merged.gate(main, merged.git('rev-parse', 'HEAD')), /bot\.py/);
 
+    const reversed = clone('reversed');
+    const docs = reversed.commit(['docs/research/side.md']);
+    reversed.git('checkout', '-q', '-b', 'remote', seed);
+    const remote = reversed.commit(['bot.py']);
+    reversed.git('checkout', '-q', 'main');
+    reversed.git('merge', '-q', '-s', 'ours', '--no-commit', '--no-ff', 'remote');
+    const rollback = reversed.commit(['docs/research/merged.md']);
+    assert.equal(reversed.git('rev-parse', `${rollback}^1`), docs);
+    assert.equal(reversed.git('rev-parse', `${rollback}^2`), remote);
+    assert.equal(reversed.git('merge-base', '--is-ancestor', remote, rollback), '');
+    assert.equal(reversed.git('diff', '--name-only', seed, docs), 'docs/research/side.md');
+    assert.equal(reversed.git('diff', '--name-only', docs, rollback), 'docs/research/merged.md');
+    assert.deepEqual(reversed.git('diff', '--name-only', remote, rollback).split('\n'), [
+      'bot.py', 'docs/research/merged.md', 'docs/research/side.md',
+    ]);
+    refused(reversed.gate(remote, rollback), /bot\.py/);
+
+    const twin = clone('reversed-docs');
+    const twinDocs = twin.commit(['docs/research/side.md']);
+    twin.git('checkout', '-q', '-b', 'remote', seed);
+    const twinRemote = twin.commit(['docs/research/remote.md']);
+    twin.git('checkout', '-q', 'main');
+    twin.git('merge', '-q', '-s', 'ours', '--no-commit', '--no-ff', 'remote');
+    const twinMerge = twin.commit(['docs/research/merged.md']);
+    assert.equal(twin.git('rev-parse', `${twinMerge}^1`), twinDocs);
+    assert.equal(twin.git('rev-parse', `${twinMerge}^2`), twinRemote);
+    const admittedTwin = twin.gate(twinRemote, twinMerge);
+    assert.equal(admittedTwin.status, 0, admittedTwin.stderr);
+
+    const empty = clone('empty-final-diff');
+    empty.commit(['docs/research/temporary.md']);
+    empty.git('rm', '-q', 'docs/research/temporary.md');
+    const emptyHead = empty.commit([]);
+    assert.equal(empty.git('diff', '--name-only', seed, emptyHead), '');
+    const admittedEmpty = empty.gate(seed, emptyHead);
+    assert.equal(admittedEmpty.status, 0, admittedEmpty.stderr);
+
     const submodule = clone('submodule');
     submodule.git('config', 'diff.ignoreSubmodules', 'all');
     submodule.git('config', 'log.showSignature', 'true');
@@ -308,13 +345,18 @@ printf '%s\\n' "$*" >> "$FAKE_GIT_CALLS"
 case $1 in
   (merge-base) exit 0 ;;
   (rev-list) printf '%s\\n' '${'3'.repeat(40)}'; exit "\${FAKE_COMMITS_STATUS:-0}" ;;
-  (-c) printf '%s\\n' "$FAKE_PATH"; exit "\${FAKE_PATHS_STATUS:-0}" ;;
+  (-c)
+    case $3 in
+      (log) printf '%s\\n' "$FAKE_PATH"; exit "\${FAKE_PATHS_STATUS:-0}" ;;
+      (diff) printf '%s\\n' "$FAKE_RANGE_PATH"; exit "\${FAKE_RANGE_STATUS:-0}" ;;
+    esac
+    ;;
   (rev-parse) printf '%s\\n' '${'4'.repeat(40)}'; exit 0 ;;
-  (diff) exit 0 ;;
+  (diff) [ "$2" = --quiet ] && [ "$3" = HEAD ] && exit 0 ;;
 esac
 exit 2
 `);
-    const fakeEnv = { ...env, FAKE_GIT_CALLS: calls, FAKE_PATH: 'docs/research/note.md' };
+    const fakeEnv = { ...env, FAKE_GIT_CALLS: calls, FAKE_PATH: 'docs/research/note.md', FAKE_RANGE_PATH: 'docs/research/note.md' };
     fn({
       root,
       calls,
@@ -341,6 +383,7 @@ test('Kestrel direct gate refuses incomplete or corrupt inputs', () => {
     assert.equal(gate().status, 0, 'fake supplies one complete qualifying commit and a clean matching tree');
     refused(gate(SHAS, { FAKE_COMMITS_STATUS: '1' }), /listing the pushed commits failed/);
     refused(gate(SHAS, { FAKE_PATHS_STATUS: '1' }), /listing the changed paths failed/);
+    refused(gate(SHAS, { FAKE_RANGE_STATUS: '1' }), /listing the final changed paths failed/);
     refused(gate(SHAS, { FAKE_PATH: '' }), /no changed paths/);
     refused(cli('', ['unexpected']), /expected no arguments/);
     refused(cli(''), /no changed paths/);

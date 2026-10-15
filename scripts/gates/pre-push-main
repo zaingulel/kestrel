@@ -37,6 +37,13 @@ for commit in $commits; do
   printf '%s\n' "$changed" | node scripts/lib/docs-route.mjs || exit 1
 done
 
+# Remote main may be a merge's second parent, so first-parent paths alone can miss its rollback.
+final_changed=$(git -c core.quotePath=false diff --name-only --no-renames --ignore-submodules=none "$remote_sha" "$local_sha" --) \
+  || refuse "listing the final changed paths failed"
+if [ -n "$final_changed" ]; then
+  printf '%s\n' "$final_changed" | node scripts/lib/docs-route.mjs || exit 1
+fi
+
 pushed_tree=$(git rev-parse "$local_sha^{tree}" 2>/dev/null) \
   && head_tree=$(git rev-parse "HEAD^{tree}" 2>/dev/null) \
   && [ "$pushed_tree" = "$head_tree" ] \
