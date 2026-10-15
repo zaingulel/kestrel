@@ -2,14 +2,14 @@
 // adopter, the render of an adopter's seat settings, the lag check against the canonical main, and the CLI.
 // Run: node --test scripts/lib/factory-sync.test.mjs   (or `npm run test:scripts`)
 //
-// Price tag: every tree is a real temporary directory; each sync test builds and commits two small git
-// repositories, and the CLI tests spawn git and node a handful of times. No network: the sync tests inject the
-// source's fetch of origin main, which is proven on its own against a local bare origin; the two --from wire tests
+// Price tag: every tree is a real temporary directory; sync tests copy one privately built pair of small git
+// repositories into independent directories, and the CLI tests spawn git and node a handful of times. No network:
+// the sync tests inject the source's fetch of origin main, proven on its own against a local bare origin; the two --from wire tests
 // run one with GIT_ALLOW_PROTOCOL=file, so its fetch fails, and one with GIT_SSH_COMMAND serving the source from its
 // own repository, so its fetch succeeds; and the --check wire tests put a fake gh first on the PATH. Retire this file
 // with scripts/lib/factory-sync.mjs.
 
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess, { spawnSync } from 'node:child_process';
 import fileSystem, {
@@ -783,9 +783,11 @@ const CANONICAL_URL = `https://github.com/${CANONICAL}`;
 const ADOPTER_URL = 'https://github.com/example-owner/adopter';
 const MANIFEST = '.agents/factory-manifest.json';
 const GIT_ISOLATION = ['-c', 'user.name=Factory Test', '-c', 'user.email=factory@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null'];
+let syncFixtureSeed;
 
 function git(root, ...args) {
-  const run = spawnSync('git', ['-C', root, ...GIT_ISOLATION, ...args], { encoding: 'utf8' });
+  const seed = syncFixtureSeed !== undefined && (root === join(syncFixtureSeed, 'source') || root === join(syncFixtureSeed, 'target'));
+  const run = spawnSync('git', ['-C', root, ...GIT_ISOLATION, ...(seed ? ['-c', 'maintenance.auto=false'] : []), ...args], { encoding: 'utf8' });
   assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
   return run.stdout.trim();
 }
@@ -831,12 +833,10 @@ function recordSource(source, entries) {
   commitAll(source);
 }
 
-// A canonical source on main with a region, a plain file and an executable file; an adopter target
-// whose committed manifest names the canonical, whose shared file is a symlink to a file outside it, and whose
+// The private baseline: a canonical source on main with a region, a plain file and an executable file; an adopter
+// target whose committed manifest names the canonical, whose shared file is a symlink to a file outside it, and whose
 // script is not yet executable; and that outside directory.
-function syncFixture(t) {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-into-')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
+function createSyncFixture(base) {
   const [source, target, outside] = ['source', 'target', 'outside'].map((name) => join(base, name));
   put(outside, 'secret.txt', 'outside\n');
 
@@ -857,7 +857,21 @@ function syncFixture(t) {
   put(target, 'scripts/run.sh', '#!/bin/sh\necho v1\n');
   put(target, MANIFEST, JSON.stringify({ canonical: CANONICAL, entries: [] }));
   commitAll(target);
+}
 
+after(() => {
+  if (syncFixtureSeed) rmSync(syncFixtureSeed, { recursive: true, force: true });
+});
+
+function syncFixture(t) {
+  if (!syncFixtureSeed) {
+    syncFixtureSeed = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-seed-')));
+    createSyncFixture(syncFixtureSeed);
+  }
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-into-')));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  cpSync(syncFixtureSeed, base, { recursive: true, verbatimSymlinks: true });
+  const [source, target, outside] = ['source', 'target', 'outside'].map((name) => join(base, name));
   const fetchMain = (root) => git(root, 'rev-parse', 'refs/heads/main');
   return { source, target, outside, sync: (options) => syncInto({ source, target, fetchMain, ...options }) };
 }
@@ -881,6 +895,101 @@ function snapshot(root) {
   walk(root);
   return tree;
 }
+
+test('sync fixtures isolate copied worktrees, Git state and outside paths', (t) => {
+  const traceDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-trace-')));
+  t.after(() => rmSync(traceDirectory, { recursive: true, force: true }));
+  const tracePath = join(traceDirectory, 'events.jsonl');
+  const a = withEnv({
+    GIT_TRACE2_EVENT: tracePath,
+    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_KEY_0: 'maintenance.auto',
+    GIT_CONFIG_VALUE_0: 'true',
+    GIT_CONFIG_KEY_1: 'maintenance.autoDetach',
+    GIT_CONFIG_VALUE_1: 'false',
+    GIT_CONFIG_PARAMETERS: '',
+  }, () => syncFixture(t));
+  let nativeTrace;
+  try {
+    nativeTrace = readFileSync(tracePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  } catch {
+    assert.fail('native Git trace must contain valid JSON records');
+  }
+  for (const name of ['source', 'target']) {
+    const root = join(syncFixtureSeed, name);
+    assert.ok(nativeTrace.some(({ event, argv }) => event === 'start'
+      && argv[argv.indexOf('-C') + 1] === root && argv.includes('commit')),
+    'native Git trace must include both seed commits');
+  }
+  assert.ok(!nativeTrace.some(({ event, argv }) => event === 'child_start'
+    && argv.includes('maintenance') && argv.includes('run')),
+  'seed construction must not launch automatic maintenance');
+  const b = syncFixture(t);
+  const assertBaseline = (fixture) => {
+    assert.equal(readFileSync(join(fixture.source, 'docs/a.txt'), 'utf8'), 'hello v2\n');
+    assert.equal(readFileSync(join(fixture.source, 'scripts/run.sh'), 'utf8'), '#!/bin/sh\necho v2\n');
+    assert.equal(readFileSync(join(fixture.target, 'scripts/run.sh'), 'utf8'), '#!/bin/sh\necho v1\n');
+    assert.equal(readFileSync(join(fixture.outside, 'secret.txt'), 'utf8'), 'outside\n');
+    assert.equal(readFileSync(join(fixture.target, 'docs/a.txt'), 'utf8'), 'outside\n');
+    if (FILE_SYMLINKS) {
+      assert.ok(lstatSync(join(fixture.target, 'docs/a.txt')).isSymbolicLink());
+      assert.equal(readlinkSync(join(fixture.target, 'docs/a.txt')).replaceAll('\\', '/'), '../../outside/secret.txt');
+    } else {
+      assert.ok(lstatSync(join(fixture.target, 'docs/a.txt')).isFile());
+    }
+    assert.equal(indexMode(fixture.source, 'scripts/run.sh'), '100755');
+    assert.equal(indexMode(fixture.target, 'scripts/run.sh'), '100644');
+    assert.equal(git(fixture.source, 'remote', 'get-url', 'origin'), 'https://github.com/example-owner/example-repo');
+    assert.equal(git(fixture.target, 'remote', 'get-url', 'origin'), 'https://github.com/example-owner/adopter');
+    assert.equal(git(fixture.source, 'symbolic-ref', 'HEAD'), 'refs/heads/main');
+    assert.equal(git(fixture.target, 'symbolic-ref', 'HEAD'), 'refs/heads/main');
+  };
+  const gitBytes = (root) => {
+    const head = git(root, 'rev-parse', 'HEAD');
+    const object = `objects/${head.slice(0, 2)}/${head.slice(2)}`;
+    return Object.fromEntries(['HEAD', 'config', 'index', 'refs/heads/main', object]
+      .map((path) => [path, readFileSync(join(root, '.git', path))]));
+  };
+  assertBaseline(b);
+  const treesBefore = [snapshot(b.source), snapshot(b.target), snapshot(b.outside)];
+  const gitBefore = [gitBytes(b.source), gitBytes(b.target)];
+
+  if (FILE_SYMLINKS) {
+    assert.ok(lstatSync(join(a.target, 'docs/a.txt')).isSymbolicLink());
+    writeFileSync(join(a.target, 'docs/a.txt'), 'A-only outside\n');
+    assert.equal(readFileSync(join(a.outside, 'secret.txt'), 'utf8'), 'A-only outside\n');
+    assert.equal(readFileSync(join(b.outside, 'secret.txt'), 'utf8'), 'outside\n');
+  } else {
+    assert.ok(lstatSync(join(a.target, 'docs/a.txt')).isFile());
+    assert.equal(readFileSync(join(a.target, 'docs/a.txt'), 'utf8'), 'outside\n');
+    writeFileSync(join(a.target, 'docs/a.txt'), 'A-only shared file\n');
+    assert.equal(readFileSync(join(a.outside, 'secret.txt'), 'utf8'), 'outside\n');
+  }
+  writeFileSync(join(a.source, 'docs/a.txt'), 'contaminated source\n');
+  writeFileSync(join(a.source, 'scripts/run.sh'), 'contaminated source script\n');
+  writeFileSync(join(a.target, 'scripts/run.sh'), 'contaminated target script\n');
+  writeFileSync(join(a.target, 'AGENTS.md'), 'contaminated target manual\n');
+  writeFileSync(join(a.outside, 'secret.txt'), 'contaminated outside\n');
+  for (const root of [a.source, a.target]) {
+    const head = git(root, 'rev-parse', 'HEAD');
+    const object = join(root, '.git', 'objects', head.slice(0, 2), head.slice(2));
+    chmodSync(object, 0o644);
+    writeFileSync(object, 'corrupt object\n');
+    for (const path of ['HEAD', 'config', 'index', 'refs/heads/main']) {
+      writeFileSync(join(root, '.git', path), 'corrupt metadata\n');
+    }
+  }
+
+  assert.deepEqual([snapshot(b.source), snapshot(b.target), snapshot(b.outside)], treesBefore);
+  assert.deepEqual([gitBytes(b.source), gitBytes(b.target)], gitBefore);
+  const c = syncFixture(t);
+  assertBaseline(c);
+  assert.deepEqual([snapshot(c.source), snapshot(c.target), snapshot(c.outside)], treesBefore);
+  assert.deepEqual([gitBytes(c.source), gitBytes(c.target)], gitBefore);
+  for (const root of [b.source, b.target, c.source, c.target]) {
+    assert.equal(git(root, 'status', '--porcelain'), '', 'an independent copied repository must remain clean');
+  }
+});
 
 function assertRefused(fixture, cause, options) {
   const before = [snapshot(fixture.target), snapshot(fixture.outside)];

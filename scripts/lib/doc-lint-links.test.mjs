@@ -15,7 +15,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   extractMarkdownLinks,
   resolveLinkTarget,
@@ -180,4 +181,38 @@ test('documentation verdict reports a dead relative Markdown link naming file an
   assert.deepEqual(verdict(), { errors: ['docs/A.md:1 — dead Markdown link: `B.md` does not exist'], advisories: [] });
   contents['docs/B.md'] = 'The sibling document.\n';
   assert.deepEqual(verdict(), { errors: [], advisories: [] });
+});
+
+test('documentation verdict preserves source-scoped path allowances', async (t) => {
+  const fixture = fs.mkdtempSync(path.join(tmpdir(), 'doc-lint-scoped-'));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const modules = path.dirname(fileURLToPath(import.meta.url));
+  for (const name of ['doc-lint-verdict.mjs', 'doc-lint-links.mjs', 'doc-lint-citations.mjs', 'runtimes.mjs']) {
+    fs.copyFileSync(path.join(modules, name), path.join(fixture, name));
+  }
+  fs.copyFileSync(path.join(modules, 'doc-lint.mjs'), path.join(fixture, 'base-doc-lint.mjs'));
+  fs.writeFileSync(path.join(fixture, 'doc-lint.mjs'), [
+    "export * from './base-doc-lint.mjs';",
+    "import { extractPathRefs as extract } from './base-doc-lint.mjs';",
+    'export function extractPathRefs(text, sourcePath) {',
+    "  return extract(text).filter(ref => sourcePath !== 'docs/allowed.md' || ref.path !== 'docs/external-repository');",
+    '}',
+  ].join('\n'));
+  const { docLintVerdict: scopedVerdict } = await import(pathToFileURL(path.join(fixture, 'doc-lint-verdict.mjs')).href);
+  const contents = {
+    'docs/allowed.md': '`docs/external-repository`\n`docs/missing.md`',
+    'docs/other.md': '`docs/external-repository`',
+  };
+  assert.deepEqual(scopedVerdict({
+    files: Object.keys(contents),
+    read: (rel) => contents[rel],
+    settings: readSettingsHeader(),
+    allowEmpty: true,
+  }), {
+    errors: [
+      'docs/allowed.md:2 — dangling path ref: `docs/missing.md` does not exist',
+      'docs/other.md:1 — dangling path ref: `docs/external-repository` does not exist',
+    ],
+    advisories: [],
+  });
 });

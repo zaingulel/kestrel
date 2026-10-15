@@ -84,10 +84,11 @@ function scenario(t) {
       }
       const target = lsofTarget(args);
       if (target) {
-        if (state.lsof.l3) return state.lsof.l3;
+        const raw = !state.lsof.l3Target || state.lsof.l3Target === target;
+        if (raw && state.lsof.l3) return state.lsof.l3;
         const rows = state.lsof.open.filter(({ name: open }) => open === target || open.startsWith(`${target}/`));
         const fields = rows.map(({ pid, command, name: open }) => `p${pid}\nc${command}\nf3\nn${open}\n`).join('');
-        return reply(rows.length ? 0 : 1, fields, state.lsof.l3Stderr ?? '');
+        return reply(rows.length ? 0 : 1, fields, raw ? state.lsof.l3Stderr ?? '' : '');
       }
     }
     if (name === 'lsof' && (key === '-nP -iTCP -sTCP:LISTEN -Fpc' || lsofTarget(args))) return { absent: true };
@@ -414,6 +415,12 @@ function assertWorktreeRetained(s, result, reason) {
   assert.deepEqual(s.unexpected, []);
 }
 
+function assertWorktreeNotRemoved(s) {
+  assert.equal(s.state.branch, true);
+  assert.deepEqual(s.calls.filter(([name, ...args]) => name === 'git' &&
+    (args[0] === 'branch' || args[0] === 'worktree' && args[1] === 'remove')), []);
+}
+
 // lsof's warnings for file systems it cannot stat, as lsof 4.99.7 prints them.
 const LSOF_WARNINGS = [
   "lsof: WARNING: can't stat() nsfs file system /run/docker/netns/default",
@@ -422,6 +429,77 @@ const LSOF_WARNINGS = [
   '      Output information may be incomplete.',
   '',
 ].join('\n');
+
+test('a non-listening process using the worktree retains it and the branch', { skip: SKIP_POSIX }, async (t) => {
+  for (const use of ['open file', 'working directory', 'arguments']) {
+    const s = scenario(t);
+    let reason;
+    if (use === 'open file') {
+      const path = placeFile(join(s.worktree, 'logs', 'output.log'));
+      s.state.lsof.open = [{ pid: 31337, command: 'tail', name: path }];
+      reason = 'pid 31337 (tail) uses it';
+    } else if (use === 'working directory') {
+      s.state.lsof.l3 = reply(0, `p4242\ncbash\nfcwd\nn${s.worktree}\n`);
+      reason = 'pid 4242 (bash) uses it';
+    } else {
+      s.state.processes.push({ pid: 5150, ppid: 1, args: `node ${s.worktree}/worker.js --secret=private` });
+      reason = 'pid 5150 names it in its arguments';
+    }
+    assertWorktreeRetained(s, await s.cleanup(['23'], { pid: 4242 }), reason);
+    assertWorktreeNotRemoved(s);
+  }
+});
+
+test('unavailable worktree use observations retain it and the branch', { skip: SKIP_POSIX }, async (t) => {
+  for (const observation of ['directory lookup timeout', 'absent ps']) {
+    const s = scenario(t);
+    let reason;
+    if (observation === 'directory lookup timeout') {
+      s.state.lsof.l3Target = s.worktree;
+      s.state.lsof.l3 = { failed: 'ETIMEDOUT' };
+      reason = 'lsof failed: ETIMEDOUT';
+    } else {
+      s.state.ps = { absent: true };
+      reason = 'no process check: ps is not installed';
+    }
+    assertWorktreeRetained(s, await s.cleanup(), reason);
+    assertWorktreeNotRemoved(s);
+  }
+});
+
+test('malformed worktree use observations retain it and the branch', { skip: SKIP_POSIX }, async (t) => {
+  for (const observation of ['unexpected lsof field', 'unreadable ps row']) {
+    const s = scenario(t);
+    let reason;
+    if (observation === 'unexpected lsof field') {
+      s.state.lsof.l3Target = s.worktree;
+      s.state.lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${s.worktree}/notes.md\n`);
+      reason = 'lsof printed a field it was not asked for';
+    } else {
+      s.state.ps = reply(0, 'unreadable process row --secret=private\n');
+      reason = 'ps printed a row that could not be read';
+    }
+    assertWorktreeRetained(s, await s.cleanup(), reason);
+    assertWorktreeNotRemoved(s);
+  }
+});
+
+test('only the cleanup process and its ancestors naming the worktree allow cleanup', { skip: SKIP_POSIX }, async (t) => {
+  const s = scenario(t);
+  s.state.processes = [
+    { pid: 1, ppid: 0, args: '/sbin/init splash' },
+    { pid: 4100, ppid: 1, args: `bash -c node ${s.worktree}/scripts/closeout-cleanup.mjs 23` },
+    { pid: 4242, ppid: 4100, args: `node ${s.worktree}/scripts/closeout-cleanup.mjs 23` },
+  ];
+  assert.deepEqual(await s.cleanup(['23'], { pid: 4242 }), {
+    exitCode: 0,
+    out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'],
+    err: [],
+  });
+  assert.equal(existsSync(s.worktree), false);
+  assert.equal(s.state.branch, false);
+  assert.deepEqual(s.unexpected, []);
+});
 
 test('a server listening from inside the worktree retains it and the branch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
@@ -746,6 +824,7 @@ test('an lsof row whose name lsof escaped still retains the scratch target', { s
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'résumé', 'report.log')));
   // lsof prints a name's non-ASCII bytes as \xNN escapes, so the name it prints differs from the path it matched.
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3 = reply(0, `p4242\ncless\nf3\nn${s.root}/r\\xc3\\xa9sum\\xc3\\xa9/report.log\n`);
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'pid 4242 (less) uses it');
 });
@@ -754,6 +833,7 @@ test('an lsof warning on the mount holding the scratch target retains it', { ski
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
   const mount = join(s.root, 'scratch');
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3Stderr = `lsof: WARNING: can't stat() overlay file system ${mount}\n      Output information may be incomplete.\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lookup incomplete: lsof could not stat the file system at ${mount}`);
 });
@@ -763,6 +843,7 @@ test('an lsof warning on a mount below the scratch directory retains it', { skip
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
   const mount = join(target, 'cache');
   mkdirSync(mount);
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3Stderr = `lsof: WARNING: can't stat() fuse.sshfs file system ${mount}\n      Output information may be incomplete.\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lookup incomplete: lsof could not stat the file system at ${mount}`);
 });
@@ -770,6 +851,7 @@ test('an lsof warning on a mount below the scratch directory retains it', { skip
 test('an lsof warning on an unrelated mount is ignored and the scratch target removed', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3Stderr = LSOF_WARNINGS;
   assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
     exitCode: 0,
@@ -783,6 +865,7 @@ test('an lsof warning on an unrelated mount is ignored and the scratch target re
 test('unrecognised lsof stderr retains the scratch target', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3Stderr = `lsof: status error on ${target}: Permission denied\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lsof reported: lsof: status error on ${target}: Permission denied`);
 });
@@ -790,6 +873,7 @@ test('unrecognised lsof stderr retains the scratch target', { skip: SKIP_POSIX }
 test('an lsof field the command did not ask for retains the scratch target', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
+  s.state.lsof.l3Target = target;
   s.state.lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${target}\n`);
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'lsof printed a field it was not asked for');
 });
@@ -819,7 +903,20 @@ test('a ps run exiting non-zero with empty output retains the scratch target', {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
   s.state.ps = reply(1);
-  assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'ps failed: exit status 1');
+  assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
+    exitCode: 4,
+    out: [
+      `retained scratch ${target}: ps failed: exit status 1`,
+      `retained worktree ${s.worktree}: ps failed: exit status 1`,
+      'retained branch job/23: its worktree is retained',
+      'closeout-cleanup: 0 removed, 3 retained',
+    ],
+    err: [],
+  });
+  assert.ok(existsSync(target));
+  assert.ok(existsSync(s.worktree));
+  assertWorktreeNotRemoved(s);
+  assert.deepEqual(s.unexpected, []);
 });
 
 test('a scratch target replaced during the checks is retained', { skip: SKIP_POSIX }, async (t) => {
@@ -962,7 +1059,7 @@ const DAEMON_DOWN = 'Cannot connect to the Docker daemon at unix:///var/run/dock
 const DOCKER_EMPTY = '[ "$*" = "container ls --all --quiet --no-trunc" ] && exit 0\necho "unexpected docker call: $*" >&2\nexit 99\n';
 const DOCKER_DOWN = `echo '${DAEMON_DOWN}' >&2\nexit 1\n`;
 // lsof prints nothing and exits 1 when nothing matches; any other call prints a line the command retains on.
-const LSOF_FAKE = 'case "$*" in\n  "-nP -iTCP -sTCP:LISTEN -Fpc"|"-nP -Fpcfn /"*) exit 1 ;;\nesac\necho "unexpected lsof call: $*" >&2\nexit 1\n';
+const LSOF_FAKE = 'case "$*" in\n  "-nP -iTCP -sTCP:LISTEN -Fpc"|"-nP -Fpcfn /"*|"-nP -Fpcfn -x f +D /"*) exit 1 ;;\nesac\necho "unexpected lsof call: $*" >&2\nexit 1\n';
 const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o args=" ] || exit 99\necho \'      1       0 /sbin/init splash\'\n';
 
 // A real repository with job/23 checked out in a linked worktree that holds an ignored node_modules, an outside
