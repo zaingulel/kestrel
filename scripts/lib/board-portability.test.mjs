@@ -109,7 +109,7 @@ const OPTIONS_BY_FIELD = {
 // unanticipated query throws, so a new query surfaces as a failure, not a guessed answer.
 // `currentValues` is card #11's value per field, read back through the issue-item query;
 // a field it omits carries no value, which GitHub returns as null.
-function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }) {
+function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }, issueItemReply) {
   const sent = [];
   const exec = (args) => {
     sent.push(args);
@@ -122,10 +122,10 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }) {
       return JSON.stringify({ data: { [rootKey]: { projectV2: { id: 'PVT_adopted', field: { id: `F_${field[1]}`, options } } } } });
     }
     const valueField = query.match(/value: fieldValueByName\(name: "([^"]+)"\)/);
-    if (query.includes('projectItems(first:10)') && valueField) {
-      const current = currentValues[valueField[1]];
-      const nodes = [{ id: 'PVTI_11', project: { number: boardPage.data[rootKey].projectV2.number }, value: current ? { name: current } : null }];
-      return JSON.stringify({ data: { repository: { issue: { projectItems: { nodes } } } } });
+    if (query.includes('projectItems(first:20)')) {
+      const current = valueField ? currentValues[valueField[1]] : null;
+      const nodes = [{ id: 'PVTI_11', isArchived: false, project: { number: boardPage.data[rootKey].projectV2.number }, value: current ? { name: current } : null }];
+      return JSON.stringify(issueItemReply(nodes, { issueId: 'I_11' }));
     }
     if (query.includes('subIssues')) {
       return JSON.stringify({ data: { repository: { issue: { subIssues: { totalCount: 0, nodes: [] } } } } });
@@ -134,7 +134,6 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }) {
     if (query.includes('updateProjectV2ItemFieldValue')) {
       return JSON.stringify({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: 'PVTI_11' } } } });
     }
-    if (query.includes('{ id } } }')) return JSON.stringify({ data: { repository: { issue: { id: 'I_11' } } } });
     throw new Error(`unanticipated gh call: ${args.join(' ')}`);
   };
   return { exec, sent };
@@ -151,19 +150,20 @@ async function boardPageFor(root) {
 // recorder, and returns what each one sent.
 async function driveEveryPath(root, rootKey) {
   const page = await boardPageFor(root);
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
   const silent = { log() {}, error() {} };
   const { moveCards } = await load(root, 'lib/board-move.mjs');
   const { main: boardAdd } = await load(root, 'board-add.mjs');
   const { main: verifyPublish } = await load(root, 'verify-issue-publish.mjs');
   await load(root, 'board-move.mjs');
 
-  const move = recordingGh(rootKey, page);
+  const move = recordingGh(rootKey, page, undefined, issueItemReply);
   assert.deepEqual(moveCards([{ issueNumber: 11, statusName: 'Done' }], move.exec), [
     { issueNumber: 11, statusName: 'Done', skipped: false, cleared: false },
   ]);
-  const add = recordingGh(rootKey, page);
+  const add = recordingGh(rootKey, page, undefined, issueItemReply);
   assert.equal(boardAdd(['11', 'Ready', 'Product'], { ghExec: add.exec, output: silent }), 0);
-  const verify = recordingGh(rootKey, page);
+  const verify = recordingGh(rootKey, page, undefined, issueItemReply);
   assert.equal(verifyPublish(['11'], { ghExec: verify.exec, output: silent }), 0);
   return { move: move.sent, add: add.sent, verify: verify.sent };
 }
@@ -259,7 +259,8 @@ test('with no routing field, a whole board of Status-only cards is clean, with n
 test('with no routing field, board-add takes an issue number and a Status only', async (t) => {
   const root = adoptToolkit(t, NO_ROUTING_CONFIG);
   const { main } = await load(root, 'board-add.mjs');
-  const { exec, sent } = recordingGh('organization', await boardPageFor(root));
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
+  const { exec, sent } = recordingGh('organization', await boardPageFor(root), undefined, issueItemReply);
   const output = recordingOutput();
 
   assert.equal(main(['12', 'Backlog'], { ghExec: exec, output }), 0);
@@ -291,11 +292,14 @@ test('with no routing field, the publish verifier checks Status only', async (t)
 
 test('with no routing field, board-move names a board-add command that takes a Status only for an issue not on the board', async (t) => {
   const root = adoptToolkit(t, NO_ROUTING_CONFIG);
-  const { parseIssueItemId } = await load(root, 'lib/board-move.mjs');
-  const offBoard = { data: { repository: { issue: { projectItems: { nodes: [{ id: 'x', project: { number: 8 } }] } } } } };
-
-  assert.throws(() => parseIssueItemId(offBoard, 999), {
-    message: 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>',
+  const { moveCards } = await load(root, 'lib/board-move.mjs');
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
+  const offBoard = issueItemReply([{ id: 'x', isArchived: false, project: { number: 8 }, value: null }]);
+  const { exec } = recordingGh('organization', await boardPageFor(root));
+  assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
+    args[3]?.includes('projectItems') ? offBoard : exec(args)), (error) => {
+    assert.equal(error.cause.message, 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>');
+    return true;
   });
 });
 
@@ -318,7 +322,8 @@ test('with no routing field, the pick view prints each card with no Unfielded gr
 test('with no routing field, board-add names a Status-only retry command when the Status update fails after the add', async (t) => {
   const root = adoptToolkit(t, NO_ROUTING_CONFIG);
   const { main } = await load(root, 'board-add.mjs');
-  const { exec: answer } = recordingGh('organization', await boardPageFor(root));
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
+  const { exec: answer } = recordingGh('organization', await boardPageFor(root), undefined, issueItemReply);
   const unset = { data: { node: { fieldValues: { totalCount: 0, nodes: [] } } } };
   const exec = (args) => {
     const query = args.find((arg) => arg.startsWith('query=')) ?? '';
@@ -565,7 +570,8 @@ test('with no parked lane configured, a card carrying a Lane value is still pick
 async function laneMove(t, currentValues, lane) {
   const root = adoptToolkit(t, PARKED_CONFIG);
   const { moveLanes } = await load(root, 'lib/board-move.mjs');
-  const gh = recordingGh('organization', await boardPageFor(root), currentValues);
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
+  const gh = recordingGh('organization', await boardPageFor(root), currentValues, issueItemReply);
   const run = () => moveLanes([{ issueNumber: 11, statusName: lane }], gh.exec);
   const edits = () => gh.sent.filter((args) => args[0] === 'project');
   return { run, edits, sent: gh.sent };
@@ -626,9 +632,8 @@ test('the copied moveCards never clears Status: none is an unknown Status', asyn
 
 test('the copied board-move CLI parks one card and releases another with --lane, writing each by literal ids', async (t) => {
   const root = adoptToolkit(t, PARKED_CONFIG);
-  const item = (id, lane) => ({
-    data: { repository: { issue: { projectItems: { nodes: [{ id, project: { number: 7 }, value: lane ? { name: lane } : null }] } } } },
-  });
+  const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
+  const item = (id, lane) => issueItemReply([{ id, isArchived: false, project: { number: 7 }, value: lane ? { name: lane } : null }]);
   const lane = {
     field: {
       data: {

@@ -6,20 +6,21 @@ import { fileURLToPath } from 'node:url';
 import {
   parseSingleSelectField,
   optionIdFor,
-  parseIssueItemId,
-  parseIssueItemValue,
+  lookupIssueBoardItem,
   parseBatchArgs,
   moveCards,
   moveLanes,
 } from './board-move.mjs';
-import { BOARD_PROJECT_NUMBER } from './board-config.mjs';
+import { main as boardMoveMain } from '../board-move.mjs';
+import { BOARD_OWNER, BOARD_REPOSITORY, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
+import { issueItemReply } from './board-fixtures.mjs';
 import { installFakeGh } from './fake-gh.mjs';
 
 // Shapes mirror the real `gh api graphql` payloads (verified live against the board
 // while fixing #461). Expected ids are independent literals.
 const STATUS_FIELD_JSON = {
   data: {
-    user: {
+    [BOARD_OWNER_TYPE]: {
       projectV2: {
         id: 'PVT_kwHOA50uGs4BcfoO',
         field: {
@@ -37,25 +38,21 @@ const STATUS_FIELD_JSON = {
   },
 };
 
-function issueItemJson(nodes) {
-  return { data: { repository: { issue: { projectItems: { nodes } } } } };
-}
-
 test('parseSingleSelectField returns projectId + fieldId + options', () => {
   assert.deepEqual(parseSingleSelectField(STATUS_FIELD_JSON), {
     projectId: 'PVT_kwHOA50uGs4BcfoO',
     fieldId: 'PVTSSF_status',
-    options: STATUS_FIELD_JSON.data.user.projectV2.field.options,
+    options: STATUS_FIELD_JSON.data[BOARD_OWNER_TYPE].projectV2.field.options,
   });
 });
 
 test('parseSingleSelectField throws (fail-loud) when the project id is missing', () => {
-  assert.throws(() => parseSingleSelectField({ data: { user: { projectV2: {} } } }), /no project id/);
+  assert.throws(() => parseSingleSelectField({ data: { [BOARD_OWNER_TYPE]: { projectV2: {} } } }), /no project id/);
 });
 
 test('parseSingleSelectField throws (fail-loud) when the Status field is missing', () => {
   assert.throws(
-    () => parseSingleSelectField({ data: { user: { projectV2: { id: 'PVT_x' } } } }),
+    () => parseSingleSelectField({ data: { [BOARD_OWNER_TYPE]: { projectV2: { id: 'PVT_x' } } } }),
     /no "Status" field/,
   );
 });
@@ -65,17 +62,17 @@ test('parseSingleSelectField throws (fail-loud) when the Status field is missing
 // exercised on its default and a Workstream failure could name the wrong field.
 test('parseSingleSelectField names a non-default field in both fail-loud messages', () => {
   assert.throws(
-    () => parseSingleSelectField({ data: { user: { projectV2: {} } } }, 'Workstream'),
+    () => parseSingleSelectField({ data: { [BOARD_OWNER_TYPE]: { projectV2: {} } } }, 'Workstream'),
     /workstream-field JSON has no project id/,
   );
   assert.throws(
-    () => parseSingleSelectField({ data: { user: { projectV2: { id: 'PVT_x' } } } }, 'Workstream'),
+    () => parseSingleSelectField({ data: { [BOARD_OWNER_TYPE]: { projectV2: { id: 'PVT_x' } } } }, 'Workstream'),
     /no "Workstream" field on the project/,
   );
 });
 
 test('optionIdFor is case-insensitive and handles multi-word statuses', () => {
-  const options = STATUS_FIELD_JSON.data.user.projectV2.field.options;
+  const options = STATUS_FIELD_JSON.data[BOARD_OWNER_TYPE].projectV2.field.options;
   assert.equal(optionIdFor(options, 'Done'), 'opt-done');
   assert.equal(optionIdFor(options, 'done'), 'opt-done');
   assert.equal(optionIdFor(options, 'In review'), 'opt-inreview');
@@ -83,38 +80,48 @@ test('optionIdFor is case-insensitive and handles multi-word statuses', () => {
 });
 
 test('optionIdFor throws on an unknown status, naming the valid options', () => {
-  const options = STATUS_FIELD_JSON.data.user.projectV2.field.options;
+  const options = STATUS_FIELD_JSON.data[BOARD_OWNER_TYPE].projectV2.field.options;
   assert.throws(() => optionIdFor(options, 'Bogus'), /unknown Status "Bogus".*Done/s);
 });
 
-test('parseIssueItemId picks the configured project\'s node among others; throws when not on the board', () => {
-  const json = issueItemJson([
-    { id: 'item-other-project', project: { number: BOARD_PROJECT_NUMBER + 1 } },
-    { id: 'item-a', project: { number: BOARD_PROJECT_NUMBER } },
-  ]);
-  assert.equal(parseIssueItemId(json, 453), 'item-a');
-  // One assertion pins the whole refusal as a contiguous message: the diagnosis AND the
-  // scripted way forward. Without the pointer the caller falls back to a bare
-  // `gh project item-add` and leaves an unfielded card behind.
-  assert.throws(
-    () => parseIssueItemId(issueItemJson([{ id: 'x', project: { number: BOARD_PROJECT_NUMBER + 1 } }]), 999),
-    /#999 is not on the board — add it with Status and Workstream: node scripts\/board-add\.mjs 999 <Status> <Workstream>/,
-  );
+test('lookupIssueBoardItem resolves complete replies and requests the configured issue and field', () => {
+  for (const value of [{ name: 'Done' }, null]) {
+    const nodes = [
+      { id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1 }, value: null },
+      { id: 'item-a', isArchived: true, project: { number: BOARD_PROJECT_NUMBER }, value },
+    ];
+    const calls = [];
+    const result = lookupIssueBoardItem(453, (args) => {
+      calls.push(args);
+      return JSON.stringify(issueItemReply(nodes, { issueId: 'I_453' }));
+    }, 'Lane');
+    assert.deepEqual(result, { issueId: 'I_453', item: nodes[1] });
+    assert.equal(calls.length, 1);
+    const query = calls[0][3];
+    assert.ok(query.includes(`repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}")`));
+    assert.match(query, /issue\(number:453\) \{ id projectItems\(first:20\) \{ totalCount nodes \{ id isArchived project/);
+    assert.match(query, /value: fieldValueByName\(name: "Lane"\)/);
+  }
+  for (const nodes of [[], [{ id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1 }, value: null }]]) {
+    assert.deepEqual(lookupIssueBoardItem(453, (args) => {
+      assert.doesNotMatch(args[3], /fieldValueByName/);
+      return issueItemReply(nodes);
+    }), { issueId: 'I_fixture', item: null });
+  }
 });
 
-test('parseIssueItemId throws (fail-loud) on malformed JSON', () => {
-  assert.throws(() => parseIssueItemId({ data: { repository: { issue: {} } } }, 453), /no nodes\[\] array/);
+test('moveCards preserves the configured add advice for a complete absent reply', () => {
+  assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
+    args[3]?.includes('projectV2(number:') ? STATUS_FIELD_JSON : issueItemReply()), (error) => {
+    assert.equal(error.cause.message, 'issue #999 is not on the board — add it with Status and Workstream: node scripts/board-add.mjs 999 <Status> <Workstream>');
+    return true;
+  });
 });
 
-test('parseIssueItemValue reads the configured project\'s node\'s current field value, or null with no value', () => {
-  const withStatus = issueItemJson([{ id: 'item-a', project: { number: BOARD_PROJECT_NUMBER }, value: { name: 'Done' } }]);
-  assert.equal(parseIssueItemValue(withStatus, 453), 'Done');
-  const withoutStatus = issueItemJson([{ id: 'item-b', project: { number: BOARD_PROJECT_NUMBER }, value: null }]);
-  assert.equal(parseIssueItemValue(withoutStatus, 453), null);
-  assert.throws(
-    () => parseIssueItemValue(issueItemJson([{ id: 'x', project: { number: BOARD_PROJECT_NUMBER + 1 } }]), 999),
-    /#999 is not on the board/,
-  );
+test('moveCards refuses a matching item without an id', () => {
+  assert.throws(() => moveCards([{ issueNumber: 453, statusName: 'Ready' }], (args) =>
+    args[3]?.includes('projectV2(number:') ? STATUS_FIELD_JSON
+      : issueItemReply([{ isArchived: false, project: { number: BOARD_PROJECT_NUMBER }, value: null }])), /board item for #453 has no id/);
 });
 
 test('parseBatchArgs parses "<issue#>:<Status>" pairs, incl. multi-word "In review"', () => {
@@ -155,8 +162,9 @@ function recordingExec(itemIdByIssue, currentStatusByIssue = {}) {
       const match = query.match(/issue\(number:(\d+)\)/);
       const issueNumber = Number(match[1]);
       const status = currentStatusByIssue[issueNumber];
-      return JSON.stringify(issueItemJson([{
+      return JSON.stringify(issueItemReply([{
         id: itemIdByIssue[issueNumber],
+        isArchived: false,
         project: { number: BOARD_PROJECT_NUMBER },
         value: status ? { name: status } : null,
       }]));
@@ -251,8 +259,8 @@ test('moveCards preserves the underlying error as cause on a per-pair failure', 
   }
 });
 
-// #464 review: moveCards validates its own inputs — the exported moveCard() is an
-// in-process entry point, and issueNumber is interpolated into the GraphQL query,
+// #464 review: moveCards validates its own inputs — in-process callers hand values
+// in directly, and issueNumber is interpolated into the GraphQL query,
 // so an unvalidated value must fail before any query is built.
 test('moveCards rejects a non-integer issue number and an empty status before querying', () => {
   const { exec, calls } = recordingExec({});
@@ -299,4 +307,91 @@ test('board-move --lane with no parked lane configured exits 1 naming board-conf
   assert.equal(run.status, 1, run.stderr);
   assert.equal(run.stderr, `board-move: ${NO_PARKED_LANE}\n`);
   assert.equal(readFileSync(callsFile, 'utf8'), '');
+});
+
+function outputSink() {
+  const sink = { stdout: '', stderr: '' };
+  sink.log = (line) => { sink.stdout += `${line}\n`; };
+  sink.error = (line) => { sink.stderr += `${line}\n`; };
+  return sink;
+}
+
+test('board-move single-card form moves the card, prints its line on stdout and returns 0', () => {
+  const { exec, calls } = recordingExec({ 453: 'item-453' });
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['453', 'In', 'progress'], { ghExec: exec, output: sink }), 0);
+  assert.equal(sink.stdout, 'board-move: #453 → In progress\n');
+  assert.equal(sink.stderr, '');
+  const edit = calls.find((args) => args[0] === 'project' && args[1] === 'item-edit');
+  assert.ok(edit, 'no item-edit call recorded');
+  assert.equal(edit[edit.indexOf('--id') + 1], 'item-453');
+  assert.equal(edit[edit.indexOf('--single-select-option-id') + 1], 'opt-inprogress');
+});
+
+test('board-move --batch moves every pair, prints one line each on stdout and returns 0', () => {
+  const { exec } = recordingExec({ 453: 'item-453', 454: 'item-454' });
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['--batch', '453:Done', '454:In review'], { ghExec: exec, output: sink }), 0);
+  assert.equal(sink.stdout, 'board-move: #453 → Done\nboard-move: #454 → In review\n');
+  assert.equal(sink.stderr, '');
+});
+
+// Literal, not imported from scripts/board-move.mjs: the printed text is the oracle, so a
+// change to any usage line must fail this test.
+const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
+  '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
+  '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none';
+
+test('board-move rejects bad arguments before any gh call: usage problems return 2 and a malformed batch pair returns 1', () => {
+  for (const args of [[], ['abc', 'Done'], ['453'], ['--batch']]) {
+    const { exec, calls } = recordingExec({});
+    const sink = outputSink();
+    assert.equal(boardMoveMain(args, { ghExec: exec, output: sink }), 2, JSON.stringify(args));
+    assert.equal(sink.stdout, '');
+    assert.equal(sink.stderr, `${USAGE_TEXT}\n`, JSON.stringify(args));
+    assert.deepEqual(calls, []);
+  }
+  const { exec, calls } = recordingExec({});
+  const sink = outputSink();
+  assert.equal(boardMoveMain(['--batch', 'nonsense'], { ghExec: exec, output: sink }), 1);
+  assert.equal(sink.stdout, '');
+  assert.equal(sink.stderr, 'board-move: malformed batch pair "nonsense" — expected "<issue#>:<Status>"\n');
+  assert.deepEqual(calls, []);
+});
+
+test('board-move refuses incomplete issue-item replies with their cause and no write', () => {
+  const missingNodes = issueItemReply();
+  delete missingNodes.data.repository.issue.projectItems.nodes;
+  const missingCount = issueItemReply();
+  delete missingCount.data.repository.issue.projectItems.totalCount;
+  const unreadableIssue = issueItemReply();
+  unreadableIssue.data.repository.issue = null;
+  const cases = [
+    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99 } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
+    [missingCount, /no non-negative integer projectItems\.totalCount/],
+    [unreadableIssue, /no readable issue/],
+    ['not json at all', /not valid JSON/],
+    [issueItemReply([{ id: 'bad', isArchived: false, project: null }]), /non-integer project number/],
+    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER } }]), /non-boolean isArchived/],
+    [missingNodes, /no projectItems\.nodes\[\] array/],
+  ];
+  for (const [reply, expected] of cases) {
+    const calls = [];
+    const exec = (args) => {
+      calls.push(args);
+      return args[3]?.includes('projectV2(number:') ? JSON.stringify(STATUS_FIELD_JSON) : typeof reply === 'string' ? reply : JSON.stringify(reply);
+    };
+    assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], exec), (error) => {
+      assert.match(error.cause.message, expected);
+      assert.doesNotMatch(error.message, /is not on the board/);
+      return true;
+    });
+    const sink = outputSink();
+    assert.equal(boardMoveMain(['999', 'Ready'], { ghExec: exec, output: sink }), 1);
+    assert.match(sink.stderr, expected);
+    assert.doesNotMatch(sink.stderr, /is not on the board/);
+    assert.equal(calls.some((args) => args[0] === 'project'), false);
+  }
 });

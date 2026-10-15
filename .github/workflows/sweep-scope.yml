@@ -1,7 +1,7 @@
-# This tracked guard runs on pull-request events. It evaluates documentation-sweep and day-after
-# triage branches against the scope rules in docs/DOC-SWEEP.md, and exits successfully without
-# checking scope on ordinary branches. Committing this file does not establish a required check or
-# activate the maintenance routine, its schedule, or its publication environment.
+# This tracked guard starts on pull-request events. Its one job judges a documentation-sweep or
+# day-after triage branch against the scope rules in docs/DOC-SWEEP.md and is skipped on every other
+# branch. Committing this file does not establish a required check or activate the maintenance
+# routine, its schedule, or its publication environment.
 #
 # pull_request_target keeps the workflow file, check script, and library on `main`, never the pull
 # request it judges. The packages the check parses Markdown with are installed from the base tree's
@@ -23,39 +23,26 @@ concurrency:
 
 jobs:
   sweep-scope:
+    # The branch is decided here and nowhere else: no step carries a condition, so a job that starts
+    # always judges. A job this condition skips starts no runner and still reports its required
+    # check as passing; a workflow-level filter is what would leave a required check pending for
+    # ever. A fork names its own branch, which this expression compares as a value and no script
+    # reads. `startsWith` ignores letter case, so a prefix in other casing is judged too.
+    if: startsWith(github.head_ref, 'docs-sweep/') || startsWith(github.head_ref, 'docs-triage/')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      # The gate carries no `if:` and the job no condition, so an ordinary pull request still runs this
-      # job and exits 0: a required check that never starts stays pending for ever. A fork names its
-      # own branch, so HEAD_REF arrives through `env:` and is read as a quoted shell variable; a `${{ }}`
-      # expression would be pasted into the script text before bash saw it.
-      - id: gate
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          set -euo pipefail
-          if [[ "$HEAD_REF" != docs-sweep/* && "$HEAD_REF" != docs-triage/* ]]; then
-            echo "sweep-scope: $HEAD_REF is not a sweep or triage branch; nothing to check"
-            echo "judge=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "judge=true" >> "$GITHUB_OUTPUT"
       # No `ref`: on pull_request_target the checkout is the base branch, which is the point.
       # fetch-depth 0 brings every branch head, so the pull request's commits are present as objects.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: steps.gate.outputs.judge == 'true'
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: steps.gate.outputs.judge == 'true'
         with:
           node-version: 22
-      - if: steps.gate.outputs.judge == 'true'
-        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
-      - if: steps.gate.outputs.judge == 'true'
-        env:
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |

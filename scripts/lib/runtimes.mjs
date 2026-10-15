@@ -1,5 +1,5 @@
-// runtimes.mjs — which runtimes a repository runs, which shared path belongs to which, and the one read of the
-// seat settings file.
+// runtimes.mjs — which runtimes a repository runs, which shared path belongs to which, the one read of the seat
+// settings file, and the two answers that file gives about a shared path.
 //
 // A leaf: it imports only node:fs and node:path, because seat-settings.mjs imports the agent check and the agent check
 // must be able to import this module. For the same reason it is the only place the settings file is read from disk, so
@@ -7,11 +7,26 @@
 // home of the file's top-level rules (readSettingsHeader), so no reader takes its runtimes from a file whose top level
 // the sync refuses.
 //
+// The two answers are separate questions, and neither stands in for the other:
+// leftOutCause: why a tree with these settings must hold nothing at a path, or null where the tree installs it. The
+// path's runtime is not named or, failing that, it is the Greptile add-on's and the add-on is off or, failing that, it
+// is one of the documentation sweep's six files and the sweep is off.
+// needNotResolveCause: why a reference to a path need not resolve in a tree with these settings, or null where it
+// must. The path's runtime is not named or, failing that, it is one of the sweep's six files or two manuals and the
+// sweep is off. Never the add-on.
+// Both take the settings readSettingsHeader returns, which reach it only as settings-file text; a tree with no file is
+// judged as the text NO_SETTINGS_FILE, so what an absent key means is written once (treeSettings).
+//
 // RUNTIMES: the two runtimes a repository may run. The settings file's `runtimes` key names the ones present; with
 // no key, or no file, both are.
 // runtimeOf: a shared path belongs to Claude Code (everything under .claude/, CLAUDE.md, and the files of the script
 // only its hooks run), to Codex (everything under .codex/, and the files of the scripts only its hooks run), or to
 // every install (null). A shared file of every install never imports one of those five script files.
+// isGreptilePath: the Greptile add-on's files are everything under .agents/skills/greptile/, .claude/skills/greptile/
+// and .greptile/. A tree installs them only where its settings file holds `"greptile": true`.
+// The settings file's `docSweep` key turns the documentation sweep's files off with `false`; with no key it is on. The
+// sweep's shared files are the six the sweep-scope check owns (SWEEP_PATHS). A tree whose sweep is off leaves them out;
+// a reference to one of them, or to one of the two manuals the sweep runs by, need not resolve there (sweepOmits).
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +54,40 @@ export function runtimeOf(path) {
 export function installs(runtimes, path) {
   const runtime = runtimeOf(path);
   return runtime === null || runtimes.includes(runtime);
+}
+
+const GREPTILE_FOLDERS = ['.agents/skills/greptile/', '.claude/skills/greptile/', '.greptile/'];
+
+/** Whether a shared path is one of the Greptile add-on's files. Exact string comparison. */
+export const isGreptilePath = (path) => GREPTILE_FOLDERS.some((folder) => path.startsWith(folder));
+
+const SWEEP_PATHS = new Set([
+  '.github/workflows/sweep-scope.yml',
+  'scripts/lib/sweep-scope-corpus.mjs',
+  'scripts/lib/sweep-scope-evaluate.mjs',
+  'scripts/lib/sweep-scope.mjs',
+  'scripts/lib/sweep-scope.test.mjs',
+  'scripts/sweep-scope-check.mjs',
+]);
+const SWEEP_MANUALS = ['docs/DOC-SWEEP.md', 'docs/SWEEP-TRIAGE.md'];
+
+/** Whether a tree whose sweep is `docSweep` leaves the path out: the sweep's six files and its two manuals, only where it is off. Exact string comparison. */
+export const sweepOmits = (docSweep, path) => !docSweep && (SWEEP_PATHS.has(path) || SWEEP_MANUALS.includes(path));
+
+const runtimeCause = (path) => `the settings file names no ${runtimeOf(path)} runtime`;
+const SWEEP_OFF_CAUSE = 'the settings file turns the documentation sweep off';
+
+/** Why a tree with these settings must hold nothing at the path, or null where it installs the path. */
+export function leftOutCause({ runtimes, greptile, docSweep }, path) {
+  if (!installs(runtimes, path)) return runtimeCause(path);
+  if (!greptile && isGreptilePath(path)) return 'the settings file does not turn the Greptile add-on on';
+  return !docSweep && SWEEP_PATHS.has(path) ? SWEEP_OFF_CAUSE : null;
+}
+
+/** Why a reference to the path need not resolve in a tree with these settings, or null where it must. */
+export function needNotResolveCause({ runtimes, docSweep }, path) {
+  if (!installs(runtimes, path)) return runtimeCause(path);
+  return sweepOmits(docSweep, path) ? SWEEP_OFF_CAUSE : null;
 }
 
 const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, run the sync that installs that copy, then make the edit again';
@@ -90,21 +139,29 @@ export function checkContained(root, path) {
   }
 }
 
-/** The settings file's parsed object and the runtimes it names, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats and planApproval, a valid `runtimes` value, a `planApproval` that is true or false when present. Throws a refusal naming `label`. */
+// What a tree with no settings file is judged as.
+const NO_SETTINGS_FILE = '{"version":1,"seats":{}}';
+
+/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview, a valid `runtimes` value, a `planApproval`, a `greptile` and a `docSweep` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
 export function readSettingsHeader(text, label) {
   let settings;
   try {
-    settings = JSON.parse(text);
+    settings = JSON.parse(text === undefined ? NO_SETTINGS_FILE : text);
   } catch {
     throw new Error(`${label}: is not valid JSON`);
   }
   if (!isRecord(settings)) throw refusal(label, 'file', 'must hold one JSON object', settings);
   if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the sync (only 1)', settings.version, true);
   for (const key of Object.keys(settings)) {
-    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats and planApproval', key, true);
+    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview', key, true);
   }
   if (settings.planApproval !== undefined && typeof settings.planApproval !== 'boolean') throw refusal(label, 'planApproval', 'must be true or false', settings.planApproval);
-  return { settings, runtimes: readRuntimes(settings.runtimes, label) };
+  if (settings.greptile !== undefined && typeof settings.greptile !== 'boolean') throw refusal(label, 'greptile', 'must be true or false', settings.greptile);
+  if (settings.docSweep !== undefined && typeof settings.docSweep !== 'boolean') throw refusal(label, 'docSweep', 'must be true or false', settings.docSweep);
+  if (settings.crossFamilyReview !== undefined && settings.crossFamilyReview !== true) throw refusal(label, 'crossFamilyReview', 'must be true, or left out to record no authorization', settings.crossFamilyReview);
+  const runtimes = readRuntimes(settings.runtimes, label);
+  if (settings.crossFamilyReview === true && runtimes.length < RUNTIMES.length) throw refusal(label, 'crossFamilyReview', 'is refused where runtimes names one runtime', settings.crossFamilyReview);
+  return { settings, runtimes, greptile: settings.greptile === true, docSweep: settings.docSweep !== false, crossFamilyReview: settings.crossFamilyReview === true };
 }
 
 /** The text of the settings file of the tree at `root`, or undefined when the tree has none. Refuses one under a symlinked directory or one that is not a regular file, before any read. */
@@ -117,8 +174,11 @@ export function readSettingsFile(root) {
   return readFileSync(full, 'utf8');
 }
 
-/** The runtimes the tree at `root` runs: those its settings file names, or both. Applies the top-level rules of readSettingsHeader; the seats are validated by parseSettings (seat-settings.mjs), which the manifest check runs. */
-export function presentRuntimes(root) {
-  const text = readSettingsFile(root);
-  return text === undefined ? RUNTIMES : readSettingsHeader(text, SETTINGS_PATH).runtimes;
-}
+/** The settings of the tree at `root`, as readSettingsHeader returns them: those of its settings file, or of NO_SETTINGS_FILE where it has none. The seats are validated by parseSettings (seat-settings.mjs), which the manifest check runs. */
+export const treeSettings = (root) => readSettingsHeader(readSettingsFile(root), SETTINGS_PATH);
+
+/** The runtimes the tree at `root` runs: those its settings file names, or both. */
+export const presentRuntimes = (root) => treeSettings(root).runtimes;
+
+/** Whether the tree at `root` leaves the documentation sweep on: on unless its settings file holds `"docSweep": false`. */
+export const sweepOn = (root) => treeSettings(root).docSweep;

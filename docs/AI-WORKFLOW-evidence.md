@@ -12,7 +12,7 @@ hold the checks.
 |---|---|---|
 | Claim | One observable behaviour or invariant a slice proves | The plan |
 | Construction mode | How much proof the claim needs, and in what order | [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) |
-| Mutation | The change broken on purpose, to show the test notices, where the strategy requires one | The orchestrator, at convergence |
+| Discrimination proof | Evidence that rejects the claimed wrong behaviour, by the route the strategy selects | The orchestrator, at convergence |
 | Receipt | The exit code a script wrote to the run log | [`scripts/run-log.mjs`](../scripts/run-log.mjs) |
 | Hosted check | The suites run on the merge result before a merge | Continuous integration and the branch rules |
 
@@ -22,10 +22,12 @@ hold the checks.
 mode, which settles whether a failing test must come first, whether new evidence must land with the change, or whether
 the existing regression net is enough; that document defines the modes and when each applies.
 
-Where the strategy requires it, a claim is also proven by breaking it on purpose: the change is undone, the focused test
-must go red, and the change is restored. A test that stays green when the feature breaks is not evidence.
-[`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) owns the mutation rule: which claims need one and how many, how each
-run is recorded, and what stands in for it where no test can observe the claim.
+The strategy selects how a claim shows that its evidence rejects the wrong behaviour. Qualifying ordinary pre-fix
+red followed by unchanged-test green may already demonstrate the equivalent wrong behaviour. Where a mutation is
+required, the orchestrator deliberately breaks the implementation, observes the focused evidence fail, restores it,
+and observes green. Protected invariants retain their adversarial convergence mutation.
+[`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) owns the qualifications, protected floors, focused selection and
+recording rules, and the alternative where no test can observe the claim.
 
 ### The run log
 
@@ -55,16 +57,17 @@ passed local receipt can in one bounded case stand for a check the hosted run al
 same rule in [the `resume` skill](../.agents/skills/resume/SKILL.md) under "8. Deliver", and the pull request body
 says when it was used.
 
-A second check, `sweep-scope` in `.github/workflows/sweep-scope.yml`, required where the documentation routines are
-active, exists because the documentation sweep and its day-after triage land their own pull requests and no one reads
+A second check, `sweep-scope` in `.github/workflows/sweep-scope.yml`, is carried unless the repository's settings file
+turns the documentation sweep off, and a repository that carries it requires it where the documentation routines are
+active. It exists because the documentation sweep and its day-after triage land their own pull requests and no one reads
 them first. It runs from `main` rather than from the pull request it judges, and holds those branches to the scope table
 both routines answer to; [the head of `scripts/sweep-scope-check.mjs`](../scripts/sweep-scope-check.mjs) and
 [`docs/DOC-SWEEP.md`](DOC-SWEEP.md) own what it refuses and its limits.
 
 ## Where the rules live
 
-- [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): the construction modes, the mutation rule and the claims that take
-  another route, the evidence routes, which suites run where and which checks a changed path reruns.
+- [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): the construction modes, discrimination proof and focused
+  selection, the evidence routes, which suites run where and which checks a changed path reruns.
 - [`docs/CODING-STANDARDS.md`](CODING-STANDARDS.md): what a test or a tool may cost.
 - [`AGENTS.md`](../AGENTS.md) under "Coding standards and the executed test bar": which document owns which part of the
   bar.
@@ -76,8 +79,8 @@ both routines answer to; [the head of `scripts/sweep-scope-check.mjs`](../script
 
 ## Failure modes
 
-- **A test passes whatever the code does.** The executed mutation exposes it: the change is broken on purpose and the
-  focused test must go red.
+- **A test passes whatever the code does.** The strategy-selected discrimination proof must show it rejects the
+  claimed wrong behaviour, through qualifying ordinary pre-fix red or a required mutation's failing run.
 - **A focused command matches no test.** Zero matches is a failed verification, never a pass.
 - **A check could not run.** It is reported as unavailable evidence, never converted to a pass or a zero.
 - **A carried result reads as a fresh one.** The pull request body lists every carried receipt with the commit it ran
@@ -88,4 +91,4 @@ both routines answer to; [the head of `scripts/sweep-scope-check.mjs`](../script
 - `docs/TESTING-STRATEGY.md`: the evidence authority.
 - `docs/CODING-STANDARDS.md`: the cost standard for tests and tools.
 - `scripts/run-log.mjs`: the logger every check runs through.
-- `.github/workflows/sweep-scope.yml` and `scripts/sweep-scope-check.mjs`: the documentation routines' scope check.
+- `.github/workflows/sweep-scope.yml` and `scripts/sweep-scope-check.mjs`: the documentation routines' scope check, where the sweep is not turned off.

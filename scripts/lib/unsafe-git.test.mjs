@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { join, resolve, sep } from 'node:path';
 import { blockReason } from './unsafe-git.mjs';
 
-const REASON_CREATE = "gh pr create without --draft skips the draft review: open it as a draft (--draft/-d) so Greptile reviews it before CI runs";
+const REASON_CREATE = "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
 const REASON_MERGE = 'gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused';
 const REASON_READY = 'gh pr ready: only `gh pr ready <number>` and `gh pr ready <number> --undo`, alone in their command segment, are allowed; the allow list runs that prefix unprompted, so anything else in the segment (a quoted, substituted or variable word, a redirection, a wrapper) is refused';
 const REASON_COMMIT_NO_VERIFY = 'git commit --no-verify skips the pre-commit gates';
@@ -18,6 +18,11 @@ const REASON_HOOKS_PATH = 'a core.hooksPath override skips the pre-commit and pr
 const REASON_HOOKS_PATH_CONFIG = 'git config core.hooksPath: only the arming step `git config core.hooksPath .githooks` and a read that ends at the key are allowed; another value or an unset skips the pre-commit and pre-push gates, and git can store a word after the key as the value even when it looks like an option, so put options before the key';
 const REASON_PUSH_FORCE = 'git push --force is unsafe (use --force-with-lease for a rebase)';
 const REASON_FILTER_BRANCH = 'git filter-branch rewrites history';
+const REASON_WORKTREE_RESET = 'git worktree add -B resets the branch to the start point when it already exists, dropping the commits only it held: create a new branch with -b instead';
+const REASON_WORKTREE_ADD_FORCE = "git worktree add --force overrides git's refusal to check out a branch another worktree holds or to reuse the path of a missing or locked worktree: free the branch or the path first (git worktree list, git worktree prune), or choose a new one";
+const REASON_WORKTREE_ESCAPE = 'git worktree add: a path under .claude/worktrees/ that holds `..` can climb back out of that folder: write it as .claude/worktrees/<name> with no `..`';
+const REASON_WORKTREE_UNREAD = 'git worktree add under .claude/worktrees/: a word that is not plain (letters, digits and `_ . / : @ + , -`), such as a quoted, escaped, variable or substituted word, can hide `..`, -B or --force from this guard: write every word plainly';
+const REASON_WORKTREE_REMOVE_FORCE = "git worktree remove --force deletes the worktree's uncommitted and untracked changes, and given twice a locked worktree: commit what it holds or discard it on purpose, unlock it if it is locked, then remove it without --force";
 
 // ── gh pr create --draft ────────────────────────────────────────────────────
 
@@ -679,6 +684,197 @@ test('git filter-branch is blocked', () => {
   assert.equal(blockReason('git filter-branch --tree-filter x'), REASON_FILTER_BRANCH);
   assert.equal(blockReason('Git filter-branch --tree-filter x'), REASON_FILTER_BRANCH);
   assert.equal(blockReason('git -C . filter-branch --tree-filter x'), REASON_FILTER_BRANCH);
+});
+
+// ── git worktree add and remove ──────────────────────────────────────────────
+
+// Git bundles short options, takes a value glued to -b or -B, and takes a unique prefix of a long
+// option, so each spelling below resets or forces; the invocation is found wherever it sits.
+test('ANTI-REGRESSION: a worktree add that resets a branch or forces is refused in every spelling and wherever the invocation sits', () => {
+  for (const [command, reason] of [
+    ['git worktree add .claude/worktrees/job-1 -B job/1 abc123', REASON_WORKTREE_RESET],
+    ['git worktree add -B job/1 .claude/worktrees/job-1 abc123', REASON_WORKTREE_RESET],
+    ['git worktree add ../jobs/1 -B job/1 abc123', REASON_WORKTREE_RESET],
+    ['git worktree add -Bjob/1 .claude/worktrees/job-1', REASON_WORKTREE_RESET],
+    ['git worktree add -qB job/1 .claude/worktrees/job-1', REASON_WORKTREE_RESET],
+    ['git -C /repo worktree add .claude/worktrees/job-1 -B main', REASON_WORKTREE_RESET],
+    ['env FOO=1 git worktree add .claude/worktrees/job-1 -B main', REASON_WORKTREE_RESET],
+    ['FOO=1 git worktree add ../x -B main', REASON_WORKTREE_RESET],
+    ['Git worktree add ../x -B main', REASON_WORKTREE_RESET],
+    ['/usr/bin/git worktree add ../x -B main', REASON_WORKTREE_RESET],
+    ['time git worktree add .claude/worktrees/job-1 -B main', REASON_WORKTREE_RESET],
+    ['true & git worktree add .claude/worktrees/job-1 -B main', REASON_WORKTREE_RESET],
+    ['npm test && git worktree add ../x -B main', REASON_WORKTREE_RESET],
+    ['echo "$(git worktree add .claude/worktrees/job-1 -B main)"', REASON_WORKTREE_RESET],
+    ['git worktree remove ../old & git worktree add ../new -B saved HEAD', REASON_WORKTREE_RESET],
+    ['echo "$(git worktree remove ../old; git worktree add ../new -B saved HEAD)"', REASON_WORKTREE_RESET],
+    ['git worktree add --force .claude/worktrees/job-1 main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add .claude/worktrees/job-1 main -f', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add -f ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add --fo ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add --f ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add -qf ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add -df ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add --force --force ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add -ff ../x main', REASON_WORKTREE_ADD_FORCE],
+    // The shell ends a word at an operator character, so an option glued to one still reaches git.
+    ['git worktree add ../x main --force>/dev/null', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add .claude/worktrees/job-1 main --force>/dev/null', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add ../x main --force& wait', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add ../x main --force<input', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add ../x main --fo>/dev/null', REASON_WORKTREE_ADD_FORCE],
+    ['echo "$(git worktree add ../x main --force; echo done)"', REASON_WORKTREE_ADD_FORCE],
+    ['echo "$(git worktree add ../x main --force| cat)"', REASON_WORKTREE_ADD_FORCE],
+    ['echo $(git worktree add ../x main --force)', REASON_WORKTREE_ADD_FORCE],
+    ['echo `git worktree add ../x main --force`', REASON_WORKTREE_ADD_FORCE],
+    ['echo "$(git worktree add ../x main --force\necho done)"', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add ../x main -f>/dev/null', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add ../x -B main>/dev/null', REASON_WORKTREE_RESET],
+    ['git worktree add ../x -Bmain>/dev/null', REASON_WORKTREE_RESET],
+    // A redirection is no word wherever it is glued, so it hides neither the subcommand nor an option.
+    ['git worktree add>/dev/null .claude/worktrees/job-1 -B saved HEAD', REASON_WORKTREE_RESET],
+    ['git worktree>/dev/null add ../x -B saved HEAD', REASON_WORKTREE_RESET],
+    ['git>/dev/null worktree add -f ../x main', REASON_WORKTREE_ADD_FORCE],
+    ['git worktree add 2>/dev/null ../x main --force', REASON_WORKTREE_ADD_FORCE],
+    // A later invocation in a substitution is still judged: the first add has no reason of its own, so the second add's reset decides.
+    ['echo "$(git worktree add ../x -b job/1 HEAD; git worktree add ../y -B saved HEAD)"', REASON_WORKTREE_RESET],
+    // A `>` glued to a path ending in `git` is a word, not the invocation's own, so the `-B` it carries is seen.
+    ['git worktree add ${x:-../git> -B saved } HEAD', REASON_WORKTREE_RESET],
+    // A redirection before the subcommand hides nothing, whatever its target.
+    ['log=/dev/null; git worktree>$log add .claude/worktrees/job-1 -B saved HEAD', REASON_WORKTREE_RESET],
+    ['git>$log worktree add ../x -B saved HEAD', REASON_WORKTREE_RESET],
+    ['git worktree > >(cat) add ../x -B saved HEAD', REASON_WORKTREE_RESET],
+    // A separator inside a quoted span of the substituted text cuts nothing, since the text is judged whole.
+    ['echo "$(git worktree add .claude/worktrees/job-1 >\'/tmp/log;name\' -B saved HEAD)"', REASON_WORKTREE_RESET],
+    ['echo "$(git worktree add ../x >\'/tmp/log;name\' -B saved HEAD)"', REASON_WORKTREE_RESET],
+    // A comment and its apostrophe in the substituted text are read as words, so the live line between two comments is still judged.
+    ['echo "$(true # don\'t skip\ngit worktree add .claude/worktrees/job-1 -B saved HEAD\n# owner\'s note\n)"', REASON_WORKTREE_RESET],
+    // Bash runs the add after `${x:- #};` and after a non-breaking space before `#;`, so neither hides -B.
+    ['echo "$(printf %s ${review_note:- #}; git worktree add .claude/worktrees/job-1 -B saved HEAD)"', REASON_WORKTREE_RESET],
+    ['echo "$(true \u00a0#; git worktree add .claude/worktrees/job-1 -B saved HEAD)"', REASON_WORKTREE_RESET],
+    // A backslash ends no comment and is no redirection target, so the next line's add is still judged.
+    ['echo "$(true # >\\\ngit worktree add .claude/worktrees/job-1 -B saved HEAD\n)"', REASON_WORKTREE_RESET],
+    // A value glued to -b is a branch name, so its letters are not options.
+    ['git worktree add -bfix/1 ../x main', ''],
+    ['git worktree add -bBranch ../x main', ''],
+    ['git worktree add --detach ../x main', ''],
+    ['git worktree add -d ../x main', ''],
+  ]) assert.equal(blockReason(command), reason, command);
+});
+
+// A `..` step anywhere after the folder can climb out of it, and while a word holds the folder a
+// quoted, escaped, variable, glob or brace word could hide `..`, -B or --force, so each is refused.
+test('ANTI-REGRESSION: a worktree add path under the job worktrees folder that climbs back out, or holds a word the guard cannot read, is refused', () => {
+  for (const [command, reason] of [
+    ['git worktree add .claude/worktrees/../x -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add ./.claude/worktrees/.. -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add .claude/worktrees/job-1/.. -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add .claude/worktrees/../ -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add .claude/worktrees/a/../../b -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add /repo/.claude/worktrees/../outside -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add .claude/worktrees/a/../b -b job/1', REASON_WORKTREE_ESCAPE],
+    ['git worktree add .claude/worktrees/x"/../y" -b job/1', REASON_WORKTREE_UNREAD],
+    ["git worktree add .claude/worktrees/job-1 '-B' main", REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/job-1 \\-B main', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/$NAME -b job/1', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/{a,..}/x -b job/1', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/.? -b job/1', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/job-1 -b job/1 \\\n-B main', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/job-1 -b job/1 HEAD & echo hi', REASON_WORKTREE_UNREAD],
+    ['git worktree add .claude/worktrees/job-232 main > /tmp/worktree.log\\\n --force', REASON_WORKTREE_UNREAD],
+    // An escaped `#` is no comment, so its word is read.
+    ['git worktree add .claude/worktrees/job-1 -b job/1 HEAD \\# x', REASON_WORKTREE_UNREAD],
+    // A double-quoted substitution is judged whole, so a separator or a comment in it is read as a word.
+    ['echo "$(git worktree add .claude/worktrees/job-1 -b job/1 HEAD; pwd)"', REASON_WORKTREE_UNREAD],
+    ['echo "$(git worktree add .claude/worktrees/job-1 -b job/1 HEAD # create job\n)"', REASON_WORKTREE_UNREAD],
+    // A `>` inside a quoted span of substituted text takes no target, so the climbing path is still read.
+    ['echo "$(git worktree add \'>/.claude/worktrees/../x\' -b job/1 HEAD)"', REASON_WORKTREE_ESCAPE],
+    // A redirection target ends only at a blank or an operator, so one running into a `}` is read as a
+    // word and its `..` is seen.
+    ['git worktree add ${x:-a >.claude/worktrees/../w}', REASON_WORKTREE_ESCAPE],
+    // A `>` glued to a path ending in `git` is a word, not the invocation's own, so the `..` it carries is seen.
+    ['git worktree add ${x:--btopic/git> .claude/worktrees/../x } HEAD', REASON_WORKTREE_ESCAPE],
+    // A redirection is not a word.
+    ['git worktree add .claude/worktrees/job-1 -b job/1 abc123 2>&1', ''],
+    ['git worktree add .claude/worktrees/job-1 -b job/1 abc123 > /dev/null', ''],
+  ]) assert.equal(blockReason(command), reason, command);
+});
+
+test('ANTI-REGRESSION: a forced worktree remove is refused, and a plain remove passes', () => {
+  for (const [command, reason] of [
+    ['git worktree remove --force .claude/worktrees/job-1', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove .claude/worktrees/job-1 -f', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove -ff ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove --fo ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git -C /repo worktree remove --force x', REASON_WORKTREE_REMOVE_FORCE],
+    ['env FOO=1 git worktree remove -f x', REASON_WORKTREE_REMOVE_FORCE],
+    // The shell ends a word at an operator character, so an option glued to one still reaches git.
+    ['git worktree remove .claude/worktrees/job-1 --force>/dev/null', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove .claude/worktrees/job-1 --force& wait', REASON_WORKTREE_REMOVE_FORCE],
+    ['echo "$(git worktree remove .claude/worktrees/job-1 --force; echo done)"', REASON_WORKTREE_REMOVE_FORCE],
+    ['echo "$(git worktree remove ../x --force| cat)"', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove ../x --force<input', REASON_WORKTREE_REMOVE_FORCE],
+    ['echo $(git worktree remove ../x --force)', REASON_WORKTREE_REMOVE_FORCE],
+    ['echo `git worktree remove ../x --force`', REASON_WORKTREE_REMOVE_FORCE],
+    ['echo "$(git worktree remove ../x --force\necho done)"', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove ../x -f>/dev/null', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove ../x --fo>/dev/null', REASON_WORKTREE_REMOVE_FORCE],
+    // A redirection is no word wherever it is glued, whatever its target.
+    ['git worktree remove>/dev/null --force .claude/worktrees/job-1', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree>/dev/null remove --force ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove>"$log" -f ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove> >(cat) --force ../x', REASON_WORKTREE_REMOVE_FORCE],
+    // An escaped `>` is part of the path, not a redirection, so `--force` is still read.
+    [String.raw`git worktree remove ../old\> --force`, REASON_WORKTREE_REMOVE_FORCE],
+    // A `>` glued to a word other than the invocation's own is read as a word, so a `--force` a `${...}`
+    // default carries is still seen.
+    ['git worktree remove ../x ${x:-a> --force }', REASON_WORKTREE_REMOVE_FORCE],
+    // A `>` glued to a path ending in `git` is a word, not the invocation's own, so the `--force` it carries is seen.
+    ['git worktree remove ${x:-../git> --force }', REASON_WORKTREE_REMOVE_FORCE],
+    // A redirection before the subcommand hides nothing, whatever its target.
+    ['git worktree>$log remove --force ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git -c a=b >/dev/null worktree remove --force ../x', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree 2> >(cat >&2) remove --force ../x', REASON_WORKTREE_REMOVE_FORCE],
+    // A command inside a process substitution the invocation's redirection passes over is still judged.
+    ['git worktree > >(git worktree remove ../dirty --force) add .claude/worktrees/job-1 -b job/1 HEAD', REASON_WORKTREE_REMOVE_FORCE],
+    // A `#` is a comment only as a word of its own: after an escaped blank, or inside a quoted span of
+    // the substituted text, it is filename data.
+    [String.raw`git worktree remove .claude/worktrees/job-1\ # --force`, REASON_WORKTREE_REMOVE_FORCE],
+    ['echo "$(git worktree remove \'../jobs/ # 1\' --force)"', REASON_WORKTREE_REMOVE_FORCE],
+    // A comment inside a substitution is read as words, so the live line between two comments is still judged.
+    ['echo "$(true # don\'t skip\ngit worktree remove ../x --force\n# owner\'s note\n)"', REASON_WORKTREE_REMOVE_FORCE],
+    ['git worktree remove .claude/worktrees/job-1', ''],
+    ['git worktree remove ../repo.job-1170', ''],
+  ]) assert.equal(blockReason(command), reason, command);
+});
+
+// The forms the resume skill, the sweep and triage manuals and a verifier run; the Codex sibling
+// path and a slice path may sit outside the folder.
+test('ANTI-REGRESSION: every workflow worktree add form passes, the Codex sibling path and slice paths outside the job worktrees folder included', () => {
+  for (const command of [
+    'git worktree add .claude/worktrees/job-232 -b job/232 13ecf6a3b1c2d4e5f60718293a4b5c6d7e8f9012',
+    'git worktree add ../jobs/232 -b job/232 13ecf6a3b1c2d4e5f60718293a4b5c6d7e8f9012',
+    'git worktree add -b slice/232-guard ../slice-232-guard job/232',
+    'git worktree add -b slice/232-guard .claude/worktrees/slice-232-guard job/232',
+    'git worktree add -b slice/232-guard ../../../.claude/worktrees/slice-232-guard job/232',
+    'git worktree add -b slice/232-guard /Users/z/repo/.claude/worktrees/slice-232-guard job/232',
+    'git worktree add -b slice/232-guard "/Users/z/Claude Code/repo/.claude/worktrees/slice-232-guard" job/232',
+    'git worktree add .claude/worktrees/docs-sweep -b docs-sweep/2026-10-12',
+    'git worktree add .claude/worktrees/docs-triage -b docs-triage/2026-10-13',
+    'git worktree add --detach .claude/worktrees/verify-232 origin/main',
+    'git worktree add .claude/worktrees/verify-232 13ecf6a3b1c2d4e5f60718293a4b5c6d7e8f9012',
+    'git worktree add ../repo.job-1171 -b job/1171',
+    'git worktree list',
+    'git worktree prune',
+    'echo "git worktree add -B main x"',
+    'time git worktree add .claude/worktrees/job-232 -b job/232 abc123',
+    'echo "$(git worktree add ../x -b job/1)"',
+    // A trailing comment, a quoted redirection target and a redirection glued onto the subcommand are no words of the add.
+    'git worktree add .claude/worktrees/job-1 -b job/1 HEAD # create job',
+    'git worktree add .claude/worktrees/job-1 -b job/1 HEAD >"$log" 2>&1',
+    'git worktree add .claude/worktrees/job-1 -b job/1 HEAD >\'/tmp/a b\' 2>&1',
+    'git worktree add>/dev/null .claude/worktrees/job-1 -b job/1 HEAD',
+  ]) assert.equal(blockReason(command), '', command);
 });
 
 // ── plain and allowed forms ─────────────────────────────────────────────────

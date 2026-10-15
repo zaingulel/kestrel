@@ -18,8 +18,9 @@
 // contract in scripts/lib/factory-sync.mjs: every check runs before any write, so a refusal writes nothing.
 // It removes, and prints, each file the target's committed manifest listed and the fetched one no longer shares,
 // when the target holds it committed with the exact bytes last recorded; anything else at such a path is a refusal.
-// It writes no entry of a runtime the target's settings file does not name, treats such an entry's path the same
-// way, and prints how many entries it left out.
+// It writes no entry of a runtime the target's settings file does not name, nor of the external review add-on where
+// that file does not turn it on, nor of the documentation sweep where that file turns it off, treats such an entry's
+// path the same way, and prints how many entries it left out.
 // --canonical is needed only for a target with no committed manifest. Source and target must be different
 // repositories. Exit 0 on success, 1 on a refusal with its cause, 2 on a usage error.
 //
@@ -93,7 +94,7 @@ function sync({ from, into = '.', canonical }) {
   if (source === target) throw new Error(`the source and target are the same repository (${source})`);
   const { files, regions, removed, omitted } = syncInto({ source, target, canonical, fetchMain });
   console.log(`factory-sync: wrote ${files} files and ${regions} regions from ${source} into ${target}`);
-  if (omitted > 0) console.log(`factory-sync: left out ${omitted} entries of a runtime the settings file does not name`);
+  if (omitted > 0) console.log(`factory-sync: left out ${omitted} entries the settings file leaves out`);
   console.log(`factory-sync: removed ${removed.length} retired files`);
   for (const path of removed) console.log(`  ${path}`);
 }

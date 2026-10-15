@@ -41,6 +41,7 @@ import {
   groupByRouting,
   formatGrouped,
 } from './board.mjs';
+import * as board from './board.mjs';
 
 // A representative board spanning pickable + non-pickable columns.
 const BOARD = {
@@ -233,7 +234,7 @@ test('boardQuery asks for every field the fused read carries, each capped sub-li
 
 test('boardQuery asks for the project identity and field schema every page is checked against', () => {
   const q = boardQuery();
-  assert.match(q, new RegExp(`user\\(login:"${BOARD_OWNER}"\\) \\{ login`));
+  assert.match(q, new RegExp(`${BOARD_OWNER_TYPE}\\(login:"${BOARD_OWNER}"\\) \\{ login`));
   assert.match(q, new RegExp(`projectV2\\(number:${BOARD_PROJECT_NUMBER}\\) \\{ id number closed`));
   assert.match(q, /fields\(first:50\) \{ totalCount nodes \{ \.\.\. on ProjectV2FieldCommon \{ name dataType \}/);
   assert.match(q, /\.\.\. on ProjectV2SingleSelectField \{ options \{ name \} \}/);
@@ -244,13 +245,13 @@ test('boardQuery asks for the project identity and field schema every page is ch
 // array; every walk check the page-by-page loop used to make now runs over that array.
 test('fetchBoard walks the slurped pages of one gh call in order and fails loud on malformed or failed reads', () => {
   const firstPage = structuredClone(BOARD_PAGE);
-  firstPage.data.user.projectV2.items.totalCount = 2;
-  firstPage.data.user.projectV2.items.nodes = [REAL_ISSUE_NODE];
-  firstPage.data.user.projectV2.items.pageInfo = { hasNextPage: true, endCursor: 'page-one-cursor' };
+  firstPage.data[BOARD_OWNER_TYPE].projectV2.items.totalCount = 2;
+  firstPage.data[BOARD_OWNER_TYPE].projectV2.items.nodes = [REAL_ISSUE_NODE];
+  firstPage.data[BOARD_OWNER_TYPE].projectV2.items.pageInfo = { hasNextPage: true, endCursor: 'page-one-cursor' };
   const secondPage = structuredClone(BOARD_PAGE);
-  secondPage.data.user.projectV2.items.totalCount = 2;
-  secondPage.data.user.projectV2.items.nodes = [REAL_DRAFT_NODE];
-  secondPage.data.user.projectV2.items.pageInfo = { hasNextPage: false, endCursor: null };
+  secondPage.data[BOARD_OWNER_TYPE].projectV2.items.totalCount = 2;
+  secondPage.data[BOARD_OWNER_TYPE].projectV2.items.nodes = [REAL_DRAFT_NODE];
+  secondPage.data[BOARD_OWNER_TYPE].projectV2.items.pageInfo = { hasNextPage: false, endCursor: null };
   const calls = [];
   const items = fetchBoard((args) => {
     calls.push(args);
@@ -284,7 +285,7 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
   assert.throws(() => fetchBoard(() => { throw new Error('offline'); }), /offline/);
 
   const missingCursorPage = structuredClone(firstPage);
-  missingCursorPage.data.user.projectV2.items.pageInfo.endCursor = null;
+  missingCursorPage.data[BOARD_OWNER_TYPE].projectV2.items.pageInfo.endCursor = null;
   assert.throws(
     () => fetchBoard(() => JSON.stringify([missingCursorPage, secondPage])),
     /pagination.*endCursor/,
@@ -337,14 +338,14 @@ test('fetchBoard throws when the project identity or the field schema changes ac
   assert.equal(fetchPages(first, second).length, 2);
 
   const otherProject = structuredClone(second);
-  otherProject.data.user.projectV2.id = 'PVT_someone_else';
+  otherProject.data[BOARD_OWNER_TYPE].projectV2.id = 'PVT_someone_else';
   assert.throws(() => fetchPages(first, otherProject), /project identity changed across pages.*rerun/i);
 
   // A field added mid-walk: the per-page schema guard passes it (it is neither Status
   // nor the routing field), so only the across-pages comparison can see it.
   const otherSchema = structuredClone(second);
-  otherSchema.data.user.projectV2.fields.nodes.push({ name: 'Notes', dataType: 'TEXT' });
-  otherSchema.data.user.projectV2.fields.totalCount += 1;
+  otherSchema.data[BOARD_OWNER_TYPE].projectV2.fields.nodes.push({ name: 'Notes', dataType: 'TEXT' });
+  otherSchema.data[BOARD_OWNER_TYPE].projectV2.fields.totalCount += 1;
   assert.throws(() => fetchPages(first, otherSchema), /field schema changed across pages.*rerun/i);
 });
 
@@ -454,7 +455,7 @@ const guardNode = (content = {}, node = {}) => leanNode({
 const parseNodes = (...nodes) => parseBoardPage(leanBoardPage(nodes));
 const parseMutated = (mutate, nodes = [guardNode()]) => {
   const page = leanBoardPage(nodes);
-  mutate(page.data.user.projectV2, page.data.user, page);
+  mutate(page.data[BOARD_OWNER_TYPE].projectV2, page.data[BOARD_OWNER_TYPE], page);
   return parseBoardPage(page);
 };
 
@@ -464,7 +465,7 @@ test('parseBoardPage throws on unparseable JSON, on a non-object, and on a respo
   assert.throws(() => parseBoardPage('{not json'), /board page JSON could not be parsed.*rerun the board read/s);
   assert.throws(() => parseBoardPage('"a string"'), /board page.*not a GraphQL data object.*rerun the board read/s);
   assert.throws(() => parseBoardPage(null), /board page.*not a GraphQL data object.*rerun the board read/s);
-  assert.throws(() => parseBoardPage({ data: null }), /board page carried no user data.*rerun the board read/s);
+  assert.throws(() => parseBoardPage({ data: null }), new RegExp(`board page carried no ${BOARD_OWNER_TYPE} data.*rerun the board read`, 's'));
   assert.throws(
     () => parseBoardPage({ errors: [{ message: 'Could not resolve to a User' }] }),
     /board read returned GraphQL errors: Could not resolve to a User/,
@@ -600,8 +601,8 @@ test('parseBoardPage throws on a duplicate Status or routing value on one card',
 test('parseBoardPage throws when a page is not the configured, open project', () => {
   const wrongProjectNumber = BOARD_PROJECT_NUMBER + 1;
   assert.throws(
-    () => parseMutated((project, user) => { user.login = 'someone-else'; }),
-    new RegExp(`answered for user "someone-else".*BOARD_OWNER is "${BOARD_OWNER}".*board-config\\.mjs`, 's'),
+    () => parseMutated((project, owner) => { owner.login = 'someone-else'; }),
+    new RegExp(`answered for ${BOARD_OWNER_TYPE} "someone-else".*BOARD_OWNER is "${BOARD_OWNER}".*board-config\\.mjs`, 's'),
   );
   assert.throws(
     () => parseMutated((project) => { project.number = wrongProjectNumber; }),
@@ -618,6 +619,26 @@ test('parseBoardPage throws when a page is not the configured, open project', ()
   assert.throws(
     () => parseMutated((project) => { delete project.closed; }),
     /carried no boolean closed flag.*rerun the board read/s,
+  );
+});
+
+// Guard 5, for either kind of owner. The check judges a page against the board it is
+// handed, so an install can ask it about a board of the other kind; handed nothing it
+// judges against the configured one.
+test('assertProject judges a page against the owner, owner type and project it is handed, and against the configured board when handed none', () => {
+  const other = BOARD_OWNER_TYPE === 'user' ? 'organization' : 'user';
+  const login = `${BOARD_OWNER}-other`;
+  const pageUnder = (root) => ({
+    data: { [root]: { login, projectV2: { id: 'PVT_other', number: 9, closed: false } } },
+  });
+  assert.equal(board.assertProject(pageUnder(other), login, 9, other).identity, `${login} project 9 (PVT_other)`);
+  assert.throws(
+    () => board.assertProject(pageUnder(other), login, 9, BOARD_OWNER_TYPE),
+    new RegExp(`board page carried no ${BOARD_OWNER_TYPE} data`),
+  );
+  assert.throws(
+    () => board.assertProject(pageUnder(BOARD_OWNER_TYPE)),
+    new RegExp(`answered for ${BOARD_OWNER_TYPE} "${login}".*BOARD_OWNER is "${BOARD_OWNER}"`, 's'),
   );
 });
 
@@ -855,8 +876,8 @@ test('groupByRouting orders groups by ROUTING_OPTIONS and still falls back for a
   // The live board's routing field offers exactly these three. Pinned literally
   // so adding a fourth option, or reordering them, fails here first.
   assert.deepEqual(ROUTING_OPTIONS, ['Go-to-market', 'Product', 'Platform']);
-  // The live board belongs to a personal account, so it is read under the `user` root.
-  assert.equal(BOARD_OWNER_TYPE, 'user');
+  // The owner type is the GraphQL root the board is read under, so it is one of the two GitHub offers.
+  assert.ok(['user', 'organization'].includes(BOARD_OWNER_TYPE));
   const groups = groupByRouting(ALL_ROUTED_ITEMS);
   assert.deepEqual(groups.map((g) => g.routing), [
     'Go-to-market',

@@ -29,19 +29,13 @@ import { moveCards, moveLanes, parseBatchArgs } from './lib/board-move.mjs';
 import { PARKED_LANE } from './lib/board-config.mjs';
 import { ghExec } from './lib/gh-exec.mjs';
 
-// Move a single card. Thin wrapper over `moveCards` — exported because CLAUDE.md
-// references it as the in-process entry point for a future ritual script.
-export function moveCard(issueNumber, statusName) {
-  moveCards([{ issueNumber, statusName }], ghExec);
-}
-
-function usageError() {
-  console.error(
+function usageError(output) {
+  output.error(
     'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
     '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
     '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none',
   );
-  process.exit(2);
+  return 2;
 }
 
 // The written / already-there report for one completed pair. A lane line names the
@@ -58,37 +52,37 @@ function reportLine({ issueNumber, statusName, skipped, cleared }, laneField) {
     : `board-move: #${issueNumber} → ${laneField}: ${statusName}`;
 }
 
-function main() {
-  const argv = process.argv.slice(2);
-  const lane = argv[0] === '--lane';
+export function main(args = process.argv.slice(2), dependencies = {}) {
+  const output = dependencies.output ?? console;
+  const executor = dependencies.ghExec ?? ghExec;
+  const lane = args[0] === '--lane';
   let pairs;
-  if (argv[0] === '--batch' || lane) {
-    if (argv.length < 2) return usageError();
+  if (args[0] === '--batch' || lane) {
+    if (args.length < 2) return usageError(output);
     try {
-      pairs = parseBatchArgs(argv.slice(1), lane ? PARKED_LANE?.field ?? 'Lane' : 'Status');
+      pairs = parseBatchArgs(args.slice(1), lane ? PARKED_LANE?.field ?? 'Lane' : 'Status');
     } catch (err) {
-      console.error(`board-move: ${err.message}`);
-      process.exit(1);
-      return;
+      output.error(`board-move: ${err.message}`);
+      return 1;
     }
   } else {
-    const [numRaw, ...statusParts] = argv;
+    const [numRaw, ...statusParts] = args;
     const issueNumber = Number(numRaw);
     const statusName = statusParts.join(' ').trim();
-    if (!Number.isInteger(issueNumber) || issueNumber <= 0 || !statusName) return usageError();
+    if (!Number.isInteger(issueNumber) || issueNumber <= 0 || !statusName) return usageError(output);
     pairs = [{ issueNumber, statusName }];
   }
   let completed;
   try {
-    completed = lane ? moveLanes(pairs, ghExec) : moveCards(pairs, ghExec);
+    completed = lane ? moveLanes(pairs, executor) : moveCards(pairs, executor);
   } catch (err) {
-    console.error(`board-move: ${err.message}`);
-    process.exit(1);
-    return;
+    output.error(`board-move: ${err.message}`);
+    return 1;
   }
-  for (const pair of completed) console.log(reportLine(pair, lane && PARKED_LANE.field));
+  for (const pair of completed) output.log(reportLine(pair, lane && PARKED_LANE.field));
+  return 0;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main();
+  process.exitCode = main();
 }

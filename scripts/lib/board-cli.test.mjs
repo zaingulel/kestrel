@@ -5,8 +5,10 @@
 // there proves they are WIRED. main() could hand scanOutcome a hard-coded
 // `closeout: false`, print the scan on the wrong stream, or drop the exit code, and
 // every other test in this repository would stay green while the session-start and
-// closeout bookends silently degraded to report-only. Only the real process can observe
-// that, so these spawn it against a fake `gh` reached through `BOARD_TOOLKIT_GH`.
+// closeout bookends silently degraded to report-only. The wiring is tested by calling
+// main with a recording executor and output sink; one positive and one negative proof
+// still start the real process against a fake `gh` (`BOARD_TOOLKIT_GH`), so a guard that
+// never calls main, or drops its status, cannot pass.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { installFakeGh } from './fake-gh.mjs';
 import { leanBoardPage, leanNode } from './board-fixtures.mjs';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } from './board-config.mjs';
+import { main as boardMain } from '../board.mjs';
 
 const SCRIPT = fileURLToPath(new URL('../board.mjs', import.meta.url));
 const UNQUALIFIED_CLEAN = 'board: no drift found.';
@@ -57,6 +60,32 @@ function runBoard(args, page, extraEnv = {}) {
     env: fakeGh.env({ FAKE_BOARD: JSON.stringify([page]), FAKE_GH_CALLS: callsFile, ...extraEnv }),
   });
   return { ...run, calls: readFileSync(callsFile, 'utf8').split('\n').filter(Boolean) };
+}
+
+// The in-process twin of runBoard: main is called with an executor that records every call's
+// arguments and answers as the fake `gh` does — the slurped board walk, and a detail read
+// only when `details` is supplied; anything else throws, as a failing `gh` makes the real
+// executor throw — and an output sink that collects each stream.
+function runBoardInProcess(args, page, details) {
+  const calls = [];
+  let stdout = '';
+  let stderr = '';
+  const ghExec = (callArgs) => {
+    calls.push(callArgs);
+    if (callArgs[0] === 'api' && callArgs[1] === 'graphql' && callArgs.includes('--paginate') && callArgs.includes('--slurp')) {
+      return JSON.stringify([page]);
+    }
+    if (callArgs[0] === 'api' && callArgs[1] === 'graphql' && !callArgs.includes('--paginate') && details) {
+      return details;
+    }
+    throw new Error(`unexpected gh invocation: ${callArgs.join(' ')}`);
+  };
+  const output = {
+    log: (line) => { stdout += `${line}\n`; },
+    error: (line) => { stderr += `${line}\n`; },
+  };
+  const status = boardMain(args, { ghExec, output });
+  return { status, stdout, stderr, calls };
 }
 
 // One raw boardQuery page carrying exactly one nullable-content card. It has enough
@@ -108,7 +137,7 @@ test('board CLI: an unrecognised argument fails loud in the script idiom before 
 // so only the column vocabulary can reject it — and it has to reject it HERE, before the
 // metered read, or the command spends a board read to report `Rady: 0 of N item(s)`.
 test('board CLI: a --status= value that is not a board column fails loud before any GitHub read', () => {
-  const run = runBoard(['--status=Rady'], UNREADABLE_PAGE);
+  const run = runBoardInProcess(['--status=Rady'], UNREADABLE_PAGE);
 
   assert.equal(run.status, 1);
   assert.match(run.stderr, /^board: --status=Rady is not a board column/m);
@@ -118,7 +147,7 @@ test('board CLI: a --status= value that is not a board column fails loud before 
 });
 
 test('ANTI-REGRESSION (#600 closeout gate, end to end): the real command fails an unreadable board ONLY when --closeout is passed', () => {
-  const ordinary = runBoard([], UNREADABLE_PAGE);
+  const ordinary = runBoardInProcess([], UNREADABLE_PAGE);
 
   // An ordinary interactive read reports the unread card but is never stranded by it.
   assert.equal(ordinary.status, 0, ordinary.stderr);
@@ -135,7 +164,7 @@ test('ANTI-REGRESSION (#600 closeout gate, end to end): the real command fails a
 
   // The closeout gate certifies the board, so an admittedly partial read cannot pass.
   // This is the run that dies if `closeout` stops reaching scanOutcome.
-  const closeout = runBoard(['--closeout'], UNREADABLE_PAGE);
+  const closeout = runBoardInProcess(['--closeout'], UNREADABLE_PAGE);
 
   assert.equal(closeout.status, 1, closeout.stdout);
   assert.match(closeout.stdout, /⚠ BOARD READ INCOMPLETE/);
@@ -145,13 +174,13 @@ test('ANTI-REGRESSION (#600 closeout gate, end to end): the real command fails a
 });
 
 test('ANTI-REGRESSION (#610 board coverage, end to end): closeout fails when the board read returns fewer items than totalCount and accepts an exact read', () => {
-  const incomplete = runBoard(['--closeout'], cleanPage(2));
+  const incomplete = runBoardInProcess(['--closeout'], cleanPage(2));
 
   assert.equal(incomplete.status, 1, incomplete.stdout);
   assert.match(incomplete.stderr, /board: failed to read the GitHub Projects board — incomplete board items read:/);
   assert.match(incomplete.stderr, /GitHub reported 2 board items but 1 were fetched/);
 
-  const exact = runBoard(['--closeout'], cleanPage(1));
+  const exact = runBoardInProcess(['--closeout'], cleanPage(1));
 
   assert.equal(exact.status, 0, exact.stderr);
   assert.equal(exact.stderr, '');
@@ -163,7 +192,7 @@ test('ANTI-REGRESSION (#610 board coverage, end to end): closeout fails when the
 // exists to prevent. Both halves are asserted, plus the exit code the ordinary read now
 // carries: drift fails the session-start bookend.
 test('board CLI: --json puts the selection on stdout and the scan on stderr, and drift still exits 1', () => {
-  const run = runBoard(['--json'], DRIFTED_PAGE);
+  const run = runBoardInProcess(['--json'], DRIFTED_PAGE);
 
   assert.equal(run.status, 1, run.stderr);
   const selection = JSON.parse(run.stdout);
@@ -226,22 +255,22 @@ test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with 
 });
 
 test('ANTI-REGRESSION: an intake board read that failed, drift and an unavailable card detail exit 2, 3 and 4', () => {
-  const failed = runBoard(['--intake'], cleanPage(2));
+  const failed = runBoardInProcess(['--intake'], cleanPage(2));
 
   assert.equal(failed.status, 2, failed.stderr);
   assert.equal(failed.stdout, '');
   assert.match(failed.stderr, /board: failed to read the GitHub Projects board — incomplete board items read:/);
   assert.match(failed.stderr, /GitHub reported 2 board items but 1 were fetched/);
 
-  const drifted = runBoard(['--intake'], DRIFTED_PAGE, { FAKE_DETAILS: detailsFor(272, 'CVE body', 'a comment') });
+  const drifted = runBoardInProcess(['--intake'], DRIFTED_PAGE, detailsFor(272, 'CVE body', 'a comment'));
 
   assert.equal(drifted.status, 3, drifted.stderr);
   assert.ok(linesOf(drifted.stdout).includes('=== #272 [Backlog] CVE sweep ==='), drifted.stdout);
   assert.match(drifted.stderr, /⚠ BOARD DRIFT/);
   assert.match(drifted.stderr, /^board intake: details complete for 1 card\(s\)\.$/m);
 
-  // No FAKE_DETAILS: the fake refuses the detail read, so the card's details are unread.
-  const unread = runBoard(['--intake'], PICKABLE_PAGE);
+  // No details supplied: the executor refuses the detail read, so the card's details are unread.
+  const unread = runBoardInProcess(['--intake'], PICKABLE_PAGE);
 
   assert.equal(unread.status, 4, unread.stderr);
   const document = linesOf(unread.stdout);

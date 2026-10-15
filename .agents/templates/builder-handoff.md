@@ -25,8 +25,8 @@ Each labelled value sits on its label's line. `Construction mode:` holds exactly
 `evidence-required` or `preservation` and nothing else: the reasoning belongs in the plan, and a slice that needs
 two modes is two handoffs.
 
-The focused verification command runs one named test by its full title: a command matching ZERO tests is a
-failure to report loudly, never a pass.
+`docs/TESTING-STRATEGY.md` owns focused selection and reporting, including admissible grouped evidence and
+incomplete execution. The focused verification command follows that authority.
 -->
 ---8<---
 Slice: {{SLICE_TITLE}}
@@ -51,8 +51,7 @@ Stop condition: {{STOP_CONDITION}}
 Standing contract:
 - Work only in the working directory above. Verify ONLY this claim with the focused verification command; NEVER
   run the full suite, that is the orchestrator's job after the claim converges.
-- Run the focused evidence by its actual full title and report each count separately. A command matching ZERO
-  tests is a failure to report loudly, never a pass.
+- Run and report the focused evidence under `docs/TESTING-STRATEGY.md`'s selection and executed-evidence rule.
 - If the runtime refuses the focused command as git it cannot verify, rerun it in the form
   `docs/TESTING-STRATEGY.md` names for a job worktree; never rename the file or leave it out of the run.
 - Follow the construction mode exactly; you cannot select, reinterpret, or downgrade it.

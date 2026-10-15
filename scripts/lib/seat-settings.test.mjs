@@ -108,7 +108,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     ['[]', `${label}: file: must hold one JSON object; found []`],
     ['{"seats":{}}', `${label}: version: is unsupported by this copy of the sync (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the sync (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats and planApproval; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],
     [withRuntimes(['gemini']), `${label}: ${runtimesRule}; found ["gemini"]`],
@@ -149,7 +149,9 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     '{"claude":{"builder":{"model":"opus","effort":"high"},"reviewer":{"model":"opus","maxTurns":90}},"codex":{"reviewer":{"model_reasoning_effort":"high"}}}',
   );
   assert.deepEqual(seatsRecord(new Map()), {});
-  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], seats: new Map() });
+  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], greptile: false, docSweep: true, seats: new Map() });
+  assert.equal(parseSettings('{"version":1,"seats":{},"greptile":true}', label).greptile, true);
+  assert.equal(parseSettings('{"version":1,"seats":{},"docSweep":false}', label).docSweep, false);
 
   const claudeOnly = { claude: { builder: { model: 'opus' } } };
   const codexOnly = { codex: { builder: { model: 'gpt-6-luna' } } };

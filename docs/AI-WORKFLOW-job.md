@@ -14,9 +14,9 @@ what a build must prove, and [Enforced or instructed](AI-WORKFLOW-enforcement.md
 | Job starts | The card gets its own worktree and branch, the root checkout stays on `main`, and the card moves to In progress | Branch work in the root checkout is refused |
 | Build | Bounded slices, every check logging its exit code, and an executed mutation where the testing strategy requires one, before review | An incomplete handoff is refused, and so is a turn that ends on a lint error |
 | Review | One fresh review of the final tree, repairs, and a security review when the trust perimeter widens | Nothing: review is instructed |
-| Deliver | A draft pull request, an external review where the tier requires it, and checks on the merge result; or, for a change the repository's own gate admits whole, a push straight to `main` | A pull request that is not a draft is refused, and so is an unsafe force push; [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs) lists the exact forms |
+| Deliver | A draft pull request, an external review where the tier requires it and the repository has turned that add-on on, and checks on the merge result; or, for a change the repository's own gate admits whole, a push straight to `main` | A pull request that is not a draft is refused, and so is an unsafe force push; [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs) lists the exact forms |
 | Merge | On the pull request route, the platform merges once the required checks are green, squashed, with the branch deleted | A merge command other than the platform's auto-merge is refused, and the branch rules require the checks |
-| After merge | The issue is confirmed closed, the card moves to Done, servers and containers are stopped, and the worktree is removed and local `main` advances where that is provably safe | Nothing: closeout is instructed |
+| After merge | The issue is confirmed closed, the card moves to Done, servers are stopped, the job's containers, scratch, worktree and branch are removed by one command where its checks pass, and local `main` advances where that is provably safe | The cleanup command retains whatever its checks or git hold back; that it runs is instructed |
 
 ## How it works
 
@@ -33,8 +33,8 @@ flowchart TD
     RV --> PA[Push authorisation: card to Awaiting push, owner reads the PR body and screenshot]
     PA --> DR[Draft pull request, card to In review]
     PA -->|every changed path qualifies| FF[Fast-forward push to main, no pull request or CI]
-    DR -->|document and code tiers: no Greptile| RD[Marked ready: CI runs on the merge result]
-    DR -->|sign-off tier: explicit Greptile request| GR[Review attempt settled, findings resolved]
+    DR -->|document and code tiers, or the add-on off: no external review| RD[Marked ready: CI runs on the merge result]
+    DR -->|sign-off tier, add-on on: external review requested| GR[Review attempt settled, findings resolved]
     GR --> RD
     RD -->|required checks green| MG[GitHub auto-merge, squash, branch deleted]
     MG --> CO[Closeout: issue closed, card to Done, worktree removed]
@@ -50,7 +50,7 @@ is planned by an architect or by the session, with a plan review where the card 
 bounded slices with recorded evidence, verified, and given a fresh review of the final tree with repairs. At push
 authorisation the card moves to Awaiting push and the owner reads the pull request body. On the owner's yes a
 draft pull request opens and the card moves to In review; a change at the sign-off tier first settles an external
-review, and every draft is then marked ready so the checks run on the merge result. Once the required checks are green
+review where the repository has turned that add-on on, and every draft is then marked ready so the checks run on the merge result. Once the required checks are green
 the platform merges, and closeout confirms the issue closed, moves the card to Done and removes the worktree. A change
 whose every path qualifies skips the pull request, is pushed straight to `main`, and is closed out the same way.
 
@@ -92,11 +92,12 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
 - **Review in two layers.** One fresh review of the final tree comes before push authorisation, and its depth
   follows two questions asked of the change, whether it can be undone and how far the damage reaches if it is wrong,
   which each repository answers in its Surfaces table: the session itself, the model family that did not write the
-  diff, because a writer's own family shares its blind spots, or that pass and an external review on the finished
+  diff, because a writer's own family shares its blind spots, or that pass and, where the repository has turned that add-on on, an external review on the finished
   draft.
   [The `resume` skill](../.agents/skills/resume/SKILL.md) owns the two questions, the tiers they choose between,
   how each is run, what happens when a reviewer cannot be reached, and how repairs are reviewed again, under "5. Build",
-  "6. Verify and review" and "8. Deliver"; [the `greptile` skill](../.agents/skills/greptile/SKILL.md) owns how the
+  "6. Verify and review" and "8. Deliver"; in a repository that has turned
+  [the external review add-on](AI-WORKFLOW.md#the-external-review-add-on) on, that add-on's own skill owns how the
   external review is requested and settled, and when an attempt counts as unavailable.
 - **Delivery by GitHub.** On the pull request route, marking the pull request ready, after any required review
   attempt has settled, starts continuous integration, and the merge is always queued as a GitHub auto-merge, which
@@ -108,24 +109,27 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
   [The `resume` skill](../.agents/skills/resume/SKILL.md) owns the sequence, the waiting command and the direct
   route under "8. Deliver", and how a session waits on a long command under "5. Build";
   [Enforced or instructed](AI-WORKFLOW-enforcement.md) names the checks the branch rules require;
-  [`AGENTS.md`](../AGENTS.md) owns what the direct route admits under "Publication and machinery"; the documentation
-  routines' own merge exception is in [`docs/DOC-SWEEP.md`](DOC-SWEEP.md) and
+  [`AGENTS.md`](../AGENTS.md) owns what the direct route admits under "Publication and machinery"; where the documentation
+  routines are active and the settings file does not turn the documentation sweep off, their own merge exception is in
+  [`docs/DOC-SWEEP.md`](DOC-SWEEP.md) and
   [`docs/SWEEP-TRIAGE.md`](SWEEP-TRIAGE.md).
 - **Closeout.** The moment the merge lands, the same session confirms it, moves the card, updates local `main`, and
   removes the branch and worktree. Local `main` advances only by a provably safe fast-forward, and a checkout that is
-  dirty, active or uncertain is preserved. Servers and containers bound to the worktree are stopped, and the job's own
-  disposable scratch is removed; when removal cannot be proven safe the worktree is kept and the reason reported. A
-  leftover the session finds, another job's artifact or one it cannot prove it created, is investigated to a
-  conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete one, and its limits, under
-  "Owner gates"; the `closeout` skill owns what a leftover is and what each outcome allows under "Leftover rule", and
-  the steps. Rulings the owner made during the session go to the issue or the document that owns the topic, never to a
-  new document.
+  dirty, active or uncertain is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
+  its named scratch, its worktree and its branch, retaining with the reason whatever a check or a refusal holds back
+  and never forcing a removal; the session keeps the judgment of what is its own scratch and stops any server the
+  command finds serving the worktree. A leftover the session finds, another job's artifact or one it cannot prove it
+  created, is investigated to a conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete
+  one, and its limits, under "Owner gates"; the `closeout` skill owns what a leftover is and what each outcome allows
+  under "Leftover rule", and the steps. Rulings the owner made during the session go to the issue or the document that
+  owns the topic, never to a new document.
 
 ## Where the rules live
 
 - [The `resume` skill](../.agents/skills/resume/SKILL.md): every step from intake to the queued merge, in the order a
   session runs them, the review tiers and when the external review runs included.
-- [The `greptile` skill](../.agents/skills/greptile/SKILL.md): how the external review is run: the shared pool it is
+- The external review add-on's own skill, in a repository that has turned
+  [the add-on](AI-WORKFLOW.md#the-external-review-add-on) on: how the external review is run: the shared pool it is
   metered from, the allowance read before a request, the request, how each finding is settled, whether a settled review
   still stands after a rebase, and when an attempt counts as unavailable.
 - [The `closeout` skill](../.agents/skills/closeout/SKILL.md): every step after the merge, and under "Leftover rule"
@@ -164,9 +168,10 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
 ## Key files
 
 - `.agents/skills/resume/SKILL.md` and `.agents/skills/closeout/SKILL.md`: the steps.
-- `.agents/skills/greptile/SKILL.md`: the external review's procedure.
+- The external review add-on's skill and reviewer configuration, in a repository that has turned
+  [the add-on](AI-WORKFLOW.md#the-external-review-add-on) on.
 - `.github/pull_request_template.md`: the pull request body the owner reads.
 - `scripts/run-log.mjs`: the logger every check runs through.
 - `scripts/merge-watch.mjs`: the one waiting command after the merge is queued.
+- `scripts/closeout-cleanup.mjs`: the one cleanup command closeout runs after the merge.
 - `scripts/gates/pre-push-main`: the repository's own gate for the direct route, where it supplies one.
-- `.greptile/config.json`: the external reviewer's configuration.

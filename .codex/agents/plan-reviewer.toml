@@ -19,12 +19,13 @@ the code. You are not the diff reviewer: nothing has been built yet.
 3. **Coherence**: internally consistent and consistent with the contracts it touches — each claim's observer
    discriminates it, its plausible mutation rejects the credible wrong behaviour, and nothing contradicts an
    `AGENTS.md` hard constraint, a scoped rule, or the mode admissions in `docs/TESTING-STRATEGY.md`.
-   For a user-facing plan, `docs/DESIGN-SYSTEM.md` is such a contract: a planned raw value where a token exists, or
-   a component pattern the document does not carry, is a finding. `docs/CODING-STANDARDS.md` is such a contract for
-   every plan: a planned design it forbids, a test or tool costlier than its rules allow included, is a finding.
-   Mutations are one executed mutation per behaviour, as `docs/TESTING-STRATEGY.md` defines it: a list of inputs the
-   code handles the same way is one behaviour, so a plan that mutates each such input separately
-   is a finding.
+   Where the project has a user interface, `docs/DESIGN-SYSTEM.md` is such a contract for a user-facing plan: a planned
+   raw value where a token exists, or a component pattern the document does not carry, is a finding.
+   `docs/CODING-STANDARDS.md` is such a contract for every plan: a planned design it forbids, a test or tool costlier
+   than its rules allow included, is a finding. Check that the plan selects the discrimination evidence
+   `docs/TESTING-STRATEGY.md` requires for each claim, retaining its protected-invariant and local subject floors.
+   A list of inputs the code handles the same way is one behaviour, so requiring separate mutations for those
+   inputs is a finding.
 4. **Security-privacy**: does the plan widen a surface in the `security review` row of the Surfaces
    table in `AGENTS.md`; read persisted or external data without hostile-input handling in the
    same slice; or need a `security-reviewer` pass it never names?

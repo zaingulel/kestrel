@@ -24,22 +24,19 @@ import {
 // Status is never cleared: an unfielded card is drift the board scan reports.
 const CLEAR_VALUE = 'none';
 
-// GraphQL for a single-select field (id + options) on project #2. Also carries the
+// GraphQL for a single-select field (id + options) on the configured project. Also carries the
 // project id, so one read resolves both.
 export function singleSelectFieldQuery(fieldName) {
   return `{ ${BOARD_OWNER_TYPE}(login:"${BOARD_OWNER}") { projectV2(number:${BOARD_PROJECT_NUMBER}) { id field(name:"${fieldName}") ` +
     '{ ... on ProjectV2SingleSelectField { id options { id name } } } } } }';
 }
 
-// GraphQL for the project-item nodes backing issue #issueNumber, read off the issue
-// side (no board paging). Carries the item's current value of `fieldName` alongside its
-// id so moveCards can skip a redundant write (see parseIssueItemValue) in the same round
-// trip, never a second one.
-export function issueItemQuery(issueNumber, fieldName = 'Status') {
+// Read the issue side once, with the current field value only when requested.
+export function issueItemQuery(issueNumber, fieldName = null) {
+  const value = fieldName == null ? ''
+    : `value: fieldValueByName(name: "${fieldName}") { ... on ProjectV2ItemFieldSingleSelectValue { name } } `;
   return `{ repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issue(number:${issueNumber}) ` +
-    '{ projectItems(first:10) { nodes { id project { number } '
-    + `value: fieldValueByName(name: "${fieldName}") { ... on ProjectV2ItemFieldSingleSelectValue { name } } `
-    + '} } } } }';
+    '{ id projectItems(first:20) { totalCount nodes { id isArchived project { number } ' + value + '} } } } }';
 }
 
 // From a singleSelectFieldQuery response, the project id + field id + its options.
@@ -73,40 +70,53 @@ export function optionIdFor(options, statusName, fieldName = 'Status') {
   return opt.id;
 }
 
-// The issueItemQuery response's project-item node for THIS project (number 2) among
-// the issue's projectItems. Throws (fail-loud) if the issue isn't on the board — a
-// move against a nonexistent card must fail, not no-op. Shared by parseIssueItemId
-// and parseIssueItemValue so the "not on the board" diagnosis is worded once.
-function findProjectItemNode(json, issueNumber) {
-  const d = typeof json === 'string' ? JSON.parse(json) : json;
-  const nodes = d?.data?.repository?.issue?.projectItems?.nodes;
-  if (!Array.isArray(nodes)) throw new Error('issue projectItems JSON has no nodes[] array');
-  const node = nodes.find((n) => n?.project?.number === BOARD_PROJECT_NUMBER);
-  // Name the way forward: refusing without one is what pushed callers to a bare
-  // `gh project item-add`, which drops a card with its fields empty — the #357-#361
-  // drift the board scan catches only after the fact.
-  if (!node) {
-    throw new Error(ROUTING_FIELD
-      ? `issue #${issueNumber} is not on the board — add it with Status and ${ROUTING_FIELD}: `
-        + `node scripts/board-add.mjs ${issueNumber} <Status> <${ROUTING_FIELD}>`
-      : `issue #${issueNumber} is not on the board — add it with a Status: node scripts/board-add.mjs ${issueNumber} <Status>`);
+// A complete nonmatching connection means absence; an unreadable one refuses.
+// Archived items stay visible here because the board read lists unarchived cards only.
+export function lookupIssueBoardItem(number, exec, fieldName = null) {
+  const graphqlResponse = exec(['api', 'graphql', '-f', `query=${issueItemQuery(number, fieldName)}`]);
+  let payload;
+  try {
+    payload = typeof graphqlResponse === 'string' ? JSON.parse(graphqlResponse) : graphqlResponse;
+  } catch {
+    throw new Error('board item probe GraphQL response is not valid JSON');
   }
-  return node;
-}
 
-// From the issueItemQuery response, the project-item node id for THIS project.
-export function parseIssueItemId(json, issueNumber) {
-  const node = findProjectItemNode(json, issueNumber);
-  if (typeof node.id !== 'string' || !node.id) throw new Error(`board item for #${issueNumber} has no id`);
-  return node.id;
-}
-
-// From the same issueItemQuery response, the item's current option name for the queried
-// field, or null when the field carries no value (a card added without one, #357-#361).
-// Read off the same response parseIssueItemId already has — never a second query — so
-// moveCards can tell a redundant write from a real one.
-export function parseIssueItemValue(json, issueNumber) {
-  return findProjectItemNode(json, issueNumber).value?.name ?? null;
+  // A shape defect, never the world fact "issue #N does not exist": a null `data` or a null
+  // repository produces this same payload for an issue that is sitting right there, and the
+  // real transport throws on the accompanying `errors` array long before this line.
+  const issue = payload?.data?.repository?.issue;
+  if (issue == null) {
+    throw new Error('board item probe GraphQL response has no readable issue');
+  }
+  const { projectItems } = issue;
+  if (!projectItems || !Array.isArray(projectItems.nodes)) {
+    throw new Error('board item probe GraphQL response has no projectItems.nodes[] array');
+  }
+  // A board item on page two would read as "not on the board", so a truncated probe can
+  // only be answered by raising the cap — never by concluding from the page that was read.
+  if (!Number.isSafeInteger(projectItems.totalCount) || projectItems.totalCount < 0) {
+    throw new Error('board item probe GraphQL response has no non-negative integer projectItems.totalCount');
+  }
+  if (projectItems.totalCount > projectItems.nodes.length) {
+    throw new Error(
+      `issue #${number} has ${projectItems.totalCount} project items but only ${projectItems.nodes.length} fetched — raise the projectItems first: cap in issueItemQuery`,
+    );
+  }
+  // A null node or project cannot establish absence; GraphQL errors stop the transport first.
+  for (const node of projectItems.nodes) {
+    if (!Number.isSafeInteger(node?.project?.number)) {
+      throw new Error(
+        `board item probe GraphQL response has a non-integer project number ${JSON.stringify(node?.project?.number)}`,
+      );
+    }
+  }
+  const boardItem = projectItems.nodes.find((node) => node.project.number === BOARD_PROJECT_NUMBER);
+  if (boardItem && typeof boardItem.isArchived !== 'boolean') {
+    throw new Error(
+      `board item probe GraphQL response has a non-boolean isArchived ${JSON.stringify(boardItem.isArchived)}`,
+    );
+  }
+  return { issueId: issue.id, item: boardItem ?? null };
 }
 
 // Parse `--batch <issue#>:<Status> [...]` (or `--lane <issue#>:<Lane>`) CLI args into
@@ -149,8 +159,8 @@ export function moveCards(pairs, exec, fieldName = 'Status') {
   const completed = [];
   for (const { issueNumber, statusName } of pairs) {
     try {
-      // Validate here, not only in the CLI arg parsers: the exported moveCard()
-      // is an in-process entry point, and issueNumber is interpolated into the
+      // Validate here, not only in the CLI arg parsers: in-process callers
+      // hand values in directly, and issueNumber is interpolated into the
       // GraphQL query string — an unvalidated value must fail, not be sent.
       if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
         throw new Error(`invalid issue number: ${issueNumber}`);
@@ -160,9 +170,16 @@ export function moveCards(pairs, exec, fieldName = 'Status') {
       }
       const clear = fieldName !== 'Status' && statusName.trim().toLowerCase() === CLEAR_VALUE;
       const optionId = clear ? null : optionIdFor(options, statusName, fieldName);
-      const itemJson = exec(['api', 'graphql', '-f', `query=${issueItemQuery(issueNumber, fieldName)}`]);
-      const itemId = parseIssueItemId(itemJson, issueNumber);
-      const current = parseIssueItemValue(itemJson, issueNumber);
+      const { item } = lookupIssueBoardItem(issueNumber, exec, fieldName);
+      if (!item) {
+        throw new Error(ROUTING_FIELD
+          ? `issue #${issueNumber} is not on the board — add it with Status and ${ROUTING_FIELD}: `
+            + `node scripts/board-add.mjs ${issueNumber} <Status> <${ROUTING_FIELD}>`
+          : `issue #${issueNumber} is not on the board — add it with a Status: node scripts/board-add.mjs ${issueNumber} <Status>`);
+      }
+      const itemId = item.id;
+      if (typeof itemId !== 'string' || !itemId) throw new Error(`board item for #${issueNumber} has no id`);
+      const current = item.value?.name ?? null;
       const alreadyThere = clear
         ? current == null
         : current != null && current.trim().toLowerCase() === statusName.trim().toLowerCase();

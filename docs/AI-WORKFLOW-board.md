@@ -33,6 +33,19 @@ it could not read as unavailable. [`scripts/board-move.mjs`](../scripts/board-mo
 with a parked lane, parks a card in that lane or releases it; on a board with no parked lane it refuses that request
 before making any `gh` call. The head of each script owns its modes and argument forms.
 
+`lookupIssueBoardItem` in [`scripts/lib/board-move.mjs`](../scripts/lib/board-move.mjs) supplies one guarded
+issue-side read to `moveCards`, `addIssueToBoard` and the publication verifier's missing-card check. It reads up to
+20 project items and checks completeness and readable item data before returning the issue id and the configured
+project's item, or `item: null` for a complete nonmatching reply. A failed, malformed or truncated read cannot establish
+absence. Move retains that cause rather than giving the add-card advice reserved for a complete absent reply; its
+current-field read still lets it skip redundant writes and already-clear lanes.
+
+Add uses the shared read's issue id but still sends the idempotent add mutation even when the read found a card. The
+mutation's returned item id determines the target of the separate Status and configured routing-field writes. If a
+field update fails, add rereads the fields and reports their observed values, or an unknown outcome when that reread
+fails, with a safe whole-command retry. The publication verifier uses the shared item and archive flag only when the
+board read lacks a requested card, preserving its lagging, archived and confirmed-absence diagnoses.
+
 ### The toolkit in another repository
 
 The toolkit (`scripts/board.mjs`, `board-add.mjs`, `board-move.mjs`, `verify-issue-publish.mjs` and
@@ -68,7 +81,7 @@ board's own automation, so no agent moves a card for these cases:
 | Pull request linked to issue | Off | | Awaiting push and In review are `resume`'s calls, tied to push authorisation and the draft actually opening, not merely a link existing |
 | Pull request merged | Off | | The issue's own close, through the pull request's `Closes #` line, already triggers Item closed |
 | Item reopened | Off | | A reopen is the Returned quality signal the session records deliberately; an automatic reversion would fight the Awaiting-push/In-review sequencing |
-| Code changes requested | Off | | Review state is tracked by the `resume` skill's own evidence bar (fresh review, Greptile where required), not by the board |
+| Code changes requested | Off | | Review state is tracked by the `resume` skill's own evidence bar (fresh review, the external review where required), not by the board |
 | Code review approved | Off | | The same evidence bar as Code changes requested |
 | Auto-close issue | Off | | Closing an issue follows the pull request's `Closes #` line, never inferred from a card's column |
 

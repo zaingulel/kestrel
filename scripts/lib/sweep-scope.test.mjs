@@ -1,21 +1,25 @@
 // sweep-scope.test.mjs — the CI lane that owns the documentation sweep's scope.
 //
 // The sweep lands its own pull request, so no one reads it before it merges; these tests are the
-// evidence that the two rules docs/DOC-SWEEP.md used to leave to the owner's eyes now fail the
-// required check mechanically. The pure functions are tested on the real manual and on synthetic
+// evidence that scope, destination and optional content-only rules fail the required check mechanically. The pure functions are tested on the real manual and on synthetic
 // tables; the script is run end-to-end against a throwaway Git repository so a stubbed check, a
-// head-tree manual read, or a swallowed Git error each goes red here.
+// head-tree manual read, or a swallowed Git error each goes red here. The content-only comparison
+// is exercised on inline specimens and needs the pinned template parser (nunjucks 3.2.4): where it
+// is not installed those tests skip with a printed reason, and the refusal test for a missing or
+// wrong-version parser still runs.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  addedNetworkTokens, hiddenDestinationShapes, markupDifference, outOfScope, parseMayEdit, renderedDestinations,
-  tokenMatches, treeGrepArgs, treeGrepCandidates,
+  addedNetworkTokens, contentOnlyMarkdownDifference, hiddenDestinationShapes, markupDifference, outOfScope, parseContentOnlyMarkdown, parseMayEdit, renderedDestinations,
 } from './sweep-scope.mjs';
+import { knownInTree } from './sweep-scope-evaluate.mjs';
 import {
   ALLOWED, HIDDEN_ROWS, LEGACY, MARKUP_ROWS, PASS_ROWS, RENDERED_ROWS, TOKEN_ROWS, TREE_ROWS, judge, repo,
 } from './sweep-scope-corpus.mjs';
@@ -23,6 +27,16 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const MANUAL = readFileSync(join(ROOT, 'docs/DOC-SWEEP.md'), 'utf8');
 const SCRIPT = join(ROOT, 'scripts/sweep-scope-check.mjs');
+
+function pinnedParserInstalled() {
+  try {
+    return createRequire(import.meta.url)('nunjucks/package.json').version === '3.2.4';
+  } catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    return false;
+  }
+}
+const NEEDS_PARSER = { skip: !pinnedParserInstalled() && 'template parser nunjucks 3.2.4 is not installed' };
 
 function checkCliParity(r, head) {
   const cwd = process.cwd();
@@ -58,6 +72,28 @@ test('parseMayEdit takes only the left column and fails loud on a missing or emp
   assert.deepEqual(parseMayEdit(table), ['a.md', 'b/c.md']);
   assert.throws(() => parseMayEdit('# no table here'), /scope table/);
   assert.throws(() => parseMayEdit('| May edit | Never edit |\n|---|---|\n| | `d.md` |\n'), /empty/);
+});
+
+test('content-only Markdown policy is an exact optional base-owned table', () => {
+  const table = (rows) => `| Content-only Markdown |\n|---|\n${rows}\n`;
+  const allowed = ['a.md', 'b/c.md', 'page.html'];
+  assert.deepEqual(parseContentOnlyMarkdown('# Manual without opt-in\n', allowed), []);
+  assert.deepEqual(parseContentOnlyMarkdown(table('| `a.md` |\n| `b/c.md` |'), allowed), ['a.md', 'b/c.md']);
+  assert.deepEqual(parseContentOnlyMarkdown('| Content-only Markdown**example** |\n|---|\n| `a.md` |\n', allowed), []);
+  for (const malformed of [
+    table(''),
+    table('| |'),
+    table('| a.md |'),
+    table('| `a.md` and prose |'),
+    table('| `a.md`, `b/c.md` |'),
+    table('| `a.md` |\n| `a.md` |'),
+    table('| `missing.md` |'),
+    table('| `page.html` |'),
+    table('| `b/` |'),
+    table('| `*.md` |'),
+    table('| `a.md` |') + '\n' + table('| `b/c.md` |'),
+    '| Content-only Markdown | Extra |\n|---|---|\n| `a.md` | other |\n',
+  ]) assert.throws(() => parseContentOnlyMarkdown(malformed, allowed), /Content-only Markdown policy/, malformed);
 });
 
 test('outOfScope is an exact-path match, so a shared prefix never admits a never-edit path', () => {
@@ -183,11 +219,11 @@ test('no live may-edit document trips a rule', () => {
 // The invariant the design rests on: a fixed-string hit vouches for nothing on its own, so each row is
 // judged on the lines the base actually returns for it. K1, K3a and K3b are destinations a past sweep
 // left inert in `docs/LEGACY.md`; the tree carries their text and still vouches for none of them.
-test('tokenMatches vouches for a destination only as a whole token of the base tree', async (t) => {
+test('knownInTree vouches for a destination only as a whole token of the base tree', async (t) => {
   const r = repo();
   for (const row of TREE_ROWS) {
     await t.test(`${row.id} ${row.text}`, () => {
-      assert.equal(tokenMatches(row.text, r.grep(row.text)), row.expect === 'known');
+      assert.equal(r.vouches(row.text), row.expect === 'known');
     });
   }
 });
@@ -197,24 +233,32 @@ test('tokenMatches vouches for a destination only as a whole token of the base t
 // fixtures of the Rust crate and the browser specs; were the tree searched with them in it, the guard
 // would vouch for every hostile example they own and a sweep could write one into a document unrefused.
 test('the live tree vouches for no destination only the guard\'s own sources or test code carry', () => {
-  const knownAtHead = (text) => {
-    const lines = [];
-    for (const candidate of treeGrepCandidates(text)) {
-      const found = spawnSync('git', treeGrepArgs(candidate, 'HEAD'), { cwd: ROOT, encoding: 'utf8' });
-      for (const match of found.stdout.split('\n').filter(Boolean)) lines.push(match.slice(match.indexOf('\0') + 1));
-    }
-    return tokenMatches(text, lines);
-  };
   for (const text of ['https://github.com@evil.icu', 'https://evil.icu/in', 'https://support.example.co',
     'other@evil.icu', 'https://nested.example.icu/u', 'https://github.com.evil.example/login/device',
     'github.com.evil.example', 'https://evil.com', 'evil.com', 'http://localhost.evil.com', 'localhost.evil.com',
     'team.example.net.evil.com', 'https://evil.example']) {
-    assert.equal(knownAtHead(text), false, `the tree at HEAD vouches for ${text}`);
+    assert.equal(knownInTree(text, 'HEAD', ROOT), false, `the tree at HEAD vouches for ${text}`);
   }
   // A destination the repository legitimately carries and this file and the other excluded test code name
   // throughout, so the rows above cannot pass on a search that returns nothing for everything, and excluding
   // the guard's own sources and test code cannot also exclude a destination the tree legitimately carries.
-  assert.equal(knownAtHead('github.com'), true, 'the tree at HEAD vouches for nothing at all');
+  assert.equal(knownInTree('github.com', 'HEAD', ROOT), true, 'the tree at HEAD vouches for nothing at all');
+});
+
+// A tree search that did not complete is a git failure, never "nothing found", or every row expecting the tree
+// to vouch for nothing could pass on a search that never ran. Only the tree search reads `src/`, so removing its
+// tree object fails `git grep` while every other read the check makes succeeds.
+test('a base-tree search that fails is refused, never read as nothing found', () => {
+  const r = repo();
+  const text = 'https://unsearched.example.icu/in';
+  r.write('docs/ALLOWED.md', `See ${text}.\n`);
+  const head = r.commit('edit whose token needs the tree search');
+  const tree = r.git('rev-parse', `${r.base}:src`);
+  rmSync(join(r.dir, '.git', 'objects', tree.slice(0, 2), tree.slice(2)));
+  const result = r.check(head);
+  assert.equal(result.status, 128, result.stdout);
+  assert.match(result.stderr, /^sweep-scope: git grep failed: /);
+  assert.throws(() => r.vouches(text), { status: 128, message: /^sweep-scope: git grep failed: / });
 });
 
 test('repo clones isolate committed, indexed and untracked contamination', () => {
@@ -236,7 +280,7 @@ test('repo clones isolate committed, indexed and untracked contamination', () =>
   assert.equal(b.git('config', 'commit.gpgsign'), 'false');
   assert.equal(b.git('rev-list', '--parents', '-n', '1', b.base), b.base);
   assert.equal(b.git('show', `${b.base}:docs/ALLOWED.md`), ALLOWED.trim());
-  assert.deepEqual(b.grep('https://isolated.example.net/in'), []);
+  assert.equal(b.vouches('https://isolated.example.net/in'), false);
 
   const allowed = 'The app lives at https://app.example.app; see app.example.app for the hosted build.\n';
   b.write('docs/ALLOWED.md', allowed);
@@ -503,12 +547,11 @@ test('the check refuses raw text the parser swallows that hides markup (E14b)', 
   assert.match(result.stderr, /the rendered destination <tmp> is refused \(raw text hides markup/);
 });
 
-// The guard's own sources list destinations that must not be trusted, so they are excluded from the
-// search that decides what the repository vouches for, in whatever folder they sit. Pinned through the
-// real check script, whose `knownInTree` calls the shared argument builder. The root plants pin that
-// `**/` matches the root; the `copy/` plants pin a second copy of the sources kept in another folder.
-// The last run plants the same content at an ordinary path, so the others cannot pass on a search that
-// finds nothing anywhere.
+// The guard's own sources list destinations that must not be trusted, so they are excluded from the search
+// that decides what the repository vouches for, in whatever folder they sit. Pinned through the real check
+// script, whose `knownInTree` calls the one argument builder. The root plants pin that `**/` matches the
+// root; the `copy/` plants pin a second copy of the sources kept in another folder. The last run plants the
+// same content at an ordinary path, so the others cannot pass on a search that finds nothing anywhere.
 test('the tree does not vouch for a destination only a guard source carries (E12)', async (t) => {
   const PLANT = 'export const ROWS = [{ id: \'X\', line: \'[x](https://evil.icu/in)\' }];\n';
   const EDIT = 'See [docs](https://evil.icu/in).\n';
@@ -603,4 +646,133 @@ test('the check reads added lines as text even when a NUL makes git guess binary
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, /docs\/ALLOWED\.md: CONTROL_CHARACTER refuses U\+0000 on the added line: /);
   assert.match(result.stderr, /https:\/\/evil-nul\.icu\/x is added by this diff and is not a whole token anywhere in the tree/);
+});
+
+
+test('the base-owned content boundary admits prose and refuses executable edits', NEEDS_PARSER, () => {
+  const manual = '| May edit | Never edit |\n|---|---|\n| `docs/ALLOWED.md`, `docs/DOC-SWEEP.md` | `src/` |\n\n' +
+    '| Content-only Markdown |\n|---|\n| `docs/ALLOWED.md` |\n';
+  const before = '---\ntitle: Example\n---\nOld prose.\n\n<h1>{{ topic }}</h1>\n';
+  const r = repo({ documents: { 'docs/DOC-SWEEP.md': manual, 'docs/ALLOWED.md': before },
+    mayEdit: ['docs/ALLOWED.md', 'docs/DOC-SWEEP.md'] });
+  r.write('docs/ALLOWED.md', before.replace('Old prose.', 'Repaired prose.'));
+  const good = r.commit('prose repair');
+  const passed = r.checkCli(good);
+  assert.equal(passed.status, 0, passed.stderr);
+  assert.deepEqual(r.check(good), { status: passed.status, stdout: passed.stdout, stderr: passed.stderr });
+  r.write('docs/ALLOWED.md', before.replace('{{ topic }}', '{{ other }}'));
+  r.write('docs/DOC-SWEEP.md', manual.slice(0, manual.indexOf('| Content-only Markdown |')));
+  const bad = r.commit('template edit removes head policy');
+  const refused = r.checkCli(bad);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /docs\/ALLOWED\.md: content-only Markdown.*template/);
+  assert.deepEqual(r.check(bad), { status: refused.status, stdout: refused.stdout, stderr: refused.stderr });
+});
+
+
+const page = (body) => `---\ntitle: Example\n---\n${body}`;
+
+test('content-only Markdown freezes frontmatter and template instructions', NEEDS_PARSER, () => {
+  assert.equal(contentOnlyMarkdownDifference(page('Old prose.\n'), page('Repaired prose.\n')), null);
+  const specimens = [
+    [page('Body.\n'), page('Body.\n').replace('title: Example', 'title: Changed')],
+    [page('{% include "first.njk" %}\n'), page('{% include "second.njk" %}\n')],
+    [page('{# original comment #}\n'), page('{# changed comment #}\n')],
+    [page('{{ topics[\n "product"\n] }}\n'), page('{{ topics[\n "other"\n] }}\n')],
+    [page('{% set captured %}old{% endset %}\n{{ captured }}\n'), page('{% set captured %}new{% endset %}\n{{ captured }}\n')],
+    [page('{% filter upper %}old{% endfilter %}\n'), page('{% filter upper %}new{% endfilter %}\n')],
+    [page('{% for x in items %}old{% endfor %}\n'), page('{% for x in items %}new{% endfor %}\n')],
+  ];
+  for (const [before, after] of specimens) {
+    assert.match(contentOnlyMarkdownDifference(before, after), /frontmatter|template/, after);
+  }
+});
+
+
+test('content-only Markdown preserves raw markup and rendering contexts', NEEDS_PARSER, () => {
+  for (const [before, after] of [
+    ['<figure><figcaption>Old caption.</figcaption></figure>\n', '<figure><figcaption>Repaired caption.</figcaption></figure>\n'],
+    ['<details><summary>Transcript</summary><p>Old equivalent.</p></details>\n', '<details><summary>Transcript</summary><p>Repaired equivalent.</p></details>\n'],
+    ['[Old label](guide.md "Old title")\n', '[New label](help.md "New title")\n'],
+  ]) assert.equal(contentOnlyMarkdownDifference(page(before), page(after)), null, after);
+  assert.match(contentOnlyMarkdownDifference(page('a\nb\n'), page('a\n b\n')), /literal lines/);
+  const specimens = [
+    ['<p class="old">Caption</p>\n', '<p class="new">Caption</p>\n'],
+    ['<script>old()</script>\n', '<script>newCall()</script>\n'],
+    ['<style>p { color: red }</style>\n', '<style>p { color: blue }</style>\n'],
+    ['Plain prose\n', '```\nPlain prose\n```\n'],
+    ['Plain prose\n', '    Plain prose\n'],
+    ['Plain prose\n', '> Plain prose\n'],
+    ['{{ one }}\n\n{{ two }}\n', '{{ two }}\n\n{{ one }}\n'],
+    ['`main` is a branch.\n', '`other` is a branch.\n'],
+    ['```sh\ngit status\n```\n', '```sh\ngit push\n```\n'],
+    ['<h2>{{ topics["product"] }}</h2>\n', '<h2><{{ topics["product"] }}></h2>\n'],
+    ['[{{ label }}](guide.md)\n', '[<{{ label }}>](guide.md)\n'],
+    ['[Guide]({{ route }})\n', '[Guide](prefix{{ route }})\n'],
+    ['Old {{ topic }} caption.\n', 'New {{ topic }} caption.\n'],
+    ['Text\n\n{{ topic }}\n', 'Text\n{{ topic }}\n\n'],
+  ];
+  for (const [before, after] of specimens) {
+    const reason = contentOnlyMarkdownDifference(page(before), page(after));
+    assert.equal(typeof reason, 'string', after);
+    assert.ok(reason.trim(), after);
+  }
+});
+
+
+test('content-only Markdown freezes raw HTML code and pre samples', NEEDS_PARSER, () => {
+  for (const [before, after] of [
+    ['Before <code>main</code> after.\n', 'Before <code>other</code> after.\n'],
+    ['<pre>\n<code>git status</code>\nsecond line\n</pre>\n', '<pre>\n<code>git push</code>\nsecond line\n</pre>\n'],
+    ['Before <code><b>main</b> sample</code> after.\n', 'Before <code><b>other</b> sample</code> after.\n'],
+    ['<section><code>main</section>continued\n', '<section><code>main</section>changed\n'],
+  ]) assert.match(contentOnlyMarkdownDifference(page(before), page(after)), /HTML|Markdown/, after);
+  for (const [before, after] of [
+    ['Old prose <code>main</code> after.\n', 'New prose <code>main</code> after.\n'],
+    ['<pre>\n<code>git status</code>\n</pre>\n\nOld prose.\n', '<pre>\n<code>git status</code>\n</pre>\n\nNew prose.\n'],
+  ]) assert.equal(contentOnlyMarkdownDifference(page(before), page(after)), null, after);
+});
+
+
+test('content-only Markdown fails closed on malformed input', NEEDS_PARSER, () => {
+  for (const [source, expected] of [
+    ['---\ntitle: Missing close\n', /frontmatter/],
+    [page('{{ unfinished'), /template parse/],
+    [page('{# unfinished'), /template parse/],
+    [page('Text\0hidden\n'), /control/],
+    [page('Text\uFFFDhidden\n'), /replacement/],
+    [page('Text\uE0000\uE001hidden\n'), /reserved marker/],
+  ]) {
+    assert.match(contentOnlyMarkdownDifference(source, page('Safe prose.\n')), expected);
+    assert.match(contentOnlyMarkdownDifference(page('Safe prose.\n'), source), expected);
+  }
+  for (const [before, after] of [
+    ['{% raw %}old{% endraw %}\n', '{% raw %}new{% endraw %}\n'],
+    ['Old prose.  \n{{- topic }}\n', 'New prose.  \n{{- topic }}\n'],
+  ]) assert.match(contentOnlyMarkdownDifference(page(before), page(after)), /template.*mapping/, after);
+});
+
+
+test('content-only Markdown refuses when the pinned template parser is missing or the wrong version', async (t) => {
+  const isolated = mkdtempSync(join(tmpdir(), 'scope-content-parser-'));
+  t.after(() => rmSync(isolated, { recursive: true, force: true }));
+  const copiedModule = join(isolated, 'sweep-scope.mjs');
+  cpSync(join(dirname(fileURLToPath(import.meta.url)), 'sweep-scope.mjs'), copiedModule);
+  mkdirSync(join(isolated, 'node_modules'));
+  for (const dependency of ['htmlparser2', 'mdast-util-from-markdown', 'mdast-util-gfm', 'micromark-extension-gfm']) {
+    symlinkSync(realpathSync(join(ROOT, 'node_modules', dependency)), join(isolated, 'node_modules', dependency), 'dir');
+  }
+  const isolatedRequire = createRequire(pathToFileURL(copiedModule));
+  assert.throws(() => isolatedRequire.resolve('nunjucks/src/parser.js'), { code: 'MODULE_NOT_FOUND' },
+    'fixture must not resolve Nunjucks through an ancestor or shared dependency');
+  const isolatedScope = await import(pathToFileURL(copiedModule).href);
+  assert.match(isolatedScope.contentOnlyMarkdownDifference(page('Old prose.\n'), page('New prose.\n')),
+    /template parser: unavailable.*3\.2\.4/);
+  const wrongVersion = join(isolated, 'node_modules', 'nunjucks');
+  mkdirSync(wrongVersion);
+  writeFileSync(join(wrongVersion, 'package.json'), JSON.stringify({ name: 'nunjucks', version: '3.2.5' }));
+  mkdirSync(join(wrongVersion, 'src'));
+  for (const file of ['parser.js', 'lexer.js']) writeFileSync(join(wrongVersion, 'src', file), 'module.exports = {};\n'); // resolvable, so only the version check can refuse
+  assert.match(isolatedScope.contentOnlyMarkdownDifference(page('Old prose.\n'), page('New prose.\n')),
+    /template parser: unavailable.*3\.2\.4/);
 });

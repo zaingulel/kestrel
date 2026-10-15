@@ -171,6 +171,36 @@ test('pre-commit: the agent guard validates the STAGED charters, not the working
   });
 });
 
+// Price tag: one scratch repo and two hook runs; retire with the staged agent guard.
+// Mutation: omit the source trigger and the divergent staged source pair passes.
+test('ANTI-REGRESSION: pre-commit checks staged source charters before commit', () => {
+  withScratchRoot((root) => {
+    const repo = initBaseRepo(root);
+    const source = join(repo, 'src');
+    armAgentDefinitions(source);
+    const claude = (body) => `---\nname: explorer\ndescription: "Fixture explorer"\nmodel: opus\n---\n${body}\n`;
+    const codex = (body) => `name = "explorer"\ndescription = "Fixture explorer"\nmodel = "gpt-6-luna"\nmodel_reasoning_effort = "high"\nsandbox_mode = "read-only"\ndeveloper_instructions = """\n${body}\n"""\n`;
+    const claudePath = join(source, '.claude', 'agents', 'explorer.md');
+    const codexPath = join(source, '.codex', 'agents', 'explorer.toml');
+    writeFileSync(claudePath, claude('Explore.'));
+    writeFileSync(codexPath, codex('Explore.'));
+    git(repo, ['add', 'src']);
+    git(repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', 'commit', '-q', '-m', 'arm source explorer']);
+
+    writeFileSync(claudePath, claude('Explore further.'));
+    git(repo, ['add', claudePath]);
+    writeFileSync(codexPath, codex('Explore further.'));
+    const divergentStaged = runHook(repo);
+    assert.notEqual(divergentStaged.status, 0, 'a staged divergent source explorer pair must block despite an unstaged fix');
+    assert.match(divergentStaged.stderr, /edit the explorer charters together/);
+
+    git(repo, ['add', codexPath]);
+    writeFileSync(codexPath, codex('Explore.'));
+    const matchingStaged = runHook(repo);
+    assert.equal(matchingStaged.status, 0, `a staged matching source pair must pass despite an unstaged divergence: ${matchingStaged.stderr}`);
+  });
+});
+
 test('pre-commit: the agent guard runs the STAGED validator, not the working-tree copy', () => {
   withScratchRoot((root) => {
     const repo = initBaseRepo(root);

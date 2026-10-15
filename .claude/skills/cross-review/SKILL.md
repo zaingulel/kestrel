@@ -14,12 +14,15 @@ on the Codex `plan-reviewer` seat before any build.
 
 ## 1. Dispatch the other family's seat as configured
 
+Dispatch the other family only where the `resume` skill, under "6. Verify and review", finds cross-family review
+authorized or the owner has said yes for this job.
+
 Read the seat file and pass its settings unchanged; `AGENTS.md`'s model routing rule forbids raising or lowering
 them. The read-only sandbox has no network, so the prompt carries the card, body and comments, that the charter's spec lens needs,
 and the charter's own `gh` and web calls fail harmlessly. `<out>` is a directory outside the worktree.
 
 `<pending>` names every check and review still running or already scheduled for this branch, the full suite, a
-convergence check, `security-reviewer` or Greptile among them, or reads `none`. Every reviewer dispatch carries it,
+convergence check, `security-reviewer` or the external review among them, or reads `none`. Every reviewer dispatch carries it,
 a native dispatch of this family's own seat included, so the reviewer treats those as in hand and reports findings
 only on what is already settled.
 
@@ -105,6 +108,9 @@ The JSON itself stays in `<out>`. A Claude pass and a natively dispatched seat e
 view reads, so the body carries no usage for them. A run that fails is reported as failed, never as zero cost.
 
 ## 4. Review a plan before the build
+
+Dispatch the other family only where the `resume` skill, under "6. Verify and review", finds cross-family review
+authorized or the owner has said yes for this job.
 
 The `resume` skill's Plan step sends a plan-first card's fixed plan to the Codex `plan-reviewer` seat,
 `.codex/agents/plan-reviewer.toml`, on both runtimes, and owns what happens when that seat cannot be reached.

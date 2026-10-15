@@ -117,3 +117,8 @@ export function leanBoardPage(
     },
   };
 }
+
+// Fresh counted issue-side replies preserve malformed values for guard tests.
+export function issueItemReply(nodes = [], { issueId = 'I_fixture', totalCount = nodes.length } = {}) {
+  return { data: { repository: { issue: { id: issueId, projectItems: { totalCount, nodes: structuredClone(nodes) } } } } };
+}
