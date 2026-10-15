@@ -70,7 +70,7 @@ MPLCONFIGDIR="$PWD/.runtime/cache/matplotlib" \
 
 Use `.runtime/asr-venv/bin/python` with NVIDIA's documented Transformers interface to load the local recognition model. Specify `local_files_only=True` and move the model to `cuda` to run without network downloads or a CPU fallback.
 
-Installation checks, recorded-sample pipeline checks and generated audio are available under `.runtime/`. Recorded-sample checks cover recognition and Saluki; they do not establish the native microphone and playback boundary, recognition accuracy on the user's voice or live microphone-to-speaker latency. The service logs a numeric pipeline-response duration in seconds for each reply, measured by Pipecat from detected user silence to its bot-speaking frame. That frame is a pipeline proxy, not physical speaker onset; audible responsiveness still needs a spoken check.
+Recorded-sample recognition and Saluki checks have no verified runnable recipe here; do not count them as current evidence. Live recognition accuracy, physical playback and microphone-to-speaker latency require a spoken check. The service logs a numeric pipeline-response duration in seconds for each reply, measured by Pipecat from detected user silence to its bot-speaking frame. That frame is a pipeline proxy, not physical speaker onset; audible responsiveness still needs a spoken check.
 
 ## Local mute
 
@@ -104,7 +104,7 @@ After a change to the audio system, the volume or the devices, run the spoken ch
 
 [AGENTS.md](AGENTS.md) defines the repository contract. The [local profile](.agents/REPOSITORY.md) records repository conventions; [docs/README.md](docs/README.md) indexes the standards and tracker manual. Factory adoption preserves this conversation prototype. Product discovery and drilling with the owner precede further product implementation.
 
-Run `npm run lint`, `npm run lint:docs` and `npm run test:scripts` for the factory checks. `npm run test:speech` runs the existing Python tests with the local voice environment; `npm test` runs both suites.
+Follow the [testing strategy](docs/TESTING-STRATEGY.md#6-local-suites) for focused evidence and the full before-push checks, including native Ruff without changing the model environments.
 
 The git guard and the other runtime hooks run only in a runtime that has trusted this repository's hook files, and only once those files are on `main` in the root checkout. An installed hook is not proof that it fires: the proof is a live probe in each runtime, in which a command the guard refuses, such as `git commit --no-verify --dry-run`, comes back blocked. Repeat the probe after a sync changes a hook file or a runtime's hook configuration.
 

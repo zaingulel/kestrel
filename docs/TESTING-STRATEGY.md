@@ -19,7 +19,8 @@ authority for the executed test bar and the fail-loud invocation rule.
 4. **Keep the oracle independent.** Expected values come from requirements, canon, a hand-worked example, or
    a known-good fixture, never a copy of the production calculation. The implementing agent's own new test
    is never the sole oracle for its own implementation; independence comes from the expected-value source, an
-   executed mutation where applicable, and the fresh reviewer.
+   executed mutation where applicable, and the fresh reviewer. Agreement between models is not an independent
+   oracle.
 5. **Prove discrimination, not activity.** Valid evidence accepts the intended behaviour, rejects a plausible
    wrong behaviour, and still accepts an equivalent correct implementation. Execute one plausible mutation per
    distinct material behaviour at convergence; a list of inputs the code handles the same way is one behaviour, so
@@ -42,11 +43,14 @@ authority for the executed test bar and the fail-loud invocation rule.
 
 ## 2. Evidence routes
 
-Prefer interaction tests at the real interface.
+Prefer interaction tests at the real interface. Assert events and terminal states, with watchdog deadlines
+against hangs rather than elapsed-time assertions. Register cleanup before startup can fail; test-framework
+teardown alone does not prove production cleanup. Constrain mocks to real interfaces where signatures are
+stable so interface drift cannot silently pass.
 
 | Concern | Cheapest valid observer | What it does not prove |
 |---|---|---|
-| Pure calculation or policy | A direct `node --test` unit test on the extracted function | Nothing about whether any caller is wired to it |
+| Pure calculation or policy | A direct unit test on the function in the existing language framework | Nothing about whether any caller is wired to it |
 | Command or subprocess wrapper | A unit test on the extracted logic plus the smallest representative positive and negative wire proof, per the Test economics standard in [CODING-STANDARDS.md](CODING-STANDARDS.md) | Nothing about a caller's real environment, credentials, or platform |
 | Repository or storage boundary | A real temporary repository or fixture whose isolation is demonstrated by a contaminating scenario rather than asserted | Nothing about product behaviour built on top of the stored state |
 | Structural, generated-artifact, documentation, privacy, or forbidden-pattern invariant | A deterministic mechanical guard over the committed bytes | Nothing about whether the guarded behaviour is correct |
@@ -64,57 +68,42 @@ user, so its named anti-regression test keeps pinning it.
 
 ### Whole-conversation evidence
 
-For reply-text sequences spanning multiple turns, interruption and follow-up, drive the real
-`run_conversation(stt, voice, *, llm, transport, user_params=None, handle_signals=False)` session in
-[bot.py](../bot.py). Its caller creates and cleans up the required service; the service owns its preparation reader
-through `start_preparation()`. Keyword-only dependencies let a test supply a forwarding transport and native
-user-turn strategies while preserving the production defaults. Keep the real pipeline worker, context aggregators,
-cancellation and speech adapters; do not replace the conversation with a fake engine.
-
-[WholeConversationTests.open_session](../tests/test_bot.py) always owns and supplies one real Hermes service,
-registering cleanup before awaiting startup. Dedicated preparation cases start real preparation without awaiting it,
-proving concurrent preparation, private provider requests/history, pending mute and cleanup. Unrelated turn/history
-cases await `open_engine()` first as an already-ready projection, not a production startup path. Empty caller history,
-a ready worker or sticky startup failure, and no pending reader preserve those cases' observations: completed
-preparation's reader wait is immediate and its messages never enter caller history. Timing and preparation claims
-must use the dedicated pending-preparation cases, never this projection.
+Drive the real `run_conversation` session in [bot.py](../bot.py), retaining its pipeline worker, context
+aggregators, cancellation and speech adapters rather than substituting a fake conversation engine.
+[WholeConversationTests.open_session](../tests/test_bot.py) owns a real Hermes service and registers cleanup
+before startup. Dedicated pending-preparation cases observe concurrent preparation, private provider
+requests/history, pending mute and cleanup. Already-ready turn/history fixtures await engine readiness and
+have empty caller history, a ready worker or sticky startup failure, and no pending reader. They do not
+establish production startup timing or pending preparation; completed preparation messages never enter
+caller history.
 
 [WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
-supplies finalized heard text through native `ProposedUserStartedSpeakingFrame`, `TranscriptionFrame` and
-`ProposedUserStoppedSpeakingFrame` inputs. It observes downstream `TTSTextFrame` at the transport output for
-spoken text and upstream `LLMContextAssistantTurnFrame` for committed assistant context. Captured brain
-requests establish ordered history, including only the spoken prefix of an interrupted reply. A synthesis
-log alone does not establish spoken output or context commitment.
+drives native user-turn frames through the installed Hermes worker against a controlled streaming provider.
+It observes speech at the transport output and committed assistant context, not merely synthesis activity.
+Captured requests establish ordered history, exclude the interrupted unheard tail, and show empty history
+for a new service lifetime. The fixture refuses a direct provider bypass, controls interruption and observes
+native work finish before the next request. Recognition is unloaded without audio input; voice generation
+uses a finite double through the real adapter.
 
-The test starts the real installed Hermes 0.19.0 worker against a controlled loopback HTTP (Hypertext
-Transfer Protocol) brain with scripted streaming replies. It refuses any direct OpenAI service bypass,
-blocks an interrupted provider response until the test releases it, and observes native work finish before
-the next request. Captured provider requests exclude the unheard tail; a new service lifetime starts with empty history.
-It uses an unloaded `NemotronSTT` without audio input and a finite voice-generator double through the real
-`VoxCPMTTS` adapter. Related session cases exercise engine absence or death, provider refusal, incomplete
-replies and corrupt worker output, asserting spoken failures and no automatic session restart or user-turn retry.
+Related session cases cover engine absence or death, provider refusal, incomplete replies, corrupt worker
+output and startup/turn timeouts, including interrupted-reply drainage. They assert spoken failures without
+automatic session restart or user-turn retry. Timeout cases also assert worker exit and owned-home removal.
+[NativeHermesTests](../tests/test_hermes.py) separately exercises the installed worker's JSON-lines boundary:
+unsolicited tool refusal, isolated configuration/environment, no reusable conversation state and attempted
+network destinations limited to the controlled provider. Its
+`test_production_worker_entrypoint_becomes_ready_without_a_turn` observes the actual worker script become
+ready and exit cleanly with closed standard input, without a conversation or inference.
 
-The startup and turn-timeout cases use short test deadlines and assert spoken failure, worker exit and
-owned-home removal, rather than elapsed time. The turn-timeout case also covers an interrupted reply draining.
+Local provider-error diagnostics belong in the owned ignored home, as checked by
+`NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
+`WholeConversationTests.test_brain_refusal_speaks_failure_without_retry` observes production cleanup remove
+that home after worker exit. Neither proves cleanup after a hard-killed parent or power loss.
 
-[NativeHermesTests](../tests/test_hermes.py) separately drives the installed worker's JSON-lines boundary,
-observing unsolicited tool refusal, isolated configuration and environment, absent reusable conversation
-state, and attempted network destinations limited to the controlled provider. Its
-`test_production_worker_entrypoint_becomes_ready_without_a_turn` starts the actual worker script with the
-installed interpreter and closed standard input, observing readiness and clean exit without a conversation
-or inference.
-
-Provider-error request dumps are permitted local diagnostics in the owned ignored home. Their placement is
-checked by `NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
-Removal after worker exit on orderly shutdown is checked through production-session cleanup in
-`WholeConversationTests.test_brain_refusal_speaks_failure_without_retry`. A hard-killed parent or power loss
-can leave the home behind; these tests do not establish cleanup after forced parent death.
-
-These native cases require the installed interpreter locally; missing native evidence blocks delivery.
-Hosted continuous integration explicitly skips the native cases when that interpreter is absent. Those
-skips do not establish installed-engine behaviour, and local native results do not establish hosted execution.
-The controlled brain and speech doubles do not prove microphone accuracy, physical playback, the live Ally
-network or Saluki's answers, or live spoken latency.
+Installed-engine evidence is required locally; its absence blocks delivery. Hosted continuous integration
+skips native cases when the interpreter is absent: those skips do not prove installed-engine behaviour,
+and local native results do not prove hosted execution. Tracked recognition adapter tests use doubles and
+do not establish actual recognition-worker execution. Controlled providers and speech doubles do not prove
+live recognition accuracy, physical playback, the Ally network, Saluki's answers or spoken latency.
 
 ## 3. Evidence classes stay distinct
 
@@ -161,9 +150,32 @@ Performance budgets stay advisory and labelled with the environment they were me
 
 ## 6. Local suites
 
-Focused evidence runs during construction. At convergence, run `npm run lint`, `npm run test:scripts` and `npm run test:speech`; documentation changes also run `npm run lint:docs`. `npm test` runs both the factory Node tests and the existing Python speech tests. The speech command requires the ignored local voice environment described in [README.md](../README.md). An unavailable environment is unavailable evidence, never a pass.
+Focused evidence runs during construction, naming one Python qualified method or one anchored Node full
+title per run. Each example below must report exactly one passing test; zero matches, a skipped selected
+test or multiple matches is failed verification.
+
+```sh
+node scripts/run-log.mjs quality mute-wire -- env PYTHONPATH=tests .runtime/voice-venv/bin/python -m unittest test_bot.LocalMuteTests.test_local_command_wire_success_and_failure -v
+node scripts/run-log.mjs quality flags -- node --test --test-name-pattern='^an absent flag returns the default and a present valid value is returned as a number$' scripts/lib/cli-flags.test.mjs
+```
+
+At convergence, run `npm run lint`, `npm run test:scripts`, `npm run test:speech` and the Ruff command below;
+documentation changes also run `npm run lint:docs`. `npm test` runs both the factory Node tests and the existing Python speech tests. The speech command requires the ignored local voice environment described in [README.md](../README.md). An unavailable environment is unavailable evidence, never a pass.
 
 In a job worktree with no `.runtime`, run `ln -s /home/zain/Projects/zaingulel/kestrel/.runtime .runtime`. This link points to the preserved real models, environments and voice assets; it is not disposable test storage. Do not delete the linked assets, follow the link during cleanup, or rebuild the assets for tests.
+
+Ruff requires `uvx` (provided by uv). From the repository root, run:
+
+```sh
+node scripts/run-log.mjs quality ruff -- uvx --isolated --no-config --constraints requirements-test.txt ruff check --select F bot.py speech.py asr_worker.py hermes_worker.py tests
+```
+
+This uses the existing requirements pin and the hosted check's rules and source selection. `--isolated`
+avoids installed tools; `--no-config` ignores uv configuration, not Ruff configuration. Constraints do not
+install the unrelated model dependencies. uv uses its tool cache and may download Ruff on a cold cache;
+it does not install into the preserved model environments. Missing `uvx`, unavailable downloads or an
+unavailable tool are unavailable evidence; a failing check remains failure, never a pass. This adds one
+cached source scan per applicable convergence, with no recurring synthetic-fixture suite or timing claim.
 
 Continuous integration creates its own CPU (central processing unit) test environment from the pins in `requirements-test.txt`; it needs no GPU (graphics processing unit) model weights.
 
@@ -171,7 +183,7 @@ The hosted [tests workflow](../.github/workflows/tests.yml) provides the require
 
 These are configured hosted checks, not evidence that they have executed. Local results do not establish hosted or Windows results; read the actual hosted run before reporting those green.
 
-A commit added on top of one whose checks passed reruns a convergence check where this table names it for the commit, or where the investigation of a path the table does not cover finds it affected; the `resume` skill's Receipt reuse rule under "8. Deliver" owns how a receipt is carried. For that rule, the hosted `test` check runs all four checks in the table.
+A commit added on top of one whose checks passed reruns a convergence check where this table names it for the commit, or where the investigation of a path the table does not cover finds it affected; the `resume` skill's Receipt reuse rule under "8. Deliver" owns how a receipt is carried. For that rule, the hosted `test` check includes equivalent evidence for the checks in the table.
 
 | Convergence check | What reruns it |
 |---|---|
@@ -179,6 +191,7 @@ A commit added on top of one whose checks passed reruns a convergence check wher
 | `npm run test:scripts` | Any path, and any new head even when no path changed: the suite reads the tracked tree as a whole and queries git about the repository itself |
 | `npm run lint:docs`, in a job that changes documentation | Any path: it resolves every cited path and link against the whole tracked tree |
 | `npm run test:speech` | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, a path under `tests/`, `requirements-test.txt` or `package.json` |
+| Ruff command above | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, a path under `tests/`, `requirements-test.txt`, or a change to the command or effective Ruff configuration |
 
 Command and configuration inputs always rerun the affected check, regardless of filename extension: this includes package commands, ESLint configuration and package or lockfile changes. An unchanged `package-lock.json` together with a preserved installed-package and tool environment establishes unchanged Node inputs; a preserved `.runtime/` establishes unchanged voice inputs. Reinstalling packages, upgrading tools or changing either environment after a receipt was written reruns the affected check.
 
