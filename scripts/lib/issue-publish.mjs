@@ -13,7 +13,8 @@
 // from an Epic whose children were forgotten: showing the count resolves that
 // ambiguity visibly.
 
-import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD } from './board-config.mjs';
+import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD } from './board-config.mjs';
+import { lookupIssueBoardItem } from './board-move.mjs';
 import { isContentUnresolved, normalizeItem } from './board.mjs';
 
 const FIELDS_VERIFIED = ROUTING_FIELD ? `Statuses and ${ROUTING_FIELD}s` : 'Statuses';
@@ -85,72 +86,6 @@ function parseNativeChildren(graphqlResponse) {
   return { totalCount, numbers };
 }
 
-// The absence confirmation, read from the ISSUE side: which projects does GitHub say this
-// issue has an item on? A card that lags the board read is missing from `projectV2.items`
-// entirely, so the board read alone cannot tell "never added" from "not propagated yet" —
-// only the other end of the same link can (#572).
-//
-// `isArchived` is read, not filtered away: `projectV2.items` defaults to NOT_ARCHIVED and
-// `issue.projectItems` defaults to includeArchived, so an ARCHIVED card is absent from the
-// board read and present here — the exact shape of a lagging read. Keeping the flag is what
-// separates the two, so the archived card gets the one action that resolves it.
-function boardItemProbeQuery(number) {
-  return `{ repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issue(number:${number}) { projectItems(first:20) { totalCount nodes { isArchived project { number } } } } } }`;
-}
-
-function parseBoardItemProbe(graphqlResponse, number) {
-  let payload;
-  try {
-    payload = typeof graphqlResponse === 'string' ? JSON.parse(graphqlResponse) : graphqlResponse;
-  } catch {
-    throw new Error('board item probe GraphQL response is not valid JSON');
-  }
-
-  // A shape defect, never the world fact "issue #N does not exist": a null `data` or a null
-  // repository produces this same payload for an issue that is sitting right there, and the
-  // real transport throws on the accompanying `errors` array long before this line.
-  const issue = payload?.data?.repository?.issue;
-  if (issue == null) {
-    throw new Error('board item probe GraphQL response has no readable issue');
-  }
-  const { projectItems } = issue;
-  if (!projectItems || !Array.isArray(projectItems.nodes)) {
-    throw new Error('board item probe GraphQL response has no projectItems.nodes[] array');
-  }
-  // A board item on page two would read as "not on the board", so a truncated probe can
-  // only be answered by raising the cap — never by concluding from the page that was read.
-  // `totalCount` is validated rather than compared loosely, as in `parseNativeChildren`: a
-  // missing one makes every comparison false, so the truncation guard would wave through the
-  // very read whose completeness it exists to prove.
-  if (!Number.isSafeInteger(projectItems.totalCount) || projectItems.totalCount < 0) {
-    throw new Error('board item probe GraphQL response has no non-negative integer projectItems.totalCount');
-  }
-  if (projectItems.totalCount > projectItems.nodes.length) {
-    throw new Error(
-      `issue #${number} has ${projectItems.totalCount} project items but only ${projectItems.nodes.length} fetched — raise the projectItems first: cap in boardItemProbeQuery`,
-    );
-  }
-  // Per-node validation for the same reason `parseNativeChildren` has it: read loosely, a null
-  // node or a `{project: null}` one counts as a definite negative and a confirmed absence is
-  // reported from a page the parser could not read. Guard parity against the local standard
-  // rather than a live shape — `ProjectV2ItemConnection.nodes` is schema-nullable, but a nulled
-  // element ships with an `errors` array and `gh api graphql` exits non-zero first.
-  for (const node of projectItems.nodes) {
-    if (!Number.isSafeInteger(node?.project?.number)) {
-      throw new Error(
-        `board item probe GraphQL response has a non-integer project number ${JSON.stringify(node?.project?.number)}`,
-      );
-    }
-  }
-  const boardItem = projectItems.nodes.find((node) => node.project.number === BOARD_PROJECT_NUMBER);
-  if (boardItem && typeof boardItem.isArchived !== 'boolean') {
-    throw new Error(
-      `board item probe GraphQL response has a non-boolean isArchived ${JSON.stringify(boardItem.isArchived)}`,
-    );
-  }
-  return { onBoard: boardItem !== undefined, archived: boardItem?.isArchived ?? false };
-}
-
 export function boardCardsByNumber(items) {
   if (!Array.isArray(items)) throw new Error('board reader returned a non-array item list');
   const cards = new Map();
@@ -199,20 +134,17 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
       //    confirmed absence, not an inference from nothing.
       let probe;
       try {
-        probe = parseBoardItemProbe(
-          ghExec(['api', 'graphql', '-f', `query=${boardItemProbeQuery(number)}`]),
-          number,
-        );
+        probe = lookupIssueBoardItem(number, ghExec).item;
       } catch (err) {
         if (unresolvedCount > 0) throw new Error(unresolvedReadMessage(number, unresolvedCount));
         throw new Error(
           `could not confirm whether issue #${number} is on the board: ${err.message}`,
         );
       }
-      if (probe.archived) {
+      if (probe?.isArchived) {
         throw new Error(`requested issue #${number} is archived on the board, so this read — which lists only unarchived cards — does not show it; unarchive the card rather than adding it again.`);
       }
-      if (probe.onBoard) {
+      if (probe) {
         throw new Error(`requested issue #${number} is on the board but not in this board read, which lagged the card; re-run this check rather than adding the card again.`);
       }
       throw new Error(unresolvedCount > 0

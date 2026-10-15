@@ -36,11 +36,11 @@ Prefer events and terminal states, with watchdog deadlines against hangs, rather
 
 ### The explicit disagreement
 
-Opus retains today's mutation rule per distinct material behaviour. Astra proposes accepting a relevant, independently grounded pre-fix red followed by unchanged-test green for ordinary changes, without recreating an equivalent defect. Astra retains explicit adversarial mutation for changed protected invariants and one wrong-behaviour check for ordinary new features lacking red evidence. The coordinator recommends this narrowly defined simplification as a proposal. It is not current permission: [today's strategy](../TESTING-STRATEGY.md), lines 23–41 and 128–152, still governs.
+Opus retains today's mutation rule per distinct material behaviour. Astra proposes accepting a relevant, independently grounded pre-fix red followed by unchanged-test green for ordinary changes, without recreating an equivalent defect. Astra retains explicit adversarial mutation for changed protected invariants and one wrong-behaviour check for ordinary new features lacking red evidence. The coordinator recommends this narrowly defined simplification as a proposal. Current permissions are defined by the [testing strategy](../TESTING-STRATEGY.md).
 
-Astra also proposes grouped invocations of explicitly named focused tests. Opus did not explicitly endorse grouping. The coordinator recommends retaining per-test identification, rejecting zero matches, preserving each result and the logged command's authoritative failing exit, and using individual runs for diagnosis. Any grouped-run permission would require an explicit policy change; current single-test requirements remain active. Runtime savings are unmeasured.
+Astra also proposes grouped invocations of explicitly named focused tests. Opus did not explicitly endorse grouping. The coordinator recommends retaining per-test identification, rejecting zero matches, preserving each result and the logged command's authoritative failing exit, and using individual runs for diagnosis. Current grouped-run permissions are defined by the [testing strategy](../TESTING-STRATEGY.md). Runtime savings are unmeasured.
 
-Shared handoff and skill changes must originate in canonical Fabraik, with owner direction and sync, rather than unilateral local relaxation. [Shared authorship contract](../../AGENTS.md), lines 188–200.
+Shared handoff and skill changes must originate in canonical Fabraik, with owner direction and sync, rather than unilateral local relaxation. [Shared authorship contract](../../AGENTS.md#shared-workflow-adoption).
 
 ## Coding standards: short prospective additions
 

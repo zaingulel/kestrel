@@ -24,10 +24,10 @@
 // Only the canonical's manifest holds `adopters`, the repositories that carry a copy. Every reader takes a manifest
 // without it and holds one that is present to an array of "owner/repo" names; nothing is decided by the list.
 //
-// A tree's settings file may name the runtimes it runs; runtimes.mjs says which entry belongs to which runtime. An
-// entry of a runtime the settings file leaves out is left out of the tree: every manifest keeps every entry, a sync
-// writes only the entries of the named runtimes, and the path of a left-out entry must hold nothing. A tree with no
-// settings file, or one that names no runtimes, runs both and leaves nothing out.
+// A tree's settings file may name the runtimes it runs, may turn the Greptile add-on on and may turn the documentation
+// sweep off; leftOutCause in runtimes.mjs is the one answer to which entries those settings leave out of the tree, and
+// the check, the sync and the render all ask it, each from the settings file's text. Every manifest keeps every entry,
+// a sync writes only the entries the tree installs, and the path of a left-out entry must hold nothing.
 //
 // verifyManifest reports anything a left-out entry's path holds, whatever its bytes, and nothing where it holds
 // nothing. It holds every other entry to its record, with one exception: a seat the tree's settings file or the
@@ -37,7 +37,7 @@
 // nothing else. seatDefaults is a witness the entry's hash checks, never trusted input. The settings file is read
 // only as a regular file under no symlinked directory, and it and seatDefaults throw when malformed or when they
 // name a seat the manifest does not list. A tree with neither takes the strict path alone, and a missing or changed
-// file of a named runtime is refused like any other.
+// file of a named runtime, of the add-on where it is on, or of the sweep where it is not off, is refused like any other.
 //
 // syncInto copies the entries from a canonical source checkout into an adopter target. Everything it writes comes
 // from the source's freshly fetched origin main commit, never from the source's working tree, index or disk
@@ -66,6 +66,9 @@
 // that does not honour file modes the sync stages the file entries it writes, because the index is the only place
 // such a checkout can hold the executable bit.
 //
+// Any installed path or the manifest marked skip-worktree or assume-unchanged in the target's index is refused
+// before any write: git status cannot prove it clean.
+//
 // A retired entry is one the target's committed manifest lists at a path the fetched manifest does not. The target
 // must be clean at every retired path too, and before any write the sync removes each retired file it can prove: a
 // regular file under no symlinked parent whose bytes, on disk and committed at the target's HEAD, are the ones that
@@ -75,8 +78,8 @@
 // that a case-insensitive or Unicode-normalising disk reads as one the fetched manifest shares, is refused by name.
 // It removes no directory and no other file.
 //
-// An entry of a runtime the target's settings file leaves out is never written, and the manifest the sync records
-// still lists it. Its path is proven and cleared as a retired path is, against the record of the target's committed
+// An entry the target leaves out, of a runtime its settings file does not name, of the Greptile add-on where that
+// file does not turn it on or of the documentation sweep where that file turns it off, is never written, and the manifest the sync records still lists it. Its path is proven and cleared as a retired path is, against the record of the target's committed
 // manifest where that lists the path and of the fetched manifest otherwise: a file committed with exactly those bytes
 // is removed, a path holding nothing is skipped, and anything else is refused by name before any write, so a
 // left-out seat that still holds overridden values is rendered back or removed first. The sync returns how many
@@ -120,12 +123,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { checkContained, installs, kindOf, readSettingsFile, runtimeOf, RUNTIMES, SETTINGS_PATH } from './runtimes.mjs';
+import { checkContained, kindOf, leftOutCause, readSettingsFile, SETTINGS_PATH } from './runtimes.mjs';
 import { overrideProblems, parseSettings, seatsByPath, seatsRecord, substituteSeatSettings } from './seat-settings.mjs';
 
 export const MANIFEST_PATH = '.agents/factory-manifest.json';
-const REGION_START = '<!-- factory-shared:start -->';
-const REGION_END = '<!-- factory-shared:end -->';
+export const REGION_START = '<!-- factory-shared:start -->';
+export const REGION_END = '<!-- factory-shared:end -->';
 const SHA256 = /^[0-9a-f]{64}$/;
 const REPOSITORY = /^[^/\s]+\/[^/\s]+$/;
 const GITHUB_REMOTE = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+?)(?:\.git)?$/;
@@ -182,7 +185,7 @@ function checkSeatsListed(paths, entries, what, remedy = '') {
 }
 
 // The manifest held in text, validated; label names where the text came from in every error.
-function parseManifest(text, label) {
+export function parseManifest(text, label) {
   let manifest;
   try {
     manifest = JSON.parse(text);
@@ -253,7 +256,7 @@ export function regionText(text, path) {
 }
 
 // The text with everything strictly between its marker lines replaced by region; the rest stays byte for byte.
-function replaceRegion(text, region, path) {
+export function replaceRegion(text, region, path) {
   const lines = text.split('\n');
   const [start, end] = regionBounds(lines, path);
   return `${lines.slice(0, start + 1).join('\n')}\n${region}${lines.slice(end).join('\n')}`;
@@ -261,7 +264,7 @@ function replaceRegion(text, region, path) {
 
 // Whether root's checkout honours file modes; a tree outside any repository, or one with core.fileMode unset (git
 // config exits 1), does. Any other failed lookup is refused, never read as a checkout that honours file modes.
-function honoursFileModes(root) {
+export function honoursFileModes(root) {
   const run = spawnSync('git', ['-C', root, 'config', '--type=bool', 'core.fileMode'], { encoding: 'utf8', env: gitEnvironment() });
   if (run.status === 0) return run.stdout.trim() !== 'false';
   if (run.status === 1) return true;
@@ -311,20 +314,14 @@ function valueOf(entry, data) {
   return sha256('region' in entry ? regionText(data.toString('utf8'), entry.path) : data);
 }
 
-// The settings file of the tree at root, as { runtimes, overrides }: the runtimes it names and a Map from seat path
-// to the values it names; every runtime and an empty Map when the tree has none. Refuses, before any read, one
-// under a symlinked directory or one that is not a regular file; then one that fails its own validation or names a
-// seat the manifest does not list as a file; remedy, when given, ends that last refusal.
-function treeSettings(root, manifest, remedy) {
-  const text = readSettingsFile(root);
-  if (text === undefined) return { runtimes: RUNTIMES, overrides: new Map() };
-  const { runtimes, seats: overrides } = parseSettings(text, SETTINGS_PATH);
-  checkSeatsListed(overrides.keys(), manifest.entries, SETTINGS_PATH, remedy);
-  return { runtimes, overrides };
+// The settings a settings file's text holds, as parseSettings returns them, `seats` being a Map from seat path to the
+// values the file names; an undefined text is a tree with no settings file. Refuses text that fails the file's own
+// validation or names a seat the manifest does not list as a file; remedy, when given, ends that last refusal.
+export function settingsWithSeats(text, manifest, remedy) {
+  const settings = parseSettings(text, SETTINGS_PATH);
+  checkSeatsListed(settings.seats.keys(), manifest.entries, SETTINGS_PATH, remedy);
+  return settings;
 }
-
-// Why the path of an entry whose runtime the settings file leaves out must hold nothing.
-const leftOutCause = (path) => `the settings file names no ${runtimeOf(path)} runtime`;
 
 const NOT_RENDERED = 'seat settings not rendered; run node scripts/factory-sync.mjs --render';
 
@@ -349,16 +346,19 @@ function overriddenSeatValue(root, entry, named = {}, recorded = {}) {
 
 // Every entry whose disk state differs from its record, as { path, expected, actual }; actual is the
 // disk value or the problem that stands in for it, for an overridden seat what overriddenSeatValue gives, or, for
-// a file whose bytes match, its executable state. An entry of a runtime the settings file leaves out differs
-// whenever its path holds anything. A manifest passed without seatDefaults records none.
-export function verifyManifest(root, manifest = readManifest(root)) {
+// a file whose bytes match, its executable state. An entry the settings file leaves out differs whenever its path
+// holds anything. A manifest passed without seatDefaults records none. The tree is judged by settingsText, the text of
+// a settings file or undefined for none: its own settings file unless the caller hands another.
+export function verifyManifest(root, manifest = readManifest(root), settingsText = readSettingsFile(root)) {
+  const settings = settingsWithSeats(settingsText, manifest);
   const modes = indexModes(root);
-  const { runtimes, overrides } = treeSettings(root, manifest);
+  const { seats: overrides } = settings;
   const defaults = manifest.seatDefaults ?? new Map();
   return manifest.entries.flatMap((entry) => {
     const { value, problem, executable } = entryState(root, entry, modes);
-    if (!installs(runtimes, entry.path)) {
-      return problem === 'missing' ? [] : [{ path: entry.path, expected: `absent (${leftOutCause(entry.path)})`, actual: value ?? problem }];
+    const cause = leftOutCause(settings, entry.path);
+    if (cause !== null) {
+      return problem === 'missing' ? [] : [{ path: entry.path, expected: `absent (${cause})`, actual: value ?? problem }];
     }
     const overridden = value !== undefined && (overrides.has(entry.path) || defaults.has(entry.path));
     const actual = overridden ? overriddenSeatValue(root, entry, overrides.get(entry.path), defaults.get(entry.path)) : value ?? problem;
@@ -477,6 +477,12 @@ function hiddenFromStatus(root, paths) {
   );
 }
 
+function hiddenPathError(path, cause) {
+  const prefix = cause === undefined ? '' : `${cause}, but `;
+  const removal = cause === undefined ? '' : ' and the next commit would not record its removal';
+  return new Error(`${path}: ${prefix}the target's index marks it skip-worktree or assume-unchanged, which hides it from git status, so the sync cannot prove it clean${removal}; clear both marks with git update-index --no-skip-worktree -- ${path} and git update-index --no-assume-unchanged -- ${path}, commit or restore whatever git status then shows there, then sync`);
+}
+
 // The target's committed manifest, validated, or null when HEAD verifiably holds none: a listing of HEAD's tree
 // settles which, so a manifest that cannot be read is refused, never taken for a first sync.
 function previousManifest(target) {
@@ -540,12 +546,11 @@ function clear(full) {
 // holds. Any other retired path that holds nothing is skipped, and anything else at one is refused by name. It
 // removes nothing itself, so every entry is proven before any file goes. The disk and HEAD are both checked because
 // the status check sees neither an ignored file nor a byte difference a line-ending conversion hides from it.
-function provenRetired(root, retired, installed) {
-  // With no path the listings would hold the whole tree and the whole index.
+function provenRetired(root, retired, installed, hidden) {
+  // With no path the listing would hold the whole tree.
   if (retired.length === 0) return [];
   const paths = retired.map(({ entry }) => entry.path);
   const tree = committedTree(root, 'HEAD', paths, "the retired paths in the target's HEAD");
-  const hidden = hiddenFromStatus(root, paths);
   const twins = new Map(installed.map(({ path }) => [folded(path), path]));
   const proven = [];
   for (const { entry, cause } of retired) {
@@ -554,7 +559,7 @@ function provenRetired(root, retired, installed) {
       throw new Error(`${path}: the manifest no longer shares this file's ${entry.region} region, and the sync never removes text from a file the adopter owns around it; retiring a region needs its own change to the sync`);
     }
     if (hidden.has(path)) {
-      throw new Error(`${path}: ${cause}, but the target's index marks it skip-worktree or assume-unchanged, which hides it from git status, so the sync cannot prove it clean and the next commit would not record its removal; clear both marks with git update-index --no-skip-worktree -- ${path} and git update-index --no-assume-unchanged -- ${path}, commit or restore whatever git status then shows there, then sync`);
+      throw hiddenPathError(path, cause);
     }
     const { value, problem } = entryState(root, entry, null);
     if (problem === 'missing') continue;
@@ -589,7 +594,7 @@ const NAMED_AFTER_SYNC = 'a value only a newer copy of the shared workflow admit
 // A seat's shared bytes with the values its settings name in place, as { data, replaced }, replaced holding the
 // values that were there. Refuses values that give the seat a problem its shared bytes do not have: this copy
 // judges what the settings file names and nothing else, so a default it does not know stops nothing.
-function renderSeat(path, shared, values) {
+export function renderSeat(path, shared, values) {
   const rendered = substituteSeatSettings(path, shared, values);
   const problems = overrideProblems(path, shared, rendered.data);
   if (problems.length > 0) {
@@ -614,10 +619,77 @@ export function fetchMain(source) {
   return fetched;
 }
 
+// Count the complete argv conservatively for Windows quoting, keeping each path or cacheinfo pair together.
+function indexGitBatches(root, args, units) {
+  const cost = (argv) => argv.reduce((total, argument) => total + 2 * argument.length + 3, 0);
+  const prefixCost = 1 + cost(['git', '-C', root, ...args]);
+  const batches = [];
+  let batch = [...args];
+  let batchCost = prefixCost;
+  for (const unit of units) {
+    const unitCost = cost(unit);
+    if (prefixCost + unitCost > 30000) throw new Error('a single index-recording Git argument unit exceeds 30000 UTF-16 units');
+    if (batchCost + unitCost > 30000) {
+      batches.push(batch);
+      batch = [...args];
+      batchCost = prefixCost;
+    }
+    batch.push(...unit);
+    batchCost += unitCost;
+  }
+  if (batch.length > args.length) batches.push(batch);
+  return batches;
+}
+
+// Records each file entry's executable bit in root's index, where the checkout does not honour file modes and so
+// keeps that bit only there; returns at once where it does. Region entries are not recorded.
+export function recordIndexModes(root, entries) {
+  if (honoursFileModes(root)) return;
+  const files = entries.filter((entry) => !('region' in entry));
+  const refusal = (paths, executable, cause) => new Error(
+    `cannot record ${paths.join(', ')} as ${modeName(executable)} in the index of ${root}, whose checkout does not honour file modes`,
+    { cause },
+  );
+  for (const { path, executable } of files) {
+    try {
+      checkContained(root, path);
+      if (!lstatSync(join(root, path)).isFile()) throw new Error(`${path} is not a regular file`);
+    } catch (cause) {
+      throw refusal([path], executable === true, cause);
+    }
+  }
+  const groups = [];
+  for (const executable of [true, false]) {
+    const paths = files.filter((entry) => (entry.executable === true) === executable).map(({ path }) => path);
+    const hashes = [];
+    try {
+      for (const batch of indexGitBatches(root, ['hash-object', '-w', '--'], paths.map((path) => [path]))) {
+        const output = git(root, ...batch);
+        const ids = output === null ? [] : output.split(/\r?\n/);
+        if (ids.length !== batch.length - 3 || ids.some((id) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(id))) {
+          throw new Error('Git did not return one valid object ID per file');
+        }
+        hashes.push(...ids);
+      }
+      const mode = executable ? '100755' : '100644';
+      const units = paths.map((path, i) => ['--cacheinfo', `${mode},${hashes[i]},${path}`]);
+      groups.push({ executable, paths, batches: indexGitBatches(root, ['update-index', '--add'], units) });
+    } catch (cause) {
+      throw refusal(paths, executable, cause);
+    }
+  }
+  // Hash every group and validate every batch before staging anything; native cacheinfo retains conflict refusal.
+  for (const { executable, paths, batches } of groups) {
+    for (const batch of batches) {
+      if (git(root, ...batch) === null) throw refusal(paths, executable);
+    }
+  }
+}
+
 // Syncs the source's manifest entries into the target, per the contract at the top of this file. fetchMain, the
 // function above or a stand-in, fetches the source's origin main and returns its commit; it throws when the fetch
-// fails. Returns the counts written, the paths removed, sorted, and the number of entries left out because the
-// target's settings file does not name their runtime, as { files, regions, removed, omitted }.
+// fails. Returns the counts written, the paths removed, sorted, and the number of entries the target's settings file
+// leaves out, as { files, regions, removed, omitted }.
 export function syncInto({ source, target, canonical: requested, fetchMain }) {
   const previous = previousManifest(target);
   const canonical = resolveCanonical(previous, requested);
@@ -652,13 +724,17 @@ export function syncInto({ source, target, canonical: requested, fetchMain }) {
   const sourceChanges = uncommitted(source, shared);
   if (sourceChanges) throw new Error(`the source has uncommitted changes at shared paths: ${sourceChanges}`);
   const contents = committedContents(source, fetched, manifest);
-  const targetChanges = uncommitted(target, [...shared, ...retired.map(({ path }) => path)]);
+  const paths = [...shared, ...retired.map(({ path }) => path)];
+  const targetChanges = uncommitted(target, paths);
   if (targetChanges) throw new Error(`the target has uncommitted changes at shared paths: ${targetChanges}`);
+  const hidden = hiddenFromStatus(target, paths);
 
   const root = realpathSync(target);
-  const { runtimes, overrides } = treeSettings(root, manifest, UNSHARED_SEAT);
-  const installed = manifest.entries.filter(({ path }) => installs(runtimes, path));
-  const leftOut = manifest.entries.filter(({ path }) => !installs(runtimes, path));
+  const settings = settingsWithSeats(readSettingsFile(root), manifest, UNSHARED_SEAT);
+  const { seats: overrides } = settings;
+  const causes = manifest.entries.map((entry) => ({ entry, cause: leftOutCause(settings, entry.path) }));
+  const installed = causes.filter(({ cause }) => cause === null).map(({ entry }) => entry);
+  const leftOut = causes.filter(({ cause }) => cause !== null);
   for (const entry of installed) {
     checkContained(root, entry.path);
     if (!('region' in entry)) checkReplaceable(join(root, entry.path), entry.path);
@@ -670,10 +746,16 @@ export function syncInto({ source, target, canonical: requested, fetchMain }) {
     root,
     [
       ...retired.map((entry) => ({ entry, cause: 'the manifest no longer shares it' })),
-      ...leftOut.map((entry) => ({ entry: previous?.entries.find(({ path }) => path === entry.path) ?? entry, cause: leftOutCause(entry.path) })),
+      ...leftOut.map(({ entry, cause }) => ({ entry: previous?.entries.find(({ path }) => path === entry.path) ?? entry, cause })),
     ],
     installed,
+    hidden,
   );
+  for (const path of [...installed.map(({ path }) => path), MANIFEST_PATH]) {
+    if (hidden.has(path)) {
+      throw hiddenPathError(path);
+    }
+  }
   const regions = new Map(
     installed
       .filter((entry) => 'region' in entry)
@@ -707,16 +789,7 @@ export function syncInto({ source, target, canonical: requested, fetchMain }) {
     entries: manifest.entries,
   };
   writeRegular(join(root, MANIFEST_PATH), `${JSON.stringify(record, null, 2)}\n`, 0o644);
-  if (!honoursFileModes(root)) {
-    const files = installed.filter((entry) => !('region' in entry));
-    for (const executable of [true, false]) {
-      const paths = files.filter((entry) => (entry.executable === true) === executable).map(({ path }) => path);
-      const chmod = `--chmod=${executable ? '+x' : '-x'}`;
-      if (paths.length > 0 && git(root, '--literal-pathspecs', 'update-index', '--add', chmod, '--', ...paths) === null) {
-        throw new Error(`cannot record ${paths.join(', ')} as ${modeName(executable)} in the index of ${root}, whose checkout does not honour file modes`);
-      }
-    }
-  }
+  recordIndexModes(root, installed);
   return { ...written, removed, omitted: leftOut.length };
 }
 
@@ -730,13 +803,14 @@ export function renderSettings(root) {
   if (isGithubRepository(origin, manifest.canonical)) {
     throw new Error(`the origin ${origin} is the canonical github.com/${manifest.canonical}, whose seat lines are the defaults: a retune there edits the seat file, and no settings file is rendered`);
   }
-  const { runtimes, overrides } = treeSettings(tree, manifest);
+  const settings = settingsWithSeats(readSettingsFile(tree), manifest);
+  const { seats: overrides } = settings;
   const recorded = manifest.seatDefaults;
 
   const defaults = new Map();
   const changed = new Map();
   for (const path of [...new Set([...overrides.keys(), ...recorded.keys()])].sort()) {
-    if (!installs(runtimes, path)) continue;
+    if (leftOutCause(settings, path) !== null) continue;
     const mode = checkRegularFile(tree, path).mode & 0o777;
     const full = join(tree, path);
     const data = readFileSync(full);

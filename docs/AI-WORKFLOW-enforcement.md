@@ -12,17 +12,17 @@ sentence had failed to prevent it or because the bad state would be silent or ha
 
 | Protection | Mechanism | What it refuses or forces |
 |---|---|---|
-| No unsafe git or GitHub command | `.claude/hooks/block-unsafe-git.mjs` before every shell command (Codex twin under `.codex/hooks/`) | The command forms listed at [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs), which also says what the guard does not model |
+| No unsafe git or GitHub command | `.claude/hooks/block-unsafe-git.mjs` before every shell command (Codex twin under `.codex/hooks/`) | The command forms listed at [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs), which also says what the guard does not model; among them a `git worktree add` that resets a branch with `-B`, forces with `--force`, or names a path under `.claude/worktrees/` that climbs back out with `..`, and a forced `git worktree remove` |
 | A builder receives a bounded handoff | `.claude/hooks/check-builder-handoff.mjs` before every agent spawn | A handoff missing a required field, with an unfilled slot, or telling the builder to prove its own mutation |
 | Green before a turn ends | `.claude/hooks/verify-green.sh` at turn end, in the checkout the session is working in (Codex twin under `.codex/hooks/`) | Finishing with a lint error; a check it could not run, because no project root resolved or a tool is absent, is stated as unverified rather than passed silently |
 | The product's own checks pass | The product gates `scripts/gates/{stop,pre-commit}`: `stop` run by both Stop hooks on every turn end, and `pre-commit` run by `.githooks/pre-commit` on every commit | A turn end or commit whose product gate, when present, exits non-zero or is not executable; an absent gate changes nothing |
 | Runner output stays readable | `.claude/hooks/filter-test-output.mjs` | Condenses a green run, passes a red run through in full |
 | The artifact matches its source | The product gates `scripts/gates/{stop,pre-commit}`, where the repository supplies them (run on a merge that auto-commits through `.githooks/pre-merge-commit`), and CI | A turn end, commit or merge whose generated artifact, as the Conventions table names it, is not the byte-identical build of its source; a repository that supplies none enforces its generated artifacts by the checks its Conventions table names |
 | The installed copy matches its source | In the canonical repository, a test in its script suite, run by `.githooks/pre-push` and CI | A push or merge where a shared file's source and the manifest disagree |
-| Agent definitions parse and the reviewer charter matches | `.githooks/pre-commit` | A staged seat file the runtime would drop silently, a Claude seat file carrying an `initialPrompt` key, which never reaches a subagent, and Claude and Codex reviewer charters that differ beyond the skill-invocation sigil, compared only where the repository runs both |
+| Agent definitions parse and first-party charter bodies match | `.githooks/pre-commit` | A staged seat file the runtime would drop silently, a Claude seat file carrying an `initialPrompt` key, which never reaches a subagent, and Claude and Codex first-party charter bodies that differ beyond backticked `/name` versus `$name` skill invocations; runtime metadata is validated separately; reads staged blobs and matching staged validators for installed seats and canonical `src/` seats, with installed runtimes selected by staged settings and both required for source seats |
 | Lint and the script suite pass | `.githooks/pre-push`, which on a push to `main` first runs the product gate `scripts/gates/pre-push-main` as it stands on the remote's `main`, from a copy of that commit's tree, before lint and the script suite | A push with a red script suite, and a push to `main` when the gate on the remote's `main` is missing, not executable or exits non-zero, or when the remote's `main` cannot be read |
 | Shared workflow files match the manifest | `scripts/lib/workflow-contract.test.mjs`, run by `.githooks/pre-push` and CI | A push or merge where any file `.agents/factory-manifest.json` lists differs from its recorded hash, other than in a seat setting value the repository's own seat settings file names; the failure names the fix routes, `--write` in the canonical repository, a sync in an adopter and `--render` for a seat setting |
-| Only green code merges | Two branch rulesets on `main`, one requiring the checks the repository's branch rules name, `test` everywhere and `sweep-scope` as well where the documentation routines are active, and auto-merge; the required-check ruleset lets the administrator role bypass it, which the direct documentation route depends on | A merge before every required check is green; on a draft the `test` gate reports under a different name so it can never satisfy the rule |
+| Only green code merges | Two branch rulesets on `main`, one requiring the checks the repository's branch rules name, `test` everywhere and `sweep-scope` as well where the documentation routines are active and the settings file does not turn the documentation sweep off, and auto-merge; the required-check ruleset lets the administrator role bypass it, which the direct documentation route depends on | A merge before every required check is green; on a draft the `test` gate reports under a different name so it can never satisfy the rule |
 | Metered suites run on purpose | `.codex/rules/playwright.rules`, where the repository supplies that rule file | A browser run on Codex without a prompt |
 
 ## How it works
@@ -31,6 +31,10 @@ Everything else, including which reviewer runs, when to stop and replan, and wha
 sentence in `AGENTS.md` or a skill. The bar for executable machinery is named in [`AGENTS.md`](../AGENTS.md) under
 "Publication and machinery" and stated in full as the machinery rule in the `resume` skill under "4. Plan", the one
 home for how machinery enters, grows and leaves.
+
+A charter mismatch reports the seat, both paths and differing lines. Repair both canonical source charters together
+and regenerate their installed copies before staging them; consumers receive the repair through the
+[sync route](../.agents/skills/sync-job/SKILL.md).
 
 ### Keeping it small
 

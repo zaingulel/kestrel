@@ -1,16 +1,18 @@
 // sweep-scope.mjs — pure logic for the required check that owns the documentation sweep's scope.
 //
-// The sweep lands its own pull request, so nobody reads it before it merges. Two rules in
-// docs/DOC-SWEEP.md therefore need a mechanical owner rather than the owner's eyes: the diff modifies
-// only files in the may-edit column of the manual's scope table, and it introduces no link the
-// repository did not already carry. The table is parsed from the manual so the allowlist has one
-// home. The caller reads the manual from the BASE commit, never the head, so a diff cannot widen its
-// own scope. I/O lives in scripts/lib/sweep-scope-evaluate.mjs; this file is pure.
+// The manual owns exact allowed paths and the optional content-only Markdown boundary. Its policy
+// comes from the BASE tip so a diff cannot widen its own scope. Git reads live in the evaluator;
+// this module compares content without executing templates or fetching destinations.
 
+import { createRequire } from 'node:module';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { Parser } from 'htmlparser2';
+
+function parseMarkdown(source) {
+  return fromMarkdown(source, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+}
 
 // The scope table is the one whose header row is exactly `| May edit | Never edit |`; the may-edit
 // paths are every backtick-quoted entry in its left column, in table order. A manual without that
@@ -27,6 +29,164 @@ export function parseMayEdit(manualText) {
   }
   if (paths.length === 0) throw new Error('the scope table\'s may-edit column is empty');
   return paths;
+}
+
+// An absent table preserves consumers' existing scope; a present malformed policy never disables it.
+export function parseContentOnlyMarkdown(manualText, mayEdit) {
+  const tree = parseMarkdown(manualText);
+  const tables = [];
+  const visit = (node) => {
+    if (node.type === 'table') {
+      const cell = node.children[0].children[0];
+      if (cell.children.length === 1 && cell.children[0].type === 'text' &&
+          cell.children[0].value === 'Content-only Markdown') tables.push(node);
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  visit(tree);
+  if (tables.length === 0) return [];
+  const invalid = (reason) => { throw new Error(`Content-only Markdown policy: ${reason}`); };
+  if (tables.length !== 1) invalid('duplicate tables');
+  const table = tables[0];
+  if (table.children[0].children.length !== 1) invalid('requires one column');
+  if (table.children.length === 1) invalid('empty table');
+  const paths = [];
+  for (const row of table.children.slice(1)) {
+    const cell = row.children[0];
+    if (row.children.length !== 1 || cell.children.length !== 1 || cell.children[0].type !== 'inlineCode') {
+      invalid('each row must contain one inline-code path');
+    }
+    const path = cell.children[0].value;
+    if (!path.endsWith('.md') || !mayEdit.includes(path)) invalid('path must be a may-edit Markdown file');
+    if (paths.includes(path)) invalid('duplicate path');
+    paths.push(path);
+  }
+  return paths;
+}
+
+const require = createRequire(import.meta.url);
+
+const MARKER_START = '\uE000';
+const MARKER_END = '\uE001';
+
+function templateProjection(tree, tokens, lexer) {
+  const dataTokens = new Map(tokens.filter((token) => token.type === lexer.TOKEN_DATA)
+    .map((token) => [`${token.lineno}:${token.colno}`, token]));
+  const editable = new Set();
+  const editableTokens = new Set();
+  for (const output of tree.children) {
+    if (output.typename !== 'Output' || output.children.length !== 1) continue;
+    const data = output.children[0];
+    if (data.typename !== 'TemplateData') continue;
+    const token = dataTokens.get(`${data.lineno}:${data.colno}`);
+    if (token && token.value === data.value && token.source === data.value) {
+      editable.add(data);
+      editableTokens.add(token);
+    }
+  }
+  const normalize = (node) => {
+    if (Array.isArray(node)) return node.map(normalize);
+    if (node === null || typeof node !== 'object') return node;
+    if (!node.fields) return node;
+    return { typename: node.typename, ...Object.fromEntries(node.fields.map((field) =>
+      [field, editable.has(node) && field === 'value' ? null : normalize(node[field])])) };
+  };
+  let projection = '';
+  let marker = 0;
+  let inInstructions = false;
+  for (const token of tokens) {
+    if (token.type === lexer.TOKEN_DATA) {
+      projection += token.source;
+      inInstructions = false;
+    } else if (!inInstructions) {
+      projection += `${MARKER_START}${marker++}${MARKER_END}`;
+      inInstructions = true;
+    }
+  }
+  return {
+    tree: normalize(tree),
+    tokens: tokens.map((token) => [token.type, editableTokens.has(token) ? null : token.source]),
+    lines: tokens.filter((token) => editableTokens.has(token)).map((token) =>
+      token.source.split('\n').map((line) =>
+        [line.match(/^[ \t]*/)[0], /^[ \t]*$/.test(line)])),
+    projection,
+  };
+}
+
+function markdownContentTree(source) {
+  const tree = parseMarkdown(source);
+  const normalize = (node) => {
+    const slice = source.slice(node.position.start.offset, node.position.end.offset);
+    const markerContext = slice.includes(MARKER_START);
+    const normalized = {};
+    for (const [field, value] of Object.entries(node)) {
+      if (field === 'position') continue;
+      if (field === 'children') normalized.children = value.map(normalize);
+      else if (node.type === 'text' && field === 'value') normalized.value = markerContext ? slice : null;
+      else if (node.type === 'link' && (field === 'url' || field === 'title')) normalized[field] = null;
+      else if (node.type === 'html' && field === 'value') normalized.value = markupSkeleton(value, { contentOnly: true });
+      else normalized[field] = value;
+    }
+    if (markerContext && ['link', 'image', 'definition'].includes(node.type)) normalized.markerContext = slice;
+    return normalized;
+  };
+  return normalize(tree);
+}
+
+// The parser reads template syntax only. It never compiles, renders or loads an include.
+export function contentOnlyMarkdownDifference(before, after) {
+  const documents = [];
+  for (const [stage, source] of [['base', before], ['head', after]]) {
+    // eslint-disable-next-line no-control-regex -- unsupported input must fail before parsing
+    if (/[\x00-\x08\x0b-\x1f\x7f-\x9f\uFFFD]/u.test(source)) return `${stage} input: unsupported control or replacement character`;
+    if (source.includes(MARKER_START) || source.includes(MARKER_END)) return `${stage} input: reserved marker delimiter`;
+    const prefix = source.match(/^---\n(?:[\s\S]*?\n)?---(?:\n|$)/);
+    if (!prefix) return `${stage} frontmatter: missing or unterminated LF-delimited prefix`;
+    documents.push({ prefix: prefix[0], body: source.slice(prefix[0].length) });
+  }
+  if (documents[0].prefix !== documents[1].prefix) return 'frontmatter: protected prefix changed';
+  let parser;
+  let lexer;
+  try {
+    if (require('nunjucks/package.json').version !== '3.2.4') return 'template parser: unavailable pinned nunjucks 3.2.4';
+    parser = require('nunjucks/src/parser.js');
+    lexer = require('nunjucks/src/lexer.js');
+  } catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    return 'template parser: unavailable pinned nunjucks 3.2.4';
+  }
+  const projections = [];
+  for (const [index, document] of documents.entries()) {
+    let tree;
+    const tokens = [];
+    try {
+      tree = parser.parse(document.body);
+      const tokenizer = lexer.lex(document.body);
+      for (;;) {
+        const start = tokenizer.index;
+        const token = tokenizer.nextToken();
+        if (!token) break;
+        tokens.push({ ...token, source: document.body.slice(start, tokenizer.index) });
+      }
+    } catch (error) {
+      return `${index === 0 ? 'base' : 'head'} template parse: ${error.message}`;
+    }
+    projections.push(templateProjection(tree, tokens, lexer));
+  }
+  const [beforeProjection, afterProjection] = projections;
+  for (const field of ['tree', 'tokens']) {
+    if (JSON.stringify(beforeProjection[field]) !== JSON.stringify(afterProjection[field])) {
+      return 'template: protected instructions or literal mapping changed';
+    }
+  }
+  if (JSON.stringify(beforeProjection.lines) !== JSON.stringify(afterProjection.lines)) return 'literal lines: indentation, blankness or LF line count changed';
+  if (JSON.stringify(markdownContentTree(beforeProjection.projection)) !== JSON.stringify(markdownContentTree(afterProjection.projection))) {
+    return 'Markdown context: protected structure, code, markup or marker context changed';
+  }
+  if (markupSkeleton(beforeProjection.projection, { contentOnly: true }) !== markupSkeleton(afterProjection.projection, { contentOnly: true })) {
+    return 'HTML context: protected markup or marker context changed';
+  }
+  return null;
 }
 
 // Exact path match only. Every may-edit entry is a file, and a prefix match would let
@@ -104,25 +264,23 @@ const decodeAmpersands = (text) => text.split('&amp;').join('&');
 // The spellings of `text` a fixed-string search of the tree must look for before anything can vouch
 // for it. Case is not one of them: the search folds case itself, while the extractor never does,
 // because its output is searched for literally.
-export function treeGrepCandidates(text) {
+function treeGrepCandidates(text) {
   const decoded = decodeAmpersands(text);
   return [...new Set([text, decoded, decoded.split('&').join('&amp;')])];
 }
 
-// The whole `git grep` argument vector, after `git`, that searches one tree for one candidate
-// spelling. One builder, so the check and its tests cannot search different trees. The guard's own
-// sources are excluded: they are a list of destinations that must not be trusted, spelled out as whole
-// extractor tokens, so they are not evidence that the repository points anywhere. They are excluded in
-// whatever folder they sit, so a repository that keeps a second copy of them does not vouch through the
-// copy. Test code is excluded for the same reason, because a negative fixture names hosts precisely so
-// they can be refused; Rust keeps its tests inline, so the whole crate is excluded and a real host named
-// only in Rust fails closed. `**/` matches the root directory as well as every subdirectory. Every
-// pathspec spells its magic out, so `GIT_GLOB_PATHSPECS` and `GIT_NOGLOB_PATHSPECS` cannot change what
-// is excluded, while `GIT_LITERAL_PATHSPECS` would make every pathspec literal, so the search would
-// match nothing and the check would refuse: it fails closed. The search runs at the base commit, so a
-// pull request cannot widen or narrow it. A pathspec that excludes nothing is not an error, so this is
-// safe in any tree.
-export function treeGrepArgs(candidate, ref) {
+// The whole `git grep` argument vector, after `git`, that searches one tree for one candidate spelling. The
+// guard's own sources are excluded: they are a list of destinations that must not be trusted, spelled out as
+// whole extractor tokens, so they are not evidence that the repository points anywhere. They are excluded in
+// whatever folder they sit, so a repository that keeps a second copy of them does not vouch through the copy.
+// Test code is excluded for the same reason, because a negative fixture names hosts precisely so they can be
+// refused; Rust keeps its tests inline, so the whole crate is excluded and a real host named only in Rust
+// fails closed. `**/` matches the root directory as well as every subdirectory. Every pathspec spells its
+// magic out, so `GIT_GLOB_PATHSPECS` and `GIT_NOGLOB_PATHSPECS` cannot change what is excluded, while
+// `GIT_LITERAL_PATHSPECS` would make every pathspec literal, so the search would match nothing and the check
+// would refuse: it fails closed. The search runs at the base commit, so a pull request cannot widen or narrow
+// it. A pathspec that excludes nothing is not an error, so this is safe in any tree.
+function treeGrepArgs(candidate, ref) {
   return ['grep', '--ignore-case', '--fixed-strings', '--null', '-e', candidate, ref,
     '--', ':(exclude,glob)**/scripts/lib/sweep-scope*', ':(exclude,glob)**/scripts/sweep-scope-check.mjs',
     ':(exclude,glob)src-tauri/**', ':(exclude,glob)tests/**', ':(exclude,glob)**/*.test.*'];
@@ -141,7 +299,7 @@ function tokenHost(token) {
 // vouch for `https://support.example.co` and `https://app.example.app` for `https://app`. The tree
 // vouches only when `text` is exactly a token the extractor produces from one of those lines, or, when
 // `text` is a bare host by shape, a label-boundary suffix of such a token's host.
-export function tokenMatches(text, treeLines) {
+function tokenMatches(text, treeLines) {
   const wanted = decodeAmpersands(text.toLowerCase());
   const tokens = networkTokens(treeLines).map((token) => decodeAmpersands(token.toLowerCase()));
   if (tokens.includes(wanted)) return true;
@@ -152,6 +310,18 @@ export function tokenMatches(text, treeLines) {
     const host = tokenHost(token);
     return host === wanted || host.endsWith(`.${wanted}`);
   });
+}
+
+// Whether the tree at `ref` vouches for `text`. `grep` runs one `git grep` argument vector and returns its
+// output, throwing when the search did not complete. A fixed-string hit is only a candidate line:
+// `tokenMatches` settles whether the tree carries `text` whole or merely inside a longer token. `--null`
+// separates git's `<rev>:<path>` prefix from the line itself.
+export function treeVouches(text, ref, grep) {
+  const treeLines = [];
+  for (const candidate of treeGrepCandidates(text)) {
+    for (const line of grep(treeGrepArgs(candidate, ref)).split('\n').filter(Boolean)) treeLines.push(line.slice(line.indexOf('\0') + 1));
+  }
+  return tokenMatches(text, treeLines);
 }
 
 // A destination is a span of one added line that GitHub resolves as a URL, and only five positions
@@ -479,7 +649,7 @@ function externalDestination(text, destination) {
 // is where a browser would go. The caller keys the before and after sets by `text` and judges the
 // difference.
 export function renderedDestinations(markdownText) {
-  const tree = fromMarkdown(markdownText, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const tree = parseMarkdown(markdownText);
   const definitions = definitionUrls(tree);
   const records = [];
   const visit = (node) => {
@@ -519,31 +689,58 @@ export function renderedDestinations(markdownText) {
 // `<script/>` or `<style/>` open until its own end tag, where the parser lets another element's end tag
 // or the end of the page close it. The parser also closes an SVG `<script/>` by implication, which a
 // browser leaves empty, so text after one is refused too: a deliberate over-refusal that fails safe.
-// Entities stay undecoded, so `&lt;` is text and `<` is not.
-function markupSkeleton(html) {
+// Entities stay undecoded, so `&lt;` is text and `<` is not. Content-only Markdown also freezes
+// code/pre text and whole marker-bearing ranges: a template's output can turn surrounding literal
+// bytes into markup. Adjacent callbacks coalesce before that decision, including invalid tag openers.
+function markupSkeleton(html, { contentOnly = false } = {}) {
   const open = [];
   let codeMayContinue = false;
   let skeleton = '';
   let at = 0;
+  let pendingText = null;
+  const flushText = () => {
+    if (!pendingText) return;
+    if (!pendingText.protected && !html.slice(pendingText.start, pendingText.end).includes(MARKER_START)) {
+      skeleton += html.slice(at, pendingText.start);
+      at = pendingText.end;
+    }
+    pendingText = null;
+  };
   const parser = new Parser({
     onopentag(name) {
+      if (contentOnly) flushText();
       open.push(name);
     },
     onclosetag(name, isImplied) {
+      if (contentOnly) flushText();
       open.pop();
-      if (isImplied && (name === 'script' || name === 'style')) codeMayContinue = true;
+      if (isImplied && (name === 'script' || name === 'style' || (contentOnly && (name === 'code' || name === 'pre')))) codeMayContinue = true;
     },
     ontext(text) {
       const inScript = open.includes('script');
       if (inScript && text.includes('<!--')) codeMayContinue = true;
-      if (codeMayContinue || inScript || open.includes('style') || HIDDEN_MARKUP.test(text)) return;
+      const protectedText = codeMayContinue || inScript || open.includes('style') || HIDDEN_MARKUP.test(text) ||
+        (contentOnly && (open.includes('code') || open.includes('pre')));
       const end = parser.endIndex + 1;
+      if (contentOnly) {
+        const start = end - text.length;
+        if (pendingText && pendingText.end === start) {
+          pendingText.end = end;
+          pendingText.protected ||= protectedText;
+        } else {
+          flushText();
+          pendingText = { start, end, protected: protectedText };
+        }
+        return;
+      }
+      if (protectedText) return;
       skeleton += html.slice(at, end - text.length);
       at = end;
     },
   }, { decodeEntities: false });
   parser.write(html);
   parser.end();
+  if (contentOnly) flushText();
   return skeleton + html.slice(at);
 }
 

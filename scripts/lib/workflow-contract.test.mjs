@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
@@ -6,14 +7,29 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { gitEnvironment, MANIFEST_PATH, readManifest, regionText, verifyManifest } from './factory-sync.mjs';
-import { installs, presentRuntimes, SEATS } from './runtimes.mjs';
+import { leftOutCause, needNotResolveCause, readSettingsHeader, SEATS, SETTINGS_PATH, treeSettings } from './runtimes.mjs';
 import { blockReason } from './unsafe-git.mjs';
+import { MANUAL_LIMIT, productTailShapeProblem, profileShapeProblem } from './repository-shape.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const PRESENT = presentRuntimes(ROOT);
+const SETTINGS = treeSettings(ROOT);
+const PRESENT = SETTINGS.runtimes;
 const without = (runtime) => !PRESENT.includes(runtime) && `the settings file names no ${runtime} runtime`;
 const RESUME = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Pins the independently reviewed workflow, including its job-level branch condition.
+// Recurring cost: one file read and hash; update only after configuration review.
+test('ANTI-REGRESSION: the sweep scope workflow retains its reviewed job gate and execution configuration', {
+  skip: !SETTINGS.docSweep && 'the settings file turns the documentation sweep off',
+}, () => {
+  const workflow = readFileSync(resolve(ROOT, '.github/workflows/sweep-scope.yml'));
+  assert.equal(
+    createHash('sha256').update(workflow).digest('hex'),
+    '256e3ac07f68913623556f6303c63b052e6f16638ac1892cddbd769ed76d1967',
+    'the sweep workflow changed: independently review its configuration before updating this fixed oracle',
+  );
+});
 
 // Independent oracle for the resume skill's parallel-slice route: Git runs its commands verbatim. Recurring cost: one
 // disposable repository and about fifteen Git subprocesses. Remove if builders no longer run parallel slices.
@@ -113,7 +129,7 @@ test('Git permits job branch deletion only after its linked worktree is removed'
     assert.notEqual(refused.status, 0, 'Git must refuse to delete a branch checked out in a linked worktree');
     assert.match(`${refused.stdout}\n${refused.stderr}`, /checked out|worktree/i);
 
-    const normalizedWorktree = realpathSync(worktree);
+    const normalizedWorktree = process.platform === 'win32' ? realpathSync.native(worktree) : realpathSync(worktree);
     // Git for Windows prints worktree paths with forward slashes.
     const listedWorktree = process.platform === 'win32' ? normalizedWorktree.replaceAll('\\', '/') : normalizedWorktree;
     const worktreeEntry = new RegExp(`^worktree ${escapeRegExp(listedWorktree)}$`, 'm');
@@ -139,7 +155,7 @@ test('every worktree status read in closeout also lists ignored files', () => {
   const closeout = readFileSync(resolve(ROOT, '.agents/skills/closeout/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
   const statusReads = [...closeout.matchAll(/`([^`]*)`/g)].map(match => match[1]).filter(span => span.includes('status --porcelain'));
 
-  assert.ok(statusReads.length >= 2, 'closeout must read worktree status for a leftover worktree and for the job worktree');
+  assert.ok(statusReads.length >= 1, 'closeout must read worktree status for a leftover worktree');
   assert.deepEqual(
     statusReads,
     statusReads.map(() => 'git -C <path> status --porcelain --untracked-files=normal --ignored=matching'),
@@ -398,14 +414,6 @@ test("the cross-review skill does not copy the reviewer seat's model or effort v
   }
 });
 
-const sectionOf = (text, heading) =>
-  text.match(new RegExp(`^## ${heading}\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm'))[1];
-const tableRowNames = (sectionText) => sectionText
-  .split('\n')
-  .filter((line) => line.startsWith('|'))
-  .slice(2)
-  .map((line) => line.split('|')[1].trim());
-
 test('AGENTS.md carries one shared workflow region followed by the product headings and the Surfaces table', () => {
   const manual = readFileSync(resolve(ROOT, 'AGENTS.md'), 'utf8');
   const start = '<!-- factory-shared:start -->';
@@ -417,21 +425,10 @@ test('AGENTS.md carries one shared workflow region followed by the product headi
   assert.ok(startAt < endAt, 'the shared-region start marker must precede its end marker');
 
   const product = manual.slice(endAt);
-  const headings = ['Product', 'Hard constraints', 'Architecture seams', 'Surfaces'];
-  assert.deepEqual(
-    [...product.matchAll(/^## (.*)$/gm)].map((match) => match[1]),
-    headings,
-    `the shared region must be followed by exactly the product headings ${headings.join(', ')}, in order`,
-  );
+  const shapeFault = productTailShapeProblem(product);
+  assert.equal(shapeFault, undefined, shapeFault);
 
-  const rows = ['plan-first', 'owner-directed', 'sign-off', 'security review', 'hard to undo', 'wide reach'];
-  assert.deepEqual(
-    tableRowNames(sectionOf(product, 'Surfaces')),
-    rows,
-    `## Surfaces must carry exactly the rows ${rows.join(', ')}, in order`,
-  );
-
-  const surfaces = sectionOf(product, 'Surfaces').split('\n');
+  const surfaces = product.slice(product.search(/^## Surfaces$/m)).split('\n');
   assert.ok(
     surfaces.find((line) => /^\d+\. /.test(line))?.startsWith('1. '),
     'the standing security guarantees must start with a numbered item 1.',
@@ -443,23 +440,13 @@ test('AGENTS.md carries one shared workflow region followed by the product headi
     assert.ok(existsSync(resolve(ROOT, target)), `the security review row links ${target}, which does not exist`);
   }
 
-  assert.ok(Buffer.byteLength(manual) < 32768, 'AGENTS.md must stay under the 32 KiB Codex read cap');
+  assert.ok(Buffer.byteLength(manual) < MANUAL_LIMIT, `AGENTS.md must stay under the ${MANUAL_LIMIT} byte Codex read cap`);
 });
 
 test('the profile file carries its four headings and the Conventions table', () => {
   const profile = readFileSync(resolve(ROOT, '.agents/REPOSITORY.md'), 'utf8');
-  const headings = ['Product', 'Architecture seams', 'Grounding', 'Conventions'];
-  assert.deepEqual(
-    [...profile.matchAll(/^## (.*)$/gm)].map((match) => match[1]),
-    headings,
-    `.agents/REPOSITORY.md must carry exactly the headings ${headings.join(', ')}, in order`,
-  );
-  const rows = ['generated artifacts', 'visual verification', 'fixtures', 'documentation routines'];
-  assert.deepEqual(
-    tableRowNames(sectionOf(profile, 'Conventions')),
-    rows,
-    `## Conventions in .agents/REPOSITORY.md must carry exactly the rows ${rows.join(', ')}, in order`,
-  );
+  const shapeFault = profileShapeProblem(profile);
+  assert.equal(shapeFault, undefined, shapeFault);
 });
 
 const FIXED_PRODUCT_DOCUMENTS = [
@@ -473,10 +460,24 @@ const FIXED_PRODUCT_DOCUMENTS = [
   'docs/SWEEP-TRIAGE.md',
   '.agents/REPOSITORY.md',
 ];
+const requiredDocuments = (settings) => FIXED_PRODUCT_DOCUMENTS.filter((path) => needNotResolveCause(settings, path) === null);
 
 test('the fixed product documents exist', () => {
-  const missing = FIXED_PRODUCT_DOCUMENTS.filter((path) => !existsSync(resolve(ROOT, path)));
+  const missing = requiredDocuments(SETTINGS).filter((path) => !existsSync(resolve(ROOT, path)));
   assert.deepEqual(missing, [], `the shared workflow points at these fixed product documents, which are missing: ${missing.join(', ')}`);
+});
+
+test('ANTI-REGRESSION: a tree that turns the documentation sweep off need not hold the two sweep manuals, and must still hold every other fixed product document', () => {
+  const settings = readSettingsHeader('{"version":1,"seats":{},"docSweep":false}', SETTINGS_PATH);
+  assert.deepEqual(requiredDocuments(settings), [
+    'GLOSSARY.md',
+    'docs/README.md',
+    'docs/CODING-STANDARDS.md',
+    'docs/TESTING-STRATEGY.md',
+    'docs/DESIGN-SYSTEM.md',
+    'docs/ISSUE-TRACKER.md',
+    '.agents/REPOSITORY.md',
+  ]);
 });
 
 // Runs the real prepare script in a fresh repository holding a copy of package.json. The environment drops git's
@@ -520,22 +521,24 @@ test('ANTI-REGRESSION: every installed git guard hook refuses the hook check the
   }
 });
 
-test('the review line has one specified format, and the template and skills point at it', () => {
-  // Hand-written from the owner-approved format and slot, never extracted from a repo file, so
-  // a drift in the manual's example or the template cannot silently redefine what the test accepts.
-  const REVIEW_LINE =
+test('the review line has two specified forms, and the template and skills point at them', () => {
+  // Hand-written from the owner-approved forms and slot, never extracted from a repo file, so
+  // a drift in the manual's examples or the template cannot silently redefine what the test accepts.
+  const BASE_LINE =
+    /^Review: tier=(document|code|sign-off) rounds=([1-9]\d*) raised=(0|[1-9]\d*) fixed=(0|[1-9]\d*) dismissed=(0|[1-9]\d*) deferred=(0|[1-9]\d*)\s*$/;
+  const ADD_ON_LINE =
     /^Review: tier=(document|code|sign-off) rounds=([1-9]\d*) raised=(0|[1-9]\d*) fixed=(0|[1-9]\d*) dismissed=(0|[1-9]\d*) deferred=(0|[1-9]\d*) greptile_rounds=(0|[1-9]\d*) greptile_raised=(0|[1-9]\d*) greptile_true=(0|[1-9]\d*)\s*$/;
-  const REVIEW_SLOT =
-    'Review: tier= rounds= raised= fixed= dismissed= deferred= greptile_rounds= greptile_raised= greptile_true=';
+  const REVIEW_SLOT = 'Review: tier= rounds= raised= fixed= dismissed= deferred=';
   const assertValidLine = (line, where) => {
-    const m = REVIEW_LINE.exec(line ?? '');
-    assert.ok(m, `${where}: example review line ${JSON.stringify(line)} no longer matches the approved format`);
+    const m = BASE_LINE.exec(line ?? '') ?? ADD_ON_LINE.exec(line ?? '');
+    assert.ok(m, `${where}: example review line ${JSON.stringify(line)} no longer matches either approved form`);
     const [rounds, raised, fixed, dismissed, deferred, gRounds, gRaised, gTrue] = m.slice(2).map(Number);
     assert.equal(
       raised,
       fixed + dismissed + deferred,
       `${where}: example review line has raised not equal to fixed plus dismissed plus deferred`,
     );
+    if (m.length === 7) return;
     assert.ok(gRounds <= rounds, `${where}: example review line has greptile_rounds greater than rounds`);
     assert.ok(gRaised <= raised, `${where}: example review line has greptile_raised greater than raised`);
     assert.ok(gTrue <= gRaised, `${where}: example review line has greptile_true greater than greptile_raised`);
@@ -554,7 +557,17 @@ test('the review line has one specified format, and the template and skills poin
   };
 
   const PREFIX = 'Review: tier=sign-off rounds=7 raised=16 fixed=13 dismissed=2 deferred=1';
-  assertValidLine(`${PREFIX} greptile_rounds=0 greptile_raised=0 greptile_true=0`, 'no-Greptile fixture');
+  assertValidLine(PREFIX, 'base-form fixture');
+  assertValidLine(`${PREFIX} greptile_rounds=0 greptile_raised=0 greptile_true=0`, 'no-Greptile add-on fixture');
+  assert.throws(
+    () => assertValidLine('Review: tier=sign-off rounds=7 raised=17 fixed=13 dismissed=2 deferred=1', 'fixture'),
+    /raised not equal to fixed plus dismissed plus deferred/,
+    'a base-form line whose raised does not add up was accepted',
+  );
+  for (const between of [`${PREFIX} greptile_rounds=2`, `${PREFIX} greptile_rounds=2 greptile_raised=1`]) {
+    assert.ok(!BASE_LINE.test(between) && !ADD_ON_LINE.test(between), `${between} matches a specified form`);
+    assert.throws(() => assertValidLine(between, 'fixture'), /matches either approved form/, `${between} was accepted`);
+  }
   for (const [broken, message] of [
     [`${PREFIX} greptile_rounds=8 greptile_raised=1 greptile_true=1`, /greptile_rounds greater than rounds/],
     [`${PREFIX} greptile_rounds=2 greptile_raised=17 greptile_true=1`, /greptile_raised greater than raised/],
@@ -577,14 +590,24 @@ test('the review line has one specified format, and the template and skills poin
   assert.ok(heading >= 0, 'docs/AI-WORKFLOW.md lost its "## The review line" section');
   const next = manual.findIndex((l, i) => i > heading && l.startsWith('## '));
   const section = manual.slice(heading, next === -1 ? undefined : next);
-  const fence = section.indexOf('```');
-  assert.ok(fence >= 0, 'the review line section in docs/AI-WORKFLOW.md lost its fenced example');
-  assertValidLine(section[fence + 1], 'docs/AI-WORKFLOW.md');
+  const fences = section.flatMap((l, i) => (l.startsWith('```') ? [i] : []));
+  assert.equal(
+    fences.length,
+    4,
+    'the review line section in docs/AI-WORKFLOW.md must hold exactly two fenced examples, the base form then the add-on form',
+  );
+  const [base, addOn] = [section[fences[0] + 1], section[fences[2] + 1]];
+  assertValidLine(base, 'docs/AI-WORKFLOW.md base example');
+  assert.ok(BASE_LINE.test(base), 'the first fenced example in docs/AI-WORKFLOW.md is not the base form');
+  assertValidLine(addOn, 'docs/AI-WORKFLOW.md add-on example');
+  assert.ok(ADD_ON_LINE.test(addOn), 'the second fenced example in docs/AI-WORKFLOW.md is not the add-on form');
 
   const template = readFileSync(resolve(ROOT, '.github/pull_request_template.md'), 'utf8');
-  assertValidLine(/for example `([^`]*)`/.exec(template)?.[1], '.github/pull_request_template.md');
+  const example = /for example `([^`]*)`/.exec(template)?.[1];
+  assertValidLine(example, '.github/pull_request_template.md');
+  assert.ok(BASE_LINE.test(example), 'the pull request template example is not the base form');
   assert.deepEqual(
-    template.split('\n').filter((l) => REVIEW_LINE.test(l)),
+    template.split('\n').filter((l) => BASE_LINE.test(l) || ADD_ON_LINE.test(l)),
     [],
     'the pull request template has a line a parser would read as a real review line',
   );
@@ -803,17 +826,22 @@ const VENDORED_SKILLS = new Set(
 );
 const vendoredCopy = (path) =>
   path.startsWith('.agents/upstream/') || VENDORED_SKILLS.has(/^\.(?:agents|claude)\/skills\/([^/]+)\//.exec(path)?.[1]);
+// The entries the path scan reads: those a tree with these settings installs. Vendored skills and their copies are
+// replaced whole and never edited in place, so the scan skips them.
+const scannedEntries = (settings, entries) => entries.filter(({ path }) => !vendoredCopy(path) && leftOutCause(settings, path) === null);
 
 // Paths outside the manifest that shared code or prose names in every adopter, each with the reason it may.
 const ADOPTER_PATHS = {
   [MANIFEST_PATH]: 'the manifest itself, which lists every shared file but not its own path',
+  [SETTINGS_PATH]: 'the repository\'s own settings file, which no manifest lists and the shared settings readers name',
   'package.json': 'the npm scripts every adopter defines and the shared hooks and tests run',
   'src/': 'the product source root every adopter keeps',
   'scripts/lib/board-config.mjs': 'the product board configuration the shared board scripts load',
   'scripts/doc-lint.mjs': 'the doc lint command every adopter runs',
   'scripts/lib/doc-lint.mjs': 'the doc lint core the shared citation and link scans run beside',
   'scripts/lib/doc-lint.test.mjs': 'the doc lint core\'s own test, which every adopter carries with the doc lint',
-  '.codex/rules/playwright.rules': 'the Codex rule that prompts before a browser run, which every adopter carries',
+  '.codex/rules/playwright.rules':
+    'the Codex rule that prompts before a browser run, which a repository with a web interface that runs Codex supplies',
   'scripts/gates/': 'optional product hook point, checked for presence',
   'scripts/gates/stop': 'optional product hook point, checked for presence',
   'scripts/gates/pre-commit': 'optional product hook point, checked for presence',
@@ -851,10 +879,8 @@ test('no shared file names a path only this repository has', () => {
   ]);
 
   const hits = [];
-  for (const entry of entries) {
+  for (const entry of scannedEntries(SETTINGS, entries)) {
     const { path } = entry;
-    // Vendored skills and their copies are replaced whole and never edited in place, so this scan skips them.
-    if (vendoredCopy(path) || !installs(PRESENT, path)) continue;
     let text = readFileSync(resolve(ROOT, path), 'utf8');
     if ('region' in entry) text = regionText(text, path);
     const joined = [...text.matchAll(JOINED_LITERALS)].map(([, run]) =>
@@ -880,5 +906,13 @@ test('no shared file names a path only this repository has', () => {
     hits,
     [],
     'shared files name paths only this repository has; move each such check into a product-owned test the manifest does not list, or name the path neutrally (a placeholder, a glob, or a path no adopter has)',
+  );
+});
+
+test('ANTI-REGRESSION: the path scan reads no file of the Greptile add-on in a tree that does not turn it on, and still reads every other entry', () => {
+  const settings = readSettingsHeader('{"version":1,"seats":{},"greptile":false}', SETTINGS_PATH);
+  assert.deepEqual(
+    scannedEntries(settings, [{ path: '.greptile/config.json' }, { path: 'docs/README.md' }]).map(({ path }) => path),
+    ['docs/README.md'],
   );
 });

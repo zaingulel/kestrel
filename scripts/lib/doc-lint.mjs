@@ -29,7 +29,13 @@ export const KNOWN_UNTRACKED = [
   '.claude/launch.json', // local preview config, ignored by the exact .claude/launch.json entry
   '.claude/worktrees/', // builder worktree lanes, ignored by the exact .claude/worktrees/ entry
   'node_modules/', // deps
-  '.codex/rules/playwright.rules', // the Codex browser rule the shared region of `AGENTS.md` names and this repository does not carry
+];
+
+// Seams the shared region of `AGENTS.md` names that an install does not write: a reference to one is accepted
+// where the repository holds none. Exact, never by prefix, so a dangling `src/missing.mjs` is still reported.
+export const OPTIONAL_SEAMS = [
+  'src/', 'scripts/gates/stop', 'scripts/gates/pre-commit',
+  '.codex/rules/playwright.rules',
 ];
 
 // ref resolves against KNOWN_UNTRACKED if it IS an entry (with or without its
@@ -59,14 +65,14 @@ export function buildTrackedSet(trackedFilePaths) {
 }
 
 // The ONE existence resolver: a ref exists if it's a tracked file, a tracked
-// directory prefix (with or without its own trailing slash), or resolves
-// under KNOWN_UNTRACKED or is an exact adopter-only canonical reference. No filesystem check — local
-// and a fresh CI checkout resolve identically by construction.
+// directory prefix (with or without its own trailing slash), a path that
+// resolves under KNOWN_UNTRACKED, or exactly an OPTIONAL_SEAMS entry. No
+// filesystem check anywhere in this path: local and a fresh CI checkout
+// resolve identically by construction.
 export function pathExists(trackedSet, ref) {
   if (trackedSet.has(ref) || trackedSet.has(`${ref}/`)) return true;
-  // Shared prose names the canonical source tree, absent from this adopter.
-  if (ref === 'src/') return true;
-  return isKnownUntracked(ref);
+  const bare = ref.replace(/\/$/, '');
+  return isKnownUntracked(ref) || OPTIONAL_SEAMS.some((seam) => seam.replace(/\/$/, '') === bare);
 }
 
 // Extract every backtick-quoted token from markdown text that looks like a

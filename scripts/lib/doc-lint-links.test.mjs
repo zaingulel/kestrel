@@ -13,20 +13,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   extractMarkdownLinks,
   resolveLinkTarget,
   checkMarkdownLinks,
 } from './doc-lint-links.mjs';
-import { buildTrackedSet, pathExists, classifyDocLintPath, vendoredSkillNames } from './doc-lint.mjs';
-import { installs, presentRuntimes } from './runtimes.mjs';
+import { docLintVerdict } from './doc-lint-verdict.mjs';
+import { classifyDocLintPath, vendoredSkillNames } from './doc-lint.mjs';
+import { leftOutCause, readSettingsHeader, treeSettings } from './runtimes.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const PRESENT = presentRuntimes(ROOT);
+const SETTINGS = treeSettings(ROOT);
 
 test('checkMarkdownLinks: a dead relative Markdown link is reported with its file line and target', () => {
   const md = [
@@ -151,85 +151,33 @@ test('checkMarkdownLinks: a target that escapes the repo root is dead', () => {
   assert.deepEqual(dead, [{ target: '../../elsewhere/notes.md', resolved: null, line: 1 }]);
 });
 
-test('repo-pass: the real repo classified prose files have zero dead Markdown links', () => {
-  const tracked = execFileSync('git', ['ls-files'], { encoding: 'utf8', cwd: ROOT })
+test('repo-pass: the delivered documentation verdict has zero findings across all four blocking scans', () => {
+  const files = execFileSync('git', ['ls-files'], { encoding: 'utf8', cwd: ROOT })
     .split('\n').filter(Boolean)
     .filter((rel) => fs.existsSync(path.join(ROOT, rel)));
-  const trackedSet = buildTrackedSet(tracked);
-  const vendored = vendoredSkillNames(tracked);
-  const scanFiles = tracked.filter((rel) => classifyDocLintPath(rel, vendored).pathRefs);
-
-  // Vacuity guard: a classifier that stopped matching would make the scan
-  // below pass over nothing. Named mandatory shared surfaces only — a numeric
-  // floor would drift with ordinary repo growth; the product's own documents
-  // are named in a product-owned test.
-  for (const rel of ['CLAUDE.md', 'AGENTS.md'].filter((surface) => installs(PRESENT, surface))) {
-    assert.ok(scanFiles.includes(rel), `Markdown-link scan set must include ${rel}`);
+  const vendored = vendoredSkillNames(files);
+  for (const manual of ['CLAUDE.md', 'AGENTS.md'].filter((rel) => leftOutCause(SETTINGS, rel) === null)) {
+    assert.equal(classifyDocLintPath(manual, vendored).pathRefs, true, `${manual} must join the path scans`);
   }
-
-  const errors = [];
-  for (const rel of scanFiles) {
-    const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-    const dead = checkMarkdownLinks(rel, text, (p) => pathExists(trackedSet, p) || !installs(PRESENT, p));
-    for (const d of dead) errors.push(`${rel}:${d.line} — dead link: ${d.target}`);
-  }
-
-  assert.deepEqual(errors, []);
+  assert.equal(classifyDocLintPath('.agents/skills/tdd/SKILL.md', vendored).pathRefs, true,
+    'the known citing skill must join the path scans');
+  const verdict = docLintVerdict({
+    files, settings: SETTINGS, read: (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8'),
+  });
+  assert.deepEqual(verdict.errors, []);
 });
 
-// --- CLI wire proof ---------------------------------------------------------
-//
-// The unit tests above prove the pure module; this proves the CLI actually
-// calls it. Scratch repo rather than the real tree: the real tree is clean by
-// construction, so only a seeded dead link can fail a wired CLI.
-
-// The CLI refuses a vacuous run, so the fixture must classify at least one
-// file into every scan set.
-const CLI_FIXTURE_SEEDS = {
-  'CLAUDE.md': '# Seed\n\nThe seeded operating manual.\n',
-  'AGENTS.md': '# Seed\n\nThe seeded agent manual.\n',
-  '.agents/skills/seed/SKILL.md': 'The seeded skill.\n',
-};
-
-function makeCliFixture(files) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-lint-cli-'));
-  fs.mkdirSync(path.join(root, 'scripts', 'lib'), { recursive: true });
-  for (const rel of ['scripts/doc-lint.mjs', 'scripts/lib/doc-lint.mjs', 'scripts/lib/doc-lint-links.mjs', 'scripts/lib/doc-lint-citations.mjs', 'scripts/lib/runtimes.mjs']) {
-    fs.copyFileSync(path.join(ROOT, rel), path.join(root, rel));
-  }
-  writeFixtureFiles(root, { ...CLI_FIXTURE_SEEDS, ...files });
-  execFileSync('git', ['init', '-q'], { cwd: root });
-  execFileSync('git', ['add', '.'], { cwd: root });
-  return root;
-}
-
-function writeFixtureFiles(root, files) {
-  for (const [rel, content] of Object.entries(files)) {
-    const target = path.join(root, rel);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.writeFileSync(target, content);
-  }
-}
-
-function runCliFixture(root) {
-  return spawnSync(process.execPath, ['scripts/doc-lint.mjs'], { cwd: root, encoding: 'utf8' });
-}
-
-test('doc-lint CLI: a dead relative Markdown link fails the scan naming file and target', () => {
-  const root = makeCliFixture({ 'docs/A.md': 'See [the sibling](B.md) for the detail.\n' });
-  try {
-    const dead = runCliFixture(root);
-
-    assert.equal(dead.status, 1, dead.stderr);
-    assert.match(dead.stderr, /docs\/A\.md:1/);
-    assert.match(dead.stderr, /B\.md/);
-
-    writeFixtureFiles(root, { 'docs/B.md': 'The sibling document.\n' });
-    execFileSync('git', ['add', 'docs/B.md'], { cwd: root });
-    const live = runCliFixture(root);
-
-    assert.equal(live.status, 0, live.stderr);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+test('documentation verdict reports a dead relative Markdown link naming file and target', () => {
+  const contents = {
+    'CLAUDE.md': '# Seed\n\nThe seeded operating manual.\n',
+    'AGENTS.md': '# Seed\n\nThe seeded agent manual.\n',
+    '.agents/skills/seed/SKILL.md': 'The seeded skill.\n',
+    'docs/A.md': 'See [the sibling](B.md) for the detail.\n',
+  };
+  const verdict = () => docLintVerdict({
+    files: Object.keys(contents), read: (rel) => contents[rel], settings: readSettingsHeader(),
+  });
+  assert.deepEqual(verdict(), { errors: ['docs/A.md:1 — dead Markdown link: `B.md` does not exist'], advisories: [] });
+  contents['docs/B.md'] = 'The sibling document.\n';
+  assert.deepEqual(verdict(), { errors: [], advisories: [] });
 });

@@ -17,7 +17,8 @@
 //   opened-and-closed `developer_instructions = """ ... """` block; `name` matches the
 //   filename; `model` from the known set.
 //   Default CLI run: the seat folders of the runtimes the settings file names (runtimes.mjs), both when it names
-//   none; where both run, the Claude and Codex reviewer charters match, the skill sigil aside.
+//   none; where both run, first-party charter bodies match apart from marked skill invocations.
+//   Runtime metadata is validated separately.
 // Which seat may carry the costliest models, and how many turns the oracle and security-reviewer
 // seats may take, is the bound checkSeatPolicy holds; the default run of this file does not apply it.
 //
@@ -195,42 +196,71 @@ export function checkBuilderParity(dir, seats = SHARED_BUILDER_SEATS) {
     .map(({ seat }) => `${dir}/${seat}.md: shared builder charter (from \`Workflow:\` down) differs from ${first.seat}.md — edit the builder seats together`);
 }
 
-// The reviewer seat is the one charter both runtimes run verbatim, so cross-family review means the same
-// review; only the skill-invocation sigil differs (`/name` on Claude, `$name` on Codex).
-export function checkReviewerParity(claudeDir, codexDir) {
-  const claudeFile = join(claudeDir, 'reviewer.md');
-  const codexFile = join(codexDir, 'reviewer.toml');
-  let claudeSource;
-  let codexSource;
-  try {
-    claudeSource = readFileSync(claudeFile, 'utf8');
-  } catch {
-    return [`${claudeFile}: reviewer charter is missing — cross-runtime reviewer parity cannot be checked`];
-  }
-  try {
-    codexSource = readFileSync(codexFile, 'utf8');
-  } catch {
-    return [`${codexFile}: reviewer charter is missing — cross-runtime reviewer parity cannot be checked`];
-  }
+const FIRST_PARTY_SEATS = new Set(['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer']);
 
-  const claudeLines = claudeSource.split('\n');
-  const fence = claudeLines[0] === '---' ? claudeLines.indexOf('---', 1) : -1;
-  if (fence === -1) return [`${claudeFile}: no closed frontmatter fence — the reviewer charter body cannot be located`];
-  const claudeBody = claudeLines.slice(fence + 1);
-  if (claudeBody.at(-1) === '') claudeBody.pop();
-
-  const codexLines = codexSource.split('\n');
-  const open = codexLines.findIndex((line) => /^developer_instructions\s*=\s*"""\s*$/.test(line));
-  const close = open === -1 ? -1 : codexLines.indexOf('"""', open + 1);
-  if (close === -1) return [`${codexFile}: no closed \`developer_instructions = """\` block — the reviewer charter cannot be located`];
-  const codexBody = codexLines.slice(open + 1, close).map((line) => line.replace(/`\$([a-z][\w-]*)`/g, '`/$1`'));
-
-  for (let i = 0; i < Math.max(claudeBody.length, codexBody.length); i++) {
-    if (claudeBody[i] === codexBody[i]) continue;
-    const show = (line) => (line === undefined ? '(end of charter)' : JSON.stringify(line));
-    return [`${claudeFile} line ${fence + 2 + i} differs from ${codexFile} line ${open + 2 + i} (only the \`/\`-vs-\`$\` skill sigil may differ) — reviewer.md: ${show(claudeBody[i])}; reviewer.toml: ${show(codexLines[open + 1 + i])} — edit the reviewer charters together`];
+// Both runtimes carry matching first-party charter bodies; runtime metadata is validated separately.
+// Only marked skill invocations differ (`/name` on Claude, `$name` on Codex).
+export function checkCharterParity(claudeDir, codexDir) {
+  const problems = [];
+  // The reviewer pair is mandatory even when neither directory contains it.
+  const seats = new Set(['reviewer']);
+  for (const [dir, extension] of [[claudeDir, '.md'], [codexDir, '.toml']]) {
+    try {
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(extension)) continue;
+        const seat = basename(file, extension);
+        if (FIRST_PARTY_SEATS.has(seat)) seats.add(seat);
+      }
+    } catch (error) {
+      problems.push(`${dir}: cannot be read — cross-runtime charter parity cannot be checked: ${error.message}`);
+    }
   }
-  return [];
+  if (problems.length) return problems;
+
+  for (const seat of [...seats].sort()) {
+    const claudeFile = join(claudeDir, `${seat}.md`);
+    const codexFile = join(codexDir, `${seat}.toml`);
+    let claudeSource;
+    let codexSource;
+    try {
+      claudeSource = readFileSync(claudeFile, 'utf8');
+    } catch (error) {
+      problems.push(`${claudeFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${error.message}`);
+      continue;
+    }
+    try {
+      codexSource = readFileSync(codexFile, 'utf8');
+    } catch (error) {
+      problems.push(`${codexFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${error.message}`);
+      continue;
+    }
+
+    const claudeLines = claudeSource.split('\n');
+    const fence = claudeLines[0] === '---' ? claudeLines.indexOf('---', 1) : -1;
+    if (fence === -1) {
+      problems.push(`${claudeFile}: no closed frontmatter fence — the ${seat} charter body cannot be located`);
+      continue;
+    }
+    const claudeBody = claudeLines.slice(fence + 1);
+    if (claudeBody.at(-1) === '') claudeBody.pop();
+
+    const codexLines = codexSource.split('\n');
+    const open = codexLines.findIndex((line) => /^developer_instructions\s*=\s*"""\s*$/.test(line));
+    const close = open === -1 ? -1 : codexLines.indexOf('"""', open + 1);
+    if (close === -1) {
+      problems.push(`${codexFile}: no closed \`developer_instructions = """\` block — the ${seat} charter cannot be located`);
+      continue;
+    }
+    const codexBody = codexLines.slice(open + 1, close).map((line) => line.replace(/`\$([a-z][\w-]*)`/g, '`/$1`'));
+
+    for (let i = 0; i < Math.max(claudeBody.length, codexBody.length); i++) {
+      if (claudeBody[i] === codexBody[i]) continue;
+      const show = (line) => (line === undefined ? '(end of charter)' : JSON.stringify(line));
+      problems.push(`${claudeFile} line ${fence + 2 + i} differs from ${codexFile} line ${open + 2 + i} (charter bodies may differ only in backticked \`/\`-vs-\`$\` skill invocation marks; runtime metadata is validated separately) — ${seat}.md: ${show(claudeBody[i])}; ${seat}.toml: ${show(codexLines[open + 1 + i])} — edit the ${seat} charters together`);
+      break;
+    }
+  }
+  return problems;
 }
 
 /** Check every agent definition in a directory; the file extension picks the checker. */
@@ -314,7 +344,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const targets = dirs.length ? dirs : runtimes.map((runtime) => SEATS[runtime].directory);
   problems.push(...targets.flatMap((dir) => checkAgentsDir(dir)));
   if (runtimes.includes('claude') && runtimes.includes('codex')) {
-    problems.push(...checkReviewerParity(SEATS.claude.directory, SEATS.codex.directory));
+    problems.push(...checkCharterParity(SEATS.claude.directory, SEATS.codex.directory));
   }
   if (problems.length) {
     for (const p of problems) console.error(`✖ ${p}`);

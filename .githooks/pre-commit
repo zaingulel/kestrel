@@ -6,8 +6,9 @@
 # 2. Agent definitions must parse. Both harnesses DROP an agent file silently when its
 #    definition fails to parse (that is how `reviewer` once vanished for a whole session),
 #    so a staged .claude/agents/*.md or .codex/agents/*.toml triggers a check of the STAGED
-#    definitions with a named cause. Which seat folders it requires comes from the STAGED
-#    .agents/factory-settings.json, read by the STAGED scripts/lib/runtimes.mjs.
+#    definitions with a named cause. The same guard checks src/ seat paths with both runtimes.
+#    Installed seat folders come from STAGED .agents/factory-settings.json, read by the
+#    matching STAGED scripts/lib/runtimes.mjs.
 # 3. Then an executable scripts/gates/pre-commit (the product gate) runs on every commit, its
 #    output on stderr; a non-zero exit, or a gate file that is not executable, blocks.
 #
@@ -30,8 +31,11 @@ fi
 # --- Agent-definition guard (BLOCKS) -----------------------------------------
 # Existence-guarded, reading the index, so it is a no-op in the fixture repos precommit.test.mjs creates;
 # a validator present in HEAD but deleted in the index blocks.
-if echo "$staged" | grep -qE '^\.(claude|codex)/agents/.*\.(md|toml)$'; then
-  if git -C "$repo_root" cat-file -e :scripts/lib/check-agents.mjs 2>/dev/null; then
+for agent_prefix in '' 'src/'; do
+  if ! echo "$staged" | grep -qE "^${agent_prefix}\\.(claude|codex)/agents/.*\\.(md|toml)$"; then
+    continue
+  fi
+  if git -C "$repo_root" cat-file -e :${agent_prefix}scripts/lib/check-agents.mjs 2>/dev/null; then
     # Validate the STAGED definitions with the STAGED validator, never the working tree. The
     # snapshot writes the raw staged blobs, so no staged attribute (export-ignore, filter, eol) can
     # change or hide what is validated; the path list goes through a file because sh has no
@@ -50,21 +54,25 @@ if echo "$staged" | grep -qE '^\.(claude|codex)/agents/.*\.(md|toml)$'; then
       echo "✖ pre-commit: refused an unsafe temporary directory for staged agent validation." >&2
       exit 1
     fi
-    if ! git -C "$repo_root" ls-files -z -- .claude/agents .codex/agents scripts/lib/check-agents.mjs scripts/lib/runtimes.mjs .agents/factory-settings.json >"$agent_snap/staged.list" \
+    agent_settings=''
+    if [ -z "$agent_prefix" ]; then
+      agent_settings='.agents/factory-settings.json'
+    fi
+    if ! git -C "$repo_root" ls-files -z -- "${agent_prefix}.claude/agents" "${agent_prefix}.codex/agents" "${agent_prefix}scripts/lib/check-agents.mjs" "${agent_prefix}scripts/lib/runtimes.mjs" $agent_settings >"$agent_snap/staged.list" \
       || ! xargs -0 sh -c 'snap=$1 root=$2; shift 2; for p; do mkdir -p "$snap/$(dirname "$p")" && git -C "$root" cat-file blob ":$p" >"$snap/$p" || exit 255; done' sh "$agent_snap" "$repo_root" <"$agent_snap/staged.list"; then
       rm -rf "$agent_snap"
-      echo "✖ pre-commit: could not copy the staged .claude/agents, .codex/agents, scripts/lib/check-agents.mjs, scripts/lib/runtimes.mjs and .agents/factory-settings.json to validate them." >&2
+      echo "✖ pre-commit: could not copy the staged ${agent_prefix}agent definitions and validator inputs to validate them." >&2
       exit 1
     fi
     agents_status=0
-    (cd "$agent_snap" && node "$agent_snap/scripts/lib/check-agents.mjs") || agents_status=$?
+    (cd "$agent_snap/$agent_prefix" && node "$agent_snap/${agent_prefix}scripts/lib/check-agents.mjs") || agents_status=$?
     rm -rf "$agent_snap"
     [ "$agents_status" -eq 0 ] || exit 1
-  elif git -C "$repo_root" cat-file -e HEAD:scripts/lib/check-agents.mjs 2>/dev/null; then
-    echo "✖ pre-commit: scripts/lib/check-agents.mjs is staged for deletion while agent definitions are staged; the agent guard cannot run. Restore it (git restore --staged --worktree scripts/lib/check-agents.mjs) or commit the deletion on its own." >&2
+  elif git -C "$repo_root" cat-file -e HEAD:${agent_prefix}scripts/lib/check-agents.mjs 2>/dev/null; then
+    echo "✖ pre-commit: ${agent_prefix}scripts/lib/check-agents.mjs is staged for deletion while agent definitions are staged; the agent guard cannot run. Restore it (git restore --staged --worktree ${agent_prefix}scripts/lib/check-agents.mjs) or commit the deletion on its own." >&2
     exit 1
   fi
-fi
+done
 
 # --- Product gate (BLOCKS) ----------------------------------------------------
 # The repository's own commit checks, run on every commit; the gate recomputes what is staged

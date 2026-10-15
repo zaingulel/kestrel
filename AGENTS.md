@@ -71,14 +71,18 @@ overridden. Keep task-specific routing choices out of the tracker.
 
 Planned work: the board card and its acceptance criteria (`node scripts/board.mjs`). Shipped work: `git log` and passing
 checks, never a prose status claim. In-flight work: a branch and its draft pull request. Durable constraints: this file,
-the scoped rules, and the standards and record documents indexed in [docs/README.md](docs/README.md). History: git.
-Explanation: [docs/AI-WORKFLOW.md](docs/AI-WORKFLOW.md) is the front page of the workflow pages, whose routing table
+the scoped rules, and the standards and record documents indexed in [docs/README.md](docs/README.md). History: git, so
+an operating document is a current manual: no dates, backstory, stale counts or superseded status, and rationale only
+where it changes what the reader does. Explanation: [docs/AI-WORKFLOW.md](docs/AI-WORKFLOW.md) is the front page of the workflow pages, whose routing table
 links one page per topic; every topic page carries a summary, a mental model, how it works, where the rules live,
 failure modes and key files, and none of them owns a rule.
 
 Start every owner-facing decision in plain language before any workflow vocabulary: what happened, what the owner
 must decide, the options. The owner reads pull request descriptions and screenshots, not diffs; write for that
 reader. `resume` starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
+Report outcomes as they are: show the failing output, name any step skipped and anything guessed, never invent a
+number, and call work done only once it is verified; a value that cannot be computed fails loudly with its cause,
+never as a blank or zero that reads as real.
 
 Every rule this file does not hold in full has one home:
 
@@ -88,12 +92,12 @@ Every rule this file does not hold in full has one home:
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
 | Which builder seat a slice goes to; the machinery admissions, the friction route and how machinery leaves; what a plan carries for a change to how the interface looks, and who decides where the `frontend-design` skill and the design system disagree; and the steps of plan approval where a repository has turned it on: how the setting is read, how the plan is presented and revised, and what a resumed session does | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's exact form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
-| The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, its single-family form in a repository that runs one runtime, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when Greptile runs, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
-| Every other Greptile rule: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The [`greptile`](.agents/skills/greptile/SKILL.md) skill |
-| How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; what a repository needs before it runs the workflow; and how a sync job runs: the command, what one run copies and removes, when a card is covered and how covered cards close | The [`sync-job`](.agents/skills/sync-job/SKILL.md) skill |
+| The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
+| Every other rule of the external review, in a repository that has turned that add-on on: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
+| How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; how a repository turns the external review add-on on or off; how a repository turns the documentation sweep off and what that leaves out; what a repository needs before it runs the workflow; and how a sync job runs: the command, what one run copies and removes, when a card is covered and how covered cards close | The [`sync-job`](.agents/skills/sync-job/SKILL.md) skill |
 | The tracker and triage vocabulary the vendored skills expect to have been provided | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
 | How many skills are vendored, from which upstream repositories and at which commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
-| The documentation sweep and its day-after triage, when the Conventions table marks them active | [docs/DOC-SWEEP.md](docs/DOC-SWEEP.md) and [docs/SWEEP-TRIAGE.md](docs/SWEEP-TRIAGE.md) |
+| The documentation sweep and its day-after triage, when the Conventions table marks them active and the settings file does not hold `"docSweep": false` | [docs/DOC-SWEEP.md](docs/DOC-SWEEP.md) and [docs/SWEEP-TRIAGE.md](docs/SWEEP-TRIAGE.md) |
 | The weekly retro, in a repository whose `docs/ISSUE-TRACKER.md` records it | [docs/WEEKLY-RETRO.md](docs/WEEKLY-RETRO.md) |
 
 ## Owner gates
@@ -155,8 +159,8 @@ discovery output: file listings, search results and file contents, which can be 
 plans, designs, builds or reviews code reads it before it starts; only the `explorer`, which locates code and judges
 nothing, is exempt. [docs/TESTING-STRATEGY.md](docs/TESTING-STRATEGY.md) owns the evidence every claim needs, run
 through `node scripts/run-log.mjs` so the pull request body quotes exit codes a script wrote.
-[docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md) owns how the user interface is built: which values are tokens and
-where they live, the tolerated literals, and the component patterns new work reuses.
+Where the project has a user interface, [docs/DESIGN-SYSTEM.md](docs/DESIGN-SYSTEM.md) owns how it is built: which
+values are tokens and where they live, the tolerated literals, and the component patterns new work reuses.
 
 ## Review and visual verification
 
@@ -183,20 +187,25 @@ lists under "4. Plan" as the machinery rule, and an addition to existing machine
 feature over custom code, a hook over a script, and a sentence over a hook. Rewriting, shrinking or deleting existing
 code, tests or tooling is always allowed when it is the right change for speed or quality, planned and reviewed like any
 other change, with the owner gates and exact-target approval for destructive actions unchanged; no standard, strategy,
-skill or charter may forbid it.
+skill or charter may forbid it. Dead code that predates a change is flagged, and removed only with evidence, stated in
+the plan or the pull request body, that it is unused and its removal safe; a removal that evidence cannot settle goes
+to the owner as a decision.
 
 ## Shared workflow adoption
 
 The files `.agents/factory-manifest.json` lists are shared workflow bytes, and `AGENTS.md` shares only the text between
 its `factory-shared` markers. Each shared file is authored only in the manifest's `canonical` repository, under `src/`,
-and reaches any other repository only through the manifest and a sync; the `sync-job` skill says how the files are
-fingerprinted, pinned at a commit and kept as real files. An adopter's copy of a shared file differs from the canonical
+and reaches any other repository only through the manifest: by an install, which writes a shared file only where none is
+and leaves an identical one as it is, by a sync afterwards, or by an update to a named release through its verified manifest;
+the `sync-job` skill says how a sync fingerprints files, pins them at a commit and keeps them as real files. An adopter's copy of a shared file differs from the canonical
 bytes in one way only: the value of a seat's model, effort or turn-limit line that the adopter's own committed seat
 settings file names; the `sync-job` skill says how a repository overrides a seat and what an override may not do. An
 adopter that runs one runtime carries no file of the other, and a file found at one of the other's shared paths is
-refused like a changed byte. An ordinary shared change opens no sync card: `resume` reports at intake, as information,
-whether this repository lags the canonical copy. An urgent fix is authored in the canonical repository first and pulled
-by a sync card on the owner's decision. A job whose card is a sync card reads the
+refused like a changed byte. An adopter whose settings file does not turn the external review add-on on carries none of
+that add-on's files, on the same terms. An adopter whose settings file turns the documentation sweep off carries none of
+the `sweep-scope` check's files, on the same terms. An ordinary shared change opens no sync card: `resume` reports at
+intake, as information, whether this repository lags the canonical copy. An urgent fix is authored in the canonical
+repository first and pulled by a sync card on the owner's decision. A job whose card is a sync card reads the
 [`sync-job`](.agents/skills/sync-job/SKILL.md) skill before it runs the sync.
 
 Whoever can use the administrator bypass of the required check on `main` can put any commit on `main` when the local

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BOARD_OWNER, BOARD_REPOSITORY } from './board-config.mjs';
-import { issueNodeIdQuery, parseIssueNodeId, addIssueToBoard } from './board-add.mjs';
+import { BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
+import { addIssueToBoard } from './board-add.mjs';
+import { issueItemReply } from './board-fixtures.mjs';
 import { main as boardAddMain } from '../board-add.mjs';
 
 // Shapes mirror the real `gh api graphql` payloads for project 2. Expected ids are
@@ -22,7 +23,7 @@ const WORKSTREAM_OPTIONS = [
 ];
 
 function fieldJson(fieldId, options) {
-  return { data: { user: { projectV2: { id: PROJECT_ID, field: { id: fieldId, options } } } } };
+  return { data: { [BOARD_OWNER_TYPE]: { projectV2: { id: PROJECT_ID, field: { id: fieldId, options } } } } };
 }
 
 function projectItemFieldsJson(status, workstream) {
@@ -44,7 +45,7 @@ function recordingExec({ itemId = 'PVTI_item543', failOn = null, nodeIdJson, add
     const query = args[3];
     if (failOn && query.includes(failOn)) throw new Error('gh: GraphQL mutation rejected');
     if (query.includes('issue(number:')) {
-      return JSON.stringify(nodeIdJson ?? { data: { repository: { issue: { id: ISSUE_NODE_ID } } } });
+      return JSON.stringify(nodeIdJson ?? issueItemReply([], { issueId: ISSUE_NODE_ID }));
     }
     if (query.includes('field(name:"Status")')) return JSON.stringify(fieldJson('PVTSSF_status', STATUS_OPTIONS));
     if (query.includes('field(name:"Workstream")')) {
@@ -67,18 +68,6 @@ function recordingExec({ itemId = 'PVTI_item543', failOn = null, nodeIdJson, add
 
 const ran = (calls, needle) => calls.some((c) => c[3].includes(needle));
 
-test('issueNodeIdQuery asks for the issue node id on the right repository', () => {
-  const query = issueNodeIdQuery(543);
-  assert.match(query, new RegExp(`repository\\(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}"\\)`));
-  assert.match(query, /issue\(number:543\) \{ id \}/);
-});
-
-test('parseIssueNodeId returns the id and throws (fail-loud) on a missing or empty one', () => {
-  assert.equal(parseIssueNodeId({ data: { repository: { issue: { id: ISSUE_NODE_ID } } } }, 543), ISSUE_NODE_ID);
-  assert.throws(() => parseIssueNodeId({ data: { repository: { issue: null } } }, 543), /no node id for issue #543/);
-  assert.throws(() => parseIssueNodeId({ data: { repository: { issue: { id: '' } } } }, 543), /no node id for issue #543/);
-});
-
 // The whole point of the seam: a card must never land on the board unfielded (the
 // #357-#361 drift), so BOTH updateProjectV2ItemFieldValue mutations must fire.
 test('addIssueToBoard adds the card and sets BOTH Status and Workstream, in that call order', () => {
@@ -96,7 +85,7 @@ test('addIssueToBoard adds the card and sets BOTH Status and Workstream, in that
   });
   assert.equal(calls.length, 6);
   for (const call of calls) assert.deepEqual(call.slice(0, 3), ['api', 'graphql', '-f']);
-  assert.match(calls[0][3], /issue\(number:543\) \{ id \}/);
+  assert.match(calls[0][3], /issue\(number:543\) \{ id projectItems/);
   assert.match(calls[1][3], /field\(name:"Status"\)/);
   assert.match(calls[2][3], /field\(name:"Workstream"\)/);
   assert.match(calls[3][3], /addProjectV2ItemById/);
@@ -115,7 +104,7 @@ test('addIssueToBoard adds the card and sets BOTH Status and Workstream, in that
 // addProjectV2ItemById returns the EXISTING item for an issue already on the board,
 // so a re-run must still set both fields rather than skip them.
 test('addIssueToBoard is idempotent: an issue already on the board still gets both fields set', () => {
-  const { exec, calls } = recordingExec({ itemId: 'PVTI_alreadythere' });
+  const { exec, calls } = recordingExec({ itemId: 'PVTI_alreadythere', nodeIdJson: issueItemReply([{ id: 'PVTI_read', isArchived: false, project: { number: BOARD_PROJECT_NUMBER }, value: null }], { issueId: ISSUE_NODE_ID }) });
   const result = addIssueToBoard(
     { issueNumber: 543, statusName: 'In progress', workstreamName: 'Platform' },
     exec,
@@ -123,19 +112,29 @@ test('addIssueToBoard is idempotent: an issue already on the board still gets bo
 
   assert.equal(result.itemId, 'PVTI_alreadythere');
   assert.equal(calls.length, 6);
+  assert.equal(calls.filter((call) => call[3].includes('addProjectV2ItemById')).length, 1);
   const updates = calls.filter((c) => c[3].includes('updateProjectV2ItemFieldValue'));
   assert.equal(updates.length, 2);
   assert.match(updates[0][3], /itemId:"PVTI_alreadythere".*singleSelectOptionId:"opt-inprogress"/s);
   assert.match(updates[1][3], /itemId:"PVTI_alreadythere".*singleSelectOptionId:"ws-platform"/s);
 });
 
-test('addIssueToBoard throws (fail-loud) on a malformed issue-node-id response, before adding anything', () => {
-  const { exec, calls } = recordingExec({ nodeIdJson: { data: { repository: { issue: {} } } } });
-  assert.throws(
-    () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
-    /no node id for issue #543/,
-  );
-  assert.equal(ran(calls, 'addProjectV2ItemById'), false, 'added a card despite an unresolved issue');
+test('addIssueToBoard rejects a missing issue node id before mutation', () => {
+  const unreadableIssue = issueItemReply();
+  unreadableIssue.data.repository.issue = null;
+  const missingId = issueItemReply();
+  delete missingId.data.repository.issue.id;
+  for (const [reply, expected] of [
+    [unreadableIssue, /no readable issue/],
+    [missingId, /no node id for issue #543/],
+    [issueItemReply([], { issueId: '' }), /no node id for issue #543/],
+    [issueItemReply([], { issueId: null }), /no node id for issue #543/],
+  ]) {
+    const { exec, calls } = recordingExec({ nodeIdJson: reply });
+    assert.throws(() => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec), expected);
+    assert.equal(ran(calls, 'addProjectV2ItemById'), false);
+    assert.equal(ran(calls, 'updateProjectV2ItemFieldValue'), false);
+  }
 });
 
 test('addIssueToBoard throws (fail-loud) on a malformed add-item response, before any field update', () => {
@@ -332,4 +331,35 @@ test('board-add CLI rejects a non-numeric issue number before calling GitHub', (
   assert.equal(code, 1);
   assert.match(errors[0], /invalid issue number/);
   assert.equal(called, 0, 'GitHub was called for a non-numeric issue number');
+});
+
+test('board-add refuses incomplete issue-item replies before mutation', () => {
+  const missingNodes = issueItemReply();
+  delete missingNodes.data.repository.issue.projectItems.nodes;
+  const missingCount = issueItemReply();
+  delete missingCount.data.repository.issue.projectItems.totalCount;
+  const unreadableIssue = issueItemReply();
+  unreadableIssue.data.repository.issue = null;
+  const cases = [
+    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99 } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
+    [missingCount, /no non-negative integer projectItems\.totalCount/],
+    [unreadableIssue, /no readable issue/],
+    ['not json at all', /not valid JSON/],
+    [issueItemReply([{ id: 'bad', isArchived: false, project: null }]), /non-integer project number/],
+    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER } }]), /non-boolean isArchived/],
+    [missingNodes, /no projectItems\.nodes\[\] array/],
+  ];
+  for (const [reply, expected] of cases) {
+    const base = recordingExec();
+    const calls = [];
+    const exec = (args) => {
+      calls.push(args);
+      return args[3].includes('issue(number:') ? typeof reply === 'string' ? reply : JSON.stringify(reply) : base.exec(args);
+    };
+    const errors = [];
+    assert.equal(boardAddMain(['999', 'Ready', 'Platform'], { ghExec: exec, output: { log: () => {}, error: (message) => errors.push(message) } }), 1);
+    assert.match(errors.join('\n'), expected);
+    assert.equal(ran(calls, 'addProjectV2ItemById'), false);
+    assert.equal(ran(calls, 'updateProjectV2ItemFieldValue'), false);
+  }
 });

@@ -1,17 +1,12 @@
-// board.mjs — pure parse/filter/format for the GitHub Projects board.
+// board.mjs — the board read, selection and formatting for the GitHub Projects board.
 //
-// Guards the recurring /resume Step-1 failure mode: board reads were ad-hoc
-// `gh project item-list | python3 -c '…'` one-liners, re-improvised each session
-// and breaking on shell quoting/globbing (zsh globbed the `[...]` in an inline
-// parse and aborted the pick). This is the stable read+filter+format layer the
-// rituals call instead. I/O lives in the CLI wrapper (scripts/board.mjs); this
-// file is pure so it is unit-testable without touching `gh`.
+// The session rituals call this layer instead of improvising a `gh` one-liner. Every
+// GitHub call goes through the executor a caller hands in (fetchBoard, fetchCardDetails),
+// so the whole file is unit-testable without touching `gh`.
 //
-// #461: `gh project item-list` costs a measured 203 GraphQL points per full-board
-// read. boardQuery/parseBoardPage fetch only the fields the scripts consume — ~2
-// points per 100-item page — and replaced parseBoard (deleted, no remaining
-// callers). #1155: fetchBoard walks every page inside one
-// `gh api graphql --paginate --slurp` process instead of spawning gh once per page.
+// boardQuery fetches only the fields the scripts consume, about 2 GraphQL points per
+// 100-item page, and fetchBoard walks every page inside one
+// `gh api graphql --paginate --slurp` process.
 //
 // Do not migrate this read to the REST Projects API: at parity on these
 // fields it sends 24.1x the payload, and the quota a migration would save is
@@ -37,7 +32,7 @@ import { GhOutputTooLargeError } from './gh-exec.mjs';
 // operator never asked — and --closeout's exit code is a proof contract, so an
 // unrecognised argument stops the command here rather than certifying a board nobody
 // asked about (the #598 silent-substitution defect class).
-export const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake';
+const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake';
 
 export function parseBoardArgs(argv) {
   // Checked before rejectUnknownArgs, which knows `--status=` as ONE positional and would
@@ -261,20 +256,20 @@ function assertIssueContent(issue, cardId) {
 // Every page must be the SAME configured, open project (#572: an absence probe once
 // asked a different project than the board read it was confirming). Returns the
 // project node plus the identity string fetchBoard compares the next page against.
-function assertProject(data) {
-  const owner = data?.data?.[BOARD_OWNER_TYPE];
+export function assertProject(data, boardOwner = BOARD_OWNER, projectNumber = BOARD_PROJECT_NUMBER, ownerType = BOARD_OWNER_TYPE) {
+  const owner = data?.data?.[ownerType];
   const project = owner?.projectV2;
   if (!project) {
-    throw new Error(`board page carried no ${BOARD_OWNER_TYPE} data; ${RERUN}`);
+    throw new Error(`board page carried no ${ownerType} data; ${RERUN}`);
   }
-  if (owner.login !== BOARD_OWNER) {
+  if (owner.login !== boardOwner) {
     throw new Error(
-      `board page answered for ${BOARD_OWNER_TYPE} "${owner.login}" but BOARD_OWNER is "${BOARD_OWNER}" — point the read at the configured owner in scripts/lib/board-config.mjs`,
+      `board page answered for ${ownerType} "${owner.login}" but BOARD_OWNER is "${boardOwner}" — point the read at the configured owner in scripts/lib/board-config.mjs`,
     );
   }
-  if (project.number !== BOARD_PROJECT_NUMBER) {
+  if (project.number !== projectNumber) {
     throw new Error(
-      `board page answered for project ${project.number} but BOARD_PROJECT_NUMBER is ${BOARD_PROJECT_NUMBER} — point the read at the configured project in scripts/lib/board-config.mjs`,
+      `board page answered for project ${project.number} but BOARD_PROJECT_NUMBER is ${projectNumber} — point the read at the configured project in scripts/lib/board-config.mjs`,
     );
   }
   if (typeof project.id !== 'string' || project.id.trim() === '') {
@@ -285,7 +280,7 @@ function assertProject(data) {
   }
   if (project.closed) {
     throw new Error(
-      `board project ${BOARD_PROJECT_NUMBER} is closed — reopen it, or point BOARD_PROJECT_NUMBER at the live board in scripts/lib/board-config.mjs`,
+      `board project ${projectNumber} is closed — reopen it, or point BOARD_PROJECT_NUMBER at the live board in scripts/lib/board-config.mjs`,
     );
   }
   return { project, identity: `${owner.login} project ${project.number} (${project.id})` };
@@ -296,7 +291,7 @@ function assertProject(data) {
 // order, not the board's own. A configured parked lane's field must be a single-select
 // offering its option, among any others. Returns the schema signature fetchBoard
 // compares the next page against.
-function assertFieldSchema(fields) {
+export function assertFieldSchema(fields) {
   assertWholeConnection(fields, 'project fields', 'board page');
   for (const [name, configured] of CONFIGURED_OPTIONS) {
     const field = fields.nodes.find((f) => f?.name === name);
@@ -528,7 +523,7 @@ export function cardDetailsQuery(numbers) {
   return `query { repository(owner:"${BOARD_OWNER}" name:"${BOARD_REPOSITORY}") { ${aliases} } } fragment CardDetails on Issue { number body parent { number } comments(last:100) { ${COMMENT_PAGE_FIELDS} } }`;
 }
 
-export function commentPageQuery() {
+function commentPageQuery() {
   return `query($number: Int!, $before: String!) { repository(owner:"${BOARD_OWNER}" name:"${BOARD_REPOSITORY}") { issue(number:$number) { number comments(last:100, before:$before) { ${COMMENT_PAGE_FIELDS} } } } }`;
 }
 

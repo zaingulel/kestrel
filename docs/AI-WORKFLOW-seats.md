@@ -21,6 +21,13 @@ a job, and [The evidence bar](AI-WORKFLOW-evidence.md) for what a builder's repo
 
 ## How it works
 
+Each first-party seat has one charter body across runtimes. `scripts/lib/check-agents.mjs` compares those bodies,
+allowing only backticked `/name` versus `$name` skill invocations to differ. Runtime metadata, including descriptions,
+is validated separately rather than compared. Consumer-owned custom seats need no counterpart but still undergo
+definition validation.
+The commit hook checks staged installed seats using staged runtime settings and checks canonical `src/` seats with
+both runtimes; each check uses its matching staged validator.
+
 The session that talks to the owner is the orchestrator. It plans the cards that need no architect, delegates
 every edit to a builder seat, reviews, and delivers; it never builds. Each seat has a narrow charter and no more
 tools than the charter needs. Which model and effort each seat runs at is set in its seat file, under
@@ -90,6 +97,10 @@ fixed, and a review finding then costs a replan.
   repository overrides a seat's model, effort or turn cap, and what an override may not do.
 
 ## Failure modes
+
+- **One runtime carries a different first-party charter body.** The commit guard names the seat, both files and differing lines.
+  Edit both canonical source charters together and regenerate their installed copies before staging them.
+  A consumer receives the correction through the [sync route](../.agents/skills/sync-job/SKILL.md).
 
 - **A builder is cut off at its turn cap.** Each Claude seat file also sets a turn cap. A builder is cut off at its
   cap with no warning, so a builder's report ends with a literal sentinel line; a report without it means the

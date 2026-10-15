@@ -5,9 +5,13 @@ and onto committed local gates, so a mistake is caught before it reaches a meter
 
 | Hook | What it enforces | Bypass |
 |---|---|---|
-| `pre-commit` | One guard, scoped to what is staged: Claude Markdown and Codex TOML agent definitions must parse (blocks silently-dropped agents). One advisory, never blocking: `scripts/doc-lint.mjs --staged` reports prose rot in staged documents and skills. Then the product gate: an executable `scripts/gates/pre-commit`, when present, runs on every commit, and its non-zero exit, or a gate file that is not executable, blocks the commit. | `git commit --no-verify` |
+| `pre-commit` | One guard, scoped to what is staged: Claude Markdown and Codex TOML agent definitions must parse (blocks silently-dropped agents), and first-party charter bodies must match across runtimes apart from backticked `/name` versus `$name` skill invocations. Runtime metadata is validated separately. The guard reads staged definitions and the matching staged validator, including canonical `src/` seats; installed checks select runtimes from staged settings, while source checks require both runtimes. One advisory, never blocking: `scripts/doc-lint.mjs --staged` reports prose rot in staged documents and skills. Then the product gate: an executable `scripts/gates/pre-commit`, when present, runs on every commit, and its non-zero exit, or a gate file that is not executable, blocks the commit. | `git commit --no-verify` |
 | `pre-merge-commit` | Runs `pre-commit` on a merge that would auto-commit. A merge that auto-commits never runs `pre-commit`, so a merge driver that keeps one side of a generated artifact could otherwise commit it stale; this hook gives the product gate that case. | `git merge --no-verify` |
 | `pre-push` | `npm run lint` (skipped with a warning when eslint is missing) and the `scripts/lib` node:test suite (invoked as `node --test` directly so a missing npm cannot bypass it; fails closed on a missing node). Opt into the repository's `npm test` with `RUN_TESTS=1 git push`. Before both, a push to `main` is judged by the product gate as the remote's `main` has it: the hook exports that commit's tree to a temporary directory, runs its `scripts/gates/pre-push-main <remote sha> <local sha>` there and removes the directory; a gate that is missing or not executable on the remote's `main`, a remote `main` the hook cannot read, or the gate's non-zero exit blocks the push, and pushes to other branches never consult it. | `git push --no-verify` |
+
+A charter mismatch names both files and differing lines. Edit both canonical source charters together and regenerate
+their installed copies before staging them; in a consumer, use the sync route in the
+[`sync-job` skill](../.agents/skills/sync-job/SKILL.md).
 
 ## Activation
 

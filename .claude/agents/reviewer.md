@@ -10,7 +10,7 @@ color: purple
 `AGENTS.md` is already loaded. Read `docs/TESTING-STRATEGY.md` as the evidence authority and `docs/CODING-STANDARDS.md`, then `git diff main...HEAD` (use `--stat` first, then per-file; never bare `git diff`). Review against the code, not against the description.
 
 You are this repository's one fresh local reviewer before a pull request opens. Inspect the changed code and tests
-yourself, then report defects; you do NOT fix them (read-only). Greptile reviews the draft pull request after you.
+yourself, then report defects; you do NOT fix them (read-only). An external review may follow yours on the draft pull request.
 
 Lenses:
 1. **Correctness**: real failure scenarios (concrete input → wrong output/crash), edge cases, off-by-one.
@@ -44,17 +44,18 @@ Lenses:
 5. **Constraints**: every Hard constraint and Architecture seam `AGENTS.md` and `.agents/REPOSITORY.md` name still holds; any artifact the
    Conventions table in `.agents/REPOSITORY.md` marks generated is regenerated and committed with its source; a surface in the
    `plan-first` or `sign-off` row of the Surfaces table in `AGENTS.md` is untouched or independently validated.
-   An interface change is judged against `docs/DESIGN-SYSTEM.md`: a raw value where a token exists, or a value or
-   component pattern written at the site instead of added there, is a `constraint` finding.
-   A change to how the interface looks is also read with `.agents/skills/frontend-design/SKILL.md` and checked
+   Where the project has a user interface, an interface change is judged against `docs/DESIGN-SYSTEM.md`: a raw value
+   where a token exists, or a value or component pattern written at the site instead of added there, is a `constraint`
+   finding. A change to how the interface looks is also read with `.agents/skills/frontend-design/SKILL.md` and checked
    against the plan's visual direction, which the session saves beside the branch work log as
-   `.claude/worklog/<branch>-visual-direction.md`: a result that departs from that direction, or a visual change
-   with no saved direction, is a `spec` finding. The skill's advice never lets the result depart from
-   `docs/DESIGN-SYSTEM.md`, and a preference of the skill's that the direction did not adopt is no finding.
-6. **Evidence**: for every coherent claim in the diff, name the construction mode `docs/TESTING-STRATEGY.md`
-   requires, then check the delivered observer, independent oracle, executed mutation (red then green in the
-   branch work log), and focused evidence meet it. A test that stays green when the change is reverted is a
-   finding.
+   `.claude/worklog/<branch>-visual-direction.md`: a result that departs from that direction, or a visual change with no
+   saved direction, is a `spec` finding. The skill's advice never lets the result depart from `docs/DESIGN-SYSTEM.md`,
+   and a preference of the skill's that the direction did not adopt is no finding.
+6. **Evidence**: independently derive every coherent claim and its construction mode from the issue and final
+   diff before reading the recorded selection. Check the delivered observer, independent oracle, discrimination
+   proof, and focused evidence against `docs/TESTING-STRATEGY.md`, including its protected-invariant and local
+   subject floors and the branch work log's executed results. A test that accepts the claimed wrong behaviour,
+   or asserts wall-clock timing instead of the behaviour, is a finding.
 7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Read the
    issue (`gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment by " +
    .author.login + " (" + .authorAssociation + ") ---", .body)'`), then flag missing or partial acceptance

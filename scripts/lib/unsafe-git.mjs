@@ -2,7 +2,7 @@
 // .codex/hooks/block-unsafe-git.mjs (the PreToolUse(Bash) guards). Extracted so the rules get unit
 // test coverage; each hook stays a thin stdin/stderr/exit-code shell around blockReason().
 //
-// Ten plain rules, judged on the actual command segments of an agent's shell call:
+// Thirteen plain rules, judged on the actual command segments of an agent's shell call:
 //   git commit --no-verify   -> skips the pre-commit gates
 //   git push --no-verify     -> skips the lint pre-push hook
 //   git -c core.hooksPath=… / git --config-env core.hooksPath=… /
@@ -16,7 +16,22 @@
 //                                the key pass
 //   git push --force / -f    -> unsafe overwrite (--force-with-lease is ALLOWED)
 //   git filter-branch        -> history rewrite
-//   gh pr create (no --draft)-> skips the draft review before the metered suite
+//   git worktree add -B / --force / -f
+//                            -> -B resets a branch that already exists to the start point, dropping
+//                                the commits only it held, and --force overrides git's refusal to
+//                                check out a branch another worktree holds or to reuse a missing or
+//                                locked worktree's path; read in every spelling git takes (`-qB`,
+//                                `-df`, `-Bmain`, `--fo`)
+//   git worktree add <path holding .claude/worktrees/ and then a `..` step>
+//                            -> climbs back out of the job worktrees folder; while a word holds
+//                                that folder, every word after `add` must be plain, so a quoted,
+//                                escaped, variable, substituted, glob or brace word is refused;
+//                                the words are read with redirections and a trailing comment set
+//                                aside
+//   git worktree remove --force / -f
+//                            -> deletes the worktree's uncommitted and untracked changes, and,
+//                                given twice, a locked worktree
+//   gh pr create (no --draft)-> skips the draft stage before the metered suite
 //   gh pr merge              -> only `gh pr merge --auto --squash --delete-branch <number>`, alone
 //                                in its segment, is allowed: an admin token merges regardless of
 //                                checks, and --auto lets GitHub merge only once the required test
@@ -174,6 +189,25 @@
 // one (`>/tmp/my\ log`) is one target, and a `#` after it starts no comment. An abbreviated
 // `--unset-all` (`--unset-a`, `--unset-al`) is an unset, because git takes a unique prefix of a
 // long option.
+// The `git worktree` rules find every invocation anywhere in a segment, after a blank, `(`, a
+// backtick or `&`, so a wrapper (`time`, `nice`, `timeout`), a lone `&`, a subshell or an earlier
+// harmless invocation in front of it hides nothing, and, like the merge and ready rules, they read
+// a command substitution inside a double-quoted span. Each invocation is judged on the words after
+// its `add` or `remove` up to the next invocation, split on spaces and tabs, with each operator
+// character (`;`, `|`, `&`, `<`, `>`, `(`, `)`, a backtick or a newline) read as a word of its own,
+// so an option glued to one (`--force>/dev/null`, `--force&`) is still read. A plain word is
+// letters, digits and `_ . / : @ + , -`, and a redirection before the subcommand is passed over
+// whatever its target, and one after it, after a blank or glued onto the subcommand, whose target is
+// plain, is not a word. Any other redirection is a word, whether glued elsewhere, escaped, or with a
+// target holding a backslash or a quote. A `..`
+// before the folder (`../../.claude/worktrees/x`) leads into it and passes. Refused with the rule
+// although harmless: an unquoted mention (`echo git worktree add -B x`), so quote it, and an add
+// under the folder sent to the background, whose `&` is not a plain word. Residuals: where no word
+// shows the folder, only plain words are read, so a quoted, escaped or variable `-B` or `--force`
+// there is not seen, nor is an option carried onto a continuation line, nor a path whose
+// `.claude/worktrees/` is itself quoted or behind a variable; a `>` after a blank inside a `${...}`
+// expansion is read as a redirection with its target; a process substitution nested inside another
+// hides the invocation its redirection precedes; and `git worktree move --force` is not judged.
 import { posix, win32 } from 'node:path';
 
 // Returns a reason string when `cmd` should be blocked, or "" when it's allowed. `checkout` is the
@@ -326,17 +360,22 @@ export function blockReason(cmd, checkout) {
   // placeholder instead of `""` and kept aside for relocate(). Planted inside the one pass so quote
   // pairing stays the blanker's own: a separate scan once paired an apostrophe inside a
   // double-quoted span with a later single quote and swallowed live argv (pinned by test).
-  // Two readings serve the merge and ready rules alone. Quote removal makes `"merge"` the word
-  // `merge`, so a quoted span that is exactly one of their four command words is unquoted first,
-  // and left followed by a space the command never held: the rules see the invocation, and its
-  // segment can never be the exact delivery text, so it is refused. No other quoted word is
-  // unquoted, because a quoted `--draft` or `--force` is data. And a double-quoted span
-  // runs only what its `$(…)`, read to the matching `)`, or its backtick pair holds, a
-  // backslash-escaped `$(` or backtick being text that opens or closes neither, so a merge or ready
-  // invocation in that substituted text is live and its reason is kept for the end of the segment
-  // walk, while the rest of the span stays data; a span carrying a heredoc operator is a message
-  // body and is left as data.
+  // Two readings serve the merge and ready rules, and the second the worktree rules too. Quote
+  // removal makes `"merge"` the word `merge`, so a quoted span that is exactly one of their four
+  // command words is unquoted first, and left followed by a space the command never held: the rules
+  // see the invocation, and its segment can never be the exact delivery text, so it is refused. No
+  // other quoted word is unquoted, because a quoted `--draft` or `--force` is data. And a
+  // double-quoted span runs only what its `$(…)`, read to the matching `)`, or its backtick pair
+  // holds, a backslash-escaped `$(` or backtick being text that opens or closes neither, so a merge,
+  // ready or worktree invocation in that substituted text is live and is judged at the end of the
+  // segment walk. That text is judged whole, with no split at separators and no reading of its quotes
+  // or comments, so a separator, a quote or a comment in it is read as a word. This fails closed: a
+  // safe command beside a worktree invocation in it can be refused, and is then written plainly. The
+  // rest of the span stays data; a span carrying a heredoc operator is a message body and is left as
+  // data. The substitution is read to its matching `)` by counting parentheses alone, so a `)` inside
+  // a quoted span or a comment within it ends the substitution early, and what follows stays data.
   let substitutedReason = '';
+  const substitutedTexts = [];
   const quotedPaths = [];
   const ESCAPED = String.raw`\\[\s\S]`;
   const QUOTED_SPAN = String.raw`'[^']*'|"(?:[^"\\]|\\[\s\S])*"`;
@@ -366,6 +405,7 @@ export function blockReason(cmd, checkout) {
         }
         const text = body.slice(start, end);
         substitutedReason ||= (GH_PR_MERGE.test(text) && REASON_MERGE) || (GH_PR_READY.test(text) && REASON_READY) || '';
+        substitutedTexts.push(text);
         index = end;
       }
     }
@@ -387,6 +427,31 @@ export function blockReason(cmd, checkout) {
   const GIT_COMMIT = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}commit\b`);
   const GIT_PUSH = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}push\b`);
   const GIT_FILTER_BRANCH = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}filter-branch\b`);
+  // The worktree rules find every invocation anywhere in a segment, after a blank, `(`, a backtick or
+  // `&`, as the merge and ready rules do, so a wrapper, a lone `&`, a subshell or an earlier harmless
+  // invocation in front of it hides nothing. Git bundles short options (`-qf`) and takes a value glued
+  // on (`-Bmain`), and only `-b` and `-B` take one, so a short word forces when its `f` comes before
+  // any `b` or `B` and resets a branch when `B` is the first of them; git also takes a unique prefix
+  // of a long option (`--fo`). A redirection never reaches git's arguments, so between `git`, its
+  // options, `worktree` and the subcommand any redirection, whatever its target and a process
+  // substitution included, is passed over in finding the invocation; the body of a process
+  // substitution passed over is judged on its own, so passing over too much only finds more
+  // invocations to judge. Among the words after the subcommand it is set aside only when it is
+  // certain: after a blank or glued straight onto the subcommand, an operator whose target is a
+  // descriptor copy, a plain word or a quoted span the blanker left as `""`, ending at a blank or an
+  // operator. Any other operator or target stays a word, so an escaped `\>`, a `>` glued to any other
+  // word (as `../git>` inside a `${x:-...}` default), a target holding a backslash or a `$`, and a `>`
+  // inside the raw text of a substitution hide nothing. The subcommand may be followed by an operator.
+  const WORKTREE_REDIRECT = String.raw`\d*(?:[<>]{1,2}|&>>?)&?[ \t]*(?:[<>]\([^()]*\)|[^\s;&|()<>\`]*)`;
+  const WORKTREE_PROCESS_SUBSTITUTION = /[<>]\(([^()]*)\)/g;
+  const WORKTREE_GAP = String.raw`(?:\s|${WORKTREE_REDIRECT})+`;
+  const GIT_WORKTREE = new RegExp(String.raw`(?:^|[\s(\`&])${GIT_EXEC}${WORKTREE_GAP}(?:(?:${GIT_OPT_WITH_ARG}|-\S+\s+)(?:${WORKTREE_REDIRECT}\s*)*)*worktree${WORKTREE_GAP}(add|remove)(?=[\s;&|<>()\`]|$)`, 'g');
+  const WORKTREE_FORCE = /^(?:--f(?:o(?:r(?:ce?)?)?)?$|-[^-bB]*f)/;
+  const WORKTREE_RESET = /^-[^-bB]*B/;
+  const WORKTREE_REDIRECTION = /(?<=^|\s)\d*(?:[<>]{1,2}|&>>?)(?:&\d+|[ \t]*(?:[\w./:@+,-]+|""))(?=[\s;&|<>()`]|$)/g;
+  const UNDER_WORKTREES = /\.claude\/worktrees\/([\s\S]*)/;
+  const CLIMBS_OUT = /(?:^|\/)\.\.(?:\/|$)/;
+  const PLAIN_WORD = /^[\w./:@+,-]+$/;
   const GH_PR_CREATE = new RegExp(String.raw`^${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*create\b`);
   const DELIVERY_MERGE = /^gh pr merge --auto --squash --delete-branch \d+$/;
   const DELIVERY_READY = /^gh pr ready (?:\d+(?: --undo)?|--undo \d+)$/;
@@ -433,6 +498,43 @@ export function blockReason(cmd, checkout) {
     const key = wordsUnquoted === payloadKeyed && !ODD_BLANK.test(cmd) ? CONFIG_KEY_READ.exec(args)?.[1] : undefined;
     return (unset || (at + 1 < words.length && words[at + 1] !== '.githooks')) && (key === undefined || HOOKS_PATH_WORD.test(key));
   };
+  // Any `..` step after the folder is refused, since the text cannot show where it lands. The shell
+  // splits words on spaces and tabs only, so any other blank stays inside its word, and it ends a
+  // word at an operator character, so each of those is read as a word of its own and an option glued
+  // to one (`--force&`, `--force)`) is still seen. A comment's `#` is the last word, because the scan
+  // above drops a comment's text; a `#` anywhere else is no comment.
+  const worktreeInvocationReason = (subcommand, args) => {
+    const split = args.split(/[ \t]+|(?=[;&|<>()`\n])|(?<=[;&|<>()`\n])/).filter(Boolean);
+    const words = split.at(-1) === '#' ? split.slice(0, -1) : split;
+    const forced = words.some((word) => WORKTREE_FORCE.test(word));
+    if (subcommand === 'remove') {
+      return forced ? "git worktree remove --force deletes the worktree's uncommitted and untracked changes, and given twice a locked worktree: commit what it holds or discard it on purpose, unlock it if it is locked, then remove it without --force" : '';
+    }
+    if (words.some((word) => WORKTREE_RESET.test(word))) {
+      return "git worktree add -B resets the branch to the start point when it already exists, dropping the commits only it held: create a new branch with -b instead";
+    }
+    if (forced) {
+      return "git worktree add --force overrides git's refusal to check out a branch another worktree holds or to reuse the path of a missing or locked worktree: free the branch or the path first (git worktree list, git worktree prune), or choose a new one";
+    }
+    const paths = words.flatMap((word) => UNDER_WORKTREES.exec(word)?.slice(1) ?? []);
+    if (paths.some((rest) => CLIMBS_OUT.test(rest))) {
+      return "git worktree add: a path under .claude/worktrees/ that holds `..` can climb back out of that folder: write it as .claude/worktrees/<name> with no `..`";
+    }
+    if (paths.length && !words.every((word) => PLAIN_WORD.test(word))) {
+      return "git worktree add under .claude/worktrees/: a word that is not plain (letters, digits and `_ . / : @ + , -`), such as a quoted, escaped, variable or substituted word, can hide `..`, -B or --force from this guard: write every word plainly";
+    }
+    return '';
+  };
+  // Each invocation is judged on its own words, up to the next invocation.
+  const worktreeReason = (text) => {
+    const invocations = [...text.matchAll(GIT_WORKTREE)];
+    const reasons = invocations.map((invocation, at) => {
+      const args = text.slice(invocation.index + invocation[0].length, invocations[at + 1]?.index).replace(WORKTREE_REDIRECTION, ' ');
+      return worktreeInvocationReason(invocation[1], args);
+    });
+    const passedOver = [...text.matchAll(WORKTREE_PROCESS_SUBSTITUTION)].map((substitution) => worktreeReason(substitution[1]));
+    return [...reasons, ...passedOver].find(Boolean) ?? '';
+  };
   const ruleReason = (s, raw) => {
     if (GIT_COMMIT.test(s) && NO_VERIFY.test(s)) {
       return "git commit --no-verify skips the pre-commit gates";
@@ -454,7 +556,7 @@ export function blockReason(cmd, checkout) {
       return "git filter-branch rewrites history";
     }
     if (GH_PR_CREATE.test(s) && !/(?:^|\s)(?:--draft|-d)(?:\s|$)/.test(s)) {
-      return "gh pr create without --draft skips the draft review: open it as a draft (--draft/-d) so Greptile reviews it before CI runs";
+      return "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
     }
     // Auto-merge is GitHub's own wait-for-green: the agent's owner-authorised merge is queued, never
     // forced. The allow list runs these two prefixes unprompted, so only the exact forms pass.
@@ -464,7 +566,7 @@ export function blockReason(cmd, checkout) {
     if (GH_PR_READY.test(s) && !DELIVERY_READY.test(raw)) {
       return REASON_READY;
     }
-    return '';
+    return worktreeReason(s);
   };
   // Integration-checkout rule. The root checkout (the main working tree, never a linked worktree)
   // stays on main and nothing is branched, switched, or committed there: two sessions sharing it
@@ -558,5 +660,5 @@ export function blockReason(cmd, checkout) {
     const hit = rootCheckoutReason(s) || ruleReason(s, raw);
     if (hit) return hit;
   }
-  return substitutedReason;
+  return substitutedReason || substitutedTexts.map(worktreeReason).find(Boolean) || '';
 }

@@ -11,7 +11,9 @@
 // renders the whole before and after documents and compares them: a destination the head newly renders
 // is reported when the tree already vouches for it and refused when nothing does, and a destination
 // whose spelling no reader can resolve is refused whether it is new or not. An HTML page, which a
-// browser loads raw, is held to its markup instead: only its free text may change. The table and the
+// browser loads raw, is held to its markup instead: only its free text may change. Opted-in Markdown
+// also preserves frontmatter, template instructions, structure, markup and code through nonexecuting
+// parsers; unreadable input or an unavailable pinned parser is refused. The tables and the
 // tree are read at the BASE commit (the tip of `main`, not the merge base) so a diff cannot widen its
 // own scope and a host `main` gained since the branch point still counts as known. Runs from `main`'s
 // own copy in .github/workflows/sweep-scope.yml, and by the sweep itself before it pushes; the rules

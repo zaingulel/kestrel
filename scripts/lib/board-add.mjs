@@ -13,26 +13,13 @@
 // Field ids and option ids are resolved through board-move.mjs's helpers (one lean
 // GraphQL read per field, off the project side) rather than re-derived here.
 
-import { BOARD_OWNER, BOARD_REPOSITORY, ROUTING_FIELD } from './board-config.mjs';
+import { ROUTING_FIELD } from './board-config.mjs';
 import {
+  lookupIssueBoardItem,
   singleSelectFieldQuery,
   parseSingleSelectField,
   optionIdFor,
 } from './board-move.mjs';
-
-// GraphQL for the issue's node id — what addProjectV2ItemById takes as contentId.
-export function issueNodeIdQuery(issueNumber) {
-  return `{ repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issue(number:${issueNumber}) { id } } }`;
-}
-
-// From the issueNodeIdQuery response, the issue's node id. Fail-loud if the shape is
-// malformed or the id is missing — adding a card for an unresolved issue must fail.
-export function parseIssueNodeId(json, issueNumber) {
-  const d = typeof json === 'string' ? JSON.parse(json) : json;
-  const id = d?.data?.repository?.issue?.id;
-  if (typeof id !== 'string' || !id) throw new Error(`no node id for issue #${issueNumber}`);
-  return id;
-}
 
 // Adds the issue's card. Idempotent by GitHub's own contract: for an issue already
 // on the board, addProjectV2ItemById returns the EXISTING item instead of creating a
@@ -117,7 +104,8 @@ export function addIssueToBoard({ issueNumber, statusName, workstreamName }, exe
   }
   const query = (q) => exec(['api', 'graphql', '-f', `query=${q}`]);
 
-  const contentId = parseIssueNodeId(query(issueNodeIdQuery(issueNumber)), issueNumber);
+  const { issueId: contentId } = lookupIssueBoardItem(issueNumber, exec);
+  if (typeof contentId !== 'string' || !contentId) throw new Error(`no node id for issue #${issueNumber}`);
   const status = parseSingleSelectField(query(singleSelectFieldQuery('Status')), 'Status');
   const updates = [
     { fieldName: 'Status', fieldId: status.fieldId, optionId: optionIdFor(status.options, statusName) },

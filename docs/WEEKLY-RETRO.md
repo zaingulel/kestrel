@@ -33,8 +33,8 @@ proposal is never agreed work: the owner decides each one. A local session can r
   merge time and, from its body, only the text from `## Review` to the next second-level heading. That text is
   read in full, any `<details>` block included, because it holds the review line and every finding with its
   disposition. Usage figures and token counts in it are ignored by what they are, never by their markup.
-- **Review comments.** A pull request's review comments, only when its review line shows `greptile_raised` above
-  zero, because the template sends those findings to the pull request's own threads.
+- **Review comments.** A pull request's review comments, only when its review line carries the external review
+  add-on's raised count above zero, because the template sends those findings to the pull request's own threads.
 - **Failed checks.** The workflow runs created from the earliest creation time among the kept pull requests to the
   end of the window. The listing takes no filter at all, no `status`, no `created` and no other filter parameter,
   because a filtered listing is capped at 1,000 results and an unfiltered one is not. It comes newest first and is

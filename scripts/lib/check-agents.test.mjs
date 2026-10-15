@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkAgentSource, checkCodexAgentSource, checkAgentsDir, checkBuilderParity, checkReviewerParity, checkSeatPolicy } from './check-agents.mjs';
+import { checkAgentSource, checkCodexAgentSource, checkAgentsDir, checkBuilderParity, checkCharterParity, checkSeatPolicy } from './check-agents.mjs';
 import { presentRuntimes, SEATS } from './runtimes.mjs';
 
 const PRESENT = presentRuntimes('.');
@@ -222,38 +222,108 @@ test('the real builder seats share one charter', { skip: without('claude') }, ()
   assert.deepEqual(checkBuilderParity('.claude/agents'), []);
 });
 
-// Both runtimes run one reviewer charter; only the skill sigil differs. Mutation: drop the sigil
-// normalisation (the clean pair goes red) or the line comparison (the diverged pair passes silently).
-test('the reviewer charter must match across runtimes, sigil aside', () => {
-  const root = mkdtempSync(join(tmpdir(), 'reviewer-parity-'));
+// Keep the expected seat names independent of the production selector.
+const CHARTER_SEATS = ['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer'];
+
+test('ANTI-REGRESSION: every first-party seat rejects a one-sided charter edit', () => {
+  const root = mkdtempSync(join(tmpdir(), 'charter-parity-'));
   try {
     const claude = join(root, 'claude');
     const codex = join(root, 'codex');
     mkdirSync(claude); mkdirSync(codex);
-    const body = (sigil, last) => `You review the diff.\n- If math changed, flag that \`${sigil}check-figures\` must run.\n${last}\n`;
-    writeFileSync(join(claude, 'reviewer.md'), `---\nname: reviewer\ndescription: x\n---\n${body('/', 'Report findings.')}`);
-    writeFileSync(join(codex, 'reviewer.toml'), `name = "reviewer"\ndeveloper_instructions = """\n${body('$', 'Report findings.')}"""\n`);
-    assert.deepEqual(checkReviewerParity(claude, codex), []);
-    writeFileSync(join(codex, 'reviewer.toml'), `name = "reviewer"\ndeveloper_instructions = """\n${body('$', 'Fix findings.')}"""\n`);
-    const [problem, ...rest] = checkReviewerParity(claude, codex);
-    assert.deepEqual(rest, []);
-    assert.match(problem, /reviewer\.md line 7 differs from .*reviewer\.toml line 5/);
-    assert.match(problem, /"Report findings\."; reviewer\.toml: "Fix findings\."/);
+    for (const seat of CHARTER_SEATS) {
+      writeFileSync(join(claude, `${seat}.md`), GOOD_MD.replaceAll('reviewer', seat));
+      writeFileSync(join(codex, `${seat}.toml`), GOOD_TOML.replaceAll('reviewer', seat));
+    }
+    assert.deepEqual(checkCharterParity(claude, codex), []);
+    writeFileSync(join(claude, 'mine.md'), GOOD_MD.replaceAll('reviewer', 'mine'));
+    assert.deepEqual(checkCharterParity(claude, codex), [], 'a consumer-owned custom seat needs no counterpart');
+    for (const seat of CHARTER_SEATS) {
+      for (const [dir, extension, fixture] of [[claude, '.md', GOOD_MD], [codex, '.toml', GOOD_TOML]]) {
+        const file = join(dir, `${seat}${extension}`);
+        const matching = fixture.replaceAll('reviewer', seat);
+        writeFileSync(file, matching.replace('You review the diff.', 'You rewrite the diff.'));
+        const [problem, ...rest] = checkCharterParity(claude, codex);
+        assert.deepEqual(rest, [], `${seat}${extension}`);
+        assert.ok(problem.includes(`${seat}.md line 9 differs from ${join(codex, `${seat}.toml`)} line 7`), problem);
+        assert.ok(problem.includes(`edit the ${seat} charters together`), problem);
+        assert.match(problem, /charter bodies may differ only in backticked.*skill invocation marks; runtime metadata is validated separately/);
+        assert.match(problem, /"You review the diff\."/);
+        assert.match(problem, /"You rewrite the diff\."/);
+        writeFileSync(file, matching);
+        assert.deepEqual(checkCharterParity(claude, codex), []);
+      }
+    }
+    rmSync(join(claude, 'reviewer.md'));
     rmSync(join(codex, 'reviewer.toml'));
-    assert.match(checkReviewerParity(claude, codex)[0], /reviewer\.toml: reviewer charter is missing/);
+    const [missingReviewer, ...rest] = checkCharterParity(claude, codex);
+    assert.deepEqual(rest, []);
+    assert.match(missingReviewer, /reviewer\.md: reviewer charter is missing or unreadable.*ENOENT/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('the real reviewer charters match across runtimes', { skip: without('claude') || without('codex') }, () => {
-  assert.deepEqual(checkReviewerParity('.claude/agents', '.codex/agents'), []);
+test('seat charters permit only settings and marked skill invocations to differ', () => {
+  const root = mkdtempSync(join(tmpdir(), 'charter-marks-'));
+  try {
+    const claude = join(root, 'claude');
+    const codex = join(root, 'codex');
+    mkdirSync(claude); mkdirSync(codex);
+    writeFileSync(join(claude, 'reviewer.md'), GOOD_MD);
+    writeFileSync(join(codex, 'reviewer.toml'), GOOD_TOML);
+    const claudeFile = join(claude, 'explorer.md');
+    const codexFile = join(codex, 'explorer.toml');
+    const md = GOOD_MD.replaceAll('reviewer', 'explorer').replace('You review the diff.', 'Run `/tdd`.');
+    const toml = GOOD_TOML.replaceAll('reviewer', 'explorer').replace('You review the diff.', 'Run `$tdd`.');
+    writeFileSync(claudeFile, md);
+    writeFileSync(codexFile, toml);
+    assert.deepEqual(checkCharterParity(claude, codex), []);
+    writeFileSync(codexFile, toml.replace('gpt-6.1-sol', 'gpt-6-luna').replace('xhigh', 'low'));
+    assert.deepEqual(checkCharterParity(claude, codex), []);
+    for (const body of ['Run `$diagnosing-bugs`.', 'Run `tdd`.', 'Run $tdd.', 'Run `/tdd`. ']) {
+      writeFileSync(codexFile, toml.replace('Run `$tdd`.', body));
+      assert.equal(checkCharterParity(claude, codex).length, 1, body);
+    }
+    writeFileSync(claudeFile, md.replace('Run `/tdd`.', 'Run `tdd`.'));
+    writeFileSync(codexFile, toml);
+    assert.equal(checkCharterParity(claude, codex).length, 1, 'bare versus marked invocation');
+    writeFileSync(claudeFile, md);
+    writeFileSync(codexFile, toml.replace(/\n"""\n$/, '\n'));
+    assert.match(checkCharterParity(claude, codex)[0], /explorer\.toml: no closed .* block/);
+    writeFileSync(codexFile, toml);
+    writeFileSync(claudeFile, md.replace(/\n---\nRun/, '\nRun'));
+    assert.match(checkCharterParity(claude, codex)[0], /explorer\.md: no closed frontmatter fence/);
+    writeFileSync(claudeFile, md);
+    rmSync(codexFile);
+    assert.match(checkCharterParity(claude, codex)[0], /explorer\.toml: explorer charter is missing or unreadable.*ENOENT/);
+    writeFileSync(codexFile, toml);
+    rmSync(claudeFile);
+    assert.match(checkCharterParity(claude, codex)[0], /explorer\.md: explorer charter is missing or unreadable.*ENOENT/);
+    assert.match(checkCharterParity(join(root, 'missing'), codex)[0], /cannot be read.*ENOENT/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the real seat charters match across runtimes', { skip: without('claude') || without('codex') }, () => {
+  const manifest = JSON.parse(readFileSync('.agents/factory-manifest.json', 'utf8'));
+  for (const [dir, extension] of [['.claude/agents', '.md'], ['.codex/agents', '.toml']]) {
+    const names = readdirSync(dir).filter((file) => file.endsWith(extension)).map((file) => file.slice(0, -extension.length));
+    for (const seat of CHARTER_SEATS) assert.ok(names.includes(seat), `${dir} is missing first-party seat ${seat}`);
+    const manifestNames = manifest.entries
+      .filter(({ path }) => path.startsWith(`${dir}/`) && path.endsWith(extension))
+      .map(({ path }) => path.slice(dir.length + 1, -extension.length))
+      .sort();
+    assert.deepEqual(manifestNames, [...CHARTER_SEATS].sort(), `${dir} manifest entries must match the first-party seat oracle`);
+  }
+  assert.deepEqual(checkCharterParity('.claude/agents', '.codex/agents'), []);
 });
 
 // Price tag: recurring cost is two spawned CLI runs over a tiny fixture; retire it if the CLI stops being
 // the pre-commit hook's entry point.
 // Mutation: drop the CLI's default-run parity call and the diverged run exits 0.
-test('the default CLI run refuses diverged reviewer charters', () => {
+test('the default CLI run refuses diverged non-reviewer charters', () => {
   const cli = join(dirname(fileURLToPath(import.meta.url)), 'check-agents.mjs');
   const root = mkdtempSync(join(tmpdir(), 'reviewer-cli-'));
   try {
@@ -262,11 +332,13 @@ test('the default CLI run refuses diverged reviewer charters', () => {
     writeFileSync(join(root, '.claude', 'agents', 'reviewer.md'), GOOD_MD.replace('You review the diff.', 'You review the diff.\nRun `/check-figures`.'));
     const codex = (line) => GOOD_TOML.replace('You review the diff.', `${line}\nRun \`$check-figures\`.`);
     writeFileSync(join(root, '.codex', 'agents', 'reviewer.toml'), codex('You review the diff.'));
+    writeFileSync(join(root, '.claude', 'agents', 'explorer.md'), GOOD_MD.replaceAll('reviewer', 'explorer'));
+    writeFileSync(join(root, '.codex', 'agents', 'explorer.toml'), GOOD_TOML.replaceAll('reviewer', 'explorer'));
     assert.equal(spawnSync('node', [cli], { cwd: root, encoding: 'utf8' }).status, 0);
-    writeFileSync(join(root, '.codex', 'agents', 'reviewer.toml'), codex('You rewrite the diff.'));
+    writeFileSync(join(root, '.codex', 'agents', 'explorer.toml'), GOOD_TOML.replaceAll('reviewer', 'explorer').replace('You review the diff.', 'You rewrite the diff.'));
     const diverged = spawnSync('node', [cli], { cwd: root, encoding: 'utf8' });
     assert.equal(diverged.status, 1);
-    assert.match(diverged.stderr, /edit the reviewer charters together/);
+    assert.match(diverged.stderr, /edit the explorer charters together/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

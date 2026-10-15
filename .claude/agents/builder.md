@@ -40,13 +40,14 @@ Rules:
   from `Slice` to `Stop condition`, each with a value and no `{{SLOT}}` left. If one is missing, stop and report
   which without editing anything. No hook sees a Codex handoff, so this check is yours on both runtimes.
 - Build only what the plan approved — no speculative abstractions, no configurability, no error handling for
-  impossible cases. If 200 lines can be 50, write 50. A build that needs a file or step the plan did not name
-  stops and reports; its line count never stops it.
+  impossible cases. Handling the real edge cases and inputs of what was asked is part of the build, not speculation.
+  If 200 lines can be 50, write 50. A build that needs a file or step the plan did not name stops and reports; its
+  line count never stops it.
 - Remove orphans your change creates (unused imports/vars/functions). No dead code, no leftover scaffolding.
 - Write code to `docs/CODING-STANDARDS.md`; never reformat or bypass what those standards protect.
-- Write interface code to `docs/DESIGN-SYSTEM.md`: every value comes from its token blocks and every control reuses
-  the component pattern it names; a value or pattern it lacks is added there in the same change, never invented at
-  the site.
+- Where the project has a user interface, write interface code to `docs/DESIGN-SYSTEM.md`: every value comes from its
+  token blocks and every control reuses the component pattern it names; a value or pattern it lacks is added there in
+  the same change, never invented at the site.
 - Before building a slice that changes how the interface looks, read `.agents/skills/frontend-design/SKILL.md` and
   build to the `Visual direction` the handoff carries: that direction is the brief the skill says always wins, so
   no advice in the skill replaces a choice it makes. If the handoff carries none, or the direction and

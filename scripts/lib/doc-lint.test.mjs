@@ -28,6 +28,8 @@ import {
   classifyDocLintPath,
   vendoredSkillNames,
 } from './doc-lint.mjs';
+import { docLintVerdict } from './doc-lint-verdict.mjs';
+import { readSettingsHeader } from './runtimes.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -243,12 +245,22 @@ test('pathExists: a tracked file or tracked directory prefix (with or without tr
 
 test('pathExists: adopter-only canonical references are exact exceptions', () => {
   const empty = buildTrackedSet([]);
-  assert.equal(pathExists(empty, 'src/'), true, 'src/');
-  for (const ref of ['src', 'src/missing.mjs', 'srcX/', 'scripts/gates/pre-push-main', 'scripts/gates/pre-push-mainX', 'scripts/gates/pre-push-main/missing']) {
+  for (const ref of [
+    'src', 'scripts/gates/stop', 'scripts/gates/pre-commit', '.codex/rules/playwright.rules',
+  ]) {
+    assert.equal(pathExists(empty, ref), true, ref);
+    assert.equal(pathExists(empty, `${ref}/`), true, `${ref}/`);
+    assert.equal(pathExists(empty, `${ref}/missing`), false, `${ref}/missing`);
+    assert.equal(pathExists(empty, `${ref}X`), false, `${ref}X`);
+    assert.equal(pathExists(empty, `${ref}//`), false, `${ref}//`);
+  }
+  for (const ref of ['scripts/gates', 'scripts/gates/', 'scripts/gates/pre-push-main', 'scripts/gates/pre-push-main/']) {
     assert.equal(pathExists(empty, ref), false, ref);
   }
   const tracked = buildTrackedSet(['docs/FIXTURES.md', 'scripts/gates/pre-push-main']);
   assert.equal(pathExists(tracked, 'scripts/gates/pre-push-main'), true);
+  assert.equal(pathExists(tracked, 'scripts/gates'), true);
+  assert.equal(pathExists(tracked, 'scripts/gates/'), true);
   assert.equal(pathExists(tracked, 'docs/FIXTURES.md'), true);
   assert.equal(pathExists(tracked, 'docs/missing.md'), false);
 });
@@ -453,7 +465,7 @@ const SCAN_SET_SEEDS = {
 function makeDocLintFixture(files) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-lint-'));
   fs.mkdirSync(path.join(root, 'scripts', 'lib'), { recursive: true });
-  for (const rel of ['scripts/doc-lint.mjs', 'scripts/lib/doc-lint.mjs', 'scripts/lib/doc-lint-links.mjs', 'scripts/lib/doc-lint-citations.mjs', 'scripts/lib/runtimes.mjs']) {
+  for (const rel of ['scripts/doc-lint.mjs', 'scripts/lib/doc-lint.mjs', 'scripts/lib/doc-lint-links.mjs', 'scripts/lib/doc-lint-citations.mjs', 'scripts/lib/doc-lint-verdict.mjs', 'scripts/lib/runtimes.mjs']) {
     fs.copyFileSync(path.join(ROOT, rel), path.join(root, rel));
   }
   for (const [rel, content] of Object.entries(files)) {
@@ -469,6 +481,74 @@ function makeDocLintFixture(files) {
 function runDocLintFixture(root, args = []) {
   return spawnSync(process.execPath, ['scripts/doc-lint.mjs', ...args], { cwd: root, encoding: 'utf8' });
 }
+
+test('documentation command preserves sweep resolution settings', () => {
+  const root = makeDocLintFixture({
+    ...SCAN_SET_SEEDS,
+    '.agents/factory-settings.json': '{"version":1,"docSweep":false,"seats":{}}\n',
+    'docs/cite.md': 'The sweep runs by `docs/DOC-SWEEP.md` and [triage](SWEEP-TRIAGE.md), checked by `scripts/sweep-scope-check.mjs`.\n',
+  });
+  try {
+    for (const args of [[], ['--staged']]) {
+      const result = runDocLintFixture(root, args);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, '');
+      assert.equal(result.stdout, '');
+    }
+
+    fs.writeFileSync(path.join(root, '.agents', 'factory-settings.json'), '{"version":1,"docSweep":true,"seats":{}}\n');
+    for (const args of [[], ['--staged']]) {
+      const result = runDocLintFixture(root, args);
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /docs\/DOC-SWEEP\.md/);
+      assert.match(result.stderr, /SWEEP-TRIAGE\.md/);
+      assert.match(result.stderr, /scripts\/sweep-scope-check\.mjs/);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ANTI-REGRESSION: documentation command refuses malformed working settings in both modes', () => {
+  const root = makeDocLintFixture({
+    ...SCAN_SET_SEEDS,
+    '.agents/factory-settings.json': '{"version":1,"seats":{}}\n',
+  });
+  try {
+    fs.writeFileSync(path.join(root, '.agents', 'factory-settings.json'), '{invalid');
+    for (const args of [[], ['--staged']]) {
+      const result = runDocLintFixture(root, args);
+      assert.equal(result.status, 1);
+      assert.equal(result.stderr, 'doc-lint: failed to scan \u2014 .agents/factory-settings.json: is not valid JSON\n');
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('documentation verdict preserves sweep resolution settings', () => {
+  const contents = {
+    ...SCAN_SET_SEEDS,
+    'docs/cite.md': 'The sweep runs by `docs/DOC-SWEEP.md` and [triage](SWEEP-TRIAGE.md), checked by `scripts/sweep-scope-check.mjs`.\n',
+  };
+  const files = Object.keys(contents);
+  const read = (rel) => contents[rel];
+  assert.deepEqual(docLintVerdict({
+    files, read,
+    settings: readSettingsHeader('{"version":1,"docSweep":false,"seats":{}}', 'settings.json'),
+  }), { errors: [], advisories: [] });
+  assert.deepEqual(docLintVerdict({
+    files, read,
+    settings: readSettingsHeader('{"version":1,"docSweep":true,"seats":{}}', 'settings.json'),
+  }), {
+    errors: [
+      'docs/cite.md:1 \u2014 dangling path ref: `docs/DOC-SWEEP.md` does not exist',
+      'docs/cite.md:1 \u2014 dangling path ref: `scripts/sweep-scope-check.mjs` does not exist',
+      'docs/cite.md:1 \u2014 dead Markdown link: `SWEEP-TRIAGE.md` does not exist',
+    ],
+    advisories: [],
+  });
+});
 
 test('working-tree CLI excludes unstaged tracked deletions from scans and path resolution', () => {
   const root = makeDocLintFixture({

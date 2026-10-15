@@ -2,7 +2,8 @@
 
 A repository runs Claude Code, Codex or both, and its settings file names which. Each runtime reads the same contract,
 skills and seat charters through its own copy or format. This page explains what they share, where each keeps its own
-files, and what changes on native Windows. This page is part of [the workflow guide](AI-WORKFLOW.md). Related:
+files, which layer of a working setup is the factory's, the repository's choice or a person's own, and what changes on
+native Windows. This page is part of [the workflow guide](AI-WORKFLOW.md). Related:
 [Enforced or instructed](AI-WORKFLOW-enforcement.md) for what the hooks refuse, and [The seats](AI-WORKFLOW-seats.md)
 for the agent seats each runtime defines.
 
@@ -70,6 +71,30 @@ on macOS and Linux, and on Windows only for a handler without `commandWindows`; 
 or moving a handler or inserting one ahead of it, needs it on every platform. Re-approve by running `/hooks` in
 Codex at the repository root on each affected platform.
 
+## What the factory carries, what setup chooses and what stays yours
+
+A working setup has three layers, and each has one owner. The table says which layer a thing belongs to; the rules for
+each thing stay in the homes listed under "Where the rules live".
+
+| Layer | What it holds | Who changes it |
+|---|---|---|
+| The factory | The files `.agents/factory-manifest.json` lists: the contract, skills, seat charters, hooks and checks | Nobody in an adopting repository: a sync or a release update replaces them, and each is checked against its fingerprint |
+| What setup chooses | The settings file `.agents/factory-settings.json`, which names the runtimes and records each yes the repository gave, a `crossFamilyReview` yes included, and the documents an install or the `fabraik-setup` skill writes for the repository | The repository: setup writes them once, and a person edits them afterwards |
+| What stays yours | Each person's own home instructions and settings for a runtime | The person: an install never reads, copies or changes them |
+
+Cross-family review is where the layers meet. A review by the other model family sends that family's provider the code,
+the diff, the plan and the card. The yes that allows it is recorded as `"crossFamilyReview": true` in the settings file,
+so it is a setup choice that travels with the repository on `main`: a person who clones the repository onto another
+machine, or opens a new session there, finds it without carrying any home setting across. Naming both runtimes alone
+does not record it, and a session that finds none asks the owner before it sends anything to the other family, as the
+`resume` skill describes under "6. Verify and review".
+
+That yes is a standing authorization to share material with the other provider and nothing more. It does not answer a
+prompt. Claude Code asks before a command its allow list lacks, unless a person's own settings allow it, and that holds
+for the Codex command line it runs too. Codex asks as its sandbox and approval policy decide, a network request
+included. The operating system may ask as well, for example before a program reaches a protected folder. Each prompt is
+answered where it appears, and the yes recorded in the settings file stands apart from push authorisation too.
+
 ## Where the rules live
 
 - [`AGENTS.md`](../AGENTS.md) under "Runtime notes": which file each runtime reads, and how the vendored skills
@@ -83,6 +108,9 @@ Codex at the repository root on each affected platform.
 - [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): which suites run on which platform.
 - [The `sync-job` skill](../.agents/skills/sync-job/SKILL.md): how a repository names its runtimes, and which files
   each owns.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md) under "6. Verify and review": how a session reads the
+  recorded cross-family authorization, what it asks where none is recorded, and that the authorization answers no
+  permission prompt.
 
 ## Failure modes
 
@@ -97,6 +125,13 @@ Codex at the repository root on each affected platform.
   check and the remedy under "Before intake".
 - **A file of a runtime the repository does not run is in the tree.** The contract test refuses it by path. Remove it,
   or name the runtime in the settings file and sync.
+- **A session asks about cross-family review though the owner already said yes.** The yes counts only as
+  `"crossFamilyReview": true` in `.agents/factory-settings.json` on `main`. A yes given in an earlier job's conversation, a
+  home setting or a settings file naming both runtimes without the key records nothing, so the session asks once per
+  job until the key is added and merged.
+- **A prompt appears although the owner authorized cross-family review.** The authorization answers no permission
+  prompt. Claude Code, Codex and the operating system each ask on their own rules, and a person's own settings decide
+  which commands Claude Code allows without asking.
 
 ## Key files
 
@@ -107,4 +142,4 @@ Codex at the repository root on each affected platform.
 - `.claude/settings.json` and `.codex/hooks.json`: the hook registrations.
 - `.codex/hooks/verify-green.mjs` and `scripts/lib/posix-shell.mjs`: the Windows route to the shell hooks.
 - `scripts/lib/codex-hooks-windows.test.mjs`: the proof of the Windows registrations.
-- `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime.
+- `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out.

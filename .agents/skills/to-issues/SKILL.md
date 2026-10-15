@@ -10,9 +10,10 @@ Two shapes, one publish pipeline: **decompose** a plan/spec/Epic into ordered, b
 routing, body shape, publish, and verify are identical).
 
 Claude may invoke this skill, but Step 4 (owner approval) is a HARD gate on every ordinary model-invoked
-proposal: create NOTHING on the board until the owner approves. Exceptions, none owned or gated by
+proposal: create or update NOTHING on the board until the owner approves. Exceptions, none owned or gated by
 `/to-issues`: a follow-up card, in `Backlog`, for work an approved job surfaces and genuinely cannot finish,
-filed under the "Owner gates" rule in `AGENTS.md`; an issue the day-after sweep triage filed under its own manual
+filed under the "Owner gates" rule in `AGENTS.md`; where the documentation routines are active and the settings file
+does not hold `"docSweep": false`, an issue the day-after sweep triage filed under its own manual
 (`docs/SWEEP-TRIAGE.md`), which the `resume` intake cards in `Backlog`; and any further exception
 `docs/ISSUE-TRACKER.md` records. An exception skips the step 4 approval gate, not the links rule: an
 issue created with gh still records blockers and parents as built-in links (step 6), never as body text. The sweep
@@ -31,11 +32,15 @@ gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] |
 Never `--comments` alone: it replaces the body with a comments-only view and prints nothing, at exit 0, on an
 issue with none.
 
-### 2. Explore the codebase (optional)
+### 2. Explore the codebase
 
 Read enough of the code and documents the Architecture seams sections of `AGENTS.md` and `.agents/REPOSITORY.md` name to ground the breakdown in real seams.
 Use `GLOSSARY.md` vocabulary and respect the applicable scoped rules. If a slice needs groundwork first, that
-prefactor is its own slice, ordered first.
+prefactor is its own slice, ordered first. Exploration is required for the overlap judgment in Step 3. First
+compare the proposal's and candidates' criteria by seam, using the criteria rather than labels or titles to
+exclude cards outside that seam: those cards cannot share both affected files and specific verification tests.
+For every plausible same-seam candidate, read the code and existing tests against both sets of criteria to
+establish concrete affected file and specific verification-test sets. Retain every qualifying match.
 
 ### 3. Draft vertical slices
 
@@ -54,13 +59,37 @@ child, blocked by the others, so the parent closes when its children do. No late
 or refuses work on these signals or on a line count; after work-pick the only split is the plan-time finding in
 the `resume` skill's Plan section.
 
+For ordinary proposals, compare each slice with open, non-epic cards in **Backlog** or **Ready** using current
+board intake, the card read in the `resume` skill's "3. Start the job", and its local branch/worktree and
+pull-request inventory in "1. Find where things stand". Use those reads for state, assignee and claim evidence;
+the resume Free check confirms snapshot consistency, not unstarted eligibility. An assignment, any claim, job
+branch/worktree, pull request or known prior work-pick excludes a card even if its Status returned to Backlog or
+Ready. Unresolved assignment or start state also excludes it.
+
+Require overlap in both the affected files and specific tests established by Step 2 that verify the proposed
+work; a shared area or broad suite is insufficient. Offer no fold for unmatched cards or cards whose file/test
+sets cannot be established. If board or start-state reads fail or are incomplete, report the unavailable evidence
+in one bounded notice, not one notice per card; never describe an incomplete comparison as a confirmed no-match.
+
+For each qualifying card, keep its current title and body for the publication recheck and prepare a coherent
+combined one-sentence outcome. Append the new criteria while preserving the existing criteria and meaning;
+update the relevant existing sections to describe the combined work and preserve unrelated content.
+Documentation impact remains exactly one honest outcome for the combined work. Show the card's number and title,
+all proposed body changes and any needed title change, the combined outcome, the concrete file/test overlap and
+the combined outcome or invariant statement count beside the new proposal's count in chat. Keep paths out of
+issue bodies as Step 7 requires. Recount the combined criteria and flag a count above five using the same size
+signal.
+
 ### 4. Quiz the owner
 
 Present the breakdown as a numbered list showing per slice: **Title**, **Blocked by**, **Required
 capabilities**, plus its one-sentence outcome and its count of outcome or invariant statements, flagging any count
 above five. An instruction to file an issue approves the idea, not a proposal the owner has not seen, so a single
 captured idea is presented here too. Ask: granularity right? dependencies correct? merge or split anything? Iterate
-until the owner approves; create nothing until they do.
+until the owner approves; create or update nothing until they do. Where Step 3 found a qualifying card, include
+one choice in this same size judgment: fold the shown addition into that card or file it separately. The approved
+choice and combined count travel with the proposal; a separate choice stands for later seats and is not reopened.
+The exception paths above retain their own publication rules and skip this gate.
 
 ### 5. Route each slice
 
@@ -70,6 +99,14 @@ until the owner approves; create nothing until they do.
   marked plan-first in the body regardless of how mechanical it looks.
 
 ### 6. Publish to the board, in dependency order
+
+For an approved fold, recheck that the target remains open and unstarted under Step 3's eligibility rules and
+that its title and body are unchanged from the versions kept for the proposal shown to the owner. If that evidence
+changed or is unavailable, return the changed proposal or unavailable evidence to the owner before any write.
+Otherwise write only the owner-approved combined title/body changes, preserving its metadata, including Status,
+Workstream and labels, and its native parent and blockers; add only owner-approved links using the
+built-in links below. Create no issue for folded work and skip the creation and board-add steps for that target.
+Separately approved work follows the existing creation pipeline.
 
 Publish blockers first: a blocker must exist before a later issue can link to it. If you CREATED a new parent
 Epic, it is a board item too — run a-b for it and link every child as a native sub-issue (step c). Every item gets
@@ -180,11 +217,14 @@ Do NOT close or edit the parent Epic issue.
 
 ### 8. Verify the publish (fail loud, do not skip)
 
-Run the shared verifier once with the Epic followed by every child (a standalone issue takes one number):
+Verify the Epic with exactly its actual native children; the verifier checks that exact child set:
 
 ```bash
 node scripts/verify-issue-publish.mjs <EPIC_N> <CHILD_N...>
 ```
+
+Verify each reused fold target outside that native child set in its own single-number run of the same verifier;
+a standalone new issue also takes one number. Preserve native parents; never reparent a target for verification.
 
 Report its four results: board presence, Statuses and Workstreams, the one kind label, native child count. On
 failure, read WHICH failure: `absent from the board` means the publication genuinely failed — fix before reporting
@@ -194,12 +234,16 @@ ready; `needs exactly one kind label` means correct that issue's labels with `gh
 verifier, never add again; `could not confirm whether` means fix the named cause. A silent skip here is the exact
 failure this skill already made once.
 
-Then read every published issue's blockers back from GitHub and report them against the owner-approved list; a
+Read each folded target's updated title and body back and compare them with the owner-approved combined changes
+and preserved meaning, criteria and unrelated content.
+Then read every new or reused issue's blockers back from GitHub and report them against the owner-approved list; a
 missing or extra link is a failure to fix before reporting ready:
 
 ```bash
 gh api "repos/{owner}/{repo}/issues/<N>/dependencies/blocked_by" --jq '.[].number'
 ```
+
+Report the reused issue number for folded work.
 
 ## Example
 

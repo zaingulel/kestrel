@@ -16,8 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { evaluateSweepScope } from './sweep-scope-evaluate.mjs';
-import { treeGrepArgs, treeGrepCandidates } from './sweep-scope.mjs';
+import { evaluateSweepScope, knownInTree } from './sweep-scope-evaluate.mjs';
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../sweep-scope-check.mjs');
 let parent;
@@ -687,18 +686,8 @@ export function repo({ documents = {}, mayEdit = ['docs/ALLOWED.md'] } = {}) {
   };
   const check = (head, at = base) => evaluateSweepScope(at, head, dir);
   const checkCli = (head, at = base) => spawnSync('node', [SCRIPT, at, head], { cwd: dir, encoding: 'utf8' });
-  // The check script's own grep stage, called through the same builder, so the tree rows are judged on
-  // the lines the real base returns: every spelling of the destination, case-insensitively, with git's
-  // `<rev>:<path>` prefix cut at the NUL `--null` writes after it.
-  const grep = (text) => {
-    const lines = [];
-    for (const candidate of treeGrepCandidates(text)) {
-      const found = spawnSync('git', treeGrepArgs(candidate, base), { cwd: dir, encoding: 'utf8' });
-      for (const match of found.stdout.split('\n').filter(Boolean)) lines.push(match.slice(match.indexOf('\0') + 1));
-    }
-    return lines;
-  };
-  return { git, write, commit, check, checkCli, grep, base, dir };
+  const vouches = (text) => knownInTree(text, base, dir);
+  return { git, write, commit, check, checkCli, vouches, base, dir };
 }
 
 // One end-to-end run: `path` is the only may-edit entry, it starts as `before` in the base commit, and

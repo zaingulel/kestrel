@@ -18,15 +18,14 @@ authority for the executed test bar and the fail-loud invocation rule.
    dishonest, not that a quota is unmet.
 4. **Keep the oracle independent.** Expected values come from requirements, canon, a hand-worked example, or
    a known-good fixture, never a copy of the production calculation. The implementing agent's own new test
-   is never the sole oracle for its own implementation; independence comes from the expected-value source, an
-   executed mutation where applicable, and the fresh reviewer. Agreement between models is not an independent
+   is never the sole oracle for its own implementation; independence comes from the expected-value source, the
+   discrimination proof selected below, and the fresh reviewer. Agreement between models is not an independent
    oracle.
 5. **Prove discrimination, not activity.** Valid evidence accepts the intended behaviour, rejects a plausible
-   wrong behaviour, and still accepts an equivalent correct implementation. Execute one plausible mutation per
-   distinct material behaviour at convergence; a list of inputs the code handles the same way is one behaviour, so
-   it earns one mutation, not one per input. Executing it means deliberately breaking the implementation,
-   observing the focused evidence fail, restoring it, and observing green. Preservation uses existing
-   evidence for an unchanged protected contract and invents no new test or mutation ceremony.
+   wrong behaviour, and still accepts an equivalent correct implementation. Select the discrimination proof under
+   section 4: qualifying ordinary pre-fix red/unchanged-test green, an executed mutation, or a declared alternative.
+   A list of inputs the code handles the same way is one behaviour, not one proof per input. Preservation uses
+   existing evidence for an unchanged protected contract and invents no new test or mutation ceremony.
 6. **Bound the feedback.** Focused evidence during construction; the applicable integrated evidence once at
    convergence; a further broad rerun needs a named reason: changed evidence, an invalidated environment, or
    an investigated flake. A commit added after convergence is changed evidence only for the checks section 6 reruns
@@ -35,12 +34,16 @@ authority for the executed test bar and the fail-loud invocation rule.
 7. **Stop or escalate.** When retries stop producing new information, stop. An automated-judge
    failure fails loudly and is diagnosed first as a possible test-oracle defect (wording, timing,
    stale fixture) before it is treated as an implementation defect; an unavailable observation is unavailable
-   evidence, never a pass. Each new or strengthened test gets its own focused run, logged through
-   `node scripts/run-log.mjs` before the fresh review starts, selecting one Python qualified test method or
-   one Node whole-title name pattern anchored at both ends, `^<full title>$`, one test per run. A title fragment
-   or a run that selects several tests is no evidence; zero matches or a skipped selected test is a failed
-   verification. Invoke fail-loud scripts directly: their own
-   exit status is authoritative, never a filtered pipeline's status.
+   evidence, never a pass. Before fresh review, log each new or strengthened test's focused evidence through
+   `node scripts/run-log.mjs`. Use the runner's native exact selection for one or several explicitly named tests
+   that support one coherent claim; grouping is optional. Record the intended full test identities, including
+   their files, in the handoff before the run. Report each intended test's actual result and the executed count
+   against that list. For name patterns, anchor each whole title at both ends, `^<full title>$`, escaping
+   regular-expression characters and combining exact alternatives where needed. Inspect actual execution and each
+   result against the intended selection: zero, missing, skipped, or unintended tests make the evidence incomplete
+   and fail verification. Keep individual diagnostic runs where needed. Grouped evidence does not change the
+   one-failing-test-at-a-time learning cycle in `strict-tdd`. Invoke fail-loud scripts directly: their own exit
+   status is authoritative, never a filtered pipeline's status.
 
 ## 2. Evidence routes
 
@@ -122,7 +125,7 @@ there is no meaningful observer, stop and resolve the uncertainty or name an exp
 | Mode | Admission and obligation |
 |---|---|
 | `strict-tdd` | Use for a reproducible defect with a meaningful observer and independent oracle, or when a subject-matter rule requires it, including the trust perimeter and applicable security, privacy, or honesty invariants. A slice with an admitted claim logs an independent red run through `node scripts/run-log.mjs`, in the environment where the defect shows, before its first implementation edit, and the same evidence returns green after the change. A slice that reaches review without that logged red run has no admissible evidence for the claim. |
-| `evidence-required` | This is the default for new or changed observable behaviour or policy when no higher subject floor applies, and its construction order is flexible while new or strengthened evidence and one plausible mutation remain required at convergence. |
+| `evidence-required` | This is the default for new or changed observable behaviour or policy when no higher subject floor applies, and its construction order is flexible while new or strengthened evidence and the discrimination proof selected below remain required at convergence. |
 | `preservation` | Admit only when there is no new or changed observable behaviour and the protected contract remains unchanged, including every relevant test assertion and policy outcome. Use declared existing regression, identity, lint, link, generation, or structural evidence; create no new test or mutation ceremony. |
 
 A text-only claim, a documentation or agent-instruction change, has no executable observer for its meaning. One
@@ -130,11 +133,27 @@ that changes what a reader or agent must do is `evidence-required`: `npm run lin
 and the fresh review of the final tree is the named alternative to the executed mutation. One that only rewords or
 moves text is `preservation`, and `npm run lint:docs` staying green is its protected contract.
 
+### Discrimination proof
+
+At convergence, the orchestrator validates the selected proof. For ordinary behaviour, an independently grounded
+counterexample executed and logged before implementation may discharge an equivalent mutation only when it failed
+because of the claimed defect and the identical test, oracle, and materially equivalent environment pass after the
+fix. Record the ordinary behaviour, the plausible mutation, and why that prior failure rejects the same wrong
+behaviour. Unrelated red, launch or environment failure, an oracle failure, edited assertions, and unavailable
+execution do not qualify.
+
+Without qualifying pre-fix red, ordinary new or changed behaviour requires an executed wrong-behaviour check:
+deliberately introduce one plausible mutation per distinct material behaviour, observe the focused evidence fail,
+restore the implementation, and observe green. Every changed protected invariant, including trust, security,
+privacy, and honesty, retains one explicit adversarial convergence mutation; qualifying ordinary red never replaces
+it. Any stricter local subject floor still applies. The text-only alternative above and preservation retain their
+own evidence routes. Builders never perform mutation/revert cycles; the orchestrator performs required mutations.
+
 For every claim, the plan or pull request body records the observer, independent oracle, plausible mutation,
-and focused evidence; for `preservation`, the plausible mutation is `not-applicable` and the unchanged protected
-contract is named. Every executed check, including the mutation's red run and the restored green run, is run
-through `node scripts/run-log.mjs` so the exit code is written by a script, and the pull request body quotes
-those lines. An asserted-but-unexecuted mutation is a review finding.
+selected discrimination route, and focused evidence; for `preservation`, the plausible mutation is `not-applicable`
+and the unchanged protected contract is named. Every executed check, including qualifying pre-fix red and green or
+a required mutation's red and restored green, runs through `node scripts/run-log.mjs` so the exit code is written
+by a script, and the pull request body quotes those lines. A required but unexecuted mutation is a review finding.
 
 The architect proposes the mode per claim; the orchestrator validates the proposal and applies the subject floor.
 The builder follows the handed-off mode and cannot reinterpret or downgrade it. The reviewer independently derives

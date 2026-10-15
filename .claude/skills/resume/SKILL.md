@@ -103,18 +103,35 @@ node scripts/board.mjs --intake > <scratch>/board-intake.txt
   session's job, since a job branch stays local until push: never return it to `Ready` on the session's own
   judgment and never offer it as a candidate row. Show it to the owner at work-pick with the claim the document
   gives for it, whether a comment, none or `UNAVAILABLE`, and return it to `Ready` only on the owner's say.
-- If the Conventions table in `.agents/REPOSITORY.md` marks the documentation routines active, intake sweep-triage cards
-  as `docs/SWEEP-TRIAGE.md` describes: the day-after triage routine files issues it cannot card. Before
-  work-pick, list them with
-  `gh issue list --state open --author @me --limit 100 --json number,body --jq '[.[] | select(.body | contains("Sweep triage: source #"))]'`
-  in the same batch of reads; its bodies are the triage evidence. Finish the batch before triage writes. For
-  each the board output does not show, card it with
-  `node scripts/board-add.mjs <issue> Backlog <Workstream>`, the Workstream the issue body names, only when the
-  owner-authored verdict comment on the sweep pull request its marker cites lists that issue number; otherwise
-  report it at work-pick and card nothing. For every marker issue that verdict comment lists, whether or not it is
-  already on the board, while its body still carries a `Blocked by:` line, create each link with
-  `gh issue edit <issue> --add-blocked-by <n>`, then remove the line from the body, so the link is the only
-  record.
+- If the Conventions table in `.agents/REPOSITORY.md` marks the documentation routines active and the repository's
+  settings file, `.agents/factory-settings.json`, does not hold `"docSweep": false`, intake sweep-triage tasks and
+  findings source reports as `docs/SWEEP-TRIAGE.md` describes. Where that file is absent, holds no such key or holds
+  `true`, the table alone decides. Before work-pick, list them with
+  `gh issue list --state open --author @me --limit 100 --json number,title,body`
+  in the same batch of reads. Count the raw array before identifying leads: exactly 100 results means incomplete
+  issue discovery, reported at work-pick, never a complete or empty result. Finish the batch before reconciliation
+  writes. Combine findings-source-title and task-marker leads from this listing with source-shaped reports and
+  task-marker entries in the already-complete board intake. Qualify those board leads even when they are absent
+  from the recent listing. A title or marker is only a lead: qualify each source through the owning local manual,
+  including its owner identity and readable required fields. A malformed or unavailable source-shaped report
+  receives no reconciliation writes and is excluded from candidate rows; report its unavailable qualification at
+  work-pick, never treat it as qualified or as an empty result.
+  Read the owner-authored final verdict on each qualified source report and on each qualified sweep source a task
+  marker cites, which may be a source pull request or source issue. Read the tasks that verdict lists, including
+  reused tasks. A marker alone, unrelated issue, wrong author, missing verdict or verdict omitting the task grants
+  no reconciliation.
+  For each verified task the verdict lists that is missing from the board, use
+  `node scripts/board-add.mjs <issue> Backlog <Workstream>`, with the valid Workstream from its body. Complete a
+  listed task's missing Workstream with the same operation and its existing Status, preserving that Status. For
+  each such task whose body still carries `Blocked by:`, create each link with
+  `gh issue edit <issue> --add-blocked-by <n>`, then remove the body line so the link is the only record.
+  Unqualified tasks are reported and receive no such writes.
+  Qualified source reports are evidence, never implementation tasks. If a report is absent from the board, use
+  `node scripts/board-add.mjs <issue> Backlog <Workstream>` with its valid routing line; if only routing is missing,
+  use its existing Status instead of Backlog. Preserve an existing Status and report unavailable fields rather
+  than guessing them. Exclude source reports from candidate rows whether triage is pending or complete, and show
+  that triage state separately using the owner-authored final verdict. Leave source reports open as evidence:
+  do not close, archive, delete or move them to Done. The routine has no board access.
 
 ## 2. Work-pick (owner gate one)
 
@@ -133,10 +150,11 @@ not a sentence, aiming for twelve words or fewer and never dropping a fact the d
 
 An open epic parent is never a candidate row; its next unblocked child is, and a child with an open blocker
 is not offered. Gates are read off AGENTS.md, Owner gates and Review: owner direction, sign-off, architect plan,
-screenshot, security review, Greptile, and any further gate the Surfaces table in `AGENTS.md` names. Route names
-the build seat (`builder-max`, `builder`, or `builder-lite`), whether the architect runs, and the reason from
-residual judgment, uncertainty, failure consequence, and verification strength. Close with one line recommending
-a row number, then stop; no acceptance-criteria list is presented. The owner's pick of any row is the work-pick approval of that card's
+screenshot, security review, the external review where the repository has turned that add-on on, and any further gate
+the Surfaces table in `AGENTS.md` names. Route names the build seat (`builder-max`, `builder`, or `builder-lite`),
+whether the architect runs, and the reason from residual judgment, uncertainty, failure consequence, and verification
+strength. Close with one line recommending a row number, then stop; no acceptance-criteria list is presented. The
+owner's pick of any row is the work-pick approval of that card's
 outcome and acceptance criteria as written, and it starts the job with no further confirmation unless the checks
 in "3. Start the job" do not confirm the card is free; planning proceeds autonomously after it. One issue per
 branch. Two issues may run in parallel only when their files are disjoint.
@@ -277,10 +295,13 @@ branch. Two issues may run in parallel only when their files are disjoint.
   dispatch, and the pull request body records which seat reviewed the plan and that the repository runs Claude Code
   alone, so the Sol extra-high plan review does not apply; in a repository that runs Codex alone its own Codex seat
   reviews, as a Codex session dispatches it.
+  A Claude session's pass to the Codex seat is a cross-family pass and waits on the authorization section 6 reads;
+  where the owner declines, the Claude `plan-reviewer` seat reviews by that section's fallback dispatch and the body
+  records that cross-family review was not authorized, so the Sol extra-high plan review was not met.
 - Every plan follows `docs/CODING-STANDARDS.md`, the session's own short plan for a card without an architect
   included, because a builder cannot change a plan once it arrives.
-- A plan with a user-facing change, the session's own short plan included, reads `docs/DESIGN-SYSTEM.md` first: it
-  owns the tokens and component patterns the plan builds to.
+- Where the project has a user interface, a plan with a user-facing change, the session's own short plan included, reads
+  `docs/DESIGN-SYSTEM.md` first: it owns the tokens and component patterns the plan builds to.
 - A plan for a change to how the interface looks, the architect's or the session's own short plan, is written with
   the vendored `frontend-design` skill. The planner reads `.agents/skills/frontend-design/SKILL.md` beside
   `docs/DESIGN-SYSTEM.md` and writes the visual direction into the plan under the heading `Visual direction`: every
@@ -368,7 +389,8 @@ branch. Two issues may run in parallel only when their files are disjoint.
   no authorisation; only the push does. Commit green work before any stop, handoff, replan or split proposal as
   well, so nothing green waits uncommitted in the worktree.
 - Wrap every executed check in `node scripts/run-log.mjs <label words> -- <command>` (plain unquoted label,
-  then a bare `--`) so the exit code is recorded by a script, not asserted: focused tests, the one executed mutation per behaviour (red, restore, green), lint,
+  then a bare `--`) so the exit code is recorded by a script, not asserted: focused tests, the discrimination
+  evidence `docs/TESTING-STRATEGY.md` selects, lint,
   and the convergence checks `docs/TESTING-STRATEGY.md` names. The log lives at `.claude/worklog/<branch>.md`.
   On every agent-initiated rerun, supply a nonblank diagnosed reason through `RUN_LOG_RERUN_REASON`; for example,
   `RUN_LOG_RERUN_REASON='Changed the failing assertion' node scripts/run-log.mjs focused -- npm run lint`.
@@ -451,8 +473,8 @@ branch. Two issues may run in parallel only when their files are disjoint.
     that rule says. Answers are never added across parts: one part that is hard to undo and another that is wide in
     reach make a `sign-off` change only where a single part is both. The one fresh review still covers the whole
     final tree, at that tier, because a reviewer shown one part cannot see what the parts do to each other and
-    Greptile reviews a whole pull request. The `document` tier keeps its anchor, the gate's exit on the whole change,
-    and line count never lowers a tier.
+    the external review, where the add-on is on, reads a whole pull request. The `document` tier keeps its anchor, the
+    gate's exit on the whole change, and line count never lowers a tier.
 - The two answers choose one of three tiers, each recorded in the review line under its name.
   - **`document`: the session reviews its own work.** The lightest tier is anchored, never judged: it is exactly the
     change the repository's gate for the direct route admits whole. On the committed final tree, record
@@ -482,13 +504,47 @@ branch. Two issues may run in parallel only when their files are disjoint.
     this family's own seat, in a fresh context, and the pull request body records which family reviewed, that the
     repository runs that runtime alone, and that the cross-family gate therefore does not apply. That recording is the
     whole of the route: a single-family review the body does not declare is a skip.
-  - **`sign-off`: cross-family review, then Greptile.** A change that is both hard to undo and wide in reach: the same
-    cross-family pass, its unavailability route included, then Greptile on the draft in section 8. A `sign-off` tier
-    diff whose other family is unavailable and whose Greptile attempt settles as `UNAVAILABLE` by either of the routes
-    section 8 step 2 points to proceeds on the substituted pass plus that record, both declared in the pull request
-    body, because there is no further reviewer to wait for.
+    **Cross-family authorization.** A pass sent to the other family, the plan review of "4. Plan" included, gives that
+    family's provider the code it reads, the diff, the plan and the card with its comments, so it runs only on the
+    owner's authorization. Read it on the fetched `main` with the two commands "4. Plan" uses for plan approval: it is
+    recorded only where the file is one JSON object holding `"crossFamilyReview": true`. No settings file, no such
+    key, or a `runtimes` list naming both without it records none; a command that fails, a file that is not one JSON
+    object or any other value leaves it unknown, which is never recorded, and the owner is told what the commands
+    printed. Where it is recorded the pass runs with no owner question. Where it is not, nothing goes to the other
+    family until the owner answers one plain-language question saying what the pass would share and that adding
+    `"crossFamilyReview": true` to the settings file records the authorization for later jobs. A yes covers this job's
+    cross-family passes; a no runs the same charter on this family's own seat, and the pull request body records that
+    cross-family review was not authorized and the cross-family gate therefore not met. The authorization is no push
+    authorisation or other approval and answers no permission prompt of either runtime or the operating system.
+  - **`sign-off`: cross-family review, then the external review where the add-on is on.** A change that is both hard
+    to undo and wide in reach: the same cross-family pass, its unavailability route included, then, in a repository
+    that has turned the external review add-on on, the external review on the draft in section 8. In a repository with
+    the add-on off that pass is the whole of this tier: nothing further is requested or waited for, and the six-field
+    review line is the record of it. Where the add-on is on, a `sign-off` tier diff whose other family is unavailable
+    and whose external review attempt settles as `UNAVAILABLE` by either of the routes section 8 step 2 points to
+    proceeds on the substituted pass plus that record, both declared in the pull request body, because there is no
+    further reviewer to wait for.
     In a repository that runs one runtime the first pass is the single-family review above, declared the same way, then
-    Greptile; where Greptile settles as `UNAVAILABLE` it proceeds on that pass plus that record, both declared.
+    the external review where the add-on is on; where that review settles as `UNAVAILABLE` it proceeds on that pass plus
+    that record, both declared.
+- **The external review add-on (optional).** A second, independent review of a `sign-off` tier change by an outside
+  review service, requested on the draft pull request. It is off unless the repository's settings file holds
+  `"greptile": true`. Read the setting on the fetched `main`, never from the files of the job, so a job cannot switch
+  its own review off: the two commands Plan approval gives under "4. Plan" print the file. Read it again after the
+  rebase in section 8, step 1, and after any later rebase there, each time on the `main` that rebase used, and deliver
+  under the latest reading: a setting turned on in `main` since an earlier reading then counts. The add-on is off where
+  the repository has no settings file, or where the file is one JSON object that holds no `greptile` key or holds
+  `false`. It is on where the file holds `"greptile": true`. A command that fails, a file that is not one JSON object,
+  any other value, or a key spelt nearly like it leaves the setting unknown, which is never off: open no pull request
+  for a `sign-off` tier change and tell the owner what the commands printed. A job that changes the setting is delivered
+  under the value the fetched `main` held. A job that turns the add-on off therefore still owes the external review
+  where its tier is `sign-off`, though its own sync has removed the add-on's files from its worktree: it reads the
+  add-on's skill from the fetched `main` with `git show origin/main:.agents/skills/<name>/SKILL.md`, `<name>` being that
+  skill's name, `greptile`, and follows what that prints wherever section 8 says to read the skill. A read that fails is
+  told to the owner with the draft kept open; it is never `UNAVAILABLE`. Where the add-on is on, the `greptile` skill
+  owns every other rule of the review: the pool it is metered from, the allowance read before a request, how each thread
+  is settled, whether a review still stands after a rebase, and when an attempt counts as unavailable. The `sync-job`
+  skill says how a repository turns the add-on on or off.
 - A guard keeps the heaviest tier in both directions. The rule covers a guard, which is a hook, a permission rule or a
   ruleset that refuses an action, a gate a guard runs, and its classifier, with every surface in the Surfaces table's
   `sign-off` row: a change to any of them is `sign-off` tier whether it loosens or tightens and whatever the two
@@ -504,8 +560,8 @@ branch. Two issues may run in parallel only when their files are disjoint.
   `easy` or `hard` with one sentence of reason, a line beginning `Reach:` that reads `narrow` or `wide` with one
   sentence of reason, and one sentence more where the gate's exit or the guard rule set the tier. For a mixed change
   the two lines give the answers of the part that set the tier, each reason names that part, and one sentence more
-  says what the other parts take; where two parts take the same heaviest tier, either is the part named. A Greptile
-  review not requested on tier grounds is neither `UNAVAILABLE` nor a clean review.
+  says what the other parts take; where two parts take the same heaviest tier, either is the part named. An external
+  review not requested, on tier grounds or because the add-on is off, is neither `UNAVAILABLE` nor a clean review.
 - Fix each true finding by the cheapest valid fix it names. A true finding whose every fix costs more than it is worth
   goes to the owner as a plain-language decision, and the owner may set it aside as deferred; a finding is dismissed,
   with a reason, only when it is false. Then one pass scoped to the repaired hunks and what they can break, by the
@@ -525,8 +581,8 @@ direct-route commit message: GitHub closes, as completed, any issue whose link f
 tense, another repository's `owner/repo#N` included. Every other mention, such as a covered sync card or the
 canonical repository's card for a deferred finding, which `to-issues` step 6 says how to file, keeps those words
 from directly before its link. The owner's yes, or any instruction to push, covers every step of section 8: the
-push, the draft pull request, the `@greptileai` comments, repairs on the same branch, rebasing onto `main`, marking
-ready, and the auto-merge. Nothing in section 8 stops to ask again; a public comment there is delivery, not a new
+push, the draft pull request, the comments that request the external review where the add-on is on, repairs on the same
+branch, rebasing onto `main`, marking ready, and the auto-merge. Nothing in section 8 stops to ask again; a public comment there is delivery, not a new
 action. Push only after it.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
@@ -557,7 +613,7 @@ receipts so replaced, a blank line, `Closes #<issue>`, and the attribution lines
 rev-parse HEAD^{tree}` equals `git rev-parse <head>^{tree}`, so the pushed commit carries exactly the content the
 receipts checked; a mismatch stops the route and the checks are settled again. Then push with `git push origin
 HEAD:main`, whose pre-push hook judges the push with the gate as it stands on the remote's `main` and refuses a change
-that does not qualify. The draft, Greptile, ready, auto-merge and merge-watch steps below are skipped, and `closeout`
+that does not qualify. The draft, external review, ready, auto-merge and merge-watch steps below are skipped, and `closeout`
 runs. A refusal from the gate means the pull request route, never a workaround.
 
 **Receipt reuse.** After the rebase in step 1, settle each convergence check the testing strategy names on the current
@@ -619,19 +675,21 @@ what the session found, whenever a path the testing strategy does not cover was 
 
 1. Rebase onto `origin/main`, then settle each convergence check the testing strategy names under the Receipt reuse
    rule above. The pre-push hook still runs its own gates on every push. Then push;
-   `gh pr create --draft --body-file <body>` with `Closes #<issue>` in the body. Greptile is requested only for the
-   sign-off tier in section 6; the other tiers go straight to step 3. Move the card to `In review`.
-2. For the sign-off tier, read the [`greptile`](../greptile/SKILL.md) skill and follow it on the open draft; it owns how
-   the review attempt is made and settled.
+   `gh pr create --draft --body-file <body>` with `Closes #<issue>` in the body. The external review is requested only for the
+   sign-off tier in section 6, and only where the add-on is on; every other change goes straight to step 3. Move the
+   card to `In review`.
+2. For the sign-off tier in a repository that has turned the external review add-on on, read the `greptile` skill and
+   follow it on the open draft; it owns how the review attempt is made and settled. A job whose own sync removed that
+   skill reads it from the fetched `main`, as section 6 says under the external review add-on.
 3. Re-read the open draft and require current local evidence, every finding/thread resolved, and a review line
-   that matches the rounds actually run and the findings actually raised and settled. For the sign-off tier, also
-   require the same reviewed head and a settled `COMPLETE` or `UNAVAILABLE` attempt. If a rebase is needed, do it
+   that matches the rounds actually run and the findings actually raised and settled. For the sign-off tier with the
+   add-on on, also require the same reviewed head and a settled `COMPLETE` or `UNAVAILABLE` attempt. If a rebase is needed, do it
    while draft, reverify under the Receipt reuse rule and push. Repeat step 2 only when the change requires
-   Greptile and the skill it points to says the rebased head needs a new attempt. Then `gh pr ready <pr>` starts CI, and
+   the external review and the skill it points to says the rebased head needs a new attempt. Then `gh pr ready <pr>` starts CI, and
    `gh pr merge --auto --squash --delete-branch <pr>` queues the merge for GitHub once `test` passes.
    Never any other merge form; the hook refuses it. If CI needs a repair, use `gh pr ready <pr> --undo` before
    pushing, complete local repair evidence, settling the convergence checks under the Receipt reuse rule, and
-   reassess the full pull-request diff against the section 6 tiers; repeat step 2 only when Greptile is required. An
+   reassess the full pull-request diff against the section 6 tiers; repeat step 2 only when the external review is required. An
    unchanged-head CI retry needs no new review.
 4. Watch it land with one waiting command, run as the Waiting rule under "5. Build" says for a command that runs for
    minutes, and the session never polls by hand.

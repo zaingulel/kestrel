@@ -28,8 +28,8 @@
 // dangling ref rather than an ENOENT crash. The staged hook remains the CI
 // guard against untracked/leftover files (the PR #405 failure mode).
 //
-// Runtimes: a missing target is accepted only when it belongs to a runtime the seat settings file leaves out, and
-// CLAUDE.md is neither read nor cited without Claude Code (scripts/lib/runtimes.mjs owns which path belongs to which).
+// Runtime and sweep resolution: a missing target is accepted when it belongs to an omitted runtime or sweep.
+// CLAUDE.md is neither read nor cited without Claude Code; scripts/lib/runtimes.mjs owns these resolution rules.
 // --staged reads the settings file from the working tree, which is sound because the hook's run of this lint is an
 // advisory and the agent check judges the staged settings file.
 //
@@ -43,24 +43,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import {
-  extractPathRefs,
-  checkPathRefs,
-  parseSkillMeta,
-  findIllegalInvocations,
-  findDateStamps,
-  buildTrackedSet,
-  pathExists,
-  classifyDocLintPath,
-  vendoredSkillNames,
-} from './lib/doc-lint.mjs';
-import { checkMarkdownLinks } from './lib/doc-lint-links.mjs';
-import {
-  extractManualHeadings,
-  extractHeadingCitations,
-  checkHeadingCitations,
-} from './lib/doc-lint-citations.mjs';
-import { installs, presentRuntimes } from './lib/runtimes.mjs';
+import { docLintVerdict } from './lib/doc-lint-verdict.mjs';
+import { treeSettings } from './lib/runtimes.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STAGED = process.argv.includes('--staged');
@@ -94,106 +78,23 @@ function existsInWorkingTree(rel) {
   }
 }
 
-const indexedFiles = git(['ls-files']).split('\n').filter(Boolean);
-const workingTreeTrackedFiles = indexedFiles.filter(existsInWorkingTree);
-const workingTreeFiles = [...new Set([
-  ...workingTreeTrackedFiles,
-  ...git(['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean).filter(existsInWorkingTree),
-])];
-const scanFiles = STAGED ? indexedFiles : workingTreeTrackedFiles;
-const trackedSet = buildTrackedSet(STAGED ? indexedFiles : workingTreeFiles);
-const vendoredNames = vendoredSkillNames(indexedFiles);
-const dateStampFiles = scanFiles.filter((rel) => classifyDocLintPath(rel, vendoredNames).dateStamps);
-const pathRefScanFiles = scanFiles.filter((rel) => classifyDocLintPath(rel, vendoredNames).pathRefs);
-const commandFiles = scanFiles.filter((rel) => classifyDocLintPath(rel, vendoredNames).illegalInvocations);
-const skillMetaFiles = scanFiles.filter((rel) => classifyDocLintPath(rel, vendoredNames).skillMeta);
-
 function main() {
-  // The runtimes the settings file names; read first so a refused file is reported as a failed scan.
-  const present = presentRuntimes(ROOT);
-  // A missing target is accepted only when it belongs to a runtime the settings file leaves out.
-  const exists = (p) => pathExists(trackedSet, p) || !installs(present, p);
-
-  // Repo-wide only: a scan set that classified nothing across the full tree
-  // means the gate would "pass" over no content at all — fail loud rather than
-  // report a vacuous clean run. --staged legitimately scans only what is
-  // staged, so a commit that stages no prose empties sets by design.
-  if (!STAGED) {
-    const emptySets = [
-      ['path-ref', pathRefScanFiles],
-      ['date-stamp', dateStampFiles],
-      ['illegal-invocation', commandFiles],
-    ].filter(([, files]) => files.length === 0).map(([name]) => name);
-    if (emptySets.length > 0) {
-      throw new Error(`empty scan set(s): ${emptySets.join(', ')} — no files classified`);
-    }
-  }
-
-  const errors = [];
-  const advisories = [];
-
-  // Derived at most once per run, and only once a citation is actually found:
-  // the pre-commit fixture repos arm this CLI in scratch trees that have no
-  // CLAUDE.md/AGENTS.md, so an eager read would crash every clean run. When a
-  // citation IS found AGENTS.md, and CLAUDE.md where Claude Code runs, must be readable — the throw is the fail-loud
-  // path, never a silent "no headings" pass.
-  let headingsByManual;
-  const manualHeadings = () => {
-    if (headingsByManual) return headingsByManual;
-    const agentsHeadings = extractManualHeadings(readContent('AGENTS.md'));
-    headingsByManual = { 'AGENTS.md': agentsHeadings };
-    // CLAUDE.md is read only where Claude Code runs. It imports AGENTS.md (`@AGENTS.md`), so a CLAUDE.md citation may
-    // name a heading of either.
-    if (installs(present, 'CLAUDE.md')) {
-      const claudeManual = readContent('CLAUDE.md');
-      headingsByManual['CLAUDE.md'] = new Set([
-        ...extractManualHeadings(claudeManual),
-        ...(/^@AGENTS\.md\s*$/m.test(claudeManual) ? agentsHeadings : []),
-      ]);
-    }
-    return headingsByManual;
-  };
-
-  // --- Dangling path refs, dead links, citations — the full scan set ---------
-  for (const rel of pathRefScanFiles) {
-    const text = readContent(rel);
-    const refs = extractPathRefs(text);
-    const dangling = checkPathRefs(refs, exists);
-    for (const d of dangling) {
-      errors.push(`${rel}:${d.line} — dangling path ref: \`${d.path}\` does not exist`);
-    }
-
-    for (const d of checkMarkdownLinks(rel, text, exists)) {
-      const reason = d.resolved === null ? 'escapes the repo root' : 'does not exist';
-      errors.push(`${rel}:${d.line} — dead Markdown link: \`${d.target}\` ${reason}`);
-    }
-
-    const citations = extractHeadingCitations(text).filter((c) => installs(present, c.manual));
-    if (citations.length > 0) {
-      for (const v of checkHeadingCitations(citations, manualHeadings())) {
-        errors.push(`${rel}:${v.line} — phantom ${v.manual} citation: \`${v.heading}\` is not a heading`);
-      }
-    }
-
-  }
-
-  // --- Illegal invocations — skill bodies under .agents/skills/; the disabled set also reads
-  // the vendored upstream skills' frontmatter, whose bodies are never linted ---
-  const skillFiles = commandFiles.map((rel) => ({ path: rel, text: readContent(rel) }));
-  const meta = parseSkillMeta(skillMetaFiles.map((rel) => ({ path: rel, text: readContent(rel) })));
-  const disabledNames = [...meta.entries()].filter(([, v]) => v.disabled).map(([name]) => name);
-  const illegal = findIllegalInvocations(skillFiles, disabledNames);
-  for (const v of illegal) {
-    errors.push(`${v.path}:${v.line} — ${v.message}`);
-  }
-
-  // --- Date-stamps — ADVISORY, always-loaded + Codex surfaces ------------------
-  for (const rel of dateStampFiles) {
-    const text = readContent(rel);
-    for (const d of findDateStamps(text)) {
-      advisories.push(`${rel}:${d.line} — date-stamp \`${d.match}\` (doc-authoring-leanness: strip date-stamps)`);
-    }
-  }
+  // Settings come from the working tree in both modes, before scanning.
+  const settings = treeSettings(ROOT);
+  const indexedFiles = git(['ls-files']).split('\n').filter(Boolean);
+  const workingTreeTrackedFiles = indexedFiles.filter(existsInWorkingTree);
+  const workingTreeFiles = [...new Set([
+    ...workingTreeTrackedFiles,
+    ...git(['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean).filter(existsInWorkingTree),
+  ])];
+  const { errors, advisories } = docLintVerdict({
+    files: STAGED ? indexedFiles : workingTreeTrackedFiles,
+    read: readContent,
+    settings,
+    resolutionFiles: STAGED ? indexedFiles : workingTreeFiles,
+    vendoredFiles: indexedFiles,
+    allowEmpty: STAGED,
+  });
 
   for (const a of advisories) console.log(`⚠ ${a}`);
   for (const e of errors) console.error(e);

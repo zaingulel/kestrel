@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, KIND_LABELS } from './board-config.mjs';
 import { fetchBoard } from './board.mjs';
-import { leanBoardPage, leanNode } from './board-fixtures.mjs';
+import { leanBoardPage, leanNode, issueItemReply } from './board-fixtures.mjs';
 import { installFakeGh } from './fake-gh.mjs';
 import {
   boardCardsByNumber,
@@ -37,18 +37,9 @@ function graphChildren(numbers, totalCount = numbers.length) {
 // it claims anything, so every stub has to answer the probe as well as the children query.
 // `archived` is per item and defaults to false: an unarchived card is the ordinary case.
 function graphProbe(projectNumbers = [], totalCount = projectNumbers.length, archived = []) {
-  return JSON.stringify({
-    data: {
-      repository: {
-        issue: {
-          projectItems: {
-            totalCount,
-            nodes: projectNumbers.map((number, i) => ({ isArchived: archived[i] ?? false, project: { number } })),
-          },
-        },
-      },
-    },
-  });
+  return JSON.stringify(issueItemReply(projectNumbers.map((number, i) => ({
+    id: `item-${i}`, isArchived: archived[i] ?? false, project: { number }, value: null,
+  })), { totalCount }));
 }
 
 function verify(args, { board = BOARD, graph = graphChildren([476, 477]) } = {}) {
@@ -278,27 +269,31 @@ test('issue-publish: a probe that cannot prove it read every project item never 
   // one input that must never reach a verdict: a board item beyond the page, or a response whose
   // completeness cannot be established, would otherwise be reported as a publication failure —
   // the exact wrong cause #572 exists to remove, reintroduced one layer down.
+  const missingCount = issueItemReply();
+  delete missingCount.data.repository.issue.projectItems.totalCount;
+  const unreadableIssue = issueItemReply();
+  unreadableIssue.data.repository.issue = null;
   const incomplete = [
     // Truncated: the board item could be the one on page two.
-    [graphProbe([99], 21), /has 21 project items but only 1 fetched.*raise the projectItems first: cap/],
+    [graphProbe([99], 21), /has 21 project items but only 1 fetched.*raise the projectItems first: cap in issueItemQuery/],
     // No totalCount: every comparison against it is false, so a bare truncation check passes
     // an unproven read. An empty nodes[] would then read as a confirmed absence.
-    [JSON.stringify({ data: { repository: { issue: { projectItems: { nodes: [] } } } } }), /no non-negative integer projectItems\.totalCount/],
+    [JSON.stringify(missingCount), /no non-negative integer projectItems\.totalCount/],
     // No readable issue in the response. Reported as a shape defect, never as "the issue does
     // not exist": a null repository or a null `data` produces this same payload for an issue
     // that is sitting right there, and asserting the world fact would be confidently wrong.
-    [JSON.stringify({ data: { repository: { issue: null } } }), /board item probe GraphQL response has no readable issue/],
+    [JSON.stringify(unreadableIssue), /board item probe GraphQL response has no readable issue/],
     ['not json at all', /board item probe GraphQL response is not valid JSON/],
     // A node the parser cannot read is not a definite negative: read loosely, `{project: null}`
     // reads as "not on this project" and yields a confirmed absence from an unreadable page.
     [
-      JSON.stringify({ data: { repository: { issue: { projectItems: { totalCount: 1, nodes: [{ isArchived: false, project: null }] } } } } }),
+      JSON.stringify(issueItemReply([{ id: 'bad', isArchived: false, project: null, value: null }])),
       /board item probe GraphQL response has a non-integer project number/,
     ],
     // The archived verdict is read off the matching node, so a non-boolean `isArchived` cannot
     // be defaulted into "not archived" — that is the archived card reported as a lagging read.
     [
-      JSON.stringify({ data: { repository: { issue: { projectItems: { totalCount: 1, nodes: [{ project: { number: BOARD_PROJECT_NUMBER } }] } } } } }),
+      JSON.stringify(issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER }, value: null }])),
       /board item probe GraphQL response has a non-boolean isArchived/,
     ],
   ];

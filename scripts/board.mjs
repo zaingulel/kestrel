@@ -58,81 +58,78 @@ const headerLine = (label, selected, items) =>
 
 // The pick listing and the card details as one document on stdout; the scan and the
 // details outcome on stderr, so a caller that captures stdout holds the document alone.
-function printIntake(items, args) {
+function printIntake(items, args, executor, output) {
   const { candidates, claims, numberless } = intakeCards(items);
-  const details = fetchCardDetails(ghExec, [...candidates, ...claims].map((card) => card.number));
+  const details = fetchCardDetails(executor, [...candidates, ...claims].map((card) => card.number));
   const picks = pickable(items);
   const listing = `${headerLine(PICKABLE_STATUSES.join('/'), picks, items)}\n\n${formatGrouped(picks)}`;
   const document = intakeDocument({ listing, candidates, claims, numberless, details });
   const { lines, exitCode } = intakeOutcome({ ...scanBoard(items), details });
-  console.log(document.join('\n'));
+  output.log(document.join('\n'));
   const parkedNote = parkedLine(items, args);
-  if (parkedNote) console.error(parkedNote);
-  for (const line of lines) console.error(line);
-  console.error(`board intake: ${document.length} line(s) on stdout.`);
-  process.exitCode = exitCode;
+  if (parkedNote) output.error(parkedNote);
+  for (const line of lines) output.error(line);
+  output.error(`board intake: ${document.length} line(s) on stdout.`);
+  return exitCode;
 }
 
-function main() {
-  let args;
+export function main(args = process.argv.slice(2), dependencies = {}) {
+  const output = dependencies.output ?? console;
+  const executor = dependencies.ghExec ?? ghExec;
+
+  let parsed;
   try {
-    args = parseBoardArgs(process.argv.slice(2));
+    parsed = parseBoardArgs(args);
   } catch (err) {
     // The same one-line idiom as the read failure below, so the operator reads the
     // message and not an unhandled-rejection stack trace above it.
-    console.error(`board: ${err.message}`);
-    process.exitCode = 1;
-    return;
+    output.error(`board: ${err.message}`);
+    return 1;
   }
 
   // 2 under --intake, which tells a failed read from a rejected argument (1); every other mode keeps 1.
-  const readFailed = args.intake ? INTAKE_EXIT.readFailed : 1;
+  const readFailed = parsed.intake ? INTAKE_EXIT.readFailed : 1;
   let items;
   try {
-    items = fetchBoard(ghExec);
+    items = fetchBoard(executor);
   } catch (err) {
-    console.error(`board: failed to read the GitHub Projects board — ${err.message}`);
-    process.exitCode = readFailed;
-    return;
+    output.error(`board: failed to read the GitHub Projects board — ${err.message}`);
+    return readFailed;
   }
   if (items.length === 0) {
-    console.error('board: gh returned 0 items — auth/network/project problem, not an empty backlog.');
-    process.exitCode = readFailed;
-    return;
+    output.error('board: gh returned 0 items — auth/network/project problem, not an empty backlog.');
+    return readFailed;
   }
 
-  if (args.intake) {
-    printIntake(items, args);
-    return;
-  }
+  if (parsed.intake) return printIntake(items, parsed, executor, output);
 
   // Under --json stdout is a document a caller parses, so the scan goes to stderr rather
   // than corrupting it; the verdict still reaches the operator and still sets the exit code.
-  const report = args.json ? console.error : console.log;
+  const report = (line) => (parsed.json ? output.error(line) : output.log(line));
 
   // --closeout certifies the board and nothing else, so it prints no listing at all.
-  if (!args.closeout) {
-    const selected = args.all
+  if (!parsed.closeout) {
+    const selected = parsed.all
       ? items
-      : args.status
-        ? items.filter((i) => i.status === args.status)
+      : parsed.status
+        ? items.filter((i) => i.status === parsed.status)
         : pickable(items);
-    const label = args.status || (args.all ? 'all columns' : PICKABLE_STATUSES.join('/'));
-    if (args.json) {
-      console.log(JSON.stringify(selected.map(normalizeItem), null, 2));
+    const label = parsed.status || (parsed.all ? 'all columns' : PICKABLE_STATUSES.join('/'));
+    if (parsed.json) {
+      output.log(JSON.stringify(selected.map(normalizeItem), null, 2));
     } else {
-      console.log(`${headerLine(label, selected, items)}\n`);
-      console.log(formatGrouped(selected));
+      output.log(`${headerLine(label, selected, items)}\n`);
+      output.log(formatGrouped(selected));
     }
-    const parkedNote = parkedLine(items, args);
+    const parkedNote = parkedLine(items, parsed);
     if (parkedNote) report(parkedNote);
   }
 
-  const { lines, exitCode } = scanOutcome({ ...scanBoard(items), closeout: args.closeout });
+  const { lines, exitCode } = scanOutcome({ ...scanBoard(items), closeout: parsed.closeout });
   for (const line of lines) report(line);
-  process.exitCode = exitCode;
+  return exitCode;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main();
+  process.exitCode = main();
 }

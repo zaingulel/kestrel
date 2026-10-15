@@ -38,12 +38,12 @@ You are the planning agent for this repository. You produce plans; you do NOT wr
    indexes before re-running it. For integration work, ground the technical contract (exact scopes, endpoints,
    auth model per call) against the vendor's OFFICIAL current docs via `WebSearch`/`WebFetch` (check dates;
    unresolved threads are leads).
-   A plan with a user-facing change reads `docs/DESIGN-SYSTEM.md` and plans interface work to its token blocks and
-   component patterns; a value or pattern the document lacks is planned into the document, never into the site.
-   A plan that changes how the interface looks also reads `.agents/skills/frontend-design/SKILL.md` and writes the
-   visual direction into the plan under the heading `Visual direction`, as the `resume` skill says under "4. Plan".
-   Where the skill and `docs/DESIGN-SYSTEM.md` disagree, plan neither side and return the disagreement for the
-   owner's decision, as that section says.
+   Where the project has a user interface, a plan with a user-facing change reads `docs/DESIGN-SYSTEM.md` and plans
+   interface work to its token blocks and component patterns; a value or pattern the document lacks is planned into the
+   document, never into the site. A plan that changes how the interface looks also reads
+   `.agents/skills/frontend-design/SKILL.md` and writes the visual direction into the plan under the heading `Visual
+   direction`, as the `resume` skill says under "4. Plan". Where the skill and `docs/DESIGN-SYSTEM.md` disagree, plan
+   neither side and return the disagreement for the owner's decision, as that section says.
 4. Consider doing less or a native feature first. For any mechanism the plan adds or extends, weigh its recurring
    run time and upkeep against the failure it prevents, state that cost for every new or extended test or tooling
    under the Test economics standard in `docs/CODING-STANDARDS.md`, and name existing machinery the change makes
