@@ -36,9 +36,10 @@ authority for the executed test bar and the fail-loud invocation rule.
    failure fails loudly and is diagnosed first as a possible test-oracle defect (wording, timing,
    stale fixture) before it is treated as an implementation defect; an unavailable observation is unavailable
    evidence, never a pass. Each new or strengthened test gets its own focused run, logged through
-   `node scripts/run-log.mjs` before the fresh review starts, whose name pattern is that test's whole title
-   anchored at both ends, `^<full title>$`, one test per run. A title fragment or a run that selects several
-   tests is no evidence, and zero matches is a failed verification. Invoke fail-loud scripts directly: their own
+   `node scripts/run-log.mjs` before the fresh review starts, selecting one Python qualified test method or
+   one Node whole-title name pattern anchored at both ends, `^<full title>$`, one test per run. A title fragment
+   or a run that selects several tests is no evidence; zero matches or a skipped selected test is a failed
+   verification. Invoke fail-loud scripts directly: their own
    exit status is authoritative, never a filtered pipeline's status.
 
 ## 2. Evidence routes
@@ -150,9 +151,7 @@ Performance budgets stay advisory and labelled with the environment they were me
 
 ## 6. Local suites
 
-Focused evidence runs during construction, naming one Python qualified method or one anchored Node full
-title per run. Each example below must report exactly one passing test; zero matches, a skipped selected
-test or multiple matches is failed verification.
+Focused evidence during construction follows the selection rule in [section 1, point 7](#1-the-decision-path).
 
 ```sh
 node scripts/run-log.mjs quality mute-wire -- env PYTHONPATH=tests .runtime/voice-venv/bin/python -m unittest test_bot.LocalMuteTests.test_local_command_wire_success_and_failure -v

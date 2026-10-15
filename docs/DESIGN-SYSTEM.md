@@ -47,7 +47,7 @@ Kestrel defines no colour of its own. Every colour is a role read from the activ
 
 ### Type and spacing
 
-Dimensions and type sizes use Qt logical (device-independent) pixels at Omarchy base size 14, following [Qt's scaling model](https://doc.qt.io/qt-6/highdpi.html). This includes panel geometry and pointer targets; native measurements do not establish compliance with web CSS (Cascading Style Sheets) pixel criteria.
+Dimensions and type sizes use Qt logical (device-independent) pixels at Omarchy base size 14, following [Qt's scaling model](https://doc.qt.io/qt-6/highdpi.html). This includes panel geometry and pointer targets. For the target-size audit, use Qt’s density-independent logical pixel as the native equivalent of a CSS (Cascading Style Sheets) reference pixel, following [World Wide Web Consortium guidance](https://www.w3.org/TR/wcag2ict-22/), and verify the rendered target at the actual display scale.
 
 | Token | Value |
 | --- | --- |
