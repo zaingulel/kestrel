@@ -64,8 +64,8 @@ export function buildTrackedSet(trackedFilePaths) {
 // and a fresh CI checkout resolve identically by construction.
 export function pathExists(trackedSet, ref) {
   if (trackedSet.has(ref) || trackedSet.has(`${ref}/`)) return true;
-  // Shared prose names the canonical source tree and optional gate that Kestrel does not install.
-  if (ref === 'src/' || ref === 'scripts/gates/pre-push-main') return true;
+  // Shared prose names the canonical source tree, absent from this adopter.
+  if (ref === 'src/') return true;
   return isKnownUntracked(ref);
 }
 

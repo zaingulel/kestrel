@@ -1,0 +1,52 @@
+#!/bin/sh
+# The remote-main hook runs this gate from its own tree. Every path changed by every
+# pushed commit must qualify, and local checks must have seen the clean pushed tree.
+set -e
+
+refuse() {
+  echo "pre-push-main: $1; use the pull request route." >&2
+  exit 1
+}
+
+[ "$#" -eq 2 ] || refuse "expected exactly <remote-sha> <local-sha>"
+remote_sha=$1
+local_sha=$2
+for sha in "$remote_sha" "$local_sha"; do
+  [ "${#sha}" -eq 40 ] || refuse "each object name must be 40 hexadecimal characters"
+  case $sha in (*[!0-9a-fA-F]*) refuse "each object name must be 40 hexadecimal characters" ;; esac
+done
+
+# Git names a missing ref with an all-zero sha.
+case $remote_sha in (*[!0]*) ;; (*) refuse "creating main is never a direct push" ;; esac
+case $local_sha in (*[!0]*) ;; (*) refuse "deleting main is never a direct push" ;; esac
+git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null \
+  || refuse "the push is not a fast-forward of main"
+command -v node >/dev/null 2>&1 || refuse "node is not on PATH, so the changed paths cannot be checked"
+
+# Each pushed commit is judged against its own first parent, oldest first, so commits that change a file
+# and restore it are still judged, by path. The first refused commit ends the gate.
+commits=$(git rev-list --reverse "$remote_sha..$local_sha") || refuse "listing the pushed commits failed"
+[ -n "$commits" ] || refuse "the push carries no commit"
+for commit in $commits; do
+  # Captured before node sees it: POSIX sh has no pipefail, so a piped listing that failed after printing
+  # some paths would hand node a partial list. An empty list reaches node, which refuses it. The options
+  # make the listing ignore the pushing machine's signature-display and submodule-ignore settings.
+  changed=$(git -c core.quotePath=false log -1 --format= --name-only --no-renames --diff-merges=first-parent \
+    --no-show-signature --ignore-submodules=none "$commit") \
+    || refuse "listing the changed paths failed"
+  printf '%s\n' "$changed" | node scripts/lib/docs-route.mjs || exit 1
+done
+
+# Remote main may be a merge's second parent, so first-parent paths alone can miss its rollback.
+final_changed=$(git -c core.quotePath=false diff --name-only --no-renames --ignore-submodules=none "$remote_sha" "$local_sha" --) \
+  || refuse "listing the final changed paths failed"
+if [ -n "$final_changed" ]; then
+  printf '%s\n' "$final_changed" | node scripts/lib/docs-route.mjs || exit 1
+fi
+
+pushed_tree=$(git rev-parse "$local_sha^{tree}" 2>/dev/null) \
+  && head_tree=$(git rev-parse "HEAD^{tree}" 2>/dev/null) \
+  && [ "$pushed_tree" = "$head_tree" ] \
+  || refuse "the pushed commit is not the checked-out content, so the local checks ran on something else"
+git diff --quiet HEAD \
+  || refuse "the working tree has uncommitted changes, so the local checks ran on something else"
