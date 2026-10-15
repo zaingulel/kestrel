@@ -40,7 +40,7 @@ Opus retains today's mutation rule per distinct material behaviour. Astra propos
 
 Astra also proposes grouped invocations of explicitly named focused tests. Opus did not explicitly endorse grouping. The coordinator recommends retaining per-test identification, rejecting zero matches, preserving each result and the logged command's authoritative failing exit, and using individual runs for diagnosis. Current grouped-run permissions are defined by the [testing strategy](../TESTING-STRATEGY.md). Runtime savings are unmeasured.
 
-Shared handoff and skill changes must originate in canonical Fabraik, with owner direction and sync, rather than unilateral local relaxation. [Shared authorship contract](../../AGENTS.md), lines 188–200.
+Shared handoff and skill changes must originate in canonical Fabraik, with owner direction and sync, rather than unilateral local relaxation. [Shared authorship contract](../../AGENTS.md#shared-workflow-adoption).
 
 ## Coding standards: short prospective additions
 
