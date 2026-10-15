@@ -8,7 +8,7 @@ The current conversation prototype and the owner discovery boundary are defined 
 
 ## Architecture seams
 
-The product seams are in [AGENTS.md](../AGENTS.md#architecture-seams). Adopter-local workflow facts live in `scripts/lib/board-config.mjs` (Project 7, with the canonical Workstream options Go-to-market, Product and Platform), the document lint policy in `scripts/lib/doc-lint.mjs`, `package.json`, this profile and the manuals indexed in [docs/README.md](../docs/README.md). Shared paths are identified by `.agents/factory-manifest.json`; this repository has no shared source tree and does not author shared bytes. No optional local commit, turn-end or direct-main push gate is installed.
+The product seams are in [AGENTS.md](../AGENTS.md#architecture-seams). Adopter-local workflow facts live in `scripts/lib/board-config.mjs` (Project 7, with the canonical Workstream options Go-to-market, Product and Platform), the document lint policy in `scripts/lib/doc-lint.mjs`, `package.json`, this profile and the manuals indexed in [docs/README.md](../docs/README.md). Shared paths are identified by `.agents/factory-manifest.json`; this repository has no shared source tree and does not author shared bytes. The optional `scripts/gates/pre-push-main` gate uses the local classifier `scripts/lib/docs-route.mjs`; the [testing strategy](../docs/TESTING-STRATEGY.md#direct-documentation-route) defines its documentation policy and receipt limits. No optional local commit or turn-end gate is installed.
 
 ## Grounding
 

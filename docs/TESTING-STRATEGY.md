@@ -180,7 +180,22 @@ A commit added on top of one whose checks passed reruns a convergence check wher
 | `npm run lint:docs`, in a job that changes documentation | Any path: it resolves every cited path and link against the whole tracked tree |
 | `npm run test:speech` | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, a path under `tests/`, `requirements-test.txt` or `package.json` |
 
-The other inputs show in no path: the installed Node packages, which an unchanged `package-lock.json` shows unchanged, and the local voice environment in `.runtime/`, which no job rebuilds. Installing packages again or changing that environment after a receipt was written runs the affected check again.
+Command and configuration inputs always rerun the affected check, regardless of filename extension: this includes package commands, ESLint configuration and package or lockfile changes. An unchanged `package-lock.json` together with a preserved installed-package and tool environment establishes unchanged Node inputs; a preserved `.runtime/` establishes unchanged voice inputs. Reinstalling packages, upgrading tools or changing either environment after a receipt was written reruns the affected check.
+
+### Direct documentation route
+
+The local `scripts/gates/pre-push-main` gate and `scripts/lib/docs-route.mjs` classifier admit only a nonempty fast-forward whose every path changed by every added commit qualifies. The pushed tree must match the checked-out tree, with no uncommitted tracked changes. The executable gate must already be on remote `main`; adding or rewriting the checkout's copy cannot enable the route. Gate or classifier changes take the pull request route. [Owner push authorisation](../AGENTS.md#owner-gates) still applies, and the pre-push hook runs its own checks on every push.
+
+| Qualifying location | Qualifying types |
+|---|---|
+| `docs/README.md` | The document index itself |
+| Files beneath `docs/research/` | `md`, `png`, `jpg`, `jpeg`, `gif`, `svg`, `webp`, with case-insensitive extensions |
+
+Locations are case-sensitive. Hidden, empty, `.` or `..` path components, backslashes, control characters and Git-quoted names refuse rather than being decoded or normalized. At every depth, the following basenames refuse case-insensitively: `AGENTS.md`, `CLAUDE.md`, `SKILL.md`, `CODING-STANDARDS.md`, `TESTING-STRATEGY.md`, `DESIGN-SYSTEM.md`, `ISSUE-TRACKER.md`, `DOC-SWEEP.md`, `SWEEP-TRIAGE.md`, `WEEKLY-RETRO.md`, `AI-WORKFLOW.md` and `AI-WORKFLOW-*.md`. Membership in `.agents/factory-manifest.json` vetoes an otherwise qualifying path; a missing, unreadable or malformed manifest refuses.
+
+All other locations and file types refuse. This includes the operation manual `README.md`, root instructions and `GLOSSARY.md`, `.agents/REPOSITORY.md`, all architecture decisions under docs/adr/, root workflow manuals, workflow directories, hooks, permission and seat files, scripts, tests, package and configuration files, and product files including `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py` and `run-voice.sh`.
+
+For a qualifying documentation-only commit added on top, `npm run lint` and `npm run test:speech` may carry a passing clean same-command receipt under the [Receipt reuse rule](../.agents/skills/resume/SKILL.md#8-deliver): ancestry and unchanged tracked and non-file inputs must be established. The direct route uses the head where the receipt actually ran. `npm run test:scripts` reruns for every new head because it reads tracked files and Git state; `npm run lint:docs` reruns because it resolves links and paths against the whole tree. A direct-route rebase onto moved `main` cannot borrow the hosted-check reuse case. The input invalidations above still apply.
 
 Inside a Claude Code job worktree, a focused run names its test file through a quoted pattern when the file's path contains the letters `git`: `node scripts/run-log.mjs <label> -- node --test --test-name-pattern="^<full title>$" "scripts/lib/unsafe-g*.test.mjs"`, where `node --test` expands the pattern itself and the title is written with its regular-expression characters escaped. Claude Code's worktree check can read those letters in the plain path and refuse the command as git it cannot verify; the `resume` skill owns that rule under "3. Start the job". If that form is refused too, append `2>&1 | tail -10` to the same command: the receipt `run-log` writes still carries the command's own exit code.
 
