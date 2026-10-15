@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
@@ -16,6 +17,19 @@ const PRESENT = SETTINGS.runtimes;
 const without = (runtime) => !PRESENT.includes(runtime) && `the settings file names no ${runtime} runtime`;
 const RESUME = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Pins the independently reviewed workflow, including its job-level branch condition.
+// Recurring cost: one file read and hash; update only after configuration review.
+test('ANTI-REGRESSION: the sweep scope workflow retains its reviewed job gate and execution configuration', {
+  skip: !SETTINGS.docSweep && 'the settings file turns the documentation sweep off',
+}, () => {
+  const workflow = readFileSync(resolve(ROOT, '.github/workflows/sweep-scope.yml'));
+  assert.equal(
+    createHash('sha256').update(workflow).digest('hex'),
+    '256e3ac07f68913623556f6303c63b052e6f16638ac1892cddbd769ed76d1967',
+    'the sweep workflow changed: independently review its configuration before updating this fixed oracle',
+  );
+});
 
 // Independent oracle for the resume skill's parallel-slice route: Git runs its commands verbatim. Recurring cost: one
 // disposable repository and about fifteen Git subprocesses. Remove if builders no longer run parallel slices.

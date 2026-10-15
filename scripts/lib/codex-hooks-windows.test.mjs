@@ -84,20 +84,12 @@ test('Bash guard commandWindows allows an ordinary command', NEEDS_POWERSHELL, (
   }
 });
 
-// A PATH holding git and every PowerShell but not node, unless node shares a directory with one of them.
-const GIT = findOnPath(['git.exe', 'git']);
-const NO_NODE_PATH = [GIT, ...POWERSHELLS].filter(Boolean).map((file) => dirname(file));
-const NEEDS_NODE_APART = POWERSHELLS.length === 0 ? NEEDS_POWERSHELL : {
-  skip: NO_NODE_PATH.includes(dirname(process.execPath)) && 'node shares a directory with git or PowerShell, so no PATH can hold them without it',
-};
-
-test('Bash guard commandWindows fails, not passes, when node is not on PATH', NEEDS_NODE_APART, () => {
-  assert.ok(GIT, 'git is not on PATH');
+test('Bash guard commandWindows fails, not passes, when node is not on PATH', NEEDS_POWERSHELL, () => {
   // An allowed command, so only a node that never ran can make the hook exit non-zero.
   const input = JSON.stringify({ cwd: ROOT, tool_input: { command: 'ls -la' } });
-  for (const r of runEach(BASH_GUARD, { cwd: ROOT, input, env: { PATH: NO_NODE_PATH.join(delimiter) } })) {
-    assert.notEqual(r.status, 0, `${r.ps}: ${r.stderr}`);
-    assert.notEqual(r.stderr, '', r.ps);
+  for (const r of runEach(BASH_GUARD, { cwd: ROOT, input, env: { PATH: '' } })) {
+    assert.equal(r.status, 1, `${r.ps}: ${r.stderr}`);
+    assert.match(r.stderr, /\bnode\b/i, r.ps);
   }
 });
 

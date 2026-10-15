@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "c78a711ed5fe0f06c248446130d3b5f9fab2e59f",
+  "syncedFrom": "957322c0b01b95af9bdaca120d79e1db0002695d",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -853,7 +853,7 @@
     },
     {
       "path": "scripts/lib/codex-hooks-windows.test.mjs",
-      "sha256": "8df86ea86c9e08ab34d970932e4e445bc3e59855e8558519ae0bacf89dbd2af1"
+      "sha256": "81dea0abe6ff85b6b453947ff3cdb63ed176f57320c4a88fe64fa355d9b6af6a"
     },
     {
       "path": "scripts/lib/doc-lint-citations.mjs",
@@ -997,7 +997,7 @@
     },
     {
       "path": "scripts/lib/workflow-contract.test.mjs",
-      "sha256": "1d146f0e3b53ebbe185644254c9b61475cc3ecafba0aa2945b91d909c2c44825"
+      "sha256": "5474ac582ac0364fa50ac90321d3beb571b737f3d0169cf723d88d51e8915883"
     },
     {
       "path": "scripts/merge-watch.mjs",
