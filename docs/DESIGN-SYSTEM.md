@@ -2,6 +2,8 @@
 
 The current conversation uses native laptop audio, operated as [README.md](../README.md) describes. It has no browser client. The desktop notification pattern and approved future indicator and panel patterns live below.
 
+This manual owns visual controls, interaction and accessibility. Spoken behaviour and product meaning stay with [AGENTS.md](../AGENTS.md#product) and the operation manual.
+
 Product discovery and drilling with the owner precede interface design or implementation. An approved interface plan must establish its tokens and patterns here before building, as [AGENTS.md](../AGENTS.md) and the resume skill require.
 
 ## Native mute failure notification
@@ -45,7 +47,7 @@ Kestrel defines no colour of its own. Every colour is a role read from the activ
 
 ### Type and spacing
 
-Values in pixels at Omarchy base size 14.
+Dimensions and type sizes use Qt logical (device-independent) pixels at Omarchy base size 14, following [Qt's scaling model](https://doc.qt.io/qt-6/highdpi.html). This includes panel geometry and pointer targets. For the target-size audit, use Qt’s density-independent logical pixel as the native equivalent of a CSS (Cascading Style Sheets) reference pixel, following [World Wide Web Consortium guidance](https://www.w3.org/TR/wcag2ict-22/), and verify the rendered target at the actual display scale.
 
 | Token | Value |
 | --- | --- |
@@ -108,3 +110,13 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 | Trouble | `Brain trouble. Microphone in use.` |
 
 Every pointer target is at least 24 by 24.
+
+### Native accessibility and verification
+
+The first approved interface plan must specify native accessible roles, names and actions for controls, keyboard navigation, initial focus, closing and focus restoration. Use [Qt accessibility metadata](https://doc.qt.io/qt-6/accessible-qtquick.html) compatible with the installed Qt version, which the plan must verify. Decorative header marks remain excluded from assistive technology; the adjacent status sentence carries their meaning.
+
+Before build, that plan must bind a verified reduced-motion preference source and the fallback when its signal is absent. A published desktop setting does not prove that the installed backend supplies it. Preserve the still shapes specified above when reduced motion is requested.
+
+During the native visual drive, verify keyboard and assistive-technology interaction, pointer target dimensions at the actual display scale, enlarged text and long content. Check that text and controls remain readable and usable. Measure rendered text and control contrast after theme opacity and background composition; inherited theme roles alone are not evidence of sufficient contrast. Record unavailable observations as limitations. Follow the resume skill's visual and accessibility review requirements; browser scans and screenshots alone do not prove native accessibility.
+
+Displayed microphone and status claims require supporting runtime evidence, including evidence for microphone release. Missing status does not establish release. Any new meaning or wording for unavailable status requires an owner decision before implementation.

@@ -228,6 +228,7 @@ Product discovery and drilling with the owner must precede any further product i
 - `bot.py` owns conversation orchestration.
 - `speech.py` owns speech adapters.
 - `asr_worker.py` is the speech recognition process boundary.
+- `hermes_worker.py` is the conversation-engine process boundary.
 - `run-voice.sh` owns startup.
 - `README.md` is the operation manual.
 - [.agents/REPOSITORY.md](.agents/REPOSITORY.md) owns the local repository profile.
@@ -241,7 +242,7 @@ Product discovery and drilling with the owner must precede any further product i
 | sign-off | Changes to microphone access, audio or transcript handling, the localhost service boundary, the Ally connection, or the workflow trust perimeter. |
 | security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, service exposure and the Ally connection; runtime hooks, permission settings, workflow triggers and token permissions, and sync integrity. |
 | hard to undo | Recordings, transcripts or credentials exposed through commits, logs or publication; loss or replacement of local microphone and model assets; repository hosting settings and rulesets. |
-| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `speech.py`, `asr_worker.py`, `run-voice.sh` and the operation manual. |
+| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
 
 Standing security guarantees:
 
