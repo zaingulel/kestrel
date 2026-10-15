@@ -34,7 +34,7 @@ export const KNOWN_UNTRACKED = [
 // Seams the shared region of `AGENTS.md` names that an install does not write: a reference to one is accepted
 // where the repository holds none. Exact, never by prefix, so a dangling `src/missing.mjs` is still reported.
 export const OPTIONAL_SEAMS = [
-  'src/', 'scripts/gates/', 'scripts/gates/stop', 'scripts/gates/pre-commit', 'scripts/gates/pre-push-main',
+  'src/', 'scripts/gates/stop', 'scripts/gates/pre-commit',
   '.codex/rules/playwright.rules',
 ];
 

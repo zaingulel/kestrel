@@ -246,8 +246,7 @@ test('pathExists: a tracked file or tracked directory prefix (with or without tr
 test('pathExists: adopter-only canonical references are exact exceptions', () => {
   const empty = buildTrackedSet([]);
   for (const ref of [
-    'src', 'scripts/gates', 'scripts/gates/stop', 'scripts/gates/pre-commit', 'scripts/gates/pre-push-main',
-    '.codex/rules/playwright.rules',
+    'src', 'scripts/gates/stop', 'scripts/gates/pre-commit', '.codex/rules/playwright.rules',
   ]) {
     assert.equal(pathExists(empty, ref), true, ref);
     assert.equal(pathExists(empty, `${ref}/`), true, `${ref}/`);
@@ -255,8 +254,13 @@ test('pathExists: adopter-only canonical references are exact exceptions', () =>
     assert.equal(pathExists(empty, `${ref}X`), false, `${ref}X`);
     assert.equal(pathExists(empty, `${ref}//`), false, `${ref}//`);
   }
+  for (const ref of ['scripts/gates', 'scripts/gates/', 'scripts/gates/pre-push-main', 'scripts/gates/pre-push-main/']) {
+    assert.equal(pathExists(empty, ref), false, ref);
+  }
   const tracked = buildTrackedSet(['docs/FIXTURES.md', 'scripts/gates/pre-push-main']);
   assert.equal(pathExists(tracked, 'scripts/gates/pre-push-main'), true);
+  assert.equal(pathExists(tracked, 'scripts/gates'), true);
+  assert.equal(pathExists(tracked, 'scripts/gates/'), true);
   assert.equal(pathExists(tracked, 'docs/FIXTURES.md'), true);
   assert.equal(pathExists(tracked, 'docs/missing.md'), false);
 });
