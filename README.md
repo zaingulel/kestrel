@@ -22,7 +22,7 @@ Run commands from this directory. Start the conversation trial as a user service
 systemd-run --user --unit=kestrel-voice --collect --service-type=exec \
   --working-directory="$PWD" \
   --property="StandardOutput=append:$PWD/.runtime/voice-server.log" \
-  --property=StandardError=inherit --property=TimeoutStopSec=15s \
+  --property=StandardError=inherit --property=TimeoutStopSec=15s --property=KillMode=mixed \
   "$PWD/run-voice.sh"
 ```
 

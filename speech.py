@@ -171,7 +171,6 @@ class LaptopOutput(BaseOutputTransport):
         super().__init__(params)
         self.audio = audio
         self.write_lock = asyncio.Lock()
-        self.playback_written = False
         self.playback_deadline: float | None = None
         self.write_gate = asyncio.Event()
         self.write_gate.set()
@@ -187,9 +186,8 @@ class LaptopOutput(BaseOutputTransport):
                 # Native sender cancellation discards its queued audio and cancels the pacing wait.
                 await super().process_frame(frame, direction)
                 async with self.write_lock:
-                    if self.playback_written:
+                    if self.audio.playback is not None:
                         await self.audio._discard_playback()
-                        self.playback_written = False
                         self.playback_deadline = None
             finally:
                 self.write_gate.set()
@@ -206,7 +204,6 @@ class LaptopOutput(BaseOutputTransport):
                     await self.audio._open_playback()
                 duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
                 deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
-                self.playback_written = True
                 self.audio.playback.stdin.write(frame.audio)
                 await self.audio.playback.stdin.drain()
                 now = monotonic()
@@ -293,7 +290,6 @@ class LaptopAudioTransport:
                 await asyncio.wait_for(self.received_audio.wait(), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 if self.failure:
                     raise RuntimeError(self.failure)
-                await self._open_playback()
         except asyncio.CancelledError:
             await self.close()
             raise
