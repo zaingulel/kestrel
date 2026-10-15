@@ -65,7 +65,7 @@ user, so its named anti-regression test keeps pinning it.
 ### Whole-conversation evidence
 
 For reply-text sequences spanning multiple turns, interruption and follow-up, drive the real
-`run_conversation(runner_args, stt, voice, *, llm, transport=None, user_params=None)` session in
+`run_conversation(stt, voice, *, llm, transport, user_params=None, handle_signals=False)` session in
 [bot.py](../bot.py). Its caller creates and cleans up the required service; the service owns its preparation reader
 through `start_preparation()`. Keyword-only dependencies let a test supply a forwarding transport and native
 user-turn strategies while preserving the production defaults. Keep the real pipeline worker, context aggregators,
@@ -89,7 +89,7 @@ log alone does not establish spoken output or context commitment.
 The test starts the real installed Hermes 0.19.0 worker against a controlled loopback HTTP (Hypertext
 Transfer Protocol) brain with scripted streaming replies. It refuses any direct OpenAI service bypass,
 blocks an interrupted provider response until the test releases it, and observes native work finish before
-the next request. Captured provider requests exclude the unheard tail; reconnect starts with empty history.
+the next request. Captured provider requests exclude the unheard tail; a new service lifetime starts with empty history.
 It uses an unloaded `NemotronSTT` without audio input and a finite voice-generator double through the real
 `VoxCPMTTS` adapter. Related session cases exercise engine absence or death, provider refusal, incomplete
 replies and corrupt worker output, asserting spoken failures and no automatic session restart or user-turn retry.
@@ -106,7 +106,7 @@ or inference.
 
 Provider-error request dumps are permitted local diagnostics in the owned ignored home. Their placement is
 checked by `NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
-Removal after worker exit on orderly disconnect is checked through production-session cleanup in
+Removal after worker exit on orderly shutdown is checked through production-session cleanup in
 `WholeConversationTests.test_brain_refusal_speaks_failure_without_retry`. A hard-killed parent or power loss
 can leave the home behind; these tests do not establish cleanup after forced parent death.
 

@@ -16,6 +16,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -24,7 +25,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.runner.types import SmallWebRTCRunnerArguments
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     TTSSpeakFrame,
@@ -33,23 +33,13 @@ from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
-from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
 from hermes_worker import HERMES_PYTHON, child_environment
-from speech import EchoRemoval, NemotronSTT, ROOT, VoxCPMTTS
+from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, VoxCPMTTS
 
-SESSION_LOCK = asyncio.Lock()
-# The event loop and WebRTC connection of the conversation holding the lock.
-CONVERSATION = None
 ECHO_REMOVAL = EchoRemoval()
-# A page starts recording from the microphone it was given a moment after it connects, so the
-# check is repeated until this many seconds have passed before the conversation is refused.
-ECHO_REMOVAL_WAIT = 10
-ECHO_REMOVAL_RETRY = 0.5
-VOICE_MODEL = None
 ENGINE_TIMEOUT = 45
 MUTE_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
@@ -213,12 +203,6 @@ def match_instant_tool(text):
 
 
 def stop_kestrel():
-    # Runs on the echo removal watcher thread. Uvicorn waits for a running conversation
-    # before it exits on SIGTERM, so the conversation is ended first.
-    conversation = CONVERSATION
-    if conversation:
-        loop, connection = conversation
-        asyncio.run_coroutine_threadsafe(connection.disconnect(), loop)
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -265,7 +249,7 @@ class HermesLLMService(LLMService):
                 if set(event) != {'ready'} or event['ready'] is not True:
                     raise RuntimeError(event.get('error') or 'Hermes did not become ready')
         except Exception as error:
-            self.failure_advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
+            self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
             logger.error(self.failure)
             await self.reap_engine()
@@ -312,7 +296,7 @@ class HermesLLMService(LLMService):
             self.home = None
 
     async def exchange(self, messages, output):
-        advisory = "I couldn't reach Kestrel's engine. Reconnect and try again."
+        advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
         try:
             async with asyncio.timeout(ENGINE_TIMEOUT):
                 self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
@@ -327,7 +311,7 @@ class HermesLLMService(LLMService):
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = "I couldn't get a complete reply from the brain on the Ally. Reconnect and try again."
+                        advisory = "I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again."
                         raise RuntimeError(event['error'])
                     else:
                         raise RuntimeError('Invalid or incomplete Hermes response')
@@ -381,7 +365,7 @@ class HermesLLMService(LLMService):
                 raise RuntimeError(self.failure)
         except Exception as error:
             logger.error(f'Hermes session cannot answer: {error}')
-            advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Reconnect and try again."
+            advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             await self.push_frame(LLMTextFrame(' ' + advisory))
         finally:
             if self.output is output:
@@ -394,80 +378,44 @@ def make_llm():
     return HermesLLMService()
 
 
-async def echo_removal_fault(disconnected):
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + ECHO_REMOVAL_WAIT
-    while True:
-        fault = await asyncio.to_thread(ECHO_REMOVAL.fault)
-        if not fault or disconnected.is_set() or loop.time() >= deadline:
-            return fault
-        await asyncio.sleep(ECHO_REMOVAL_RETRY)
-
-
-async def bot(runner_args: SmallWebRTCRunnerArguments):
-    global CONVERSATION, VOICE_MODEL
-    if SESSION_LOCK.locked():
-        logger.warning("A microphone session is already running; disconnecting the second client")
-        await runner_args.webrtc_connection.disconnect()
-        return
-    async with SESSION_LOCK:
-        stt = NemotronSTT()
-        disconnected = asyncio.Event()
-
-        @runner_args.webrtc_connection.event_handler("closed")
-        async def on_closed(connection):
-            disconnected.set()
-
-        # Set before the check: a stop reported at any moment either ends this conversation
-        # or fails the check.
-        CONVERSATION = (asyncio.get_running_loop(), runner_args.webrtc_connection)
-        llm = None
-        try:
-            fault = await echo_removal_fault(disconnected)
-            if fault:
-                logger.error(f"Refusing the microphone session: {fault}")
-                return
-            if disconnected.is_set():
-                return
-            llm = make_llm()
-            llm.start_preparation()
-            logger.info("Loading local speech models for the microphone session")
-            await stt.load()
-            torch.set_num_threads(4)
-            if VOICE_MODEL is None:
-                model = await asyncio.to_thread(
-                    VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
-                    load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
-                )
-                has_audio = False
-                async for frame in VoxCPMTTS(model).run_tts('Hello.', 'warmup'):
-                    has_audio = has_audio or bool(frame.audio)
-                if not has_audio:
-                    raise RuntimeError('VoxCPM preparation produced no audio')
-                VOICE_MODEL = model
-            if not disconnected.is_set():
-                await run_conversation(runner_args, stt, VOICE_MODEL, llm=llm)
-        finally:
-            CONVERSATION = None
-            try:
-                if llm is not None:
-                    try:
-                        await llm.close_local_tools()
-                    finally:
-                        await llm.close_engine()
-            finally:
-                try:
-                    await stt.close()
-                finally:
-                    await runner_args.webrtc_connection.disconnect()
-
-
-async def run_conversation(runner_args, stt, voice, *, llm, transport=None, user_params=None):
-    if transport is None:
-        transport = SmallWebRTCTransport(
-            webrtc_connection=runner_args.webrtc_connection,
-            params=TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+async def bot():
+    transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
+    stt = NemotronSTT()
+    llm = None
+    try:
+        await transport.open()
+        llm = make_llm()
+        llm.start_preparation()
+        logger.info("Loading local speech models for the conversation")
+        await stt.load()
+        torch.set_num_threads(4)
+        model = await asyncio.to_thread(
+            VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
+            load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
         )
+        has_audio = False
+        async for frame in VoxCPMTTS(model).run_tts('Hello.', 'warmup'):
+            has_audio = has_audio or bool(frame.audio)
+        if not has_audio:
+            raise RuntimeError('VoxCPM preparation produced no audio')
+        await run_conversation(stt, model, llm=llm, transport=transport, handle_signals=True)
+    finally:
+        try:
+            if llm is not None:
+                try:
+                    await llm.close_local_tools()
+                finally:
+                    await llm.close_engine()
+        finally:
+            try:
+                await stt.close()
+            finally:
+                await transport.close()
+                if transport.failure:
+                    raise RuntimeError(transport.failure)
+
+
+async def run_conversation(stt, voice, *, llm, transport, user_params=None, handle_signals=False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -483,33 +431,60 @@ async def run_conversation(runner_args, stt, voice, *, llm, transport=None, user
         transport.input(), stt, aggregators.user(), llm,
         VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
     ])
+    latency_observer = UserBotLatencyObserver()
+
+    @latency_observer.event_handler("on_latency_measured")
+    async def on_latency_measured(observer, latency_seconds):
+        logger.info(f"{latency_seconds:.3f}")
+
     worker = PipelineWorker(
         pipeline,
+        idle_timeout_secs=None,
+        observers=[latency_observer],
         params=PipelineParams(
             audio_in_sample_rate=16000, audio_out_sample_rate=48000,
             enable_metrics=True,
         ),
     )
 
-    @transport.event_handler("on_client_disconnected")
-    async def on_disconnect(transport, client):
-        await worker.cancel()
-
-    runner = WorkerRunner(handle_sigint=False)
+    runner = WorkerRunner(handle_sigint=handle_signals, handle_sigterm=handle_signals)
     await runner.add_workers(worker)
     logger.info("Kestrel is ready. Speak, pause for a reply, and interrupt naturally.")
     await runner.run()
 
 
-def run_voice_service(main):
-    ECHO_REMOVAL.start(stop_kestrel)
+async def run_voice_service():
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    stopping = False
+    echo_failure = None
+
+    def cancel():
+        nonlocal stopping
+        if not stopping:
+            stopping = True
+            task.cancel()
+
+    def echo_stopped():
+        nonlocal echo_failure
+        echo_failure = "Echo removal has stopped. Restart Kestrel."
+        stop_kestrel()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, cancel)
     try:
-        main()
+        ECHO_REMOVAL.start(echo_stopped)
+        try:
+            await bot()
+        except asyncio.CancelledError:
+            pass
     finally:
         ECHO_REMOVAL.close()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+    if echo_failure:
+        raise RuntimeError(echo_failure)
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
-
-    run_voice_service(main)
+    asyncio.run(run_voice_service())

@@ -65,7 +65,7 @@ def main(*, base_url=ALLY_URL):
             emit({'ready': True})
             while line := sys.stdin.buffer.readline(1024 * 1024 + 1):
                 if len(line) > 1024 * 1024:
-                    emit({'error': 'Hermes request exceeds 1 MiB. Reconnect and try again.'})
+                    emit({'error': 'Hermes request exceeds 1 MiB. Restart Kestrel and try again.'})
                     return
                 try:
                     request = json.loads(line)
