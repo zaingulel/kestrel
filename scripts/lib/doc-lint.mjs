@@ -64,8 +64,8 @@ export function buildTrackedSet(trackedFilePaths) {
 // and a fresh CI checkout resolve identically by construction.
 export function pathExists(trackedSet, ref) {
   if (trackedSet.has(ref) || trackedSet.has(`${ref}/`)) return true;
-  // Shared prose names canonical references that can be absent from an adopter checkout.
-  if (ref === 'src/' || ref === 'scripts/gates/pre-push-main') return true;
+  // Shared prose names the canonical source tree, absent from this adopter.
+  if (ref === 'src/') return true;
   return isKnownUntracked(ref);
 }
 
