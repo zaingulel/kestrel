@@ -28,9 +28,8 @@ function executable(root, path, source) {
 }
 
 function installGate(root) {
-  // The first red must reach the real hook's missing-remote-gate refusal.
   for (const path of ['scripts/gates/pre-push-main', 'scripts/lib/docs-route.mjs']) {
-    if (existsSync(join(ROOT, path))) executable(root, path, readFileSync(join(ROOT, path)));
+    executable(root, path, readFileSync(join(ROOT, path)));
   }
   write(root, MANIFEST_PATH, MANIFEST);
 }

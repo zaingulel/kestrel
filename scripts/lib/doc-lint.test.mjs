@@ -243,9 +243,7 @@ test('pathExists: a tracked file or tracked directory prefix (with or without tr
 
 test('pathExists: adopter-only canonical references are exact exceptions', () => {
   const empty = buildTrackedSet([]);
-  for (const ref of ['src/']) {
-    assert.equal(pathExists(empty, ref), true, ref);
-  }
+  assert.equal(pathExists(empty, 'src/'), true, 'src/');
   for (const ref of ['src', 'src/missing.mjs', 'srcX/', 'scripts/gates/pre-push-main', 'scripts/gates/pre-push-mainX', 'scripts/gates/pre-push-main/missing']) {
     assert.equal(pathExists(empty, ref), false, ref);
   }
