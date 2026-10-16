@@ -459,7 +459,6 @@ class SpokenReplyText:
         self.indent_columns = 0
         self.line_base = 0
         self.list_columns = []
-        self.list_open = False
         self.list_prose = False
         self.marker_width = 0
         self.marker_indent = 0
@@ -541,7 +540,7 @@ class SpokenReplyText:
             self.last = char
             self.prose |= char.isalnum()
             self.line_prose |= char.isalnum()
-            if self.list_open:
+            if self.list_columns:
                 self.list_prose |= char.isalnum()
 
     def _omit(self):
@@ -557,12 +556,18 @@ class SpokenReplyText:
         self.indent_columns = 0
         self.heading = self.line_prose = False
 
+    def _end_sentence(self, *, strip_space=False) -> None:
+        if self.last not in '.!?':
+            if strip_space:
+                self.space = ''
+            self._emit('.')
+
     def _end_line(self):
         if self.closing_hashes:
             self._omit()
         self.closing_hashes = 0
-        if self.heading and self.line_prose and self.last not in '.!?':
-            self._emit('.')
+        if self.heading and self.line_prose:
+            self._end_sentence()
         self._emit('\n')
         self._new_line()
 
@@ -572,9 +577,7 @@ class SpokenReplyText:
 
     def _list_sentence(self):
         if self.list_prose:
-            if self.last not in '.!?':
-                self.space = ''
-                self._emit('.')
+            self._end_sentence(strip_space=True)
             self.space = self.space or ' '
             self.list_prose = False
 
@@ -591,7 +594,6 @@ class SpokenReplyText:
         self.list_columns.append(base)
         extra = self.marker_padding - padding
         self.marker_width = self.marker_padding = 0
-        self.list_open = True
         self.heading = False
         self.line_base = base
         self.indent = ''
@@ -619,9 +621,8 @@ class SpokenReplyText:
         self.line_pending = []
         self.line_pending_bytes = 0
         if self.line_pending_kind == 'row':
-            if self.prose and self.last not in '.!?':
-                self.space = ''
-                self._emit('.')
+            if self.prose:
+                self._end_sentence(strip_space=True)
             self.space = self.space or ' '
             self.row_active = True
             self.row_cell_text = False
@@ -644,9 +645,8 @@ class SpokenReplyText:
             self.line_pending_bytes = 0
             self.line_pending_kind = ''
             self._list_sentence()
-            if self.prose and self.last not in '.!?':
-                self.space = ''
-                self._emit('.')
+            if self.prose:
+                self._end_sentence(strip_space=True)
             self._omit()
             self._emit('\n')
             self._new_line()
@@ -690,8 +690,7 @@ class SpokenReplyText:
             self._release_line_prefix()
             self._scan(char)
 
-    def _row_boundary(self):
-        self._resolve_emphasis('', at_end=True)
+    def _flush_pending_inline(self) -> None:
         if self.candidate:
             self._emit(self.wrapper + self.candidate)
             self.wrapper = self.candidate = ''
@@ -704,9 +703,12 @@ class SpokenReplyText:
         if self.image:
             self._emit('!')
             self.image = False
-        if self.row_cell_text and self.last not in '.!?':
-            self.space = ''
-            self._emit('.')
+
+    def _row_boundary(self):
+        self._resolve_emphasis('', at_end=True)
+        self._flush_pending_inline()
+        if self.row_cell_text:
+            self._end_sentence(strip_space=True)
         self._omit()
         self.space = ' '
         self.row_cell_text = False
@@ -1090,7 +1092,6 @@ class SpokenReplyText:
                 while self.list_columns and self.indent_columns < self.list_columns[-1]:
                     self._list_sentence()
                     self.list_columns.pop()
-                self.list_open = bool(self.list_columns)
             self.line_base = next((column for column in reversed(self.list_columns)
                                    if column <= self.indent_columns), 0)
             relative = self.indent_columns - self.line_base
@@ -1151,19 +1152,9 @@ class SpokenReplyText:
                 self._release_line_prefix()
         elif self.line_pending_kind == 'row':
             self._row_separator_char('\n')
-        if self.candidate:
-            self._emit(self.wrapper + self.candidate)
-            self.wrapper = self.candidate = ''
-            self.wrapper_omitted = False
         if self.url:
             self._finish_url_tail()
-        if self.wrapper:
-            if not self.wrapper_omitted:
-                self._emit(self.wrapper)
-            self.wrapper = ''
-            self.wrapper_omitted = False
-        if self.image:
-            self._emit('!')
+        self._flush_pending_inline()
         if self.run_char and self.mode == 'text':
             if self.run_char == '`' or self.run_length >= 3:
                 self.code = True
@@ -1184,8 +1175,8 @@ class SpokenReplyText:
         if self.row_active:
             self._row_boundary()
         self._list_sentence()
-        if self.heading and self.line_prose and self.last not in '.!?':
-            self._emit('.')
+        if self.heading and self.line_prose:
+            self._end_sentence()
         if self.label is not None:
             self._release_label(closed=self.label_closed)
         result = ''.join(self.output)

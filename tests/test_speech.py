@@ -283,10 +283,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             (r"Literal \*stars\* and \`ticks\`.", "Literal *stars* and `ticks`."),
         ]:
             with self.subTest(formatted=text):
-                actual = ' '.join(self.cleaned(text).split())
-                self.assertEqual(actual, expected)
-                if 'There is code in this reply.' not in expected:
-                    self.assertNotIn('There is code in this reply.', actual)
+                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
 
     async def test_reply_cleanup_omits_explicit_addresses_and_keeps_labels(self):
         for text, expected in [
