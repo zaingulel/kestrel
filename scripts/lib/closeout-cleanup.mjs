@@ -6,7 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { constants, lstatSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, posix, relative, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
@@ -194,7 +194,7 @@ export function cleanupJob(request, seams) {
     return report.finish();
   }
 
-  const docker = worktree || request.scratch.length ? dockerSnapshot(seams.run) : null;
+  const docker = worktree || request.scratch.length ? dockerSnapshot(seams) : null;
   if (docker?.absent) report.line('skipped containers: docker is not installed');
 
   let containers = { gone: new Set(), clean: false };
@@ -208,7 +208,7 @@ export function cleanupJob(request, seams) {
       const listener = listenerRetention(seams.run, [worktree.path, worktree.canonical]);
       if (listener) retainWorktree(listener);
     }
-    if (docker?.records) containers = removeWorktreeContainers(seams.run, docker.records, worktree, report, retainWorktree);
+    if (docker?.records) containers = removeWorktreeContainers(docker, worktree, report, retainWorktree);
   }
 
   const context = { seams, git, records, worktree, docker, containers };
@@ -230,7 +230,7 @@ export function cleanupJob(request, seams) {
     const held = useChecks(worktree.path, [worktree.path, worktree.canonical], true, true, context);
     if (held) retainWorktree(held.reason);
   }
-  if (worktree && !worktree.retained) removeWorktree(git, worktree, request.regenerated, retainWorktree);
+  if (worktree && !worktree.retained) removeWorktree(git, worktree, request.regenerated, retainWorktree, docker.verify);
   if (!worktree) report.absent('worktree', job);
   else if (worktree.retained) report.retained('worktree', worktree.path, worktree.retained);
   else report.removed('worktree', worktree.path);
@@ -240,9 +240,13 @@ export function cleanupJob(request, seams) {
   } else if (worktree?.retained) {
     report.retained('branch', job, 'its worktree is retained');
   } else {
-    const deletion = git('branch', '-d', job);
-    if (deletion.status === 0) report.removed('branch', job);
-    else report.retained('branch', job, describe(deletion));
+    const unverified = docker?.failure ? `docker failed: ${docker.failure}` : docker?.verify();
+    if (unverified) report.retained('branch', job, unverified);
+    else {
+      const deletion = git('branch', '-d', job);
+      if (deletion.status === 0) report.removed('branch', job);
+      else report.retained('branch', job, describe(deletion));
+    }
   }
   return report.finish();
 }
@@ -253,7 +257,7 @@ export function checkPaths(paths, seams) {
   const tally = { unused: 0, absent: 0, 'in use': 0, unverifiable: 0 };
   let docker;
   const lines = paths.map((path) => {
-    const { verb, reason } = checkPath(path, seams, () => (docker ??= dockerSnapshot(seams.run)));
+    const { verb, reason } = checkPath(path, seams, () => (docker ??= dockerSnapshot(seams)));
     tally[verb] += 1;
     return `${verb} path ${path}${reason ? `: ${reason}` : ''}`;
   });
@@ -276,15 +280,34 @@ function checkPath(path, seams, snapshot) {
 }
 
 // Every container's whole record: { absent: true } when docker is not installed, { failure } when docker failed or
-// printed anything unrecognised, else { records } for the containers that still exist.
-function dockerSnapshot(run) {
-  const list = run('docker', ['container', 'ls', '--all', '--quiet', '--no-trunc']);
-  if (list.absent) return { absent: true };
+// printed anything unrecognised, else { records, command, verify } with pinned local filesystem authority.
+function dockerSnapshot({ run, platform }) {
+  const inspectionEnv = { ...process.env };
+  const metadata = run('docker', ['context', 'inspect', '--format', '{{json .Endpoints.docker}}'], { env: inspectionEnv });
+  if (metadata.absent) return { absent: true, verify: () => null };
+  if (!completeCommand(metadata)) return { failure: dockerUnverifiable('endpoint inspection failed') };
+  let endpoint;
+  try {
+    endpoint = JSON.parse(metadata.stdout);
+  } catch {
+    return { failure: dockerUnverifiable('endpoint metadata is unreadable') };
+  }
+  if (!isObject(endpoint) || typeof endpoint.Host !== 'string' || !endpoint.Host || CONTROL.test(endpoint.Host)) {
+    return { failure: dockerUnverifiable('endpoint metadata is unreadable') };
+  }
+  const env = { ...inspectionEnv };
+  delete env.DOCKER_CONTEXT;
+  delete env.DOCKER_HOST;
+  const proof = proveDockerFilesystem(endpoint.Host, run, platform, env);
+  if (proof.failure) return proof;
+  const command = (...args) => run('docker', ['--host', proof.host, ...args], { env });
+  const snapshot = { verify: proof.verify, command };
+  const list = command('container', 'ls', '--all', '--quiet', '--no-trunc');
   if (list.status !== 0) return { failure: describe(list) };
   const ids = list.stdout.split('\n').filter(Boolean);
   if (ids.some((id) => !CONTAINER_ID.test(id))) return { failure: 'docker listed an unrecognised container ID' };
-  if (!ids.length) return { records: [] };
-  const inspect = run('docker', ['inspect', '--type', 'container', '--format', '{{json .}}', ...ids]);
+  if (!ids.length) return { ...snapshot, records: [] };
+  const inspect = command('inspect', '--type', 'container', '--format', '{{json .}}', ...ids);
   if (inspect.status === undefined) return { failure: describe(inspect) };
   let gone = [];
   if (inspect.status !== 0) {
@@ -309,7 +332,86 @@ function dockerSnapshot(run) {
   if (records.length !== expected.length) {
     return { failure: `docker inspect printed ${records.length} records for ${expected.length} containers` };
   }
-  return { records };
+  return { ...snapshot, records };
+}
+
+const dockerUnverifiable = (stage) => `Docker filesystem relationship is unverifiable: ${stage}`;
+const completeCommand = (result) => result.status === 0 && result.stderr === '';
+const completeLine = (text) => typeof text === 'string' && text.endsWith('\n') && !text.slice(0, -1).includes('\n') ? text.slice(0, -1) : null;
+const isCleanPosixAbsolute = (path) =>
+  posix.isAbsolute(path) && path === posix.normalize(path) && (path === '/' || !path.endsWith('/')) && !CONTROL.test(path);
+const safeSocketPath = (path) => typeof path === 'string' && /^\/[A-Za-z0-9/._-]*$/.test(path) && isCleanPosixAbsolute(path);
+
+// Socket diagnostics identify both the filesystem socket and the distinct kernel socket behind its descriptor.
+function dockerListener(stdout, sockets) {
+  const line = completeLine(stdout);
+  if (!line) return null;
+  const match = /^u_str[ \t]+LISTEN[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+(\S+)[ \t]+([0-9]+)[ \t]+\*[ \t]+0[ \t]+users:\(\("[A-Za-z0-9._-]+",pid=([0-9]+),fd=([0-9]+)\)\)[ \t]+(?:(?:<->|<--|-->|---)[ \t]+)?ino:([0-9]+)[ \t]+dev:([0-9]+)\/([0-9]+)(?:[ \t]+peers:(?:[ \t]+[0-9]+)*)?[ \t]*$/.exec(line);
+  if (!match || !sockets.includes(match[1])) return null;
+  const [kernel, pid, fd, inode, printedMajor, printedMinor] = match.slice(2).map((value) => BigInt(value));
+  if (kernel <= 0n || pid <= 0n || pid > 2147483647n || fd > 2147483647n || inode <= 0n) return null;
+  if (printedMajor > 0xfffn || printedMinor > 0xfffffn) return null;
+  // ss prints the kernel's 32-bit device through libc's different major/minor encoding.
+  return { kernel, pid, fd, inode, major: printedMinor >> 8n, minor: (printedMajor << 8n) | (printedMinor & 0xffn) };
+}
+
+function dockerIdentity(stdout, listener) {
+  if (typeof stdout !== 'string' || !stdout.endsWith('\n')) return null;
+  const lines = stdout.slice(0, -1).split('\n');
+  if (lines.length !== 8) return null;
+  const rows = [];
+  for (const line of lines) {
+    const row = /^([0-9]+):([0-9]+):([0-9]+):([0-9]+):(socket|directory|regular file|regular empty file)$/.exec(line);
+    if (!row) return null;
+    rows.push({ numbers: row.slice(1, 5).map((value) => BigInt(value)), type: row[5] });
+  }
+  const types = ['socket', 'socket', 'namespace', 'namespace', 'directory', 'directory', 'regular file', 'regular file'];
+  if (rows.some(({ type }, index) => types[index] === 'namespace' ? !['regular file', 'regular empty file'].includes(type) : type !== types[index])) return null;
+  const [socket, descriptor] = rows.map(({ numbers }) => numbers);
+  if (socket[1] !== listener.inode || socket[2] !== listener.major || socket[3] !== listener.minor || descriptor[1] !== listener.kernel) return null;
+  for (const index of [2, 4, 6]) {
+    if (rows[index].numbers[0] !== rows[index + 1].numbers[0] || rows[index].numbers[1] !== rows[index + 1].numbers[1]) return null;
+  }
+  return rows.map(({ numbers, type }) => `${numbers.join(':')}:${type}`).join('\n');
+}
+
+// A local Linux proof and a latched verifier. Native observation never inherits redirection variables.
+function proveDockerFilesystem(host, run, platform, env) {
+  const fail = (stage) => ({ failure: dockerUnverifiable(stage) });
+  const original = host.slice(7);
+  if (platform !== 'linux' || !host.startsWith('unix://') || !safeSocketPath(original)) return fail('unsupported endpoint');
+  const nativeEnv = { ...(env.PATH === undefined ? {} : { PATH: env.PATH }), LC_ALL: 'C' };
+  const native = (command, args) => run(command, args, { env: nativeEnv });
+  const link = native('readlink', ['-e', '--', original]);
+  const socket = completeCommand(link) && completeLine(link.stdout);
+  if (!safeSocketPath(socket)) return fail('socket path could not be resolved');
+  const sockets = unique([original, socket]);
+  const ssArgs = sockets.length === 1 ? ['-H', '-xlnpe', 'src', socket] :
+    ['-H', '-xlnpe', '(', 'src', original, 'or', 'src', socket, ')'];
+  const located = native('sh', ['-c', 'command -v dockerd']);
+  const executable = completeCommand(located) && completeLine(located.stdout);
+  if (!executable || !isCleanPosixAbsolute(executable)) return fail('daemon executable could not be resolved');
+  const observe = () => {
+    const result = native('ss', ssArgs);
+    const listener = completeCommand(result) && dockerListener(result.stdout, sockets);
+    if (!listener) return null;
+    const tuple = Object.values(listener).join(':');
+    const { pid, fd } = listener;
+    const stat = native('stat', ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', socket, `/proc/${pid}/fd/${fd}`,
+      '/proc/self/ns/mnt', `/proc/${pid}/ns/mnt`, '/', `/proc/${pid}/root`, executable, `/proc/${pid}/exe`]);
+    const identity = completeCommand(stat) && dockerIdentity(stat.stdout, listener);
+    return identity ? `${tuple}\n${identity}` : null;
+  };
+  const initial = observe();
+  if (!initial) return fail('listener ownership or filesystem identity could not be verified; native process metadata must be readable');
+  let failure = null;
+  return {
+    host: `unix://${socket}`,
+    verify() {
+      if (!failure && observe() !== initial) failure = dockerUnverifiable('native identity changed or became unreadable');
+      return failure;
+    },
+  };
 }
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -445,10 +547,25 @@ function listenerRetention(run, targets) {
 // retains the worktree. "No such container" naming the container's own ID means it is already gone. Returns
 // { gone, clean }: the IDs no longer present, and whether every container was settled with no unresolved source or
 // failed removal.
-function removeWorktreeContainers(run, records, worktree, report, retainWorktree) {
+function removeWorktreeContainers(docker, worktree, report, retainWorktree) {
   const gone = new Set();
   let clean = true;
-  for (const record of records) {
+  const retainUnverified = (short) => {
+    const unverified = docker.verify();
+    if (!unverified) return false;
+    clean = false;
+    report.retained('container', short, unverified);
+    retainWorktree(unverified);
+    return true;
+  };
+  for (const record of docker.records) {
+    const unverified = docker.verify();
+    if (unverified) {
+      clean = false;
+      retainWorktree(unverified);
+      report.line(`unverifiable remaining container relationships: ${unverified}`);
+      break;
+    }
     const short = record.Id.slice(0, 12);
     const sources = bindSources(record).map(canonicalPath);
     if (!sources.some(({ path }) => path && atOrBelow(path, worktree.canonical))) {
@@ -462,7 +579,8 @@ function removeWorktreeContainers(run, records, worktree, report, retainWorktree
     }
     const steps = record.State?.Running === true ? ['stop', 'rm'] : ['rm'];
     for (const step of steps) {
-      const result = run('docker', [step, record.Id]);
+      if (retainUnverified(short)) break;
+      const result = docker.command(step, record.Id);
       if (result.status === 0 && step === 'rm') {
         gone.add(record.Id);
         report.removed('container', short);
@@ -498,9 +616,9 @@ export function parseStatusEntries(stdout) {
   return entries;
 }
 
-// Removes the worktree once git status shows nothing but ignored directories named as regenerated, since removal
-// deletes ignored files without refusing, then confirms git no longer registers it.
-function removeWorktree(git, worktree, regenerated, retainWorktree) {
+// Requires ordinary index flags as well as status showing only regenerated ignored directories: ordinary removal
+// deletes ignored files and edits hidden by skip-worktree or assume-unchanged without refusing.
+function removeWorktree(git, worktree, regenerated, retainWorktree, verify) {
   const status = git('-C', worktree.path, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching');
   if (status.status !== 0) return retainWorktree(`git status failed: ${describe(status)}`);
   const entries = parseStatusEntries(status.stdout);
@@ -512,6 +630,14 @@ function removeWorktree(git, worktree, regenerated, retainWorktree) {
     const more = held.length > 5 ? ` and ${held.length - 5} more` : '';
     return retainWorktree(`git status lists ${held.slice(0, 5).join(', ')}${more}`);
   }
+  const index = git('-C', worktree.path, 'ls-files', '-v', '-z');
+  if (index.status !== 0) return retainWorktree(`could not read git index flags: ${describe(index)}`);
+  if (index.stderr !== '' || index.stdout !== '' && (!index.stdout.endsWith('\0') ||
+    !index.stdout.slice(0, -1).split('\0').every((record) => record.startsWith('H ') && record.length > 2))) {
+    return retainWorktree('git index flags are hidden or unreadable; inspect git ls-files -v, resolve index flags and review local changes before retrying');
+  }
+  const unverified = verify();
+  if (unverified) return retainWorktree(unverified);
   const removal = git('worktree', 'remove', worktree.path);
   if (removal.status !== 0) return retainWorktree(describe(removal));
   const listing = git('worktree', 'list', '--porcelain', '-z');
@@ -529,7 +655,7 @@ function removeScratch(path, context) {
   const { before, canonical, forms } = target;
   const inside = Boolean(context.worktree?.canonical) && atOrBelow(canonical, context.worktree.canonical);
   const retained = placeRetention(forms, context) ?? useChecks(path, forms, inside, before.isDirectory(), context)?.reason ??
-    removal(path, before);
+    context.docker.verify() ?? removal(path, before);
   return { retained, forms };
 }
 
@@ -599,6 +725,8 @@ function placeRetention(forms, { seams, git, records }) {
 function containerRetention(forms, inside, { docker, containers }) {
   if (docker.absent) return null;
   if (docker.failure) return unverifiable(`docker failed: ${docker.failure}`);
+  const unverified = docker.verify();
+  if (unverified) return unverifiable(unverified);
   if (inside) return containers.clean ? null : unverifiable('a container bound in the job worktree was not removed');
   for (const record of docker.records.filter(({ Id }) => !containers.gone.has(Id))) {
     const short = record.Id.slice(0, 12);

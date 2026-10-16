@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "2d60d9638b154835d91b94c9918b3ac9e7cbabc7",
+  "syncedFrom": "b9a438803bd1b158b17f3526676d021af69c3384",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -8,7 +8,7 @@
     },
     {
       "path": ".agents/skills/closeout/SKILL.md",
-      "sha256": "dc44bb9fdae2f571e6f3cf486b2a4c9bf1743e36c4e3018bd86187d56f7ca09e"
+      "sha256": "39017face8e488a34104fc37d2aff12dea14fecd3145c59f45de16bbc99145f0"
     },
     {
       "path": ".agents/skills/codebase-design/DEEPENING.md",
@@ -428,7 +428,7 @@
     },
     {
       "path": ".claude/skills/closeout/SKILL.md",
-      "sha256": "dc44bb9fdae2f571e6f3cf486b2a4c9bf1743e36c4e3018bd86187d56f7ca09e"
+      "sha256": "39017face8e488a34104fc37d2aff12dea14fecd3145c59f45de16bbc99145f0"
     },
     {
       "path": ".claude/skills/codebase-design/DEEPENING.md",
@@ -728,7 +728,7 @@
     },
     {
       "path": "docs/AI-WORKFLOW-job.md",
-      "sha256": "5b0b4237755748346d350a6f41e326d01ce7e3280ac0d5fb0b586483c2ee95e2"
+      "sha256": "7ff03d362fd5e81c27fa443baf0aae6716d9508bc4076b946ad6d6a7ed259909"
     },
     {
       "path": "docs/AI-WORKFLOW-runtimes.md",
@@ -837,11 +837,11 @@
     },
     {
       "path": "scripts/lib/closeout-cleanup.mjs",
-      "sha256": "9943eb8f7a9a3d21fda8ce28d3d5b6a4ce7e3319c29f320d8a452346f2d79f4e"
+      "sha256": "3864bd5cac9eb4db2f7e30906c2716c4a35112dc9e7f335ee24c4ab0c332bef6"
     },
     {
       "path": "scripts/lib/closeout-cleanup.test.mjs",
-      "sha256": "a7fb36e6a9cf4ebf5a330d05427acffd7dfc9e2c794bf8021f1443e59a939b3e"
+      "sha256": "04fdb4041c51303330f607055187f50efa6abcf384f4084ff7e6b2f09851e276"
     },
     {
       "path": "scripts/lib/codex-hook-adapters.mjs",

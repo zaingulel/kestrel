@@ -117,7 +117,8 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
   removes the branch and worktree. Local `main` advances only by a provably safe fast-forward, and a checkout that is
   dirty, active or uncertain is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
   its named scratch, its worktree and its branch, retaining with the reason whatever a check or a refusal holds back
-  and never forcing a removal; the session keeps the judgment of what is its own scratch and stops any server the
+  and never forcing a removal; Docker bind paths require the local filesystem proof the `closeout` skill describes.
+  The session keeps the judgment of what is its own scratch and stops any server the
   command finds serving the worktree. A leftover the session finds, another job's artifact or one it cannot prove it
   created, is investigated to a conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete
   one, and its limits, under "Owner gates"; the `closeout` skill owns what a leftover is and what each outcome allows

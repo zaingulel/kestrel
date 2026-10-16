@@ -59,7 +59,12 @@ process list; nothing is inferred from chat.
    `--scratch` once for each verified scratch target, as an absolute path, and `--regenerated` once for each
    ignored dependency or build directory a command regenerates, such as `node_modules`, as a path relative to the
    worktree; leave out a flag with nothing to name. The command finds the worktree registered for `job/<issue>`
-   itself. It stops and removes each container whose recorded bind source lies in that worktree, then removes each
+   itself. Bind paths require proof that the selected Linux daemon shares the local filesystem view. A remote,
+   unreadable or ambiguous relationship retains the targets; missing proof tools are not installed automatically.
+   The proof requires readable listener ownership and procfs process metadata; ordinary unprivileged use of
+   rootful Docker and socket activation may retain targets.
+   If Docker is not installed, the command skips containers and still checks the local targets. It stops and
+   removes each verified-local container whose recorded bind source lies in that worktree, then removes each
    named scratch target, the worktree, and the branch with an ordinary `git branch -d`, checking each target
    first. It keeps images and volumes and never forces a removal: whatever a check or a refusal holds back is
    retained, and a retained worktree keeps its branch. It prints one line for each container, path or branch it
