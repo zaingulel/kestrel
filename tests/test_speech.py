@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 from loguru import logger
 from pipecat.frames.frames import (
-    EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStoppedFrame, TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -170,6 +170,282 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_cleanup_marks_code_without_speaking_it(self):
+        started, finished = asyncio.Event(), asyncio.Event()
+        frames, synthesized = [], []
+
+        class Sink(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                frames.append(frame)
+                if isinstance(frame, StartFrame):
+                    started.set()
+                if isinstance(frame, LLMFullResponseEndFrame):
+                    finished.set()
+                await self.push_frame(frame, direction)
+
+        def chunks(text, **kwargs):
+            synthesized.append(text)
+            yield np.zeros(4800, dtype=np.float32)
+
+        worker = PipelineWorker(
+            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks)), Sink()]),
+            enable_rtvi=False, idle_timeout_secs=None,
+        )
+        runner = WorkerRunner(handle_sigint=False)
+        running = None
+        try:
+            await runner.add_workers(worker)
+            running = asyncio.create_task(runner.run())
+            await asyncio.wait_for(started.wait(), 5)
+            await worker.queue_frames([
+                LLMFullResponseStartFrame(), LLMTextFrame("Use `print(1)` now."),
+                LLMFullResponseEndFrame(),
+            ])
+            await asyncio.wait_for(finished.wait(), 5)
+            self.assertEqual(' '.join(synthesized), "Use now. There is code in this reply.")
+            self.assertEqual(' '.join(f.text for f in frames if isinstance(f, TTSTextFrame)),
+                             "Use now. There is code in this reply.")
+            await worker.queue_frame(EndFrame())
+            await running
+        finally:
+            if running is not None and not running.done():
+                await worker.cancel()
+                await running
+
+        for text, expected in [
+            ("Use `print(1)` now.", "Use now. There is code in this reply."),
+            ("Use (`print(1)`) now.", "Use now. There is code in this reply."),
+            ("Use ``print(`hidden`)`` now.", "Use now. There is code in this reply."),
+            ('Before.\n```python\nprint("Hidden. More.")\n```\nAfter.',
+             "Before. After. There is code in this reply."),
+            ('Before.\n~~~python\nHidden. More.\n~~~\nAfter.',
+             "Before. After. There is code in this reply."),
+            ('Before.\n\n    print(1)\n    hidden()\nAfter.',
+             "Before. After. There is code in this reply."),
+            ('\tprint(1)\n\tHidden. More.\nAfter.', "After. There is code in this reply."),
+            ('Keep `one` and ``two``.', "Keep and. There is code in this reply."),
+            ("Before. `There is no speakable text in this reply. Please ask me to rephrase.` After.",
+             "Before. After. There is code in this reply."),
+            ('Before.\n````python\n```\nHidden. More.\n`````\nAfter.',
+             "Before. After. There is code in this reply."),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
+
+    def cleaned(self, text):
+        recognizer = speech.SpokenReplyText()
+        recognizer.start()
+        return ''.join(recognizer.feed(char) for char in text) + recognizer.finish()
+
+    async def test_reply_cleanup_keeps_plain_text_and_flattens_formatting(self):
+        for text in [
+            "Hello. I am listening.",
+            "Open report.md. Version 1.2.3 costs 3.50. Visit example.com.",
+            "Use snake_case and 2 * 3.",
+            "  Plain  spacing.\nAn indented\n    paragraph continuation.\n",
+            "A ~ B. A _ B. Three*four. U.S.A. foo.py.",
+            "~ A.",
+            "a - b",
+            "a | b",
+            "Keep [optional] words.",
+            "A\n\n    \nPlain.",
+        ]:
+            with self.subTest(plain=text):
+                self.assertEqual(self.cleaned(text), text)
+        for text, expected in [
+            ("# **Steps**\n- First *item*\n2. Second item", "Steps. First item. Second item."),
+            ("  ### Heading ###\n+ Next!\n123456789) Last?", "Heading. Next! Last?"),
+            ("> Quoted __words__ and ~~old~~.\n> Another line.", "Quoted words and old. Another line."),
+            ("Read _this_ and **that**, then *more*.", "Read this and that, then more."),
+            ("An **unfinished phrase", "An unfinished phrase"),
+            ("This is ***very*** and ___deeply___ important.", "This is very and deeply important."),
+            ("***Bold italic*** start.", "Bold italic start."),
+            ("Use _snake_case", "Use snake_case"),
+            ("Use _snake_case_ now.", "Use snake_case now."),
+            ("Hi\n\n- - -\n\nThere.\n\n***\n\nMore.\n\n___", "Hi. There. More."),
+            ("| a | b |\n|---|:---:|\n| 1 | 2 |", "a. b. 1. 2."),
+            ("Text\n\n| a | b |\nMore text.", "Text. a. b. More text."),
+            ("| a \\| b | `secret()` | [guide](https://x.com) |\n|---|---|---|",
+             "a | b. guide. There is code in this reply."),
+            ("|https://x.com|safe|", "safe."),
+            ("1. Step one\n\n    More detail about step one.\n2. Step two",
+             "Step one. More detail about step one. Step two."),
+            ("- Item\n    - Sub item\n    - Another\n- Next", "Item. Sub item. Another. Next."),
+            ("1. Step one\n\n       print(1)\n\n    Continue safely.\n2. Step two",
+             "Step one. Continue safely. Step two. There is code in this reply."),
+            ("- Item\n\nOrdinary prose.\n\n    print(1)\nAfter.",
+             "Item. Ordinary prose. After. There is code in this reply."),
+            ("- Item\n    - Sub item\n\n      ```python\n      hidden()\n      ```\n    - Another\n- Next",
+             "Item. Sub item. Another. Next. There is code in this reply."),
+            ("># Heading\n> - First *item*\n>>2. Second item", "Heading. First item. Second item."),
+            ("### Heading ###", "Heading."),
+            (r"Literal \*stars\* and \`ticks\`.", "Literal *stars* and `ticks`."),
+        ]:
+            with self.subTest(formatted=text):
+                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
+
+    async def test_reply_cleanup_omits_explicit_addresses_and_keeps_labels(self):
+        for text, expected in [
+            ("(https://x.com and more)", "(and more)"),
+            ("Read (https://x.com  and more).", "Read (and more)."),
+            ("Read (https://x.com  ). Continue.", "Read. Continue."),
+            ("See https://en.wikipedia.org/wiki/Hilbert's_paradox today.", "See today."),
+            ('Read https://example.com/a"b next.', "Read next."),
+            ('Read "https://example.com/it\'s". Continue.', "Read. Continue."),
+            ("(see https://x.com)", "(see)"),
+            ('She said "see https://x.com".', 'She said "see".'),
+            ("See [Hilbert's paradox](https://en.wikipedia.org/wiki/Hilbert's_paradox) for details. It is fun.",
+             "See Hilbert's paradox for details. It is fun."),
+            ('See [guide](https://x.com/a"b) here. Second sentence.', "See guide here. Second sentence."),
+            ("Read https://example.com/a?q=secret. Then continue.", "Read. Then continue."),
+            ("Read www.example.com/docs. Then continue.", "Read. Then continue."),
+            ("Read HTTP://example.com:80/a#private! Then continue.", "Read! Then continue."),
+            ('Read [the guide](https://example.com/a_(b) "Title").', "Read the guide."),
+            ('Read ![the **guide**](https://example.com/a_\\(b\\) "Title").', "Read the guide."),
+            ("Read <https://example.com/private>. Continue.", "Read. Continue."),
+            ("Read (https://example.com/private). Continue.", "Read. Continue."),
+            ("Read [https://example.com/private]. Continue.", "Read. Continue."),
+            ('Read "https://example.com/private". Continue.', "Read. Continue."),
+            ("Read 'https://example.com/private'. Continue.", "Read. Continue."),
+            ("A [safe `secret()` label](destination) remains.",
+             "A safe label remains. There is code in this reply."),
+            ("Keep [optional] words and [nested [words]] here.",
+             "Keep [optional] words and [nested [words]] here."),
+            ("Keep xhttps://example.com and mywww.example.com.",
+             "Keep xhttps://example.com and mywww.example.com."),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
+
+    async def test_reply_cleanup_finishes_malformed_or_empty_output(self):
+        recognizer = speech.SpokenReplyText()
+        address_notice = "This reply contains a web address, which I won't read aloud."
+        empty_notice = "There is no speakable text in this reply. Please ask me to rephrase."
+        for text, expected in [
+            ("Before. `Hidden. More.", "Before. There is code in this reply."),
+            ("Before.\n```python\nHidden. More.", "Before. There is code in this reply."),
+            ("[the guide](https://example.com/unfinished", "the guide"),
+            ("Keep [ordinary words", "Keep [ordinary words"),
+            ("Keep [safe `secret()` words", "Keep [safe words There is code in this reply."),
+            ("https://example.com/only", address_notice),
+            ("<https://example.com/private>", address_notice),
+            ("(www.example.com/only).", address_notice),
+            ("`print(1)`", "There is code in this reply."),
+            ("```python\nprint(1)\n```", "There is code in this reply."),
+            ("**", empty_notice),
+            ("# ** **", empty_notice),
+            ("", empty_notice),
+        ]:
+            with self.subTest(text=text):
+                recognizer.start()
+                result = ''.join(recognizer.feed(char) for char in text) + recognizer.finish()
+                self.assertEqual(' '.join(result.split()), expected)
+                self.assertEqual(recognizer.finish(), '')
+                recognizer.start()
+                self.assertEqual(recognizer.feed('Fresh plain reply.') + recognizer.finish(), 'Fresh plain reply.')
+        recognizer.start()
+        self.assertEqual(recognizer.feed('[' + 'x' * (1024 * 1024 - 3) + ' h'), '')
+        self.assertEqual(recognizer.feed('x] leaked tail.'), '')
+        self.assertEqual(recognizer.finish().strip(),
+                         "I couldn't safely prepare this reply for speech. Please ask me to rephrase.")
+        recognizer.start()
+        self.assertEqual(recognizer.feed('Fresh plain reply.') + recognizer.finish(), 'Fresh plain reply.')
+        undecidable_row = '|' + '-' * (1024 * 1024)
+        recognizer.start()
+        self.assertEqual(recognizer.feed(undecidable_row), '')
+        self.assertEqual(recognizer.feed('\nleaked tail.'), '')
+        self.assertEqual(recognizer.finish().strip(),
+                         "I couldn't safely prepare this reply for speech. Please ask me to rephrase.")
+        recognizer.start()
+        self.assertEqual(recognizer.feed(undecidable_row), '')
+        self.assertEqual(recognizer.feed('\nleaked tail.'), '')
+        self.assertEqual(recognizer.finish(failed=True).strip(), '')
+        recognizer.start()
+        self.assertEqual((recognizer.feed('- Item') + recognizer.finish()).strip(), 'Item.')
+        recognizer.start()
+        self.assertEqual((recognizer.feed('    print(1)') + recognizer.finish()).strip(),
+                         'There is code in this reply.')
+        for text in ('**', 'https://example.com/only', '[' + 'x' * (1024 * 1024)):
+            recognizer.start()
+            recognizer.feed(text)
+            self.assertEqual(recognizer.finish(failed=True).strip(), '')
+
+    async def test_reply_cleanup_resets_on_interrupt_and_shutdown(self):
+        async def open_voice():
+            observed = asyncio.Queue()
+            synthesized, heard = [], []
+            started = asyncio.Event()
+
+            class Sink(FrameProcessor):
+                async def process_frame(self, frame, direction):
+                    await super().process_frame(frame, direction)
+                    if isinstance(frame, StartFrame):
+                        started.set()
+                    elif isinstance(frame, TTSTextFrame):
+                        heard.append(frame.text)
+                    elif isinstance(frame, (DataFrame, InterruptionFrame)):
+                        observed.put_nowait(frame)
+                    await self.push_frame(frame, direction)
+
+            def chunks(text, **kwargs):
+                synthesized.append(text)
+                yield np.zeros(4800, dtype=np.float32)
+
+            worker = PipelineWorker(
+                Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks)), Sink()]),
+                enable_rtvi=False, idle_timeout_secs=None,
+            )
+            runner = WorkerRunner(handle_sigint=False)
+            running = None
+
+            async def close():
+                if running is not None and not running.done():
+                    await worker.cancel()
+                    await running
+
+            self.addAsyncCleanup(close)
+            await runner.add_workers(worker)
+            running = asyncio.create_task(runner.run())
+            await asyncio.wait_for(started.wait(), 5)
+
+            async def send(frames):
+                barrier = DataFrame()
+                await worker.queue_frames([*frames, barrier])
+                while await asyncio.wait_for(observed.get(), 5) is not barrier:
+                    pass
+
+            return worker, running, observed, synthesized, heard, send
+
+        worker, running, observed, synthesized, heard, send = await open_voice()
+        await send([LLMFullResponseStartFrame(), LLMTextFrame('`Hidden. More.')])
+        await worker.queue_frame(InterruptionFrame())
+        while not isinstance(await asyncio.wait_for(observed.get(), 5), InterruptionFrame):
+            pass
+        await send([LLMFullResponseEndFrame()])
+        self.assertEqual(synthesized, [])
+        self.assertEqual(heard, [])
+        await send([LLMFullResponseStartFrame(), LLMTextFrame('Fresh reply.'), LLMFullResponseEndFrame()])
+        self.assertEqual(synthesized, ['Fresh reply.'])
+        self.assertEqual(heard, ['Fresh reply.'])
+        await worker.queue_frame(EndFrame())
+        await running
+
+        for terminal in (CancelFrame, EndFrame):
+            with self.subTest(terminal=terminal.__name__):
+                worker, running, _, synthesized, heard, send = await open_voice()
+                await send([LLMFullResponseStartFrame(), LLMTextFrame('[partial `Hidden. More.')])
+                await worker.queue_frame(terminal())
+                await running
+                self.assertEqual(synthesized, [])
+                self.assertEqual(heard, [])
+                fresh, fresh_running, _, fresh_synthesis, fresh_heard, fresh_send = await open_voice()
+                await fresh_send([LLMFullResponseStartFrame(), LLMTextFrame('New service.'), LLMFullResponseEndFrame()])
+                self.assertEqual(fresh_synthesis, ['New service.'])
+                self.assertEqual(fresh_heard, ['New service.'])
+                await fresh.queue_frame(EndFrame())
+                await fresh_running
+
     async def test_sentences_and_service_lifetimes_keep_the_same_voice_reference(self):
         model = Mock(generate_streaming=Mock(side_effect=lambda **kwargs: iter_chunks()))
 

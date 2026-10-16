@@ -1848,6 +1848,94 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await close()
                 self.assertFalse(home.exists())
 
+    async def test_cleanup_preserves_spoken_history_and_streaming(self):
+        blocked, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+        def held_reply():
+            yield {'content': 'One fact. Obsolete continuation `Hidden. More.'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Scripted cleanup reply was never released')
+            yield {}, 'stop'
+            finished.set()
+
+        completed = [
+            ('Plain turn.', 'Hello. I am listening.', 'Hello. I am listening.'),
+            ('Formatted turn.', '# **Steps**\n- Read [the guide](https://example.com/private).\n- Use `secret()` now.',
+             'Steps. Read the guide. Use now. There is code in this reply.'),
+            ('Unclosed turn.', 'Before. `Hidden. More.', 'Before. There is code in this reply.'),
+        ]
+        brain = ScriptedBrain([
+            *[[({'content': raw}, None), ({}, 'stop')] for _, raw, _ in completed],
+            held_reply(), [({'content': 'Fresh reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        transport, spoken, committed, interrupted, processes, close = await self.open_session(brain)
+        history = []
+        expected_histories = []
+
+        async def hear(expected):
+            parts = []
+            while ' '.join(parts) != expected:
+                parts.append(await asyncio.wait_for(spoken.get(), 5))
+                self.assertTrue(expected.startswith(' '.join(parts)), parts)
+            self.assertEqual(' '.join(parts), expected)
+
+        for user, _, expected in completed:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, user)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), expected)
+            await hear(expected)
+            expected_histories.append([*history, ('user', user)])
+            history.extend([('user', user), ('assistant', expected)])
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Held turn.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+        self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+        self.assertFalse(release.is_set(), 'First speech must precede provider completion')
+        interrupted.clear()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await asyncio.wait_for(interrupted.wait(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+        self.assertTrue(spoken.empty())
+        expected_histories.append([*history, ('user', 'Held turn.')])
+        history.extend([('user', 'Held turn.'), ('assistant', 'One fact.')])
+        self.assertIsNone(processes[0][0].returncode)
+        release.set()
+        self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+        await self.finish_user_turn(transport, 'Fresh turn.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+        await hear('Fresh reply.')
+        expected_histories.append([*history, ('user', 'Fresh turn.')])
+        histories = [[(m['role'], m['content'].strip()) for m in request[2]['messages']
+                      if m['role'] != 'system'] for request in brain.requests]
+        self.assertEqual(histories, expected_histories)
+        self.assertTrue(spoken.empty())
+        self.assertEqual(len(processes), 1)
+        await close()
+
+    async def test_unclosed_code_cannot_hide_engine_failure(self):
+        response = '{"text":"```python\\nHidden. More."}\n{"done":1}'
+        wire = ('import sys; print(\'{"ready":true}\', flush=True); sys.stdin.readline(); '
+                f'print({response!r}, flush=True); sys.stdin.read()')
+        transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
+        try:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Answer over the wire.')
+            expected = ("There is code in this reply. I couldn't reach Kestrel's engine. "
+                        "Restart Kestrel and try again.")
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), expected)
+            heard = []
+            while ' '.join(heard) != expected:
+                heard.append(await asyncio.wait_for(spoken.get(), 5))
+                self.assertTrue(expected.startswith(' '.join(heard)), heard)
+            self.assertTrue(spoken.empty())
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0][0].returncode)
+        finally:
+            await close()
+
     async def test_conversation_preserves_context_and_interrupts_reply(self):
         blocked = threading.Event()
         release = threading.Event()
