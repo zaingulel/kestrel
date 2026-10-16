@@ -94,7 +94,7 @@ Kestrel captures the selected output using Omarchy's resolver, including the phy
 
 If volume cannot be confirmed, Kestrel attempts to say **I couldn't confirm volume. Check the audio control. I won't retry.** and attempts a native desktop notification titled **Volume could not be confirmed**, with **Check the audio control. Kestrel will not retry.** It uses the same transient, silent, fixed-text pattern and delivery limitations as mute failure. If the volume write cannot be confirmed, Kestrel does not proceed to unmute. It never retries, undoes an attempted change or falls back to another output; a new explicit volume turn is a new request.
 
-Speaking again can interrupt the failure speech while local verification and the notification attempt finish. Kestrel keeps the request out of brain history and suppresses stale failure speech over a newer turn. Shutdown cancels and joins outstanding local work without undoing an attempted change.
+Speaking again can interrupt the failure speech while local verification and the notification attempt finish. Kestrel keeps the request out of brain history and suppresses stale failure speech over a newer turn. Shutdown cancels and joins outstanding local work without undoing an attempted change. Mute and volume changes run one at a time, in the order their spoken turns complete.
 
 ## Repeat that
 
