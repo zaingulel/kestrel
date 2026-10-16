@@ -1,1 +1,1 @@
-{"version":1,"runtimes":["claude","codex"],"seats":{},"greptile":true,"docSweep":true,"crossFamilyReview":true}
+{"version":1,"runtimes":["claude","codex"],"seats":{},"greptile":false,"docSweep":true,"crossFamilyReview":true}
