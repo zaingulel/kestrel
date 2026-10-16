@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+import json
 import os
 import signal
 import sys
@@ -153,6 +154,288 @@ MEASURED_FIRST_HI_SCORES = (
 )
 
 
+class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def volume(left, right=None):
+        return json.dumps({'volume': {
+            'front-left': {'value': left, 'value_percent': '30%'},
+            'front-right': {'value': left if right is None else right},
+        }})
+
+    async def test_captured_output_and_ordered_writes(self):
+        for percent, target in ((30, 19660), (0, 0), (100, 65536)):
+            with self.subTest(percent=percent):
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', self.volume(32768), 'Mute: yes', '',
+                    self.volume(target), '', 'selected', 'physical', self.volume(target), 'Mute: no',
+                ])
+                result = await bot.volume_output(percent, command=command)
+                self.assertTrue(result.confirmed)
+                self.assertTrue(result.attempted)
+                self.assertEqual(command.await_args_list, [
+                    call(('/usr/bin/pactl', 'get-default-sink')),
+                    call(('/usr/bin/omarchy-audio-output-sink', 'selected')),
+                    call(('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical')),
+                    call(('/usr/bin/pactl', 'get-sink-mute', 'physical')),
+                    call(('/usr/bin/pactl', 'set-sink-volume', 'physical', f'{percent}%')),
+                    call(('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical')),
+                    call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '0')),
+                    call(('/usr/bin/pactl', 'get-default-sink')),
+                    call(('/usr/bin/omarchy-audio-output-sink', 'selected')),
+                    call(('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical')),
+                    call(('/usr/bin/pactl', 'get-sink-mute', 'physical')),
+                ])
+        for default, sink, after_volume in (
+            ('changed', 'physical', self.volume(19660)),
+            ('selected', 'different', self.volume(19660)),
+            ('selected', 'physical', '{"volume":{"mono":{"value":19660}}}'),
+        ):
+            with self.subTest(default=default, sink=sink, volume=after_volume):
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', self.volume(32768), 'Mute: no', '', self.volume(19660),
+                    default, sink, after_volume, 'Mute: no',
+                ])
+                result = await bot.volume_output(30, command=command)
+                self.assertFalse(result.confirmed)
+                self.assertTrue(result.attempted)
+                self.assertEqual(command.await_count, 10)
+                self.assertEqual(sum(c.args[0][1] == 'set-sink-volume' for c in command.await_args_list), 1)
+
+        for readback in (self.volume(19660, 19661), '{"volume":{"mono":{"value":19660}}}'):
+            with self.subTest(unconfirmed_before_unmute=readback):
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', self.volume(32768), 'Mute: yes', '', readback,
+                ])
+                result = await bot.volume_output(30, command=command)
+                self.assertEqual(result, bot.AudioResult(False, True, 'readback unconfirmed'))
+                self.assertEqual(command.await_count, 6)
+                self.assertFalse(any(c.args[0][1] == 'set-sink-mute' for c in command.await_args_list))
+
+    async def test_verified_noop_and_zero(self):
+        for percent, target, initial, muted in (
+            (30, 19660, 19660, False), (30, 19660, 19660, True),
+            (0, 0, 0, False), (0, 0, 0, True), (30, 19660, 19661, False),
+        ):
+            with self.subTest(percent=percent, initial=initial, muted=muted):
+                outputs = ['selected', 'physical', self.volume(initial), 'Mute: yes' if muted else 'Mute: no']
+                writes = []
+                if initial != target:
+                    outputs += ['', self.volume(target)]
+                    writes.append(('/usr/bin/pactl', 'set-sink-volume', 'physical', f'{percent}%'))
+                if muted:
+                    outputs.append('')
+                    writes.append(('/usr/bin/pactl', 'set-sink-mute', 'physical', '0'))
+                outputs += ['selected', 'physical', self.volume(target), 'Mute: no']
+                command = AsyncMock(side_effect=outputs)
+                result = await bot.volume_output(percent, command=command)
+                self.assertTrue(result.confirmed)
+                self.assertEqual(result.attempted, bool(writes))
+                self.assertEqual([c.args[0] for c in command.await_args_list if c.args[0][1].startswith('set-')], writes)
+                self.assertEqual(command.await_count, len(outputs))
+        for invalid in (True, False, -1, 101, 30.0, '30', None):
+            with self.subTest(invalid=invalid):
+                command = AsyncMock()
+                with self.assertRaises(ValueError):
+                    await bot.volume_output(invalid, command=command)
+                command.assert_not_awaited()
+
+    async def test_invalid_readback_and_no_retry(self):
+        invalid = [
+            '', 'private malformed output', '[]', 'null', 'true', '{}',
+            '{"volume":{"left":{"value":19660}},"metadata":NaN}',
+            '{"volume":{"left":{"value":19660}},"metadata":Infinity}',
+            '{"volume":[]}', '{"volume":{}}', '{"volume":{"": {"value":1}}}',
+            '{"volume":{"left":null}}', '{"volume":{"left":{}}}',
+            '{"volume":{"left":{"value":true}}}', '{"volume":{"left":{"value":1.0}}}',
+            '{"volume":{"left":{"value":"19660"}}}', '{"volume":{"left":{"value":-1}}}',
+            '{"volume":{"left":{"value":2147483648}}}',
+            '{"volume":{"left":{"value":19660,"value":19660}}}',
+            '{"volume":{"left":{"value":19660},"left":{"value":19660}}}',
+            '{"volume":{},"volume":{"left":{"value":19660}}}',
+            json.dumps({'volume': {str(n): {'value': 19660} for n in range(33)}}),
+            '[' * 1100 + '0' + ']' * 1100,
+        ]
+        base = ['selected', 'physical', self.volume(32768), 'Mute: yes', '',
+                self.volume(19660), '', 'selected', 'physical', self.volume(19660), 'Mute: no']
+        cases = [(stage, value, 'invalid volume') for stage in (2, 5, 9) for value in invalid]
+        cases += [(stage, RuntimeError('private command failure'), 'command failed') for stage in range(11)]
+        cases += [(stage, value, reason) for stage, value, reason in (
+            (0, 'bad name;', 'invalid sink'), (1, '@DEFAULT_SINK@', 'invalid sink'),
+            (3, 'Mute: unknown', 'invalid status'), (7, 'bad\nname', 'invalid sink'),
+            (8, '-option', 'invalid sink'), (10, 'Mute: no\r\n', 'invalid status'),
+            (5, self.volume(19660, 19661), 'readback unconfirmed'),
+            (5, '{"volume":{"mono":{"value":19660}}}', 'readback unconfirmed'),
+            (9, self.volume(19660, 19661), 'readback unconfirmed'),
+            (10, 'Mute: yes', 'readback unconfirmed'),
+        )]
+        for stage, value, reason in cases:
+            with self.subTest(stage=stage, value=str(value)[:80]):
+                outputs = base.copy()
+                outputs[stage] = value
+                command = AsyncMock(side_effect=outputs)
+                result = await bot.volume_output(30, command=command)
+                self.assertFalse(result.confirmed)
+                self.assertEqual(result.attempted, stage >= 4)
+                self.assertEqual(result.reason, reason)
+                self.assertEqual(command.await_count, 11 if stage == 9 and reason == 'readback unconfirmed' else stage + 1)
+                writes = [c.args[0] for c in command.await_args_list if c.args[0][1].startswith('set-')]
+                self.assertEqual(writes, [
+                    ('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'),
+                    ('/usr/bin/pactl', 'set-sink-mute', 'physical', '0'),
+                ][:int(stage >= 4) + int(stage >= 6)])
+        for default, sink in (('changed', 'physical'), ('selected', 'changed')):
+            outputs = base.copy()
+            outputs[7:9] = [default, sink]
+            result = await bot.volume_output(30, command=AsyncMock(side_effect=outputs))
+            self.assertEqual(result, bot.AudioResult(False, True, 'target changed'))
+
+    async def test_completed_user_turn_and_consumption(self):
+        cases = [
+            ([{'role': 'user', 'content': 'volume thirty percent'}], True, FrameDirection.DOWNSTREAM),
+            ([{'role': 'user', 'content': 'volume thirty percent'}], False, FrameDirection.UPSTREAM),
+            ([{'role': 'assistant', 'content': 'volume thirty percent'}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'system', 'content': 'volume thirty percent'}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'assistant', 'content': '', 'tool_calls': [
+                {'type': 'function', 'function': {'name': 'volume thirty percent', 'arguments': '{}'}},
+            ]}], False, FrameDirection.DOWNSTREAM),
+            ([{'role': 'user', 'content': [{'type': 'text', 'text': 'volume thirty percent'}]}], False, FrameDirection.DOWNSTREAM),
+            ([], False, FrameDirection.DOWNSTREAM),
+        ]
+        for messages, speculative, direction in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Only a completed downstream text-user turn may act'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'This direct processor fixture has no engine'
+                context = bot.LLMContext(deepcopy(messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                command.assert_not_awaited()
+                self.assertEqual(context.get_messages(), messages)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        replies = iter(['selected', 'physical', self.volume(32768), 'Mute: no', '', self.volume(19660), 'selected', 'physical', self.volume(19660), 'Mute: no'])
+
+        async def command(argv):
+            calls.append(argv)
+            if len(calls) == 1:
+                started.set()
+                await release.wait()
+            return next(replies)
+
+        service = bot.HermesLLMService(local_command=command)
+        service.failure = 'This direct processor fixture has no engine'
+        context = bot.LLMContext([{'role': 'user', 'content': 'volume thirty percent'}])
+        frame = LLMContextFrame(context)
+        processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            self.assertEqual(context.get_messages(), [], 'Consumption precedes the first native-command await')
+            await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+            self.assertEqual(len(calls), 1, 'Replayed context cannot start another action while the first is pending')
+            release.set()
+            await asyncio.wait_for(processing, 5)
+            await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+            self.assertEqual(len(calls), 10)
+            self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')), 1)
+            self.assertFalse(service.local_tasks)
+        finally:
+            release.set()
+            await service.close_local_tools()
+            if not processing.done():
+                processing.cancel()
+            await asyncio.gather(processing, return_exceptions=True)
+
+    async def test_timeout_and_cancellation(self):
+        for effect in ('set-sink-volume', 'set-sink-mute'):
+            with self.subTest(effect=effect):
+                started, cleaned = asyncio.Event(), asyncio.Event()
+                calls = []
+
+                async def hung(argv):
+                    calls.append(argv)
+                    if argv[1] == effect:
+                        started.set()
+                        try:
+                            await asyncio.Future()
+                        finally:
+                            cleaned.set()
+                    if argv[1] == 'get-default-sink':
+                        return 'selected'
+                    if argv[0] == '/usr/bin/omarchy-audio-output-sink':
+                        return 'physical'
+                    if argv[1] == '--format=json':
+                        return self.volume(32768 if len(calls) == 3 else 19660)
+                    if argv[1] == 'get-sink-mute':
+                        return 'Mute: yes'
+                    return ''
+
+                with patch.object(bot, 'VOLUME_TIMEOUT', 0.01):
+                    result = await asyncio.wait_for(bot.volume_output(30, command=hung), 5)
+                self.assertTrue(started.is_set())
+                self.assertTrue(cleaned.is_set())
+                self.assertEqual(result, bot.AudioResult(False, True, 'volume timeout'))
+                self.assertEqual(len(calls), 5 if effect == 'set-sink-volume' else 7)
+                calls.clear()
+                started.clear()
+                cleaned.clear()
+                task = asyncio.create_task(bot.volume_output(30, command=hung))
+                try:
+                    await asyncio.wait_for(started.wait(), 5)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                    self.assertTrue(cleaned.is_set())
+                    self.assertEqual(len(calls), 5 if effect == 'set-sink-volume' else 7)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def test_exact_volume_grammar_and_permission(self):
+        phrases = {
+            'volume zero percent': 0, 'volume one percent': 1, 'volume nine percent': 9,
+            'volume ten percent': 10, 'volume eleven percent': 11, 'volume twelve percent': 12,
+            'volume thirteen percent': 13, 'volume fourteen percent': 14,
+            'volume fifteen percent': 15, 'volume sixteen percent': 16,
+            'volume seventeen percent': 17, 'volume eighteen percent': 18,
+            'volume nineteen percent': 19, 'volume twenty percent': 20,
+            'volume twenty-one percent': 21, 'volume thirty percent': 30,
+            'volume forty two percent': 42, 'volume fifty-three percent': 53,
+            'volume sixty four percent': 64, 'volume seventy-five percent': 75,
+            'volume eighty six percent': 86, 'volume ninety-nine percent': 99,
+            'volume one hundred percent': 100, 'volume 0 percent': 0,
+            'volume 30%': 30, 'volume 30 %': 30, 'volume 100 percent': 100,
+            ' VOLUME THIRTY PERCENT! ': 30, 'Volume 1%.': 1,
+        }
+        for text, percent in phrases.items():
+            with self.subTest(text=text):
+                tool = bot.match_instant_tool(text)
+                self.assertIsNotNone(tool)
+                self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+                self.assertEqual(tool.subject, 'volume')
+                self.assertIsNot(tool, bot.LOCAL_TOOLS['volume'])
+                command = AsyncMock()
+                action = AsyncMock()
+                with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(bot.PermissionTier.FREE, action, 'volume')):
+                    tool = bot.match_instant_tool(text)
+                    await tool.run(command=command)
+                    action.assert_awaited_once_with(percent, command=command)
+        for text in (
+            'volume 101 percent', 'volume -1 percent', 'volume +30 percent',
+            'volume 030 percent', 'volume 00%', 'volume 30.0 percent', 'volume ٣٠ percent',
+            'volume thirty%', 'volume hundred percent', 'volume twenty ten percent',
+            'volume thirty  one percent', 'volume thirty--one percent', 'volume thirty percent?',
+            'volume 30%!!', '"volume 30%"', 'do not volume 30%', 'please volume 30%',
+            'volume 30 percent please', 'volume 30 percent and mute', 'volume\n30 percent',
+            'volume\t30 percent', 'volume  30 percent', 'volume 1e2 percent', '',
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(bot.match_instant_tool(text))
+        for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+            with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(permission, AsyncMock(), 'volume')):
+                self.assertIsNone(bot.match_instant_tool('volume thirty percent'))
+
+
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_only_handles_completed_exact_user_turns(self):
         accepted = ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? ')
@@ -169,7 +452,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -246,7 +529,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -294,7 +577,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     after_default, after_sink, after_status,
                 ])
                 result = await bot.mute_output(command=command)
-                self.assertEqual(result, bot.MuteResult(confirmed, False, reason))
+                self.assertEqual(result, bot.AudioResult(confirmed, False, reason))
                 self.assertEqual(command.await_args_list, [
                     call(('/usr/bin/pactl', 'get-default-sink')),
                     call(('/usr/bin/omarchy-audio-output-sink', 'selected')),
@@ -358,7 +641,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(bot.mute_output(command=hung), 5)
         self.assertTrue(started.is_set())
         self.assertTrue(stopped.is_set())
-        self.assertEqual(result, bot.MuteResult(False, True, 'mute timeout'))
+        self.assertEqual(result, bot.AudioResult(False, True, 'mute timeout'))
         self.assertEqual(len(commands), 4)
         commands.clear()
         started.clear()
@@ -551,26 +834,27 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_notification_is_fixed_local_and_reports_unavailability(self):
-        argv = ('/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
-                '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
-                'Check the audio control. Kestrel will not retry.')
-        command = AsyncMock(return_value='')
-        with patch.object(bot.logger, 'error') as error:
-            self.assertTrue(await bot.notify_mute_failure(command=command))
-            command.assert_awaited_once_with(argv)
-            error.assert_not_called()
-        for failure in (RuntimeError('private missing executable'), RuntimeError('private external output')):
-            command = AsyncMock(side_effect=failure)
+        for subject in ('mute', 'volume'):
+            argv = ('/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+                    '--hint=boolean:suppress-sound:true', f'{subject.title()} could not be confirmed',
+                    'Check the audio control. Kestrel will not retry.')
+            command = AsyncMock(return_value='')
             with patch.object(bot.logger, 'error') as error:
-                self.assertFalse(await bot.notify_mute_failure(command=command))
+                self.assertTrue(await bot.notify_audio_failure(subject, command=command))
                 command.assert_awaited_once_with(argv)
-                error.assert_called_once_with('Mute failure notification unavailable')
-        command = AsyncMock(side_effect=asyncio.CancelledError)
-        with patch.object(bot.logger, 'error') as error:
-            with self.assertRaises(asyncio.CancelledError):
-                await bot.notify_mute_failure(command=command)
-            command.assert_awaited_once_with(argv)
-            error.assert_not_called()
+                error.assert_not_called()
+            for failure in (RuntimeError('private missing executable'), RuntimeError('private external output')):
+                command = AsyncMock(side_effect=failure)
+                with patch.object(bot.logger, 'error') as error:
+                    self.assertFalse(await bot.notify_audio_failure(subject, command=command))
+                    command.assert_awaited_once_with(argv)
+                    error.assert_called_once_with(f'{subject.title()} failure notification unavailable')
+            command = AsyncMock(side_effect=asyncio.CancelledError)
+            with patch.object(bot.logger, 'error') as error:
+                with self.assertRaises(asyncio.CancelledError):
+                    await bot.notify_audio_failure(subject, command=command)
+                command.assert_awaited_once_with(argv)
+                error.assert_not_called()
 
 
 class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
@@ -1270,6 +1554,109 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
 
+    async def test_volume_bypasses_pending_brain_and_history(self):
+        held = threading.Event()
+        release = threading.Event()
+
+        def preparation_reply():
+            yield {'content': 'Preparation nonce 731.'}, None
+            held.set()
+            if not release.wait(45):
+                raise AssertionError('Preparation reply was not released')
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            preparation_reply(), [({'content': 'Actual caller reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', LocalVolumeTests.volume(32768), 'Mute: yes', '',
+            LocalVolumeTests.volume(19660), '', 'selected', 'physical', LocalVolumeTests.volume(19660), 'Mute: no',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, local_command=command, prepare_engine=True,
+        )
+        preparation = transport.llm.reader
+        try:
+            self.assertTrue(await asyncio.to_thread(held.wait, 5))
+            self.assertFalse(preparation.done())
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Hello.'},
+            ])
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'volume thirty percent')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(command.await_count, 11)
+            self.assertFalse(preparation.done())
+            self.assertFalse(release.is_set())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+
+            checkpoint = asyncio.Event()
+            driver = asyncio.current_task()
+            native_shield = asyncio.shield
+            worker_input = processes[0][0].stdin
+            native_write = worker_input.write
+            ordinary_writes = 0
+            pending_writes = 0
+
+            def observe_shield(task):
+                future = native_shield(task)
+                if task is preparation and asyncio.current_task() is not driver:
+                    checkpoint.set()
+                return future
+
+            def observe_write(data):
+                nonlocal ordinary_writes, pending_writes
+                ordinary_writes += 1
+                pending_writes += not preparation.done()
+                checkpoint.set()
+                return native_write(data)
+
+            with (
+                patch.object(asyncio, 'shield', observe_shield),
+                patch.object(worker_input, 'write', observe_write),
+            ):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'Answer the genuine user turn.')
+                await asyncio.wait_for(checkpoint.wait(), 5)
+                self.assertEqual(ordinary_writes, 0, 'Ordinary worker request preceded preparation completion')
+                self.assertFalse(preparation.done())
+                self.assertFalse(release.is_set())
+                self.assertEqual(len(brain.requests), 1)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+
+                release.set()
+                await asyncio.wait_for(asyncio.shield(preparation), 5)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                self.assertEqual(len(brain.requests), 2)
+                self.assertIn(
+                    'Kestrel handles volume <level> percent locally, from zero to one hundred percent.',
+                    ' '.join(m['content'] for m in brain.requests[1][2]['messages'] if m['role'] == 'system'),
+                )
+                self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                    {'role': 'user', 'content': 'Answer the genuine user turn.'},
+                ])
+                self.assertEqual(ordinary_writes, 1)
+                self.assertEqual(pending_writes, 0)
+        finally:
+            release.set()
+            await close()
+        self.assertTrue(preparation.done())
+        self.assertIsNotNone(processes[0][0].returncode)
+        self.assertFalse(processes[0][1].exists())
+
     async def test_native_preparation_is_silent_private_and_does_not_block_mute(self):
         held = threading.Event()
         release = threading.Event()
@@ -1584,6 +1971,189 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             'for a request to mute, explain that the owner must say mute on its own.',
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
         )
+
+    async def test_volume_failure_interruption_and_shutdown(self):
+        notification = (
+            '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+            '--hint=boolean:suppress-sound:true', 'Volume could not be confirmed',
+            'Check the audio control. Kestrel will not retry.',
+        )
+        failure = "I couldn't confirm volume. Check the audio control. I won't retry."
+        failed_readback = ['selected', 'physical', LocalVolumeTests.volume(32768), 'Mute: yes', '',
+                           LocalVolumeTests.volume(32768)]
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            command = AsyncMock(side_effect=failed_readback + [''])
+            transport, spoken, committed, _, _, close = await self.open_session(None, local_command=command)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'volume thirty percent')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), failure)
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'repeat that')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), failure)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty(), 'Local failure speech does not enter brain history')
+                self.assertEqual(command.await_count, 7, 'Repeat cannot redo a local effect')
+                self.assertEqual(command.await_args_list[-1], call(notification))
+                self.assertEqual(command.await_args_list.count(
+                    call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')),
+                ), 1)
+                self.assertFalse(any(c.args[0][1] == 'set-sink-mute' for c in command.await_args_list))
+            finally:
+                await close()
+
+            writes_started, release_write, cancelled, notified = (
+                asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+            )
+            calls, action_tasks = [], []
+            replies = iter(failed_readback)
+
+            async def interrupted_command(argv):
+                calls.append(argv)
+                if argv[0] == '/usr/bin/notify-send':
+                    notified.set()
+                    return ''
+                if argv[1] == 'set-sink-volume':
+                    action_tasks.append(asyncio.current_task())
+                    writes_started.set()
+                    try:
+                        await release_write.wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                return next(replies)
+
+            transport, spoken, committed, interrupted, _, close = await self.open_session(
+                None, local_command=interrupted_command,
+            )
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'volume thirty percent')
+                await asyncio.wait_for(writes_started.wait(), 5)
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                self.assertFalse(cancelled.is_set(), 'Speech interruption retains attempted effects')
+                release_write.set()
+                await asyncio.wait_for(notified.wait(), 5)
+                await asyncio.wait_for(asyncio.shield(action_tasks[0]), 5)
+                await self.finish_user_turn(transport, 'repeat that')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(spoken.empty(), 'An interrupted local action cannot queue stale failure speech')
+                self.assertTrue(committed.empty())
+                self.assertEqual(calls[-1], notification)
+                self.assertEqual(len(calls), 7)
+                self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')), 1)
+                self.assertFalse(transport.llm.local_tasks)
+            finally:
+                release_write.set()
+                await close()
+
+            writes_started, cancelled, release_cleanup, cleaned = (
+                asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+            )
+            calls, action_tasks = [], []
+            replies = iter(failed_readback[:4])
+
+            async def hanging_command(argv):
+                calls.append(argv)
+                if argv[1] == 'set-sink-volume':
+                    action_tasks.append(asyncio.current_task())
+                    writes_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        await release_cleanup.wait()
+                        cleaned.set()
+                        raise
+                return next(replies)
+
+            transport, _, _, _, _, close = await self.open_session(None, local_command=hanging_command)
+            closing = None
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'volume thirty percent')
+                await asyncio.wait_for(writes_started.wait(), 5)
+                closing = asyncio.create_task(close())
+                await asyncio.wait_for(cancelled.wait(), 5)
+                self.assertFalse(closing.done(), 'Shutdown joins command cleanup')
+                release_cleanup.set()
+                await asyncio.wait_for(closing, 5)
+                self.assertTrue(cleaned.is_set())
+                self.assertTrue(action_tasks[0].cancelled())
+                self.assertFalse(transport.llm.local_tasks)
+                self.assertEqual(calls, [
+                    ('/usr/bin/pactl', 'get-default-sink'),
+                    ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+                    ('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical'),
+                    ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+                    ('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'),
+                ], 'Shutdown starts no later command')
+            finally:
+                release_cleanup.set()
+                if closing is not None:
+                    await asyncio.gather(closing, return_exceptions=True)
+                await close()
+
+    async def test_invalid_volume_turns_reach_brain_unchanged(self):
+        brain = ScriptedBrain([
+            [({'content': 'Invalid level is conversation.'}, None), ({}, 'stop')],
+            [({'content': 'Longer phrase is conversation.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=AssertionError('An invalid or longer turn cannot act'))
+        transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
+        for index, segment, tail, expected, reply in (
+            (0, 'volume 101 percent', None, 'volume 101 percent', 'Invalid level is conversation.'),
+            (1, 'volume thirty percent', 'and tell me a fact.',
+             'volume thirty percent and tell me a fact.', 'Longer phrase is conversation.'),
+        ):
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await transport.input().queue_frame(
+                TranscriptionFrame(segment, '', '2026-01-01T00:00:00Z', finalized=True),
+            )
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            command.assert_not_awaited()
+            self.assertEqual(len(brain.requests), index, 'A finalized segment is not a completed turn')
+            if tail is None:
+                await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+            else:
+                await self.finish_user_turn(transport, tail)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), reply)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), reply)
+            command.assert_not_awaited()
+            self.assertEqual(len(brain.requests), index + 1)
+            users = [m for m in brain.requests[index][2]['messages'] if m['role'] == 'user']
+            self.assertEqual(users[-1], {'role': 'user', 'content': expected})
+
+    async def test_volume_without_engine(self):
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', LocalVolumeTests.volume(32768), 'Mute: yes', '',
+            LocalVolumeTests.volume(19660), '', 'selected', 'physical', LocalVolumeTests.volume(19660), 'Mute: no',
+        ])
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, _, _, processes, _ = await self.open_session(None, local_command=command)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'volume thirty percent.')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(spoken.empty(), 'A handled volume action must not speak an engine error')
+            self.assertEqual(command.await_count, 11)
+            self.assertEqual(command.await_args_list.count(
+                call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')),
+            ), 1)
+            self.assertEqual(len(processes), 1)
+            self.assertIsNone(processes[0][0])
 
     async def test_exact_mute_works_when_the_local_engine_is_missing(self):
         command = AsyncMock(side_effect=[

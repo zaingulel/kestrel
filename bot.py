@@ -2,7 +2,8 @@
 
 import asyncio
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from enum import Enum
 import json
 import os
@@ -42,6 +43,7 @@ from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechA
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
 MUTE_TIMEOUT = 5
+VOLUME_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
 LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
 
@@ -56,10 +58,11 @@ class PermissionTier(Enum):
 class LocalTool:
     permission: PermissionTier
     run: object
+    subject: str = 'mute'
 
 
 @dataclass(frozen=True)
-class MuteResult:
+class AudioResult:
     confirmed: bool
     attempted: bool
     reason: str
@@ -139,67 +142,167 @@ async def run_local_command(argv):
         raise RuntimeError(reason) from None
 
 
+async def read_output_name(argv, *, command=run_local_command) -> str:
+    name = (await command(argv)).removesuffix('\n')
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]{0,255}', name):
+        raise ValueError('invalid sink')
+    return name
+
+
+async def read_output_mute(sink: str, *, command=run_local_command) -> str:
+    status = (await command(('/usr/bin/pactl', 'get-sink-mute', sink))).removesuffix('\n')
+    if status not in ('Mute: yes', 'Mute: no'):
+        raise ValueError('invalid status')
+    return status
+
+
 async def mute_output(*, command=run_local_command):
     attempted = False
-
-    async def sink_name(argv):
-        name = (await command(argv)).removesuffix('\n')
-        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.:-]{0,255}', name):
-            raise ValueError('invalid sink')
-        return name
-
-    async def mute_status(sink):
-        status = (await command(('/usr/bin/pactl', 'get-sink-mute', sink))).removesuffix('\n')
-        if status not in ('Mute: yes', 'Mute: no'):
-            raise ValueError('invalid status')
-        return status
-
     try:
         async with asyncio.timeout(MUTE_TIMEOUT):
-            default = await sink_name(('/usr/bin/pactl', 'get-default-sink'))
-            sink = await sink_name(('/usr/bin/omarchy-audio-output-sink', default))
-            already_muted = await mute_status(sink) == 'Mute: yes'
+            default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
+            sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', default), command=command)
+            already_muted = await read_output_mute(sink, command=command) == 'Mute: yes'
             if not already_muted:
                 attempted = True
                 await command(('/usr/bin/pactl', 'set-sink-mute', sink, '1'))
-            after_default = await sink_name(('/usr/bin/pactl', 'get-default-sink'))
-            after_sink = await sink_name(('/usr/bin/omarchy-audio-output-sink', after_default))
-            status = await mute_status(sink)
+            after_default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
+            after_sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', after_default), command=command)
+            status = await read_output_mute(sink, command=command)
             if default != after_default or sink != after_sink:
-                return MuteResult(False, attempted, 'target changed')
+                return AudioResult(False, attempted, 'target changed')
             if status != 'Mute: yes':
-                return MuteResult(False, attempted, 'readback unconfirmed')
-            return MuteResult(True, attempted, 'already muted' if already_muted else 'confirmed')
+                return AudioResult(False, attempted, 'readback unconfirmed')
+            return AudioResult(True, attempted, 'already muted' if already_muted else 'confirmed')
     except TimeoutError:
-        return MuteResult(False, attempted, 'mute timeout')
+        return AudioResult(False, attempted, 'mute timeout')
     except ValueError as error:
-        return MuteResult(False, attempted, str(error))
+        return AudioResult(False, attempted, str(error))
     except RuntimeError:
-        return MuteResult(False, attempted, 'command failed')
+        return AudioResult(False, attempted, 'command failed')
 
 
-async def notify_mute_failure(*, command=run_local_command):
+async def notify_audio_failure(subject: str, *, command=run_local_command) -> bool:
     try:
         await command((
             '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
-            '--hint=boolean:suppress-sound:true', 'Mute could not be confirmed',
+            '--hint=boolean:suppress-sound:true',
+            {'mute': 'Mute could not be confirmed', 'volume': 'Volume could not be confirmed'}[subject],
             'Check the audio control. Kestrel will not retry.',
         ))
     except RuntimeError:
-        logger.error('Mute failure notification unavailable')
+        logger.error({'mute': 'Mute failure notification unavailable',
+                      'volume': 'Volume failure notification unavailable'}[subject])
         return False
     # Command acceptance does not establish visible delivery by the desktop.
     return True
 
 
-LOCAL_TOOLS = {'mute': LocalTool(PermissionTier.FREE, mute_output)}
+async def read_output_volume(sink: str, *, command=run_local_command) -> dict[str, int]:
+    output = await command(('/usr/bin/pactl', '--format=json', 'get-sink-volume', sink))
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('invalid volume')
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError('invalid volume')
+
+    try:
+        data = json.loads(output, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        if not isinstance(data, dict):
+            raise ValueError
+        volume = data.get('volume')
+        if not isinstance(volume, dict) or not 1 <= len(volume) <= 32:
+            raise ValueError
+        values = {}
+        for name, channel in volume.items():
+            if not name or not isinstance(channel, dict):
+                raise ValueError
+            value = channel.get('value')
+            if type(value) is not int or not 0 <= value <= 2147483647:
+                raise ValueError
+            values[name] = value
+        return values
+    except (ValueError, RecursionError):
+        raise ValueError('invalid volume') from None
+
+
+async def volume_output(percent: int, *, command=run_local_command) -> AudioResult:
+    if type(percent) is not int or not 0 <= percent <= 100:
+        raise ValueError('invalid percentage')
+    attempted = False
+    target = percent * 65536 // 100
+    try:
+        async with asyncio.timeout(VOLUME_TIMEOUT):
+            default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
+            sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', default), command=command)
+            initial = await read_output_volume(sink, command=command)
+            muted = await read_output_mute(sink, command=command) == 'Mute: yes'
+            if any(value != target for value in initial.values()):
+                attempted = True
+                await command(('/usr/bin/pactl', 'set-sink-volume', sink, f'{percent}%'))
+                verified = await read_output_volume(sink, command=command)
+                if verified.keys() != initial.keys() or any(value != target for value in verified.values()):
+                    return AudioResult(False, attempted, 'readback unconfirmed')
+            if muted:
+                attempted = True
+                await command(('/usr/bin/pactl', 'set-sink-mute', sink, '0'))
+            after_default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
+            after_sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', after_default), command=command)
+            after = await read_output_volume(sink, command=command)
+            status = await read_output_mute(sink, command=command)
+            if default != after_default or sink != after_sink:
+                return AudioResult(False, attempted, 'target changed')
+            if after.keys() != initial.keys() or any(value != target for value in after.values()) or status != 'Mute: no':
+                return AudioResult(False, attempted, 'readback unconfirmed')
+            return AudioResult(True, attempted, 'confirmed' if attempted else 'already set')
+    except TimeoutError:
+        return AudioResult(False, attempted, 'volume timeout')
+    except ValueError as error:
+        return AudioResult(False, attempted, str(error))
+    except RuntimeError:
+        return AudioResult(False, attempted, 'command failed')
+
+
+LOCAL_TOOLS = {
+    'mute': LocalTool(PermissionTier.FREE, mute_output),
+    'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
+}
+
+
+VOLUME_LEVELS = {name: value for value, name in enumerate((
+    'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+    'seventeen', 'eighteen', 'nineteen',
+))}
+for value, name in enumerate(('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'), 2):
+    VOLUME_LEVELS[name] = value * 10
+    for digit, unit in enumerate(('one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'), 1):
+        for separator in (' ', '-'):
+            VOLUME_LEVELS[name + separator + unit] = value * 10 + digit
+VOLUME_LEVELS['one hundred'] = 100
 
 
 def match_instant_tool(text):
-    if text.strip().lower() not in ('mute', 'mute.', 'mute!'):
-        return None
-    tool = LOCAL_TOOLS['mute']
-    return tool if tool.permission is PermissionTier.FREE else None
+    text = text.strip().lower()
+    if text in ('mute', 'mute.', 'mute!'):
+        tool = LOCAL_TOOLS['mute']
+        return tool if tool.permission is PermissionTier.FREE else None
+    match = re.fullmatch(r'volume (0|[1-9][0-9]?|100)(?: percent| ?%)[.!]?', text)
+    if match:
+        percent = int(match[1])
+    else:
+        match = re.fullmatch(r'volume ([a-z -]+) percent[.!]?', text)
+        if not match or match[1] not in VOLUME_LEVELS:
+            return None
+        percent = VOLUME_LEVELS[match[1]]
+    tool = LOCAL_TOOLS['volume']
+    return replace(tool, run=partial(tool.run, percent)) if tool.permission is PermissionTier.FREE else None
 
 
 def stop_kestrel():
@@ -223,11 +326,11 @@ class HermesLLMService(LLMService):
         self.local_tasks = set()
         self.last_spoken_reply: str | None = None
 
-    async def run_mute(self, tool):
+    async def run_local_tool(self, tool):
         result = await tool.run(command=self.local_command)
         if not result.confirmed:
-            logger.error(f'Mute could not be confirmed: {result.reason}')
-            await notify_mute_failure(command=self.local_command)
+            logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
+            await notify_audio_failure(tool.subject, command=self.local_command)
         return result
 
     async def close_local_tools(self):
@@ -346,13 +449,13 @@ class HermesLLMService(LLMService):
             tool = match_instant_tool(messages[-1]['content'])
             if tool is not None:
                 messages.pop()
-                task = asyncio.create_task(self.run_mute(tool))
+                task = asyncio.create_task(self.run_local_tool(tool))
                 self.local_tasks.add(task)
                 task.add_done_callback(self.local_tasks.discard)
                 result = await asyncio.shield(task)
                 if not result.confirmed:
                     await self.push_frame(TTSSpeakFrame(
-                        "I couldn't confirm mute. Check the audio control. I won't retry.",
+                        f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry.",
                         append_to_context=False,
                     ))
                 return
