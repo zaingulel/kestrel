@@ -65,7 +65,7 @@ export function docLintVerdict({ files, read, settings, resolutionFiles = files,
   // --- Dangling path refs, dead links, citations — the full scan set ---------
   for (const rel of pathRefScanFiles) {
     const text = read(rel);
-    const refs = extractPathRefs(text);
+    const refs = extractPathRefs(text, rel);
     const dangling = checkPathRefs(refs, exists);
     for (const d of dangling) {
       errors.push(`${rel}:${d.line} — dangling path ref: \`${d.path}\` does not exist`);

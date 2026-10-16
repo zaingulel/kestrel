@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "957322c0b01b95af9bdaca120d79e1db0002695d",
+  "syncedFrom": "2d60d9638b154835d91b94c9918b3ac9e7cbabc7",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -837,11 +837,11 @@
     },
     {
       "path": "scripts/lib/closeout-cleanup.mjs",
-      "sha256": "74bcf486f1b7f1ca345dd60c823b7cc7375c6c6db1229404e310235d8c0f6790"
+      "sha256": "9943eb8f7a9a3d21fda8ce28d3d5b6a4ce7e3319c29f320d8a452346f2d79f4e"
     },
     {
       "path": "scripts/lib/closeout-cleanup.test.mjs",
-      "sha256": "07973c73e48276ad63ea02c3e3bd7bf5691b3a6f7551a59a4c8c6503caa6ad7d"
+      "sha256": "a7fb36e6a9cf4ebf5a330d05427acffd7dfc9e2c794bf8021f1443e59a939b3e"
     },
     {
       "path": "scripts/lib/codex-hook-adapters.mjs",
@@ -869,11 +869,11 @@
     },
     {
       "path": "scripts/lib/doc-lint-links.test.mjs",
-      "sha256": "8d53c46ad8f4b2f08ec170b69eeaa6e6c42d673c6dd753ed8621aa8482e0471b"
+      "sha256": "072a0cf1ab3f1b3581f0d17d897510bc27c8f87d5fe05f2c84c641591b9116cc"
     },
     {
       "path": "scripts/lib/doc-lint-verdict.mjs",
-      "sha256": "18323b099c8d9c63b01ea3ed3b3071a0a898f9869a1aa32f3f7656ba99ae2245"
+      "sha256": "372bec0aecfcd737d764e6950e8cd377ac525baee5d78d9cde66de680b612a5d"
     },
     {
       "path": "scripts/lib/factory-sync.mjs",
@@ -881,7 +881,7 @@
     },
     {
       "path": "scripts/lib/factory-sync.test.mjs",
-      "sha256": "e7467fd94c051c00e59ef38233a3099ae5e579b4d2ed7c24d191b2c3f27be4e5"
+      "sha256": "767bad95f06b0934f6fa8166b57654100b8baaec08da85c72a15eef9438ef7e1"
     },
     {
       "path": "scripts/lib/fake-gh.mjs",

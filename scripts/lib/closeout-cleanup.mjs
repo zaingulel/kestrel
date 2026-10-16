@@ -226,6 +226,10 @@ export function cleanupJob(request, seams) {
     }
   }
 
+  if (worktree && !worktree.retained) {
+    const held = useChecks(worktree.path, [worktree.path, worktree.canonical], true, true, context);
+    if (held) retainWorktree(held.reason);
+  }
   if (worktree && !worktree.retained) removeWorktree(git, worktree, request.regenerated, retainWorktree);
   if (!worktree) report.absent('worktree', job);
   else if (worktree.retained) report.retained('worktree', worktree.path, worktree.retained);
