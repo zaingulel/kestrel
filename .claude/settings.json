@@ -6,7 +6,8 @@
       "Bash(node scripts/board-add.mjs *)",
       "Bash(node scripts/merge-watch.mjs *)",
       "Bash(gh pr ready *)",
-      "Bash(gh pr merge --auto --squash --delete-branch *)"
+      "Bash(gh pr merge --auto --squash --delete-branch *)",
+      "Bash(git worktree add .claude/worktrees/*)"
     ]
   },
   "hooks": {
