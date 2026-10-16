@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "b9a438803bd1b158b17f3526676d021af69c3384",
+  "syncedFrom": "04f1323d69d543c41fdbc1ee938e15118d1e5990",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -140,7 +140,7 @@
     },
     {
       "path": ".agents/skills/resume/SKILL.md",
-      "sha256": "45327e7adc461901ff739021d2a74d201fcc47f7e4e7889452a86eba7da22542"
+      "sha256": "ca3c2c35cf812a0c5144bf623f69e60221c503abeb8364192967ce094344069c"
     },
     {
       "path": ".agents/skills/retro/SKILL.md",
@@ -420,7 +420,7 @@
     },
     {
       "path": ".claude/settings.json",
-      "sha256": "8ae234167cc0d3a9b79c9edd49aa6b3e9072ddf0ec12ef8c3ed60f6308b6922d"
+      "sha256": "54fb1e66de1caaa653203245a5ff7ca5f44ce41eb426781809cc1ed516611b3e"
     },
     {
       "path": ".claude/skills/accessibility-review/SKILL.md",
@@ -560,7 +560,7 @@
     },
     {
       "path": ".claude/skills/resume/SKILL.md",
-      "sha256": "45327e7adc461901ff739021d2a74d201fcc47f7e4e7889452a86eba7da22542"
+      "sha256": "ca3c2c35cf812a0c5144bf623f69e60221c503abeb8364192967ce094344069c"
     },
     {
       "path": ".claude/skills/retro/SKILL.md",
@@ -728,11 +728,11 @@
     },
     {
       "path": "docs/AI-WORKFLOW-job.md",
-      "sha256": "7ff03d362fd5e81c27fa443baf0aae6716d9508bc4076b946ad6d6a7ed259909"
+      "sha256": "9ff115e8f8d7380e7fda24d673feaa60ffca64daf420fdb932db32004d7f1564"
     },
     {
       "path": "docs/AI-WORKFLOW-runtimes.md",
-      "sha256": "031248abb69eaa78869d1ea7967b55b32dbd7e6a99ea89cb19b4ffac34ec3505"
+      "sha256": "5c0f5367da4e54d8683fa45a1a56f786ec3b3ca13cd7b97faf2261fa7f19a59b"
     },
     {
       "path": "docs/AI-WORKFLOW-seats.md",
@@ -957,7 +957,7 @@
     },
     {
       "path": "scripts/lib/settings-policy.test.mjs",
-      "sha256": "469163193b456d6c24635ac6c70072bb1d3c918c8cd37ac544cc38a81ce4469d"
+      "sha256": "484d866c5c6d23c853cfbda6f054b8db3f259b3df424c97dc85d25438a3dd4e4"
     },
     {
       "path": "scripts/lib/sweep-scope-corpus.mjs",

@@ -63,8 +63,10 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
   show, its latest claim included, while the pull-request, sync and tooling reads overlap it; results and
   failures are collected before reconciliation. Its exit status separates a failed board read, drift and a card
   whose details could not be read, and such a card is never offered as startable. Pull-request summaries
-  identify which continuation bodies matter, and the captured details serve selection and planning. Once every
-  read has returned the session rechecks the verifier checkout: movement or conflicting facts invalidate
+  identify which continuation bodies matter, and the captured details serve selection and planning. The skill's
+  Complete reads rule budgets each result and their combined output, recovers missing sections, and reuses
+  complete evidence while its provenance and validity hold. Once every read has returned the session rechecks
+  the verifier checkout: movement or conflicting facts invalidate
   affected evidence. These reduce hand-composed commands and serial waits while retaining freshness, complete
   recommendations, claims, triage authority and the owner gates; they establish no total agent-latency
   guarantee.

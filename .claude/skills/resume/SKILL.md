@@ -39,6 +39,20 @@ which checkout it is, the proof that it is clean at the target, the report when 
 removal of a verifier-only worktree this run created. With no verifier checkout, report board freshness
 unavailable rather than presenting stale local code as current evidence.
 
+**Complete reads.** Apply this to required instructions and intake evidence. Capture large responses and
+responses of unknown size in this session's scratch directory, retaining exit status and stderr. Read all
+required content in bounded, nonoverlapping sections through its known end. Budget both each result and the
+combined output returned by a tool call: issue independent sections together only when both fit, using
+further batches otherwise. Keep track of sections completely received in active context. Recover missing or
+truncated sections from the same capture or exact fetched revision, retaining complete sections instead of
+rereading them or refetching unchanged evidence. If neither is available for a truncated response, capture a
+fresh read of only that response. Replace its earlier evidence and apply the owning procedure's conflict and
+refresh rules. Until coverage is complete, unread content is unavailable evidence; scratch is never a cache.
+
+Reuse complete evidence already read in this session while it remains in active context and its provenance
+and validity satisfy the owning procedure. Obtain missing fields, including source-author evidence absent
+from board comments. Instruction reuse below and every explicitly required refresh or recheck still apply.
+
 **Instruction reuse.** Record the target and the required instruction paths. Reuse previously read text only
 when its full content remains in active context and its exact read Git revision is known: one command,
 `git rev-parse <read-revision>:<path> <target>:<path>` with a pair for every such path, must succeed, and a path
@@ -63,18 +77,18 @@ node scripts/board.mjs --intake > <scratch>/board-intake.txt
 
 - The document holds the pick listing and, for every pickable card and every claimed card with no closing pull
   request, its column, Workstream, parent, open blockers, assignees, latest `Claim:`, body and comments; stderr
-  holds the drift scan, the details outcome and the document's line count. Read the document whole, once, in
-  line ranges issued together up to that count: an unread range is unavailable evidence, never assumed and never
-  a reason to refetch. Any other large response is captured and read the same way, and scratch is never a cache.
+  holds the drift scan, the details outcome and the document's line count. Read the document whole under
+  Complete reads above, using that line count.
 - Exit 0 is a complete read with no drift; 2 is a failed board read, so board freshness is unavailable and no
   work is selected; 3 is drift, reconciliation to do before work-pick; 4 is an incomplete read; 5 is 3 and 4
   together. A card that stderr or the document marks `UNAVAILABLE` is reported at work-pick and never presented
   as startable.
 - When every read has returned, recheck the verifier checkout with `git rev-parse HEAD` and
-  `git status --porcelain`, in the same turn as the document's line ranges. Unless they show the target and no
-  change, checkout-derived evidence is invalid and step 5 of Update local main is applied again before another
-  verifier command. GitHub reads are observations at their recorded times, not an atomic snapshot: conflicting
-  facts or reconciliation writes require refreshing only the affected evidence before decisions.
+  `git status --porcelain`, in the same turn as the document's final batch of sections. Unless they show the
+  target and no change, checkout-derived evidence is invalid and step 5 of Update local main is applied again
+  before another verifier command. GitHub reads are observations at their recorded times, not an atomic
+  snapshot: conflicting facts or reconciliation writes require refreshing only the affected evidence before
+  decisions.
 - During intake, from the root checkout, inspect another job's worktree with `git -C <path>`, never by `cd`. On
   Claude Code, `EnterWorktree` records the shell's current folder as the one `ExitWorktree` later returns to, and
   a sibling job's closeout may remove that folder, leaving this session unable to leave its own worktree.

@@ -3,8 +3,9 @@
 // The allow list is a security policy: every entry runs without a prompt. It must stay the
 // three read-mostly board scripts, the read-only merge watch, and the two delivery commands,
 // `gh pr ready` and `gh pr merge --auto --squash --delete-branch`, whose prefixes the merge and
-// ready rules in scripts/lib/unsafe-git.mjs bound to the exact delivery forms, and the hook set
-// must stay exactly the guards this repository documents. A widening lands red here instead of green
+// ready rules in scripts/lib/unsafe-git.mjs bound to the exact delivery forms, plus the bounded
+// job-start form that the worktree-add guard bounds. The hook set must stay exactly the guards
+// this repository documents. A widening lands red here instead of green
 // (security review on #1122).
 
 import { test } from 'node:test';
@@ -19,7 +20,7 @@ const PRESENT = presentRuntimes(ROOT);
 const without = (runtime) => !PRESENT.includes(runtime) && `the settings file names no ${runtime} runtime`;
 const readJson = (path) => JSON.parse(readFileSync(resolve(ROOT, path), 'utf8'));
 
-test('only the board scripts, the merge watch and the two delivery commands are auto-approved, and nothing is denied by omission', { skip: without('claude') }, () => {
+test('only the approved workflow commands and bounded job-start form are auto-approved, and nothing is denied by omission', { skip: without('claude') }, () => {
   const settings = readJson('.claude/settings.json');
   assert.deepEqual(settings.permissions.allow, [
     'Bash(node scripts/board.mjs *)',
@@ -28,6 +29,7 @@ test('only the board scripts, the merge watch and the two delivery commands are 
     'Bash(node scripts/merge-watch.mjs *)',
     'Bash(gh pr ready *)',
     'Bash(gh pr merge --auto --squash --delete-branch *)',
+    'Bash(git worktree add .claude/worktrees/*)',
   ]);
   assert.equal(settings.permissions.deny, undefined);
 });

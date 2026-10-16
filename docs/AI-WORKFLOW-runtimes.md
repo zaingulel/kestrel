@@ -90,10 +90,15 @@ does not record it, and a session that finds none asks the owner before it sends
 `resume` skill describes under "6. Verify and review".
 
 That yes is a standing authorization to share material with the other provider and nothing more. It does not answer a
-prompt. Claude Code asks before a command its allow list lacks, unless a person's own settings allow it, and that holds
-for the Codex command line it runs too. Codex asks as its sandbox and approval policy decide, a network request
-included. The operating system may ask as well, for example before a program reaches a protected folder. Each prompt is
-answered where it appears, and the yes recorded in the settings file stands apart from push authorisation too.
+prompt. Claude Code's shared allow list includes `Bash(git worktree add .claude/worktrees/*)`, so matching job starts
+receive configuration approval without auto mode's classifier judgment. For plainly written commands, the
+`block-unsafe-git` hook refuses branch resets, force flags, paths that escape the worktrees folder and forms it cannot
+read. The hook reads command text; it does not inspect extra arguments supplied from input by a wrapper such as
+`xargs`. Other commands,
+the Codex command line included, follow Claude Code's runtime mode and permissions, including a person's own settings.
+Codex asks as its sandbox and approval policy decide, a network request included. The operating system may ask as well,
+for example before a program reaches a protected folder. Each prompt is answered where it appears, and the yes recorded
+in the settings file stands apart from push authorisation too.
 
 ## Where the rules live
 
@@ -130,8 +135,10 @@ answered where it appears, and the yes recorded in the settings file stands apar
   home setting or a settings file naming both runtimes without the key records nothing, so the session asks once per
   job until the key is added and merged.
 - **A prompt appears although the owner authorized cross-family review.** The authorization answers no permission
-  prompt. Claude Code, Codex and the operating system each ask on their own rules, and a person's own settings decide
-  which commands Claude Code allows without asking.
+  prompt. Claude Code's shared rule approves matching job starts under `.claude/worktrees/`; the command-text guard
+  has the limits described above. Other commands follow its runtime mode and permissions, including a person's own
+  settings.
+  Codex and the operating system each ask on their own rules.
 
 ## Key files
 
