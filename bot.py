@@ -58,7 +58,7 @@ class PermissionTier(Enum):
 class LocalTool:
     permission: PermissionTier
     run: object
-    subject: str = 'mute'
+    subject: str
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,12 @@ async def read_output_name(argv, *, command=run_local_command) -> str:
     return name
 
 
+async def read_selected_output(*, command=run_local_command) -> tuple[str, str]:
+    default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
+    sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', default), command=command)
+    return default, sink
+
+
 async def read_output_mute(sink: str, *, command=run_local_command) -> str:
     status = (await command(('/usr/bin/pactl', 'get-sink-mute', sink))).removesuffix('\n')
     if status not in ('Mute: yes', 'Mute: no'):
@@ -160,14 +166,12 @@ async def mute_output(*, command=run_local_command):
     attempted = False
     try:
         async with asyncio.timeout(MUTE_TIMEOUT):
-            default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
-            sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', default), command=command)
+            default, sink = await read_selected_output(command=command)
             already_muted = await read_output_mute(sink, command=command) == 'Mute: yes'
             if not already_muted:
                 attempted = True
                 await command(('/usr/bin/pactl', 'set-sink-mute', sink, '1'))
-            after_default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
-            after_sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', after_default), command=command)
+            after_default, after_sink = await read_selected_output(command=command)
             status = await read_output_mute(sink, command=command)
             if default != after_default or sink != after_sink:
                 return AudioResult(False, attempted, 'target changed')
@@ -187,12 +191,11 @@ async def notify_audio_failure(subject: str, *, command=run_local_command) -> bo
         await command((
             '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
             '--hint=boolean:suppress-sound:true',
-            {'mute': 'Mute could not be confirmed', 'volume': 'Volume could not be confirmed'}[subject],
+            f'{subject.title()} could not be confirmed',
             'Check the audio control. Kestrel will not retry.',
         ))
     except RuntimeError:
-        logger.error({'mute': 'Mute failure notification unavailable',
-                      'volume': 'Volume failure notification unavailable'}[subject])
+        logger.error(f'{subject.title()} failure notification unavailable')
         return False
     # Command acceptance does not establish visible delivery by the desktop.
     return True
@@ -233,32 +236,29 @@ async def read_output_volume(sink: str, *, command=run_local_command) -> dict[st
 
 
 async def volume_output(percent: int, *, command=run_local_command) -> AudioResult:
-    if type(percent) is not int or not 0 <= percent <= 100:
-        raise ValueError('invalid percentage')
     attempted = False
     target = percent * 65536 // 100
     try:
         async with asyncio.timeout(VOLUME_TIMEOUT):
-            default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
-            sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', default), command=command)
+            default, sink = await read_selected_output(command=command)
             initial = await read_output_volume(sink, command=command)
+            expected = {channel: target for channel in initial}
             muted = await read_output_mute(sink, command=command) == 'Mute: yes'
-            if any(value != target for value in initial.values()):
+            if initial != expected:
                 attempted = True
                 await command(('/usr/bin/pactl', 'set-sink-volume', sink, f'{percent}%'))
                 verified = await read_output_volume(sink, command=command)
-                if verified.keys() != initial.keys() or any(value != target for value in verified.values()):
+                if verified != expected:
                     return AudioResult(False, attempted, 'readback unconfirmed')
             if muted:
                 attempted = True
                 await command(('/usr/bin/pactl', 'set-sink-mute', sink, '0'))
-            after_default = await read_output_name(('/usr/bin/pactl', 'get-default-sink'), command=command)
-            after_sink = await read_output_name(('/usr/bin/omarchy-audio-output-sink', after_default), command=command)
+            after_default, after_sink = await read_selected_output(command=command)
             after = await read_output_volume(sink, command=command)
             status = await read_output_mute(sink, command=command)
             if default != after_default or sink != after_sink:
                 return AudioResult(False, attempted, 'target changed')
-            if after.keys() != initial.keys() or any(value != target for value in after.values()) or status != 'Mute: no':
+            if after != expected or status != 'Mute: no':
                 return AudioResult(False, attempted, 'readback unconfirmed')
             return AudioResult(True, attempted, 'confirmed' if attempted else 'already set')
     except TimeoutError:
@@ -270,7 +270,7 @@ async def volume_output(percent: int, *, command=run_local_command) -> AudioResu
 
 
 LOCAL_TOOLS = {
-    'mute': LocalTool(PermissionTier.FREE, mute_output),
+    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
 }
 

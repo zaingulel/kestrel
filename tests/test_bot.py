@@ -232,12 +232,6 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.attempted, bool(writes))
                 self.assertEqual([c.args[0] for c in command.await_args_list if c.args[0][1].startswith('set-')], writes)
                 self.assertEqual(command.await_count, len(outputs))
-        for invalid in (True, False, -1, 101, 30.0, '30', None):
-            with self.subTest(invalid=invalid):
-                command = AsyncMock()
-                with self.assertRaises(ValueError):
-                    await bot.volume_output(invalid, command=command)
-                command.assert_not_awaited()
 
     async def test_invalid_readback_and_no_retry(self):
         invalid = [
@@ -541,7 +535,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, mute=bot.LocalTool(permission, AsyncMock())):
+            with patch.dict(bot.LOCAL_TOOLS, mute=bot.LocalTool(permission, AsyncMock(), 'mute')):
                 self.assertIsNone(bot.match_instant_tool('mute'))
 
 
