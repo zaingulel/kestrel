@@ -1982,6 +1982,90 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         failed_readback = ['selected', 'physical', LocalVolumeTests.volume(32768), 'Mute: yes', '',
                            LocalVolumeTests.volume(32768)]
         with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            readback_entered, release_readback = asyncio.Event(), asyncio.Event()
+            entered = {'volume': asyncio.Event(), 'mute': asyncio.Event()}
+            completed_events = {'volume': asyncio.Event(), 'mute': asyncio.Event()}
+            action_tasks, results, completion_order, commands, effects = {}, {}, [], [], []
+            level, muted = 32768, True
+
+            async def ordered_command(argv):
+                nonlocal level, muted
+                owner = asyncio.current_task()
+                commands.append((owner, argv))
+                if argv == ('/usr/bin/pactl', 'get-default-sink'):
+                    return 'selected'
+                if argv == ('/usr/bin/omarchy-audio-output-sink', 'selected'):
+                    return 'physical'
+                if argv == ('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical'):
+                    if level == 19660 and not readback_entered.is_set():
+                        readback_entered.set()
+                        await release_readback.wait()
+                    return LocalVolumeTests.volume(level)
+                if argv == ('/usr/bin/pactl', 'get-sink-mute', 'physical'):
+                    return 'Mute: yes' if muted else 'Mute: no'
+                if argv == ('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'):
+                    effects.append((owner, argv))
+                    level = 19660
+                    return ''
+                if argv[:3] == ('/usr/bin/pactl', 'set-sink-mute', 'physical'):
+                    effects.append((owner, argv))
+                    self.assertIn(argv[3], ('0', '1'))
+                    muted = argv[3] == '1'
+                    return ''
+                raise AssertionError(f'Unexpected command: {argv}')
+
+            transport, spoken, committed, interrupted, _, close = await self.open_session(
+                None, local_command=ordered_command,
+            )
+            native_run = transport.llm.run_local_tool
+
+            async def observe_action(tool):
+                action_tasks[tool.subject] = asyncio.current_task()
+                entered[tool.subject].set()
+                result = await native_run(tool)
+                results[tool.subject] = result
+                completion_order.append(tool.subject)
+                completed_events[tool.subject].set()
+                return result
+
+            try:
+                with patch.object(transport.llm, 'run_local_tool', observe_action):
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'volume thirty percent')
+                    await asyncio.wait_for(readback_entered.wait(), 5)
+                    self.assertTrue(entered['volume'].is_set())
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await self.finish_user_turn(transport, 'mute')
+                    await asyncio.wait_for(entered['mute'].wait(), 5)
+                    self.assertEqual([argv for owner, argv in commands if owner is action_tasks['mute']], [],
+                                     'A later mute must wait for the retained volume action before native work')
+                    self.assertNotIn('mute', results, 'A later mute cannot confirm before the older action finishes')
+                    release_readback.set()
+                    await asyncio.wait_for(completed_events['volume'].wait(), 5)
+                    await asyncio.wait_for(completed_events['mute'].wait(), 5)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(results['volume'].confirmed)
+                    self.assertTrue(results['mute'].confirmed)
+                    self.assertEqual(completion_order, ['volume', 'mute'])
+                    self.assertEqual(effects, [
+                        (action_tasks['volume'], ('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')),
+                        (action_tasks['volume'], ('/usr/bin/pactl', 'set-sink-mute', 'physical', '0')),
+                        (action_tasks['mute'], ('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')),
+                    ])
+                    self.assertEqual(level, 19660)
+                    self.assertTrue(muted, 'The later completed mute remains effective')
+                    self.assertTrue(all(task.done() for task in action_tasks.values()))
+                    self.assertFalse(transport.llm.local_tasks)
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
+            finally:
+                release_readback.set()
+                await close()
+
             command = AsyncMock(side_effect=failed_readback + [''])
             transport, spoken, committed, _, _, close = await self.open_session(None, local_command=command)
             try:
@@ -2075,19 +2159,39 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         raise
                 return next(replies)
 
-            transport, _, _, _, _, close = await self.open_session(None, local_command=hanging_command)
+            transport, _, _, interrupted, _, close = await self.open_session(None, local_command=hanging_command)
+            native_run = transport.llm.run_local_tool
+            queued_entered = asyncio.Event()
+            owned_actions = {}
+
+            async def observe_shutdown_action(tool):
+                owned_actions[tool.subject] = asyncio.current_task()
+                if tool.subject == 'mute':
+                    queued_entered.set()
+                return await native_run(tool)
+
+            action_observer = patch.object(transport.llm, 'run_local_tool', observe_shutdown_action)
+            action_observer.start()
             closing = None
             try:
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, 'volume thirty percent')
                 await asyncio.wait_for(writes_started.wait(), 5)
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                await self.finish_user_turn(transport, 'mute')
+                await asyncio.wait_for(queued_entered.wait(), 5)
+                self.assertEqual(set(owned_actions), {'volume', 'mute'})
+                self.assertFalse(owned_actions['mute'].done(), 'Queued mute remains owned until shutdown')
                 closing = asyncio.create_task(close())
                 await asyncio.wait_for(cancelled.wait(), 5)
                 self.assertFalse(closing.done(), 'Shutdown joins command cleanup')
                 release_cleanup.set()
                 await asyncio.wait_for(closing, 5)
                 self.assertTrue(cleaned.is_set())
-                self.assertTrue(action_tasks[0].cancelled())
+                self.assertIs(action_tasks[0], owned_actions['volume'])
+                self.assertTrue(all(task.done() and task.cancelled() for task in owned_actions.values()))
                 self.assertFalse(transport.llm.local_tasks)
                 self.assertEqual(calls, [
                     ('/usr/bin/pactl', 'get-default-sink'),
@@ -2101,6 +2205,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if closing is not None:
                     await asyncio.gather(closing, return_exceptions=True)
                 await close()
+                action_observer.stop()
 
     async def test_invalid_volume_turns_reach_brain_unchanged(self):
         brain = ScriptedBrain([

@@ -324,10 +324,12 @@ class HermesLLMService(LLMService):
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
         self.local_tasks = set()
+        self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
 
     async def run_local_tool(self, tool):
-        result = await tool.run(command=self.local_command)
+        async with self.local_tool_lock:
+            result = await tool.run(command=self.local_command)
         if not result.confirmed:
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
             await notify_audio_failure(tool.subject, command=self.local_command)
