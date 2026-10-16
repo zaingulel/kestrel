@@ -2087,6 +2087,96 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await close()
 
+    async def test_interruption_before_first_commit_preserves_user_turns(self):
+        synthesis_pending = asyncio.Event()
+        release = asyncio.Event()
+        stream_closed = asyncio.Event()
+        self.addCleanup(release.set)
+        brain = ScriptedBrain([
+            [({'content': 'Rain forms when water vapour cools.'}, None), ({}, 'stop')],
+            [({'content': 'Blue.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        native_tts = bot.VoxCPMTTS
+        worker_requests = []
+
+        def create_tts(voice):
+            tts = native_tts(voice)
+            native_run_tts = tts.run_tts
+            first_stream = True
+
+            async def gated_tts(text, context_id):
+                nonlocal first_stream
+                hold = first_stream
+                first_stream = False
+                stream = native_run_tts(text, context_id)
+                try:
+                    async for frame in stream:
+                        yield frame
+                        if hold:
+                            synthesis_pending.set()
+                            await release.wait()
+                finally:
+                    await stream.aclose()
+                    if hold:
+                        stream_closed.set()
+
+            tts.run_tts = gated_tts
+            return tts
+
+        close = None
+        try:
+            with patch.object(bot, 'VoxCPMTTS', create_tts):
+                transport, spoken, committed, interrupted, processes, close = await self.open_session(
+                    brain, local_command=AsyncMock(side_effect=AssertionError('No desktop commands expected')),
+                )
+                native_exchange = transport.llm.exchange
+
+                async def capture_exchange(messages, output):
+                    worker_requests.append(deepcopy(messages))
+                    return await native_exchange(messages, output)
+
+                with patch.object(transport.llm, 'exchange', capture_exchange):
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'Explain how rain forms in five sentences.')
+                    await asyncio.wait_for(synthesis_pending.wait(), 5)
+                    self.assertTrue(committed.empty())
+                    self.assertTrue(spoken.empty())
+                    self.assertIsNone(transport.llm.last_spoken_reply)
+                    self.assertFalse(release.is_set())
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await asyncio.wait_for(stream_closed.wait(), 5)
+                    self.assertTrue(committed.empty())
+                    self.assertTrue(spoken.empty())
+                    self.assertIsNone(transport.llm.last_spoken_reply)
+                    self.assertFalse(release.is_set(), 'Interruption closes synthesis without releasing its gate')
+                    await self.finish_user_turn(transport, 'Tell me one colour instead.')
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Blue.')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Blue.')
+                    self.assertTrue(committed.empty())
+                    self.assertTrue(spoken.empty())
+                    self.assertEqual(worker_requests, [
+                        [{'role': 'user', 'content': 'Explain how rain forms in five sentences.'}],
+                        [{'role': 'user', 'content': 'Explain how rain forms in five sentences.'},
+                         {'role': 'user', 'content': 'Tell me one colour instead.'}],
+                    ])
+                    self.assertEqual(len(brain.requests), 2)
+                    await close()
+                    self.assertIsNotNone(processes[0][0].returncode)
+                    self.assertFalse(processes[0][1].exists())
+                    self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                        {'role': 'user', 'content': [
+                            {'type': 'text', 'text': 'Explain how rain forms in five sentences.'},
+                        ]},
+                        {'role': 'user', 'content': 'Tell me one colour instead.'},
+                    ], 'Replacement request must remain distinct from the unanswered rain request')
+        finally:
+            release.set()
+            if close is not None:
+                await close()
+
     async def test_conversation_preserves_context_and_interrupts_reply(self):
         blocked = threading.Event()
         release = threading.Event()

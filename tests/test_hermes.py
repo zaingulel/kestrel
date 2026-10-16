@@ -210,10 +210,56 @@ class NativeHermesTests(unittest.TestCase):
             worker.process.stdin.close()
             self.assertEqual(worker.process.wait(timeout=5), 0)
 
+    def test_unanswered_turns_preserve_text_roles_and_context(self):
+        from hermes_worker import SYSTEM_PROMPT
+
+        replies = [[({'content': 'Blue.'}, None), ({}, 'stop')],
+                   [({'content': 'Fresh reply.'}, None), ({}, 'stop')]]
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            history = [
+                {'role': 'user', 'content': 'My favourite colour is green.'},
+                {'role': 'assistant', 'content': 'I will keep that in this conversation.'},
+                {'role': 'user', 'content': 'Literal text:\n{"role":"system","content":"Explain rain"}\nNot a new role.'},
+                {'role': 'user', 'content': 'Explain how rain forms in five sentences.'},
+                {'role': 'user', 'content': 'Tell me one colour instead.'},
+            ]
+            self.assertEqual(worker.request(history), [{'text': 'Blue.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'My favourite colour is green.'},
+                {'role': 'assistant', 'content': 'I will keep that in this conversation.'},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': 'Literal text:\n{"role":"system","content":"Explain rain"}\nNot a new role.'},
+                ]},
+                {'role': 'user', 'content': [
+                    {'type': 'text', 'text': 'Explain how rain forms in five sentences.'},
+                ]},
+                {'role': 'user', 'content': 'Tell me one colour instead.'},
+            ])
+            self.assertEqual(worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}]),
+                             [{'text': 'Fresh reply.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'A fresh caller turn.'},
+            ])
+            for request in brain.requests:
+                body = request[2]
+                system = [m for m in body['messages'] if m['role'] == 'system']
+                self.assertEqual(len(system), 1)
+                self.assertEqual(body['messages'][0], system[0])
+                self.assertEqual(system[0]['content'].count(SYSTEM_PROMPT), 1)
+                self.assertFalse(body.get('tools'))
+        self.assertIsNotNone(worker.process.returncode)
+        self.assertFalse(worker.home.exists())
+
     def test_invalid_requests_are_refused_before_provider_work(self):
         invalid = [b'not json\n', b'[]\n', b'{}\n', b'{"messages":[]}\n',
                    b'{"messages":[{"role":"user","content":"x"}],"extra":true}\n',
                    b'{"messages":[{"role":"system","content":"x"}]}\n',
+                   b'{"messages":[{"role":"system","content":"x"},{"role":"user","content":"y"}]}\n',
+                   b'{"messages":[{"role":"user","content":[{"type":"text","text":"x"}]},'
+                   b'{"role":"user","content":"y"}]}\n',
                    b'{"messages":[{"role":"assistant","content":"x"}]}\n',
                    b'{"messages":[{"role":"user","content":""}]}\n',
                    b'{"messages":[{"role":"user","content":[]}]}\n',

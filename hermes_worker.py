@@ -82,6 +82,14 @@ def main(*, base_url=ALLY_URL):
                             raise ValueError('Expected text-only user/assistant messages')
                     if messages[-1]['role'] != 'user':
                         raise ValueError('Conversation history must end in user')
+                    # Preserve unanswered user turns without inventing assistant speech:
+                    # native Hermes merges adjacent string content, but keeps text parts distinct.
+                    history = []
+                    for index, message in enumerate(messages[:-1]):
+                        historical = message.copy()
+                        if message['role'] == 'user' and messages[index + 1]['role'] == 'user':
+                            historical['content'] = [{'type': 'text', 'text': message['content']}]
+                        history.append(historical)
                     streamed = False
 
                     def delta(text):
@@ -92,7 +100,7 @@ def main(*, base_url=ALLY_URL):
 
                     result = agent.run_conversation(
                         messages[-1]['content'], system_message=SYSTEM_PROMPT,
-                        conversation_history=messages[:-1], stream_callback=delta,
+                        conversation_history=history, stream_callback=delta,
                     )
                     if (not isinstance(result, dict) or result.get('completed') is not True
                             or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
