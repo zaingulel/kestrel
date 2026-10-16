@@ -246,6 +246,8 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             "  Plain  spacing.\nAn indented\n    paragraph continuation.\n",
             "A ~ B. A _ B. Three*four. U.S.A. foo.py.",
             "~ A.",
+            "a - b",
+            "a | b",
             "Keep [optional] words.",
             "A\n\n    \nPlain.",
         ]:
@@ -257,15 +259,44 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             ("> Quoted __words__ and ~~old~~.\n> Another line.", "Quoted words and old. Another line."),
             ("Read _this_ and **that**, then *more*.", "Read this and that, then more."),
             ("An **unfinished phrase", "An unfinished phrase"),
+            ("This is ***very*** and ___deeply___ important.", "This is very and deeply important."),
+            ("***Bold italic*** start.", "Bold italic start."),
+            ("Use _snake_case", "Use snake_case"),
+            ("Use _snake_case_ now.", "Use snake_case now."),
+            ("Hi\n\n- - -\n\nThere.\n\n***\n\nMore.\n\n___", "Hi. There. More."),
+            ("| a | b |\n|---|:---:|\n| 1 | 2 |", "a. b. 1. 2."),
+            ("| a \\| b | `secret()` | [guide](https://x.com) |\n|---|---|---|",
+             "a | b. guide. There is code in this reply."),
+            ("|https://x.com|safe|", "safe."),
+            ("1. Step one\n\n    More detail about step one.\n2. Step two",
+             "Step one. More detail about step one. Step two."),
+            ("- Item\n    - Sub item\n    - Another\n- Next", "Item. Sub item. Another. Next."),
+            ("1. Step one\n\n       print(1)\n\n    Continue safely.\n2. Step two",
+             "Step one. Continue safely. Step two. There is code in this reply."),
+            ("- Item\n\nOrdinary prose.\n\n    print(1)\nAfter.",
+             "Item. Ordinary prose. After. There is code in this reply."),
+            ("- Item\n    - Sub item\n\n      ```python\n      hidden()\n      ```\n    - Another\n- Next",
+             "Item. Sub item. Another. Next. There is code in this reply."),
             ("># Heading\n> - First *item*\n>>2. Second item", "Heading. First item. Second item."),
             ("### Heading ###", "Heading."),
             (r"Literal \*stars\* and \`ticks\`.", "Literal *stars* and `ticks`."),
         ]:
             with self.subTest(formatted=text):
-                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
+                actual = ' '.join(self.cleaned(text).split())
+                self.assertEqual(actual, expected)
+                if 'There is code in this reply.' not in expected:
+                    self.assertNotIn('There is code in this reply.', actual)
 
     async def test_reply_cleanup_omits_explicit_addresses_and_keeps_labels(self):
         for text, expected in [
+            ("See https://en.wikipedia.org/wiki/Hilbert's_paradox today.", "See today."),
+            ('Read https://example.com/a"b next.', "Read next."),
+            ('Read "https://example.com/it\'s". Continue.', "Read. Continue."),
+            ("(see https://x.com)", "(see)"),
+            ('She said "see https://x.com".', 'She said "see".'),
+            ("See [Hilbert's paradox](https://en.wikipedia.org/wiki/Hilbert's_paradox) for details. It is fun.",
+             "See Hilbert's paradox for details. It is fun."),
+            ('See [guide](https://x.com/a"b) here. Second sentence.', "See guide here. Second sentence."),
             ("Read https://example.com/a?q=secret. Then continue.", "Read. Then continue."),
             ("Read www.example.com/docs. Then continue.", "Read. Then continue."),
             ("Read HTTP://example.com:80/a#private! Then continue.", "Read! Then continue."),
@@ -319,6 +350,21 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                          "I couldn't safely prepare this reply for speech. Please ask me to rephrase.")
         recognizer.start()
         self.assertEqual(recognizer.feed('Fresh plain reply.') + recognizer.finish(), 'Fresh plain reply.')
+        undecidable_row = '|' + '-' * (1024 * 1024)
+        recognizer.start()
+        self.assertEqual(recognizer.feed(undecidable_row), '')
+        self.assertEqual(recognizer.feed('\nleaked tail.'), '')
+        self.assertEqual(recognizer.finish().strip(),
+                         "I couldn't safely prepare this reply for speech. Please ask me to rephrase.")
+        recognizer.start()
+        self.assertEqual(recognizer.feed(undecidable_row), '')
+        self.assertEqual(recognizer.feed('\nleaked tail.'), '')
+        self.assertEqual(recognizer.finish(failed=True).strip(), '')
+        recognizer.start()
+        self.assertEqual((recognizer.feed('- Item') + recognizer.finish()).strip(), 'Item.')
+        recognizer.start()
+        self.assertEqual((recognizer.feed('    print(1)') + recognizer.finish()).strip(),
+                         'There is code in this reply.')
         for text in ('**', 'https://example.com/only', '[' + 'x' * (1024 * 1024)):
             recognizer.start()
             recognizer.feed(text)

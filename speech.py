@@ -456,6 +456,27 @@ class SpokenReplyText:
         self.indent = ''
         self.blank_before = True
         self.line_nonblank = False
+        self.indent_columns = 0
+        self.line_base = 0
+        self.list_columns = []
+        self.list_open = False
+        self.list_prose = False
+        self.marker_width = 0
+        self.marker_indent = 0
+        self.marker_padding = 0
+        self.code_base = 0
+        self.line_pending = []
+        self.line_pending_bytes = 0
+        self.line_pending_kind = ''
+        self.rule_mark = ''
+        self.rule_count = 0
+        self.line_replay = False
+        self.row_active = False
+        self.row_cell_text = False
+        self.row_separator_dash = False
+        self.row_separator_colon = False
+        self.row_separator_end = False
+        self.row_separator_text = False
         self.run_char = ''
         self.run_length = 0
         self.run_at_start = False
@@ -465,7 +486,6 @@ class SpokenReplyText:
         self.fence_indent = 0
         self.fence_count = 0
         self.prefix = ''
-        self.item = False
         self.heading = False
         self.line_prose = False
         self.closing_hashes = 0
@@ -480,7 +500,9 @@ class SpokenReplyText:
         self.wrapper_omitted = False
         self.url = False
         self.url_parentheses = 0
-        self.url_tail = ''
+        self.url_tail = []
+        self.url_tail_bytes = 0
+        self.url_closer = ''
         self.image = False
         self.label = None
         self.label_depth = 0
@@ -490,6 +512,7 @@ class SpokenReplyText:
         self.destination = 0
         self.destination_escape = False
         self.destination_quote = ''
+        self.destination_title_space = False
         self.refused = False
 
     def start(self) -> None:
@@ -503,18 +526,22 @@ class SpokenReplyText:
                 continue
             if self.join:
                 spacing = ' ' if self.space or (self.last.isalnum() and char.isalnum()) else ''
-                if char in '.,!?;:)]}>':
+                if char in ".,!?;:)]}>\"'":
                     spacing = ''
             else:
                 spacing = self.space
             target = self.output if self.label is None else self.label
             if self.prose or char.isalnum() or not (self.addresses or self.code):
                 target.append(spacing + char)
+                if self.row_active and self.label is None:
+                    self.row_cell_text = True
             self.space = ''
             self.join = False
             self.last = char
             self.prose |= char.isalnum()
             self.line_prose |= char.isalnum()
+            if self.list_open:
+                self.list_prose |= char.isalnum()
 
     def _omit(self):
         self.join = True
@@ -526,16 +553,155 @@ class SpokenReplyText:
         self.line_start = True
         self.line_nonblank = False
         self.indent = ''
-        self.item = self.heading = self.line_prose = False
+        self.indent_columns = 0
+        self.heading = self.line_prose = False
 
     def _end_line(self):
         if self.closing_hashes:
             self._omit()
         self.closing_hashes = 0
-        if self.item and self.line_prose and self.last not in '.!?':
+        if self.heading and self.line_prose and self.last not in '.!?':
             self._emit('.')
         self._emit('\n')
         self._new_line()
+
+    @staticmethod
+    def _column_after(column, char):
+        return column + (4 - column % 4 if char == '\t' else 1)
+
+    def _list_sentence(self):
+        if self.list_prose:
+            if self.last not in '.!?':
+                self.space = ''
+                self._emit('.')
+            self.space = self.space or ' '
+            self.list_prose = False
+
+    def _marker_char(self, char):
+        if char in ' \t':
+            column = self.marker_indent + self.marker_width + self.marker_padding
+            self.marker_padding = self._column_after(column, char) - self.marker_indent - self.marker_width
+            return
+        self._list_sentence()
+        while self.list_columns and self.marker_indent < self.list_columns[-1]:
+            self.list_columns.pop()
+        padding = self.marker_padding if self.marker_padding <= 4 else 1
+        base = self.marker_indent + self.marker_width + padding
+        self.list_columns.append(base)
+        extra = self.marker_padding - padding
+        self.marker_width = self.marker_padding = 0
+        self.list_open = True
+        self.heading = False
+        self.line_base = base
+        self.indent = ''
+        self._omit()
+        if char == '\n':
+            self._end_line()
+        elif extra >= 4:
+            self.code = True
+            self.code_base = base
+            self.mode = 'indent'
+            self.line_start = False
+        elif char in '`~':
+            self.run_char, self.run_length, self.run_at_start = char, 1, True
+        else:
+            self._text(char)
+
+    def _hold_line_char(self, char):
+        self.line_pending.append(char)
+        self.line_pending_bytes += len(char.encode('utf-8'))
+        if self.line_pending_bytes > 1024 * 1024:
+            self._refuse_buffer()
+
+    def _release_line_prefix(self):
+        pending = self.line_pending
+        self.line_pending = []
+        self.line_pending_bytes = 0
+        if self.line_pending_kind == 'row':
+            self.row_active = True
+            self.row_cell_text = False
+            self.line_start = False
+            self._omit()
+        self.line_pending_kind = ''
+        self.line_replay = True
+        try:
+            for char in pending:
+                self._scan(char)
+        finally:
+            self.line_replay = False
+
+    def _rule_char(self, char):
+        if char == self.rule_mark or char in ' \t':
+            self._hold_line_char(char)
+            self.rule_count += char == self.rule_mark
+        elif char == '\n' and self.rule_count >= 3:
+            self.line_pending = []
+            self.line_pending_bytes = 0
+            self.line_pending_kind = ''
+            self._list_sentence()
+            if self.prose and self.last not in '.!?':
+                self.space = ''
+                self._emit('.')
+            self._omit()
+            self._emit('\n')
+            self._new_line()
+        else:
+            self._release_line_prefix()
+            self._scan(char)
+
+    def _row_separator_char(self, char):
+        if char in ' \t':
+            self._hold_line_char(char)
+        elif char == '-' and not self.row_separator_end:
+            self.row_separator_dash = self.row_separator_text = True
+            self._hold_line_char(char)
+        elif char == ':' and not self.row_separator_end:
+            if self.row_separator_dash:
+                self.row_separator_end = True
+            elif self.row_separator_colon:
+                self._release_line_prefix()
+                self._scan(char)
+                return
+            else:
+                self.row_separator_colon = True
+            self.row_separator_text = True
+            self._hold_line_char(char)
+        elif char in '|\n':
+            if self.row_separator_text and not self.row_separator_dash:
+                self._release_line_prefix()
+                self._scan(char)
+                return
+            if char == '\n':
+                self.line_pending = []
+                self.line_pending_bytes = 0
+                self.line_pending_kind = ''
+                self._omit()
+                self._new_line()
+            else:
+                self._hold_line_char(char)
+            self.row_separator_dash = self.row_separator_colon = False
+            self.row_separator_end = self.row_separator_text = False
+        else:
+            self._release_line_prefix()
+            self._scan(char)
+
+    def _row_boundary(self):
+        self._resolve_emphasis('', at_end=True)
+        if self.candidate:
+            self._emit(self.wrapper + self.candidate)
+            self.wrapper = self.candidate = ''
+        if self.wrapper:
+            self._emit(self.wrapper)
+            self.wrapper = ''
+        if self.image:
+            self._emit('!')
+            self.image = False
+        if self.row_cell_text and self.last not in '.!?':
+            self.space = ''
+            self._emit('.')
+        self._omit()
+        self.space = ' '
+        self.row_cell_text = False
 
     def _prefix_char(self, char):
         prefix = self.prefix
@@ -547,7 +713,7 @@ class SpokenReplyText:
             return
         if prefix.startswith('#'):
             waiting = char == '#' and len(prefix) < 6
-            valid = char.isspace() and len(prefix) <= 6
+            valid = char.isspace()
         elif prefix[0].isdigit():
             waiting = (char.isdigit() and prefix.isdigit() and len(prefix) < 9
                        or char in '.)' and prefix.isdigit())
@@ -558,12 +724,18 @@ class SpokenReplyText:
         if waiting:
             self.prefix += char
         elif valid:
-            self.prefix = self.indent = ''
-            self.item = prefix[0] != '>'
-            self.heading = prefix[0] == '#'
-            self._omit()
-            if char == '\n':
-                self._end_line()
+            self.prefix = ''
+            if not prefix.startswith('#'):
+                self.marker_indent = self.indent_columns
+                self.marker_width = len(prefix)
+                self.marker_padding = 0
+                self._marker_char(char)
+            else:
+                self.indent = ''
+                self.heading = True
+                self._omit()
+                if char == '\n':
+                    self._end_line()
         else:
             self.prefix = ''
             self._emit(self.indent)
@@ -572,22 +744,31 @@ class SpokenReplyText:
                 self._text(literal)
             self._text(char)
 
+    def _resolve_emphasis(self, char, *, at_end=False):
+        if not self.emphasis:
+            return
+        marker = self.emphasis * self.emphasis_length
+        opening = (not self.emphasis_before_word and bool(char) and not char.isspace()
+                   and self.emphasis_length <= 3
+                   and (self.emphasis != '~' or self.emphasis_length == 2))
+        intraword = (self.emphasis == '_' and self.emphasis_before_word
+                     and (char.isalnum() or char == '_'))
+        if intraword:
+            self._emit(marker)
+        elif marker in self.open_emphasis:
+            self.open_emphasis.remove(marker)
+        elif opening:
+            self.open_emphasis.add(marker)
+        elif ((self.prose or self.label is not None or self.emphasis == '~')
+              and (not at_end or self.emphasis_before_word or self.emphasis == '~')):
+            self._emit(marker)
+        self.emphasis = ''
+
     def _text(self, char):
-        if self.emphasis:
-            if char == self.emphasis:
-                self.emphasis_length += 1
-                return
-            marker = self.emphasis * self.emphasis_length
-            opening = (not self.emphasis_before_word and not char.isspace()
-                       and self.emphasis_length <= 2
-                       and (self.emphasis != '~' or self.emphasis_length == 2))
-            if marker in self.open_emphasis:
-                self.open_emphasis.remove(marker)
-            elif opening:
-                self.open_emphasis.add(marker)
-            elif self.prose or self.label is not None or self.emphasis == '~':
-                self._emit(marker)
-            self.emphasis = ''
+        if self.emphasis and char == self.emphasis:
+            self.emphasis_length += 1
+            return
+        self._resolve_emphasis(char)
         if self.escape:
             self.escape = False
             if not char.isalnum() and not char.isspace():
@@ -635,13 +816,27 @@ class SpokenReplyText:
             self.line_nonblank |= not char.isspace()
             self._lex(char)
 
+    def _restore_label_join(self, saved) -> bool:
+        self.space, self.last, self.prose, self.join, self.line_prose, addresses = saved
+        return addresses
+
+    def _refuse_buffer(self) -> None:
+        if self.label is not None:
+            self._restore_label_join(self.label_saved)
+        saved = (self.space, self.last, self.prose, self.join, self.line_prose, self.addresses)
+        output, code, addresses = self.output, self.code, self.addresses
+        self.reset()
+        self.active = self.refused = True
+        self.output, self.code, self.addresses = output, code, addresses
+        self._restore_label_join(saved)
+
     def _release_label(self, linked=False, closed=True):
         text = ''.join(self.label) + self.space
         saved = self.label_saved
         self.label = None
         self.label_depth = 0
         self.label_closed = False
-        self.space, self.last, self.prose, self.join, self.line_prose, old_addresses = saved
+        old_addresses = self._restore_label_join(saved)
         if linked:
             self._emit(text)
             self._omit()
@@ -682,25 +877,39 @@ class SpokenReplyText:
         else:
             self._emit(char)
 
+    def _finish_url_tail(self):
+        for char in self.url_tail:
+            if char == self.url_closer:
+                self.url_closer = ''
+            else:
+                self._emit(char)
+        self.url_tail = []
+        self.url_tail_bytes = 0
+
     def _url_char(self, char):
         if char == '(':
             self.url_parentheses += 1
         elif char == ')' and self.url_parentheses:
             self.url_parentheses -= 1
-        elif char.isspace() or char in '<>\"\'`]' or char == ')':
+        elif char.isspace() or char in '<>`])' or (self.row_active and char == '|'):
             self.url = False
-            self._emit(self.url_tail)
-            self.url_tail = ''
+            self._finish_url_tail()
             self._omit()
-            if char not in ")>\"'":
+            if char != self.url_closer:
                 self._scan(char)
+            self.url_closer = ''
             return
-        if char in '.,!?;:':
-            self.url_tail = char
+        if char in ".,!?;:\"'":
+            self.url_tail.append(char)
+            self.url_tail_bytes += len(char.encode('utf-8'))
+            if self.url_tail_bytes > 1024 * 1024:
+                self._refuse_buffer()
         else:
-            self.url_tail = ''
+            self.url_tail = []
+            self.url_tail_bytes = 0
 
     def _destination_char(self, char):
+        escaped = self.destination_escape
         if self.destination_escape:
             self.destination_escape = False
         elif char == '\\':
@@ -708,12 +917,14 @@ class SpokenReplyText:
         elif self.destination_quote:
             if char == self.destination_quote:
                 self.destination_quote = ''
-        elif char in '\"\'':
+        elif char in '\"\'' and self.destination_title_space:
             self.destination_quote = char
         elif char == '(':
             self.destination += 1
         elif char == ')':
             self.destination -= 1
+        self.destination_title_space = (char.isspace() and not escaped
+                                        and self.destination == 1 and not self.destination_quote)
         if not self.destination:
             self._omit()
 
@@ -725,9 +936,11 @@ class SpokenReplyText:
             self.fence_stage = 'indent'
             self.fence_indent = self.fence_count = 0
         elif self.fence_stage == 'indent':
-            if char == ' ' and self.fence_indent < 3:
-                self.fence_indent += 1
-            elif char == self.delimiter:
+            if char in ' \t':
+                self.fence_indent = self._column_after(self.fence_indent, char)
+                if self.fence_indent > self.code_base + 3:
+                    self.fence_stage = 'body'
+            elif char == self.delimiter and self.code_base <= self.fence_indent <= self.code_base + 3:
                 self.fence_stage = 'run'
                 self.fence_count = 1
             else:
@@ -745,6 +958,12 @@ class SpokenReplyText:
     def _scan(self, char):
         if self.refused:
             return
+        if self.line_pending_kind == 'rule':
+            self._rule_char(char)
+            return
+        if self.line_pending_kind == 'row':
+            self._row_separator_char(char)
+            return
         if self.destination:
             self._destination_char(char)
             return
@@ -755,7 +974,9 @@ class SpokenReplyText:
             candidate = self.candidate + char
             prefixes = ('http://', 'https://', 'www.')
             if candidate.lower() in prefixes:
+                self.url_closer = {'(': ')', '<': '>', '"': '"', "'": "'"}.get(self.wrapper, '')
                 self.candidate = self.wrapper = ''
+                self.url_parentheses = 0
                 self.addresses = self.url = True
                 self._omit()
                 return
@@ -768,6 +989,7 @@ class SpokenReplyText:
             if char == '(':
                 self._release_label(linked=True)
                 self.destination = 1
+                self.destination_title_space = False
                 return
             self._release_label()
         if self.run_char:
@@ -787,6 +1009,7 @@ class SpokenReplyText:
                 self.code = True
                 self._omit()
                 self.delimiter, self.delimiter_length = marker, length
+                self.code_base = self.line_base
                 self.mode = 'fence_header'
             elif marker == '`':
                 self.code = True
@@ -817,12 +1040,23 @@ class SpokenReplyText:
             elif self.line_start:
                 if char in ' \t':
                     self.indent += char
-                elif '\t' in self.indent or len(self.indent) >= 4:
+                    self.indent_columns = self._column_after(self.indent_columns, char)
+                elif self.indent_columns >= self.code_base + 4:
                     self.line_start = False
+                    self.line_nonblank = True
                     self.indent = ''
                 else:
                     self.mode = 'text'
                     self._scan(char)
+            return
+        if self.row_active and self.label is None and not self.escape and char in '|\n':
+            self._row_boundary()
+            if char == '\n':
+                self.row_active = False
+                self._new_line()
+            return
+        if self.marker_width:
+            self._marker_char(char)
             return
         if self.prefix:
             self._prefix_char(char)
@@ -830,19 +1064,42 @@ class SpokenReplyText:
         if self.line_start:
             if char in ' \t':
                 self.indent += char
+                self.indent_columns = self._column_after(self.indent_columns, char)
                 return
             if char == '\n':
+                self._list_sentence()
                 self._emit(self.indent + char)
                 self._new_line()
                 return
-            if self.blank_before and ('\t' in self.indent or len(self.indent) >= 4):
+            if self.blank_before:
+                while self.list_columns and self.indent_columns < self.list_columns[-1]:
+                    self._list_sentence()
+                    self.list_columns.pop()
+                self.list_open = bool(self.list_columns)
+            self.line_base = next((column for column in reversed(self.list_columns)
+                                   if column <= self.indent_columns), 0)
+            relative = self.indent_columns - self.line_base
+            if self.blank_before and relative >= 4:
                 self.code = True
                 self._omit()
                 self.mode = 'indent'
+                self.code_base = self.line_base
                 self.line_start = False
                 self.indent = ''
                 return
-            at_start = len(self.indent) <= 3 and '\t' not in self.indent
+            at_start = relative <= 3
+            if at_start and char == '|' and not self.line_replay:
+                self.line_pending_kind = 'row'
+                self.row_separator_dash = self.row_separator_colon = False
+                self.row_separator_end = self.row_separator_text = False
+                self._hold_line_char(char)
+                return
+            if at_start and char in '-*_' and not self.line_replay:
+                self.line_pending_kind = 'rule'
+                self.rule_mark = char
+                self.rule_count = 1
+                self._hold_line_char(char)
+                return
             self.line_start = False
             self.line_nonblank = True
             if char in '`~' and at_start:
@@ -864,12 +1121,7 @@ class SpokenReplyText:
             if self.label is not None:
                 self.label_bytes += len(char.encode('utf-8'))
                 if self.label_bytes > 1024 * 1024:
-                    saved, output = self.label_saved, self.output
-                    code, addresses = self.code, self.addresses
-                    self.reset()
-                    self.active = self.refused = True
-                    self.output, self.code, self.addresses = output, code, addresses
-                    self.space, self.last, self.prose, self.join, self.line_prose, _ = saved
+                    self._refuse_buffer()
             self._scan(char)
         return ''.join(self.output)
 
@@ -877,11 +1129,18 @@ class SpokenReplyText:
         if not self.active:
             return ''
         self.output = []
+        if self.line_pending_kind == 'rule':
+            if self.rule_count >= 3:
+                self._rule_char('\n')
+            else:
+                self._release_line_prefix()
+        elif self.line_pending_kind == 'row':
+            self._row_separator_char('\n')
         if self.candidate:
             self._emit(self.wrapper + self.candidate)
             self.wrapper = self.candidate = ''
         if self.url:
-            self._emit(self.url_tail)
+            self._finish_url_tail()
         if self.wrapper:
             self._emit(self.wrapper)
         if self.image:
@@ -891,20 +1150,22 @@ class SpokenReplyText:
                 self.code = True
             else:
                 self._emit(self.run_char * self.run_length)
+        if self.marker_width:
+            self._marker_char('\n')
         if self.prefix:
             for char in self.indent + self.prefix:
                 self._text(char)
             self.indent = self.prefix = ''
-        if self.emphasis:
-            marker = self.emphasis * self.emphasis_length
-            if marker not in self.open_emphasis and self.emphasis_before_word:
-                self._emit(marker)
+        self._resolve_emphasis('', at_end=True)
         if self.escape:
             self._emit('\\')
         if self.closing_hashes:
             self._omit()
         self.closing_hashes = 0
-        if self.item and self.line_prose and self.last not in '.!?':
+        if self.row_active:
+            self._row_boundary()
+        self._list_sentence()
+        if self.heading and self.line_prose and self.last not in '.!?':
             self._emit('.')
         if self.label is not None:
             self._release_label(closed=self.label_closed)
