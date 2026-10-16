@@ -435,7 +435,6 @@ async def run_conversation(stt, voice, *, llm, transport, user_params=None, hand
                 ),
             ]),
         )
-    llm.last_spoken_reply = None
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
     assistant = aggregators.assistant()
