@@ -5,9 +5,9 @@
 # the PR's MERGE RESULT (PR head + current base), so a textually-clean-but-semantically-
 # broken combination fails HERE, on the required `test` check, before the merge button.
 #
-# A draft runs only the two-second gate job under its control name (see `test` below), so
-# Greptile reviews the draft first and marking the pull request ready (or pushing to a ready
-# pull request) is what starts the suite. That ordering is the whole review policy — no label,
+# A draft runs only the gate job under its control name (see `test` below).
+# External review, where enabled, runs before marking the pull request ready.
+# Marking ready (or pushing to a ready pull request) starts the suite; no label,
 # admission job, or evidence marker is involved.
 name: tests
 
