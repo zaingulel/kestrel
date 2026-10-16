@@ -531,7 +531,8 @@ class SpokenReplyText:
             else:
                 spacing = self.space
             target = self.output if self.label is None else self.label
-            if self.prose or char.isalnum() or not (self.addresses or self.code):
+            if (self.prose or char.isalnum() or not (self.addresses or self.code)
+                    or self.wrapper_omitted and char == self.wrapper):
                 target.append(spacing + char)
                 if self.row_active and self.label is None:
                     self.row_cell_text = True
@@ -618,6 +619,10 @@ class SpokenReplyText:
         self.line_pending = []
         self.line_pending_bytes = 0
         if self.line_pending_kind == 'row':
+            if self.prose and self.last not in '.!?':
+                self.space = ''
+                self._emit('.')
+            self.space = self.space or ' '
             self.row_active = True
             self.row_cell_text = False
             self.line_start = False
@@ -690,9 +695,12 @@ class SpokenReplyText:
         if self.candidate:
             self._emit(self.wrapper + self.candidate)
             self.wrapper = self.candidate = ''
+            self.wrapper_omitted = False
         if self.wrapper:
-            self._emit(self.wrapper)
+            if not self.wrapper_omitted:
+                self._emit(self.wrapper)
             self.wrapper = ''
+            self.wrapper_omitted = False
         if self.image:
             self._emit('!')
             self.image = False
@@ -785,7 +793,8 @@ class SpokenReplyText:
             self.wrapper_omitted = False
             self._omit()
             return
-        if self.wrapper and char.lower() not in 'hw' and char != '`':
+        if (self.wrapper and char.lower() not in 'hw' and char != '`'
+                and not (self.wrapper_omitted and char.isspace())):
             self._emit(self.wrapper)
             self.wrapper = ''
             self.wrapper_omitted = False
@@ -895,8 +904,12 @@ class SpokenReplyText:
             self.url = False
             self._finish_url_tail()
             self._omit()
+            pending = {')': '(', '>': '<', '"': '"', "'": "'"}.get(self.url_closer, '') if char.isspace() else ''
             if char != self.url_closer:
                 self._scan(char)
+            if pending:
+                self.wrapper = pending
+                self.wrapper_omitted = True
             self.url_closer = ''
             return
         if char in ".,!?;:\"'":
@@ -976,6 +989,7 @@ class SpokenReplyText:
             if candidate.lower() in prefixes:
                 self.url_closer = {'(': ')', '<': '>', '"': '"', "'": "'"}.get(self.wrapper, '')
                 self.candidate = self.wrapper = ''
+                self.wrapper_omitted = False
                 self.url_parentheses = 0
                 self.addresses = self.url = True
                 self._omit()
@@ -985,6 +999,7 @@ class SpokenReplyText:
                 return
             self._emit(self.wrapper + self.candidate)
             self.wrapper = self.candidate = ''
+            self.wrapper_omitted = False
         if self.label_closed:
             if char == '(':
                 self._release_label(linked=True)
@@ -1139,10 +1154,14 @@ class SpokenReplyText:
         if self.candidate:
             self._emit(self.wrapper + self.candidate)
             self.wrapper = self.candidate = ''
+            self.wrapper_omitted = False
         if self.url:
             self._finish_url_tail()
         if self.wrapper:
-            self._emit(self.wrapper)
+            if not self.wrapper_omitted:
+                self._emit(self.wrapper)
+            self.wrapper = ''
+            self.wrapper_omitted = False
         if self.image:
             self._emit('!')
         if self.run_char and self.mode == 'text':

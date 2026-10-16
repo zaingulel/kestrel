@@ -265,6 +265,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             ("Use _snake_case_ now.", "Use snake_case now."),
             ("Hi\n\n- - -\n\nThere.\n\n***\n\nMore.\n\n___", "Hi. There. More."),
             ("| a | b |\n|---|:---:|\n| 1 | 2 |", "a. b. 1. 2."),
+            ("Text\n\n| a | b |\nMore text.", "Text. a. b. More text."),
             ("| a \\| b | `secret()` | [guide](https://x.com) |\n|---|---|---|",
              "a | b. guide. There is code in this reply."),
             ("|https://x.com|safe|", "safe."),
@@ -289,6 +290,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_cleanup_omits_explicit_addresses_and_keeps_labels(self):
         for text, expected in [
+            ("(https://x.com and more)", "(and more)"),
+            ("Read (https://x.com  and more).", "Read (and more)."),
+            ("Read (https://x.com  ). Continue.", "Read. Continue."),
             ("See https://en.wikipedia.org/wiki/Hilbert's_paradox today.", "See today."),
             ('Read https://example.com/a"b next.', "Read next."),
             ('Read "https://example.com/it\'s". Continue.', "Read. Continue."),
