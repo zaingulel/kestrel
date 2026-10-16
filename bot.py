@@ -37,7 +37,7 @@ from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
 from hermes_worker import HERMES_PYTHON, child_environment
-from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, VoxCPMTTS
+from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
@@ -366,7 +366,7 @@ class HermesLLMService(LLMService):
         except Exception as error:
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
-            await self.push_frame(LLMTextFrame(' ' + advisory))
+            await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
         finally:
             if self.output is output:
                 self.output = None

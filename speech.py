@@ -15,7 +15,11 @@ from time import monotonic
 import numpy as np
 from loguru import logger
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
-from pipecat.frames.frames import InputAudioRawFrame, InterruptionFrame, TranscriptionFrame, TTSAudioRawFrame
+from pipecat.frames.frames import (
+    CancelFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings, TTSSettings
 from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.services.tts_service import TTSService
@@ -433,6 +437,496 @@ class NemotronSTT(SegmentedSTTService):
             yield TranscriptionFrame(result["text"], "", time_now_iso8601(), finalized=True)
 
 
+class SpokenReplyText:
+    """Incrementally retain only generated text that is safe to speak."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.active = False
+        self.code = False
+        self.mode = 'text'
+        self.space = ''
+        self.join = False
+        self.last = ''
+        self.prose = False
+        self.output = []
+        self.line_start = True
+        self.indent = ''
+        self.blank_before = True
+        self.line_nonblank = False
+        self.run_char = ''
+        self.run_length = 0
+        self.run_at_start = False
+        self.delimiter = ''
+        self.delimiter_length = 0
+        self.fence_stage = 'indent'
+        self.fence_indent = 0
+        self.fence_count = 0
+        self.prefix = ''
+        self.item = False
+        self.heading = False
+        self.line_prose = False
+        self.closing_hashes = 0
+        self.escape = False
+        self.emphasis = ''
+        self.emphasis_length = 0
+        self.emphasis_before_word = False
+        self.open_emphasis = set()
+        self.addresses = False
+        self.candidate = ''
+        self.wrapper = ''
+        self.wrapper_omitted = False
+        self.url = False
+        self.url_parentheses = 0
+        self.url_tail = ''
+        self.image = False
+        self.label = None
+        self.label_depth = 0
+        self.label_closed = False
+        self.label_saved = None
+        self.label_bytes = 0
+        self.destination = 0
+        self.destination_escape = False
+        self.destination_quote = ''
+        self.refused = False
+
+    def start(self) -> None:
+        self.reset()
+        self.active = True
+
+    def _emit(self, text):
+        for char in text:
+            if char.isspace():
+                self.space += char
+                continue
+            if self.join:
+                spacing = ' ' if self.space or (self.last.isalnum() and char.isalnum()) else ''
+                if char in '.,!?;:)]}>':
+                    spacing = ''
+            else:
+                spacing = self.space
+            target = self.output if self.label is None else self.label
+            if self.prose or char.isalnum() or not (self.addresses or self.code):
+                target.append(spacing + char)
+            self.space = ''
+            self.join = False
+            self.last = char
+            self.prose |= char.isalnum()
+            self.line_prose |= char.isalnum()
+
+    def _omit(self):
+        self.join = True
+        if self.wrapper:
+            self.wrapper_omitted = True
+
+    def _new_line(self):
+        self.blank_before = not self.line_nonblank
+        self.line_start = True
+        self.line_nonblank = False
+        self.indent = ''
+        self.item = self.heading = self.line_prose = False
+
+    def _end_line(self):
+        if self.closing_hashes:
+            self._omit()
+        self.closing_hashes = 0
+        if self.item and self.line_prose and self.last not in '.!?':
+            self._emit('.')
+        self._emit('\n')
+        self._new_line()
+
+    def _prefix_char(self, char):
+        prefix = self.prefix
+        if prefix == '>':
+            self.prefix = self.indent = ''
+            self.line_start = True
+            self._omit()
+            self._scan(char)
+            return
+        if prefix.startswith('#'):
+            waiting = char == '#' and len(prefix) < 6
+            valid = char.isspace() and len(prefix) <= 6
+        elif prefix[0].isdigit():
+            waiting = (char.isdigit() and prefix.isdigit() and len(prefix) < 9
+                       or char in '.)' and prefix.isdigit())
+            valid = char.isspace() and prefix[-1] in '.)'
+        else:
+            waiting = False
+            valid = char.isspace()
+        if waiting:
+            self.prefix += char
+        elif valid:
+            self.prefix = self.indent = ''
+            self.item = prefix[0] != '>'
+            self.heading = prefix[0] == '#'
+            self._omit()
+            if char == '\n':
+                self._end_line()
+        else:
+            self.prefix = ''
+            self._emit(self.indent)
+            self.indent = ''
+            for literal in prefix:
+                self._text(literal)
+            self._text(char)
+
+    def _text(self, char):
+        if self.emphasis:
+            if char == self.emphasis:
+                self.emphasis_length += 1
+                return
+            marker = self.emphasis * self.emphasis_length
+            opening = (not self.emphasis_before_word and not char.isspace()
+                       and self.emphasis_length <= 2
+                       and (self.emphasis != '~' or self.emphasis_length == 2))
+            if marker in self.open_emphasis:
+                self.open_emphasis.remove(marker)
+            elif opening:
+                self.open_emphasis.add(marker)
+            elif self.prose or self.label is not None or self.emphasis == '~':
+                self._emit(marker)
+            self.emphasis = ''
+        if self.escape:
+            self.escape = False
+            if not char.isalnum() and not char.isspace():
+                self._emit(char)
+                return
+            self._emit('\\')
+        if self.image:
+            self.image = False
+            if char != '[':
+                self._emit('!')
+        if (self.wrapper and self.wrapper_omitted
+                and char == {'(': ')', '<': '>', '"': '"', "'": "'"}[self.wrapper]):
+            self.wrapper = ''
+            self.wrapper_omitted = False
+            self._omit()
+            return
+        if self.wrapper and char.lower() not in 'hw' and char != '`':
+            self._emit(self.wrapper)
+            self.wrapper = ''
+            self.wrapper_omitted = False
+        if self.closing_hashes:
+            if char == '#':
+                self.closing_hashes += 1
+                return
+            if char == '\n':
+                self._end_line()
+                return
+            if char.isspace():
+                return
+            self._emit('#' * self.closing_hashes)
+            self.closing_hashes = 0
+        if char == '\\':
+            self.escape = True
+        elif self.heading and char == '#' and self.space:
+            self.closing_hashes = 1
+        elif char in '*_~':
+            self.emphasis = char
+            self.emphasis_length = 1
+            self.emphasis_before_word = bool(self.last.isalnum() and not self.space)
+        elif char == '`':
+            self.run_char, self.run_length, self.run_at_start = char, 1, False
+        elif char == '\n':
+            self._end_line()
+        else:
+            self.line_nonblank |= not char.isspace()
+            self._lex(char)
+
+    def _release_label(self, linked=False, closed=True):
+        text = ''.join(self.label) + self.space
+        saved = self.label_saved
+        self.label = None
+        self.label_depth = 0
+        self.label_closed = False
+        self.space, self.last, self.prose, self.join, self.line_prose, old_addresses = saved
+        if linked:
+            self._emit(text)
+            self._omit()
+        elif not any(c.isalnum() for c in text) and (self.addresses != old_addresses or self.code):
+            self._omit()
+        else:
+            self._emit('[' + text + (']' if closed else ''))
+
+    def _lex(self, char):
+        if char == '[':
+            if self.label is not None:
+                self.label_depth += 1
+                self._emit(char)
+            else:
+                self.label_saved = (self.space, self.last, self.prose, self.join,
+                                    self.line_prose, self.addresses)
+                self.label = []
+                self.label_depth = 1
+                self.label_bytes = 1
+                self.space = self.last = ''
+                self.join = False
+            return
+        if char == ']' and self.label is not None:
+            self.label_depth -= 1
+            if self.label_depth:
+                self._emit(char)
+            else:
+                self.label_closed = True
+            return
+        if char == '!':
+            self.image = True
+        elif char in "(<\"'":
+            self.wrapper = char
+            self.wrapper_omitted = False
+        elif char.lower() in 'hw' and (self.wrapper or self.space or not self.last
+                                       or not (self.last.isalnum() or self.last == '_')):
+            self.candidate = char
+        else:
+            self._emit(char)
+
+    def _url_char(self, char):
+        if char == '(':
+            self.url_parentheses += 1
+        elif char == ')' and self.url_parentheses:
+            self.url_parentheses -= 1
+        elif char.isspace() or char in '<>\"\'`]' or char == ')':
+            self.url = False
+            self._emit(self.url_tail)
+            self.url_tail = ''
+            self._omit()
+            if char not in ")>\"'":
+                self._scan(char)
+            return
+        if char in '.,!?;:':
+            self.url_tail = char
+        else:
+            self.url_tail = ''
+
+    def _destination_char(self, char):
+        if self.destination_escape:
+            self.destination_escape = False
+        elif char == '\\':
+            self.destination_escape = True
+        elif self.destination_quote:
+            if char == self.destination_quote:
+                self.destination_quote = ''
+        elif char in '\"\'':
+            self.destination_quote = char
+        elif char == '(':
+            self.destination += 1
+        elif char == ')':
+            self.destination -= 1
+        if not self.destination:
+            self._omit()
+
+    def _fence(self, char):
+        if char == '\n':
+            if self.fence_stage in ('run', 'tail') and self.fence_count >= self.delimiter_length:
+                self.mode = 'text'
+                self._new_line()
+            self.fence_stage = 'indent'
+            self.fence_indent = self.fence_count = 0
+        elif self.fence_stage == 'indent':
+            if char == ' ' and self.fence_indent < 3:
+                self.fence_indent += 1
+            elif char == self.delimiter:
+                self.fence_stage = 'run'
+                self.fence_count = 1
+            else:
+                self.fence_stage = 'body'
+        elif self.fence_stage == 'run':
+            if char == self.delimiter:
+                self.fence_count += 1
+            elif char.isspace():
+                self.fence_stage = 'tail'
+            else:
+                self.fence_stage = 'body'
+        elif self.fence_stage == 'tail' and not char.isspace():
+            self.fence_stage = 'body'
+
+    def _scan(self, char):
+        if self.refused:
+            return
+        if self.destination:
+            self._destination_char(char)
+            return
+        if self.url:
+            self._url_char(char)
+            return
+        if self.candidate:
+            candidate = self.candidate + char
+            prefixes = ('http://', 'https://', 'www.')
+            if candidate.lower() in prefixes:
+                self.candidate = self.wrapper = ''
+                self.addresses = self.url = True
+                self._omit()
+                return
+            if any(prefix.startswith(candidate.lower()) for prefix in prefixes):
+                self.candidate = candidate
+                return
+            self._emit(self.wrapper + self.candidate)
+            self.wrapper = self.candidate = ''
+        if self.label_closed:
+            if char == '(':
+                self._release_label(linked=True)
+                self.destination = 1
+                return
+            self._release_label()
+        if self.run_char:
+            if char == self.run_char:
+                self.run_length += 1
+                return
+            marker, length = self.run_char, self.run_length
+            at_start = self.run_at_start
+            self.run_char = ''
+            if self.mode == 'inline':
+                if length == self.delimiter_length:
+                    self.mode = 'text'
+                else:
+                    self._scan(char)
+                    return
+            elif at_start and length >= 3:
+                self.code = True
+                self._omit()
+                self.delimiter, self.delimiter_length = marker, length
+                self.mode = 'fence_header'
+            elif marker == '`':
+                self.code = True
+                self._omit()
+                self.delimiter, self.delimiter_length = marker, length
+                self.mode = 'inline'
+            else:
+                for literal in marker * length:
+                    self._text(literal)
+        if self.mode == 'fence_header':
+            if char == '\n':
+                self.mode = 'fence'
+            return
+        if self.mode == 'fence':
+            self._fence(char)
+            return
+        if self.mode == 'inline':
+            if char == '`':
+                self.run_char, self.run_length = '`', 1
+            if char == '\n':
+                self._new_line()
+            else:
+                self.line_start = False
+            return
+        if self.mode == 'indent':
+            if char == '\n':
+                self._new_line()
+            elif self.line_start:
+                if char in ' \t':
+                    self.indent += char
+                elif '\t' in self.indent or len(self.indent) >= 4:
+                    self.line_start = False
+                    self.indent = ''
+                else:
+                    self.mode = 'text'
+                    self._scan(char)
+            return
+        if self.prefix:
+            self._prefix_char(char)
+            return
+        if self.line_start:
+            if char in ' \t':
+                self.indent += char
+                return
+            if char == '\n':
+                self._emit(self.indent + char)
+                self._new_line()
+                return
+            if self.blank_before and ('\t' in self.indent or len(self.indent) >= 4):
+                self.code = True
+                self._omit()
+                self.mode = 'indent'
+                self.line_start = False
+                self.indent = ''
+                return
+            at_start = len(self.indent) <= 3 and '\t' not in self.indent
+            self.line_start = False
+            self.line_nonblank = True
+            if char in '`~' and at_start:
+                self.run_char, self.run_length, self.run_at_start = char, 1, True
+                self.indent = ''
+                return
+            if at_start and (char in '#-+*>' or char.isdigit()):
+                self.prefix = char
+                return
+            self._emit(self.indent)
+            self.indent = ''
+        self._text(char)
+
+    def feed(self, text: str) -> str:
+        if not self.active:
+            return ''
+        self.output = []
+        for char in text:
+            if self.label is not None:
+                self.label_bytes += len(char.encode('utf-8'))
+                if self.label_bytes > 1024 * 1024:
+                    saved, output = self.label_saved, self.output
+                    code, addresses = self.code, self.addresses
+                    self.reset()
+                    self.active = self.refused = True
+                    self.output, self.code, self.addresses = output, code, addresses
+                    self.space, self.last, self.prose, self.join, self.line_prose, _ = saved
+            self._scan(char)
+        return ''.join(self.output)
+
+    def finish(self, *, failed: bool = False) -> str:
+        if not self.active:
+            return ''
+        self.output = []
+        if self.candidate:
+            self._emit(self.wrapper + self.candidate)
+            self.wrapper = self.candidate = ''
+        if self.url:
+            self._emit(self.url_tail)
+        if self.wrapper:
+            self._emit(self.wrapper)
+        if self.image:
+            self._emit('!')
+        if self.run_char and self.mode == 'text':
+            if self.run_char == '`' or self.run_length >= 3:
+                self.code = True
+            else:
+                self._emit(self.run_char * self.run_length)
+        if self.prefix:
+            for char in self.indent + self.prefix:
+                self._text(char)
+            self.indent = self.prefix = ''
+        if self.emphasis:
+            marker = self.emphasis * self.emphasis_length
+            if marker not in self.open_emphasis and self.emphasis_before_word:
+                self._emit(marker)
+        if self.escape:
+            self._emit('\\')
+        if self.closing_hashes:
+            self._omit()
+        self.closing_hashes = 0
+        if self.item and self.line_prose and self.last not in '.!?':
+            self._emit('.')
+        if self.label is not None:
+            self._release_label(closed=self.label_closed)
+        result = ''.join(self.output)
+        if self.code:
+            result += ' There is code in this reply.'
+        if self.refused and not failed:
+            result += " I couldn't safely prepare this reply for speech. Please ask me to rephrase."
+        elif not self.prose and not self.code and not failed:
+            result = ("This reply contains a web address, which I won't read aloud."
+                      if self.addresses else
+                      "There is no speakable text in this reply. Please ask me to rephrase.")
+        elif not self.code and not self.refused:
+            result += self.space + self.indent
+        self.reset()
+        return result
+
+
+class SpeechAdvisoryFrame(LLMTextFrame):
+    """Fixed application speech that generated syntax cannot suppress."""
+
+
 class VoxCPMTTS(TTSService):
     def __init__(self, model):
         super().__init__(
@@ -441,6 +935,26 @@ class VoxCPMTTS(TTSService):
         )
         self.model = model
         self._generation_lock = asyncio.Lock()
+        self._spoken_reply = SpokenReplyText()
+
+    async def process_frame(self, frame, direction):
+        if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
+            self._spoken_reply.reset()
+        elif direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._spoken_reply.start()
+            elif isinstance(frame, SpeechAdvisoryFrame):
+                tail = self._spoken_reply.finish(failed=True)
+                if tail.strip():
+                    separator = ' ' if tail.rstrip().endswith(('.', '!', '?')) else '. '
+                    frame.text = tail.rstrip() + separator + frame.text.lstrip()
+            elif isinstance(frame, LLMTextFrame):
+                frame.text = self._spoken_reply.feed(frame.text)
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                tail = self._spoken_reply.finish()
+                if tail:
+                    await super().process_frame(LLMTextFrame(tail), direction)
+        await super().process_frame(frame, direction)
 
     async def run_tts(self, text, context_id):
         # Never overlap model calls, including a chunk still finishing after interruption.
