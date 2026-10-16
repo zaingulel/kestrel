@@ -154,6 +154,39 @@ MEASURED_FIRST_HI_SCORES = (
 
 
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeat_only_handles_completed_exact_user_turns(self):
+        accepted = ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? ')
+        rejected = ('"repeat that"', 'repeat that!!', 'repeat that??', 'do not repeat that',
+                    'repeat that please', 'repeat\nthat', '')
+        cases = [([{'role': 'user', 'content': text}], False, FrameDirection.DOWNSTREAM,
+                  text in accepted) for text in (*accepted, *rejected)]
+        cases.extend([
+            ([{'role': 'user', 'content': 'repeat that'}], True, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'user', 'content': 'repeat that'}], False, FrameDirection.UPSTREAM, False),
+            ([{'role': 'assistant', 'content': 'repeat that'}], False, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'system', 'content': 'repeat that'}], False, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'user', 'content': [{'type': 'text', 'text': 'repeat that'}]}],
+             False, FrameDirection.DOWNSTREAM, False),
+            ([], False, FrameDirection.DOWNSTREAM, False),
+        ])
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute'})
+        for messages, speculative, direction, consumes in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'This direct processor fixture has no engine'
+                service.last_spoken_reply = 'Known last reply.'
+                service.push_frame = AsyncMock()
+                context = bot.LLMContext(deepcopy(messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                self.assertEqual(context.get_messages(), [] if consumes else messages)
+                replay = [args.args[0] for args in service.push_frame.await_args_list
+                          if isinstance(args.args[0], bot.TTSSpeakFrame)]
+                self.assertEqual([frame.text for frame in replay], ['Known last reply.'] if consumes else [])
+                if consumes:
+                    self.assertFalse(replay[0].append_to_context)
+                command.assert_not_awaited()
+
     async def test_processor_excludes_speculative_nonuser_and_upstream_mute(self):
         cases = [
             ([{'role': 'user', 'content': 'mute'}], True, FrameDirection.DOWNSTREAM),
@@ -1412,6 +1445,105 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
 
+    async def test_repeat_preserves_spoken_reply_without_brain_or_history(self):
+        brain = ScriptedBrain([
+            [({'content': r'Literal \`tick\` stays with ●, ◐ and ○.'}, None), ({}, 'stop')],
+            [({'content': 'Newer normal reply.'}, None), ({}, 'stop')],
+            [({'content': 'Fresh reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: no', '',
+        ])
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'repeat that')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertTrue(committed.empty())
+        self.assertEqual(len(brain.requests), 0)
+
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Give the literal reply.')
+        await asyncio.wait_for(committed.get(), 5)  # Turn summaries strip markers; only a completion barrier.
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Literal `tick` stays with ●, ◐ and ○.')
+        for text in ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? '):
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, text)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Literal `tick` stays with ●, ◐ and ○.')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 1)
+
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'mute')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5),
+                         "I couldn't confirm mute. Check the audio control. I won't retry.")
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual(command.await_count, 8)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'repeat that')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5),
+                         "I couldn't confirm mute. Check the audio control. I won't retry.")
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual(command.await_count, 8)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertTrue(committed.empty())
+
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await transport.input().queue_frame(TranscriptionFrame('repeat that', '', '2026-01-01T00:00:00Z', finalized=True))
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertTrue(spoken.empty())
+        self.assertEqual(len(brain.requests), 1)
+        await self.finish_user_turn(transport, 'with more detail.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Newer normal reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Newer normal reply.')
+        self.assertEqual([[m for m in request[2]['messages'] if m['role'] != 'system']
+                          for request in brain.requests], [
+            [{'role': 'user', 'content': 'Give the literal reply.'}],
+            [{'role': 'user', 'content': 'Give the literal reply.'},
+             {'role': 'assistant', 'content': 'Literal `tick` stays with ●, ◐ and ○.'},
+             {'role': 'user', 'content': 'repeat that with more detail.'}],
+        ])
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'repeat that')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Newer normal reply.')
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertTrue(committed.empty())
+        self.assertEqual(len(brain.requests), 2)
+        old_service = transport.llm
+        self.assertEqual(old_service.last_spoken_reply, 'Newer normal reply.')
+        await close()
+        self.assertIsNone(old_service.last_spoken_reply)
+
+        transport, spoken, committed, _, _, _ = await self.open_session(brain)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'repeat that')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual(len(brain.requests), 2)
+        self.assertTrue(committed.empty())
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'A fresh question.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'A fresh question.'}])
+
     async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
         brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
@@ -1624,6 +1756,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 release_write.set()
                 await asyncio.wait_for(notified.wait(), 5)
                 await asyncio.wait_for(asyncio.shield(action_tasks[0]), 5)
+                await self.finish_user_turn(transport, 'repeat that')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(spoken.empty(), 'An unheard mute notice cannot replace the last reply')
+                self.assertTrue(committed.empty())
+                self.assertEqual(len(calls), 8, 'Repeat cannot redo the interrupted mute command')
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, 'An ordinary follow-up after interruption.')
                 context = await asyncio.wait_for(committed.get(), 5)
                 self.assertIn("couldn't reach Kestrel's engine", context)
@@ -1933,6 +2074,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(spoken.empty())
             self.assertEqual(len(processes), 1)
             self.assertIsNotNone(processes[0][0].returncode)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'repeat that')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty(), 'Failure replay must not add duplicate context')
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0][0].returncode)
         finally:
             await close()
 
@@ -1972,6 +2123,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(interrupted.wait(), 5)
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
         self.assertIsNone(processes[0][0].returncode)
+        await self.finish_user_turn(transport, 'repeat that')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+        barrier = DataFrame()
+        await transport.input().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual(len(brain.requests), 2)
+        self.assertTrue(committed.empty(), 'Replay must not commit an assistant duplicate')
+        self.assertTrue(spoken.empty(), 'The unheard continuation cannot be replayed')
+        self.assertFalse(finished.is_set(), 'Replay finishes before interrupted provider drainage')
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'Stop. What next?')
         release.set()
         self.assertTrue(await asyncio.to_thread(finished.wait, 5), 'Native generation must finish')
