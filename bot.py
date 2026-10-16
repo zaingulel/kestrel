@@ -27,7 +27,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.frames.frames import (
     LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
-    TTSSpeakFrame,
+    TTSSpeakFrame, TTSTextFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
@@ -221,6 +221,7 @@ class HermesLLMService(LLMService):
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
         self.local_tasks = set()
+        self.last_spoken_reply: str | None = None
 
     async def run_mute(self, tool):
         result = await tool.run(command=self.local_command)
@@ -291,6 +292,7 @@ class HermesLLMService(LLMService):
         self.process = None
         self.reader = None
         self.output = None
+        self.last_spoken_reply = None
         if self.home is not None:
             self.home.cleanup()
             self.home = None
@@ -333,6 +335,14 @@ class HermesLLMService(LLMService):
         if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
                 and messages[-1].get('role') == 'user'
                 and isinstance(messages[-1].get('content'), str)):
+            if messages[-1]['content'].strip().lower() in (
+                    'repeat that', 'repeat that.', 'repeat that!', 'repeat that?'):
+                messages.pop()
+                await self.push_frame(TTSSpeakFrame(
+                    self.last_spoken_reply or "I haven't said anything to repeat yet.",
+                    append_to_context=False,
+                ))
+                return
             tool = match_instant_tool(messages[-1]['content'])
             if tool is not None:
                 messages.pop()
@@ -425,11 +435,30 @@ async def run_conversation(stt, voice, *, llm, transport, user_params=None, hand
                 ),
             ]),
         )
+    llm.last_spoken_reply = None
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
+    assistant = aggregators.assistant()
+
+    @assistant.event_handler('on_before_push_frame')
+    async def remember_assistant_reply(processor, frame):
+        if isinstance(frame, LLMContextFrame):
+            messages = frame.context.get_messages()
+            if messages and messages[-1].get('role') == 'assistant':
+                text = messages[-1].get('content')
+                if isinstance(text, str) and text.strip():
+                    llm.last_spoken_reply = text
+
+    output = transport.output()
+
+    @output.event_handler('on_after_push_frame')
+    async def remember_local_reply(processor, frame):
+        if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
+            llm.last_spoken_reply = frame.text
+
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
-        VoxCPMTTS(voice), transport.output(), aggregators.assistant(),
+        VoxCPMTTS(voice), output, assistant,
     ])
     latency_observer = UserBotLatencyObserver()
 
