@@ -78,6 +78,8 @@ class DesktopResult:
 
 
 async def run_local_command(argv):
+    budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
+              else 4096)
     uid = os.getuid()
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
@@ -135,9 +137,9 @@ async def run_local_command(argv):
                 start_new_session=True,
             )
             output = bytearray()
-            while chunk := await process.stdout.read(4097 - len(output)):
+            while chunk := await process.stdout.read(budget + 1 - len(output)):
                 output.extend(chunk)
-                if len(output) > 4096:
+                if len(output) > budget:
                     raise RuntimeError('output too large')
             if await process.wait() != 0:
                 raise RuntimeError('command failed')
@@ -299,8 +301,6 @@ def decode_desktop_status(output: str) -> dict:
         raise ValueError('invalid desktop status')
 
     try:
-        if not isinstance(output, str) or len(output.encode('utf-8')) > 4096:
-            raise ValueError
         data = json.loads(output, object_pairs_hook=unique_object, parse_constant=invalid_constant)
         if not isinstance(data, dict):
             raise ValueError

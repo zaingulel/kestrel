@@ -467,6 +467,14 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.attempted)
                 self.assertEqual(result.message, "I couldn't find a playing media player.")
                 self.assertEqual(command.await_args_list, [call(status)])
+            artwork = 'data:image/jpeg;base64,' + 'A' * (64 * 1024)
+            command = AsyncMock(side_effect=[self.media(artUrl=artwork), 'ok',
+                                             json.dumps(json.loads(good) | {'artUrl': artwork})])
+            result = await tool.run(command=command)
+            self.assertTrue(result.confirmed, 'Valid embedded artwork must not prevent observed media confirmation')
+            self.assertTrue(result.attempted)
+            self.assertIsNone(result.message, 'Ignored artwork cannot supply speech')
+            self.assertEqual(command.await_args_list, [call(status), call(write), call(status)])
             for lag in range(3):
                 command = AsyncMock(side_effect=[self.media(), 'ok\n', *[self.media()] * lag, good])
                 with patch.object(bot.asyncio, 'sleep', AsyncMock()) as delay:
@@ -817,6 +825,55 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
               patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
             await bot.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
             self.assertEqual(spawn.await_args.kwargs['env'], baseline)
+
+        cases = []
+        for argv in (('/usr/bin/omarchy-shell', 'media', 'status'),
+                     ['/usr/bin/omarchy-shell', 'media', 'status']):
+            cases.extend([(argv, 4 * 1024 * 1024, 4 * 1024 * 1024, True),
+                          (argv, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, False)])
+        cases.extend((argv, 4096, 4097, False) for argv in (
+            ('/usr/bin/omarchy-shell', 'media', 'pause'),
+            ('/usr/bin/omarchy-shell', 'media', 'next'),
+            ('/usr/bin/hyprctl', '-j', 'activeworkspace'),
+            ('/usr/bin/omarchy-shell', 'media', 'status', 'extra'),
+        ))
+        for argv, budget, size, accepted in cases:
+            with self.subTest(argv=argv, size=size):
+                payload = b'A' * size
+                cursor = 0
+                read_sizes = []
+                async def read(n):
+                    nonlocal cursor
+                    self.assertGreater(n, 0)
+                    self.assertLessEqual(n, budget + 1)
+                    read_sizes.append(n)
+                    chunk = payload[cursor:cursor + n]
+                    cursor += len(chunk)
+                    return chunk
+                process = Mock(pid=9876, returncode=0)
+                process.stdout.read = AsyncMock(side_effect=read)
+                process.wait = AsyncMock(return_value=0)
+                with (patch.dict(os.environ, poisoned, clear=True),
+                      patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
+                      patch.object(bot.os, 'killpg') as killpg):
+                    if accepted:
+                        output = await bot.run_local_command(argv)
+                        self.assertEqual(len(output), size)
+                        self.assertEqual(output, 'A' * size)
+                        process.stdout._transport.close.assert_not_called()
+                        killpg.assert_not_called()
+                        process.wait.assert_awaited_once_with()
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '^output too large$'):
+                            await bot.run_local_command(argv)
+                        process.stdout._transport.close.assert_called_once_with()
+                        self.assertEqual(killpg.call_args_list,
+                                         [call(9876, signal.SIGTERM), call(9876, signal.SIGKILL)])
+                        self.assertEqual(process.wait.await_count, 2, 'Overflow cleanup must reap its child')
+                    spawn.assert_awaited_once()
+                    self.assertEqual(spawn.await_args.args, tuple(argv))
+                    self.assertEqual(read_sizes, [budget + 1, 1] if accepted else [budget + 1])
+                    self.assertEqual(cursor, size)
 
 
 
