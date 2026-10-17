@@ -51,7 +51,6 @@ LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
 
 @dataclass(frozen=True)
 class VoicePreset:
-    name: str
     reference: Path
     transcript: str
     pcm: bytes
@@ -114,7 +113,7 @@ def load_voice_preset(name: str, *, voices_dir: Path = ROOT / '.runtime/voices')
                 raise refused(name + '.wav', 'WAV data is truncated')
     except (EOFError, wave.Error):
         raise refused(name + '.wav', 'malformed WAV audio') from None
-    return VoicePreset(name, reference, transcript, pcm)
+    return VoicePreset(reference, transcript, pcm)
 
 
 class EchoRemoval:

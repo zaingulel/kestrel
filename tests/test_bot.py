@@ -1236,7 +1236,6 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 async def conversation(recognition, voice, **kwargs):
                     self.assertIs(recognition, stt)
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
-                    self.assertEqual(voice.preset.name, name)
                     self.assertEqual(self.voice.generate_streaming.call_count, 1)
                     os.environ['KESTREL_VOICE'] = 'unknown'
                     for sentence in ('First reply.', 'Second reply.'):
@@ -1614,7 +1613,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         transport.input.return_value = Input()
         transport.output.return_value = Output()
         transport.processed = processed
-        preset = speech.VoicePreset('british-male', Path('/fixture/british-male.wav'), 'British fixture.', bytes(9600))
+        preset = speech.VoicePreset(Path('/fixture/british-male.wav'), 'British fixture.', bytes(9600))
 
         def chunks(**kwargs):
             self.assertEqual(kwargs['prompt_wav_path'], '/fixture/british-male.wav')

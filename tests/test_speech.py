@@ -29,7 +29,7 @@ import speech
 from speech import NemotronSTT, VoicePreset, VoxCPMTTS, load_voice_preset
 
 
-TEST_PRESET = VoicePreset("fixture", Path("/fixture/voice.wav"), "Fixture voice.", bytes(9600))
+TEST_PRESET = VoicePreset(Path("/fixture/voice.wav"), "Fixture voice.", bytes(9600))
 
 
 class VoicePresetTests(unittest.TestCase):
@@ -61,7 +61,6 @@ class VoicePresetTests(unittest.TestCase):
 
         with patch.object(Path, 'open', observe_open):
             preset = load_voice_preset('fixture', voices_dir=self.directory)
-        self.assertEqual(preset.name, 'fixture')
         self.assertEqual(preset.reference, self.directory / 'fixture.wav')
         self.assertEqual(preset.transcript, 'Literal spoken wording.')
         self.assertEqual(preset.pcm, self.pcm)
@@ -95,8 +94,8 @@ class VoicePresetTests(unittest.TestCase):
                 (self.directory / (name + '.wav')).write_bytes(self.wav)
                 (self.directory / (name + '.txt')).write_text(transcript)
                 preset = load_voice_preset(name, voices_dir=self.directory)
-                self.assertEqual((preset.name, preset.reference, preset.transcript, preset.pcm),
-                                 (name, self.directory / (name + '.wav'), transcript, self.pcm))
+                self.assertEqual((preset.reference, preset.transcript, preset.pcm),
+                                 (self.directory / (name + '.wav'), transcript, self.pcm))
 
 
 class RecognitionTests(unittest.IsolatedAsyncioTestCase):
