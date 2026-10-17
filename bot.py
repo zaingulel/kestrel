@@ -275,17 +275,23 @@ LOCAL_TOOLS = {
 }
 
 
-VOLUME_LEVELS = {name: value for value, name in enumerate((
+VOLUME_BASE_WORDS = (
     'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
     'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
     'seventeen', 'eighteen', 'nineteen',
-))}
-for value, name in enumerate(('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'), 2):
-    VOLUME_LEVELS[name] = value * 10
-    for digit, unit in enumerate(('one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'), 1):
-        for separator in (' ', '-'):
-            VOLUME_LEVELS[name + separator + unit] = value * 10 + digit
-VOLUME_LEVELS['one hundred'] = 100
+)
+VOLUME_TENS = ('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety')
+VOLUME_LEVELS = {
+    **{name: value for value, name in enumerate(VOLUME_BASE_WORDS)},
+    **{name: value * 10 for value, name in enumerate(VOLUME_TENS, 2)},
+    **{
+        f'{name}{separator}{unit}': value * 10 + digit
+        for value, name in enumerate(VOLUME_TENS, 2)
+        for digit, unit in enumerate(VOLUME_BASE_WORDS[1:10], 1)
+        for separator in (' ', '-')
+    },
+    'one hundred': 100,
+}
 
 
 def match_instant_tool(text):
