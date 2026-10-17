@@ -6,14 +6,14 @@ This manual owns visual controls, interaction and accessibility. Spoken behaviou
 
 Product discovery and drilling with the owner precede interface design or implementation. An approved interface plan must establish its tokens and patterns here before building, as [AGENTS.md](../AGENTS.md) and the resume skill require.
 
-## Native mute failure notification
+## Native audio failure notification
 
 Use the installed desktop's native notification component, inheriting its color, typography, spacing and placement. Kestrel adds no theme tokens, layout, custom controls or desktop configuration.
 
 | Property | Value |
 | --- | --- |
 | Application name | `Kestrel` |
-| Summary | `Mute could not be confirmed` |
+| Summary | `Mute could not be confirmed` or `Volume could not be confirmed`, matching the failed action |
 | Body | `Check the audio control. Kestrel will not retry.` |
 | Hints | Transient; `boolean:suppress-sound:true` |
 

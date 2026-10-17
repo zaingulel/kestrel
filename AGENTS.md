@@ -221,7 +221,7 @@ sync, of every adopter. An intentional adopter exception needs owner agreement a
 
 ## Product
 
-Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Saluki brain runs through LM Studio on the Ally. Kestrel's only desktop tool is local mute of the selected audio output. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
+Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Saluki brain runs through LM Studio on the Ally. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
 
 Product discovery and drilling with the owner must precede any further product implementation. Factory adoption preserves the prototype and stops before product work.
 
@@ -256,6 +256,6 @@ Product discovery and drilling with the owner must precede any further product i
 Standing security guarantees:
 
 1. Microphone recognition and voice generation stay on the laptop; conversation transcripts and system context go to LM Studio on the Ally over the local network.
-2. Kestrel opens no listening network service. Kestrel's only desktop tool is local mute of the selected audio output. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
+2. Kestrel opens no listening network service. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
 3. Runtime model weights, reference audio and logs remain ignored and are never published. Transcript text may appear in local debug logs.
 4. Shared workflow bytes retain canonical integrity through sync; the repository administrator bypass remains owner-only and no write deploy key is allowed.
