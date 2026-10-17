@@ -595,6 +595,102 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
 
+    async def test_workspace_focus_requires_matching_readback(self):
+        self.assertIsNotNone(bot.match_instant_tool('workspace three'),
+                             'A completed numbered workspace phrase must select local work')
+        status = ('/usr/bin/hyprctl', '-j', 'activeworkspace')
+        for phrase, number in (('workspace three', 3), (' WORKSPACE 3. ', 3), ('workspace eleven!', 11),
+                               ('workspace 11', 11), ('workspace one hundred', 100), ('workspace 100', 100),
+                               ('workspace twenty-one', 21), ('workspace twenty one', 21),
+                               ('workspace 2147483647', 2147483647)):
+            with self.subTest(phrase=phrase):
+                tool = bot.match_instant_tool(phrase)
+                self.assertIsNotNone(tool)
+                self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+                dispatch = ('/usr/bin/hyprctl', 'dispatch', f'hl.dsp.focus({{ workspace = "{number}" }})')
+                command = AsyncMock(side_effect=['{"id":-99}', 'ok\n', json.dumps({'id': number})])
+                result = await tool.run(command=command)
+                self.assertTrue(result.confirmed)
+                self.assertTrue(result.attempted)
+                self.assertIsNone(result.message)
+                self.assertEqual(command.await_args_list, [call(status), call(dispatch), call(status)])
+                command = AsyncMock(return_value=json.dumps({'id': number}))
+                result = await tool.run(command=command)
+                self.assertTrue(result.confirmed)
+                self.assertFalse(result.attempted)
+                self.assertIsNone(result.message)
+                self.assertEqual(command.await_args_list, [call(status)])
+        for text in ('workspace 0', 'workspace zero', 'workspace -3', 'workspace 03', 'workspace ٣',
+                     'workspace ３', 'workspace 2147483648', 'workspace 999999999999999999999999',
+                     'workspace three please', 'workspace three?', 'workspace\nthree',
+                     'workspace 3; exec bad', 'workspace $(id)', 'workspace +3', 'workspace 3.0',
+                     'workspace three!!', '"workspace three"', 'do not workspace three',
+                     'workspace one hundred one', 'workspace 1' + '0' * 5000):
+            self.assertIsNone(bot.match_instant_tool(text))
+        for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+            with patch.dict(bot.LOCAL_TOOLS, workspace=bot.LocalTool(permission, AsyncMock(), 'workspace')):
+                self.assertIsNone(bot.match_instant_tool('workspace three'))
+        command = AsyncMock()
+        for value in (True, False, 0, -1, 2147483648, '3', 3.0, None):
+            with self.assertRaises(ValueError):
+                await bot.workspace_action(value, command=command)
+        command.assert_not_awaited()
+        dispatch = ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "3" })')
+        advisory = "I couldn't confirm workspace 3. Check the desktop. I won't retry."
+        for lag in range(3):
+            command = AsyncMock(side_effect=['{"id":1}', 'ok', *['{"id":1}'] * lag, '{"id":3}'])
+            with patch.object(bot.asyncio, 'sleep', AsyncMock()) as delay:
+                result = await bot.workspace_action(3, command=command)
+            self.assertTrue(result.confirmed)
+            self.assertTrue(result.attempted)
+            self.assertIsNone(result.message)
+            self.assertEqual(command.await_args_list, [call(status), call(dispatch)] + [call(status)] * (lag + 1))
+            self.assertEqual(delay.await_args_list, [call(.15), call(.35)][:lag])
+        invalid = ['', 'PRIVATE', 'null', '[]', '{}', '{"id":true}', '{"id":"3"}', '{"id":3.0}',
+                   '{"id":3,"id":11}', '{"id":NaN}', '{"id":Infinity}', '{"id":null}',
+                   '[' * 1100 + '0' + ']' * 1100, ' ' * 4097]
+        for stage in (0, 2):
+            for output in invalid + [RuntimeError('PRIVATE command output')]:
+                with self.subTest(stage=stage, output=str(output)[:80]):
+                    command = AsyncMock(side_effect=([output] if stage == 0 else ['{"id":1}', 'ok', output]))
+                    result = await bot.workspace_action(3, command=command)
+                    self.assertFalse(result.confirmed)
+                    self.assertEqual(result.attempted, stage == 2)
+                    self.assertEqual(result.message, advisory)
+                    self.assertEqual(command.await_args_list, [call(status), call(dispatch), call(status)][:stage + 1])
+        for reply in ('unhandled', 'ok\n\n', 'ok\r\n', ' ok', 'PRIVATE', RuntimeError('PRIVATE')):
+            command = AsyncMock(side_effect=['{"id":1}', reply])
+            result = await bot.workspace_action(3, command=command)
+            self.assertFalse(result.confirmed)
+            self.assertTrue(result.attempted)
+            self.assertEqual(result.message, advisory)
+            self.assertEqual(command.await_args_list, [call(status), call(dispatch)])
+        command = AsyncMock(side_effect=['{"id":1}', 'ok', '{"id":1}', '{"id":2}', '{"id":1}'])
+        with patch.object(bot.asyncio, 'sleep', AsyncMock()):
+            result = await bot.workspace_action(3, command=command)
+        self.assertFalse(result.confirmed)
+        self.assertTrue(result.attempted)
+        self.assertEqual(result.message, advisory)
+        self.assertEqual(command.await_args_list, [call(status), call(dispatch), call(status), call(status), call(status)])
+        for hang_at in (1, 2):
+            calls = []
+            cleaned = asyncio.Event()
+            async def hanging(argv):
+                calls.append(argv)
+                if len(calls) != hang_at:
+                    return '{"id":1}'
+                try:
+                    await asyncio.Future()
+                finally:
+                    cleaned.set()
+            with patch.object(bot, 'DESKTOP_TIMEOUT', .01):
+                result = await bot.workspace_action(3, command=hanging)
+            self.assertTrue(cleaned.is_set())
+            self.assertFalse(result.confirmed)
+            self.assertEqual(result.attempted, hang_at == 2)
+            self.assertEqual(result.message, advisory)
+            self.assertEqual(calls, [status, dispatch][:hang_at])
+
     async def test_desktop_environment_is_local_and_bounded(self):
         selectors = {'WAYLAND_DISPLAY': 'wayland-1', 'HYPRLAND_INSTANCE_SIGNATURE': 'instance_12.ab-3'}
         uid = os.getuid()
@@ -660,7 +756,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -737,7 +833,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -1903,6 +1999,74 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_workspace_turn_is_local_and_nonmatches_reach_brain(self):
+        replies = ('Longer phrase remains conversation.', 'Invalid number remains conversation.',
+                   'Command text remains conversation.')
+        brain = ScriptedBrain([[({'content': text}, None), ({}, 'stop')] for text in replies])
+        self.addCleanup(brain.close)
+        status = ('/usr/bin/hyprctl', '-j', 'activeworkspace')
+        focus_three = ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "3" })')
+        focus_eleven = ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "11" })')
+        command = AsyncMock(side_effect=['{"id":-99}', 'ok', '{"id":3}', '{"id":3}', 'PRIVATE unhandled'])
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        advisory = "I couldn't confirm workspace 11. Check the desktop. I won't retry."
+        try:
+            for phrase, expected in (('workspace three', None), ('workspace 11', advisory)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, phrase)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                if expected:
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                self.assertEqual(brain.requests, [])
+                self.assertFalse(transport.llm.local_tasks)
+            self.assertEqual(command.await_args_list, [call(status), call(focus_three), call(status),
+                                                       call(status), call(focus_eleven)])
+            ordinary = ('workspace three please', 'workspace 2147483648', 'workspace 3; exec bad')
+            for index, (text, reply) in enumerate(zip(ordinary, replies)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                if index == 0:
+                    await transport.input().queue_frame(
+                        TranscriptionFrame('workspace three', '', '2026-01-01T00:00:00Z', finalized=True))
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertEqual(command.await_count, 5, 'A segment cannot dispatch before the completed turn')
+                    self.assertEqual(brain.requests, [])
+                    await self.finish_user_turn(transport, 'please')
+                else:
+                    await self.finish_user_turn(transport, text)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), reply)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), reply)
+                self.assertEqual(len(brain.requests), index + 1)
+                users = [m for m in brain.requests[index][2]['messages'] if m['role'] == 'user']
+                self.assertEqual(users, [{'role': 'user', 'content': t} for t in ordinary[:index + 1]])
+                self.assertNotIn(advisory, json.dumps(brain.requests[index][2]))
+                self.assertNotIn('PRIVATE', json.dumps(brain.requests[index][2]))
+                self.assertEqual(command.await_count, 5, 'Nonmatching phrases cannot cause a local effect')
+        finally:
+            await close()
+        command = AsyncMock(side_effect=['{"id":-99}', 'ok\n', '{"id":11}'])
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, _, processes, close = await self.open_session(None, local_command=command)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'workspace eleven!')
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(spoken.empty(), 'Confirmed local focus stays silent without an engine')
+                self.assertTrue(committed.empty())
+                self.assertEqual(command.await_args_list, [call(status), call(focus_eleven), call(status)])
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0][0])
+                self.assertFalse(transport.llm.local_tasks)
+            finally:
+                await close()
 
     async def test_media_turns_are_local_and_owned(self):
         no_player = "I couldn't find a playing media player."

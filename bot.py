@@ -286,19 +286,17 @@ async def volume_output(percent: int, *, command=run_local_command) -> AudioResu
         return AudioResult(False, attempted, 'command failed')
 
 
-async def read_media_status(*, command=run_local_command) -> dict:
-    output = await command(('/usr/bin/omarchy-shell', 'media', 'status'))
-
+def decode_desktop_status(output: str) -> dict:
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
             if key in result:
-                raise ValueError('invalid media status')
+                raise ValueError('invalid desktop status')
             result[key] = value
         return result
 
     def invalid_constant(value):
-        raise ValueError('invalid media status')
+        raise ValueError('invalid desktop status')
 
     try:
         if not isinstance(output, str) or len(output.encode('utf-8')) > 4096:
@@ -306,16 +304,21 @@ async def read_media_status(*, command=run_local_command) -> dict:
         data = json.loads(output, object_pairs_hook=unique_object, parse_constant=invalid_constant)
         if not isinstance(data, dict):
             raise ValueError
-        if any(type(data.get(key)) is not bool for key in ('hasPlayer', 'playing', 'canGoNext')):
-            raise ValueError
-        if any(not isinstance(data.get(key), str)
-               for key in ('identity', 'desktopEntry', 'title', 'artist', 'album')):
-            raise ValueError
-        if not data['hasPlayer'] and data['playing']:
-            raise ValueError
         return data
     except (ValueError, TypeError, RecursionError):
-        raise ValueError('invalid media status') from None
+        raise ValueError('invalid desktop status') from None
+
+
+async def read_media_status(*, command=run_local_command) -> dict:
+    data = decode_desktop_status(await command(('/usr/bin/omarchy-shell', 'media', 'status')))
+    if any(type(data.get(key)) is not bool for key in ('hasPlayer', 'playing', 'canGoNext')):
+        raise ValueError('invalid media status')
+    if any(not isinstance(data.get(key), str)
+           for key in ('identity', 'desktopEntry', 'title', 'artist', 'album')):
+        raise ValueError('invalid media status')
+    if not data['hasPlayer'] and data['playing']:
+        raise ValueError('invalid media status')
+    return data
 
 
 async def media_action(action: str, *, command=run_local_command) -> DesktopResult:
@@ -357,11 +360,46 @@ async def media_action(action: str, *, command=run_local_command) -> DesktopResu
         return DesktopResult(False, attempted, 'command failed', advisory)
 
 
+async def workspace_action(number: int, *, command=run_local_command) -> DesktopResult:
+    if type(number) is not int or not 1 <= number <= 2147483647:
+        raise ValueError('invalid workspace')
+    advisory = f"I couldn't confirm workspace {number}. Check the desktop. I won't retry."
+    attempted = False
+
+    async def current_workspace():
+        data = decode_desktop_status(await command(('/usr/bin/hyprctl', '-j', 'activeworkspace')))
+        if type(data.get('id')) is not int:
+            raise ValueError('invalid workspace status')
+        return data['id']
+
+    try:
+        async with asyncio.timeout(DESKTOP_TIMEOUT):
+            if await current_workspace() == number:
+                return DesktopResult(True, False, 'already focused', None)
+            attempted = True
+            reply = await command(('/usr/bin/hyprctl', 'dispatch', f'hl.dsp.focus({{ workspace = "{number}" }})'))
+            if reply not in ('ok', 'ok\n'):
+                return DesktopResult(False, True, 'action unhandled', advisory)
+            for delay in (0, .15, .35):
+                if delay:
+                    await asyncio.sleep(delay)
+                if await current_workspace() == number:
+                    return DesktopResult(True, True, 'confirmed', None)
+            return DesktopResult(False, True, 'readback unconfirmed', advisory)
+    except TimeoutError:
+        return DesktopResult(False, attempted, 'desktop timeout', advisory)
+    except ValueError:
+        return DesktopResult(False, attempted, 'invalid workspace status', advisory)
+    except RuntimeError:
+        return DesktopResult(False, attempted, 'command failed', advisory)
+
+
 LOCAL_TOOLS = {
     'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
     'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause'),
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track'),
+    'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace'),
 }
 
 
@@ -393,6 +431,15 @@ def match_instant_tool(text):
     if match:
         tool = LOCAL_TOOLS[match[1]]
         return tool if tool.permission is PermissionTier.FREE else None
+    match = re.fullmatch(r'workspace ([1-9][0-9]{0,9})[.!]?', text)
+    if match:
+        number = int(match[1])
+    else:
+        match = re.fullmatch(r'workspace ([a-z -]+)[.!]?', text)
+        number = VOLUME_LEVELS.get(match[1]) if match else None
+    if number is not None and 1 <= number <= 2147483647:
+        tool = LOCAL_TOOLS['workspace']
+        return replace(tool, run=partial(tool.run, number)) if tool.permission is PermissionTier.FREE else None
     match = re.fullmatch(r'volume (0|[1-9][0-9]?|100)(?: percent| ?%)[.!]?', text)
     if match:
         percent = int(match[1])
