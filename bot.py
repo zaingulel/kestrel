@@ -38,7 +38,7 @@ from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
 from hermes_worker import HERMES_PYTHON, child_environment
-from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS
+from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
@@ -500,6 +500,7 @@ def make_llm():
 
 
 async def bot():
+    preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
     transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
     stt = NemotronSTT()
     llm = None
@@ -508,18 +509,19 @@ async def bot():
         llm = make_llm()
         llm.start_preparation()
         logger.info("Loading local speech models for the conversation")
-        await stt.load()
+        await stt.load(preset.pcm)
         torch.set_num_threads(4)
         model = await asyncio.to_thread(
             VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
             load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
         )
+        voice = VoxCPMTTS(model, preset)
         has_audio = False
-        async for frame in VoxCPMTTS(model).run_tts('Hello.', 'warmup'):
+        async for frame in voice.run_tts('Hello.', 'warmup'):
             has_audio = has_audio or bool(frame.audio)
         if not has_audio:
             raise RuntimeError('VoxCPM preparation produced no audio')
-        await run_conversation(stt, model, llm=llm, transport=transport, handle_signals=True)
+        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True)
     finally:
         try:
             if llm is not None:
@@ -536,7 +538,7 @@ async def bot():
                     raise RuntimeError(transport.failure)
 
 
-async def run_conversation(stt, voice, *, llm, transport, user_params=None, handle_signals=False):
+async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -568,7 +570,7 @@ async def run_conversation(stt, voice, *, llm, transport, user_params=None, hand
 
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
-        VoxCPMTTS(voice), output, assistant,
+        voice, output, assistant,
     ])
     latency_observer = UserBotLatencyObserver()
 

@@ -1,6 +1,10 @@
 import asyncio
 from copy import deepcopy
+import io
 import json
+import struct
+import wave
+from functools import partial
 import os
 import signal
 import sys
@@ -25,6 +29,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
 import bot
+import speech
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
 
 
@@ -1004,6 +1009,28 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.voices = Path(home.name)
+        self.reference_pcm = b'\x01\x00' * 480
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(48000)
+            audio.writeframes(self.reference_pcm)
+        self.reference_wav = output.getvalue()
+        for name, transcript in [('irish-female', 'Irish fixture.'), ('british-male', 'British fixture.'),
+                                 ('third', 'Third fixture.')]:
+            (self.voices / (name + '.wav')).write_bytes(self.reference_wav)
+            (self.voices / (name + '.txt')).write_text(transcript)
+        selection = patch.object(bot, 'load_voice_preset', partial(speech.load_voice_preset, voices_dir=self.voices))
+        selection.start()
+        self.addCleanup(selection.stop)
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('KESTREL_VOICE', None)
         self.audio = Mock(open=AsyncMock(), close=AsyncMock(), failure=None)
         audio = patch.object(bot, "LaptopAudioTransport", return_value=self.audio)
         audio.start()
@@ -1033,7 +1060,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             preparing.set()
             await hold_preparation.wait()
 
-        async def load_local():
+        async def load_local(reference_pcm):
             loading.set()
             await release_local.wait()
 
@@ -1117,6 +1144,118 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         conversation.assert_not_awaited()
 
+    async def test_invalid_voice_presets_stop_before_model_loading(self):
+        cases = [('', 'name'), ('../private-transcript', 'name'), ('unknown', 'missing')]
+        for label, suffix, data, reason in [
+            ('missing-text', 'txt', None, 'missing'),
+            ('invalid-utf8', 'txt', b'\xffprivate transcript', 'UTF-8'),
+            ('blank', 'txt', b' \t\n', 'blank'),
+            ('control', 'txt', b'private transcript\x00', 'control'),
+            ('large-text', 'txt', b'x' * 4097, '4096'),
+            ('malformed', 'wav', b'not a WAV', 'malformed WAV'),
+            ('truncated', 'wav', self.reference_wav[:-2], 'truncated'),
+            ('empty', 'wav', self.reference_wav[:40] + struct.pack('<I', 0), 'nonempty'),
+            ('large-wav', 'wav', self.reference_wav + bytes(1048577), '1048576'),
+        ]:
+            (self.voices / (label + '.wav')).write_bytes(self.reference_wav)
+            (self.voices / (label + '.txt')).write_text('private transcript')
+            asset = self.voices / (label + '.' + suffix)
+            if data is None:
+                asset.unlink()
+            else:
+                asset.write_bytes(data)
+            cases.append((label, reason))
+        for label, channels, width, rate, frames in [
+            ('stereo', 2, 2, 48000, 1), ('wrong-width', 1, 1, 48000, 1),
+            ('wrong-rate', 1, 2, 44100, 1), ('overlong', 1, 2, 48000, 480001),
+        ]:
+            with wave.open(str(self.voices / (label + '.wav')), 'wb') as audio:
+                audio.setnchannels(channels)
+                audio.setsampwidth(width)
+                audio.setframerate(rate)
+                audio.writeframes(bytes(channels * width * frames))
+            (self.voices / (label + '.txt')).write_text('private transcript')
+            cases.append((label, 'mono 48 kHz PCM16'))
+        for suffix in ('wav', 'txt'):
+            for kind in ('directory', 'unreadable', 'escaping'):
+                label = kind + '-' + suffix
+                (self.voices / (label + '.wav')).write_bytes(self.reference_wav)
+                (self.voices / (label + '.txt')).write_text('private transcript')
+                asset = self.voices / (label + '.' + suffix)
+                asset.unlink()
+                if kind == 'directory':
+                    asset.mkdir()
+                elif kind == 'unreadable':
+                    asset.write_bytes(self.reference_wav if suffix == 'wav' else b'private transcript')
+                    asset.chmod(0)
+                    self.addCleanup(asset.chmod, 0o600)
+                else:
+                    outside = self.voices.parent / (self.voices.name + '-outside-' + suffix)
+                    outside.write_bytes(self.reference_wav if suffix == 'wav' else b'private transcript')
+                    self.addCleanup(outside.unlink)
+                    asset.symlink_to(outside)
+                reason = {'directory': 'not a regular file', 'unreadable': 'cannot read',
+                          'escaping': 'immediately inside'}[kind]
+                cases.append((label, reason))
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        for name, reason in cases:
+            with (
+                self.subTest(name=name),
+                patch.dict(os.environ, {'KESTREL_VOICE': name}),
+                patch.object(bot, 'NemotronSTT', return_value=stt),
+                patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+                patch.object(bot.torch, 'set_num_threads'),
+            ):
+                with self.assertRaises(RuntimeError) as failure:
+                    await bot.bot()
+                message = str(failure.exception)
+                self.assertIn(reason, message)
+                self.assertIn('Check the voice files and restart Kestrel.', message)
+                self.assertNotIn('private transcript', message)
+                self.assertNotIn('../private-transcript', message)
+                if name and '/' not in name:
+                    self.assertIn(name, message)
+                bot.VoxCPM.from_pretrained.assert_not_called()
+                stt.load.assert_not_awaited()
+                conversation.assert_not_awaited()
+                self.audio.open.assert_not_awaited()
+                bot.LaptopAudioTransport.assert_not_called()
+                bot.NemotronSTT.assert_not_called()
+
+    async def test_selected_preset_survives_startup_and_replies(self):
+        for name, transcript in [('irish-female', 'Irish fixture.'), ('british-male', 'British fixture.'),
+                                 ('third', 'Third fixture.')]:
+            with self.subTest(name=name):
+                self.voice.generate_streaming.reset_mock()
+                if name == 'irish-female':
+                    os.environ.pop('KESTREL_VOICE', None)
+                else:
+                    os.environ['KESTREL_VOICE'] = name
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+
+                async def conversation(recognition, voice, **kwargs):
+                    self.assertIs(recognition, stt)
+                    self.assertIsInstance(voice, speech.VoxCPMTTS)
+                    self.assertEqual(self.voice.generate_streaming.call_count, 1)
+                    os.environ['KESTREL_VOICE'] = 'unknown'
+                    for sentence in ('First reply.', 'Second reply.'):
+                        frames = [frame async for frame in voice.run_tts(sentence, 'reply')]
+                        self.assertEqual(len(frames), 1)
+
+                with (
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'run_conversation', side_effect=conversation),
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    await bot.bot()
+                stt.load.assert_awaited_once_with(self.reference_pcm)
+                calls = self.voice.generate_streaming.call_args_list
+                self.assertEqual([item.kwargs['text'] for item in calls], ['Hello.', 'First reply.', 'Second reply.'])
+                for item in calls:
+                    self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / (name + '.wav')))
+                    self.assertEqual(item.kwargs['reference_wav_path'], str(self.voices / (name + '.wav')))
+                    self.assertEqual(item.kwargs['prompt_text'], transcript)
+
     async def test_voice_weights_are_prepared_once_per_service_lifetime(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         events = []
@@ -1148,7 +1287,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
             self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'load', 'warm', 'closed', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
-            self.assertIs(conversation.await_args.args[1], model)
+            self.assertIs(conversation.await_args.args[1].model, model)
+            self.assertIsNot(conversation.await_args_list[0].args[1], conversation.await_args_list[1].args[1])
             self.assertEqual(stt.close.await_count, 2)
             self.assertEqual(self.audio.close.await_count, 2)
 
@@ -1262,7 +1402,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     preparing.set()
                     await held.wait()
 
-                async def load():
+                async def load(reference_pcm):
                     loading.set()
                     if phase == "preparation":
                         await held.wait()
@@ -1374,9 +1514,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
+        voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), self.voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -1414,10 +1555,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 measured.set()
 
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
+        voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), self.voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -1471,7 +1613,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         transport.input.return_value = Input()
         transport.output.return_value = Output()
         transport.processed = processed
+        preset = speech.VoicePreset(Path('/fixture/british-male.wav'), 'British fixture.', bytes(9600))
+
         def chunks(**kwargs):
+            self.assertEqual(kwargs['prompt_wav_path'], '/fixture/british-male.wav')
+            self.assertEqual(kwargs['reference_wav_path'], '/fixture/british-male.wav')
+            self.assertEqual(kwargs['prompt_text'], 'British fixture.')
             yield np.zeros(4800, dtype=np.float32)
 
         real_spawn = asyncio.create_subprocess_exec
@@ -1536,7 +1683,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
         session = asyncio.create_task(bot.run_conversation(
-            bot.NemotronSTT(), Mock(generate_streaming=chunks),
+            bot.NemotronSTT(), bot.VoxCPMTTS(Mock(generate_streaming=chunks), preset),
             llm=supplied_llm, transport=transport, user_params=user_params,
         ))
         await asyncio.wait_for(started.wait(), 45)
@@ -2769,8 +2916,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_tts = bot.VoxCPMTTS
         worker_requests = []
 
-        def create_tts(voice):
-            tts = native_tts(voice)
+        def create_tts(voice, preset):
+            tts = native_tts(voice, preset)
             native_run_tts = tts.run_tts
             first_stream = True
 

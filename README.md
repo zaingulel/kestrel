@@ -20,6 +20,7 @@ Run commands from this directory. Start the conversation trial as a user service
 
 ```sh
 systemd-run --user --unit=kestrel-voice --collect --service-type=exec \
+  --setenv=KESTREL_VOICE=irish-female \
   --working-directory="$PWD" \
   --property="StandardOutput=append:$PWD/.runtime/voice-server.log" \
   --property=StandardError=inherit --property=TimeoutStopSec=15s --property=KillMode=mixed \
@@ -44,7 +45,17 @@ Speaking over a reply stops its speech and playback. Hermes continues the curren
 
 If the engine is unavailable, Kestrel explains that after an ordinary conversation turn; exact mute, volume and repeat still take the local route. Brain failures, incomplete replies and invalid worker responses also produce a spoken explanation, with the diagnostic reason in the service log. A partial reply already spoken is not treated as a complete answer. Kestrel does not automatically submit a failed user turn again or restart a broken engine session; follow the spoken advice and consult the diagnostic reason in the service log before restarting Kestrel. Hermes may retry transient provider errors within a turn. Engine startup and each turn, including native retries or an interrupted turn draining, are bounded at 45 seconds.
 
-Every sentence uses the same generated speaker reference at `.runtime/voices/kestrel.wav`, paired with its exact transcript in `speech.py`. This anchors speaker identity across sentences, replies and service restarts. Keep the reference fixed; replacing it changes Kestrel's voice. The reference uses [VoxCPM2's audio and transcript cloning mode](https://github.com/OpenBMB/VoxCPM#-ultimate-cloning). Startup preparation also reads this reference. It must be a complete, nonempty, mono 48 kHz WAV using 16-bit pulse-code modulation (PCM16), no longer than ten seconds; unsupported or truncated files prevent the conversation from starting.
+Kestrel selects one local voice preset when it starts. The default is `irish-female`; `british-male` is the named British alternative. The original voice remains available as `kestrel` for rollback. To select the British voice in a foreground terminal, run:
+
+```sh
+KESTREL_VOICE=british-male ./run-voice.sh
+```
+
+For the systemd service, set `--setenv=KESTREL_VOICE=british-male` in the existing `systemd-run` command above. The command explicitly passes the default Irish selection; change that value to `british-male` for the alternative. To restore the original voice, use `KESTREL_VOICE=kestrel ./run-voice.sh` in a foreground terminal, or set `--setenv=KESTREL_VOICE=kestrel` in the service command. After changing the selection, stop the service with `systemctl --user stop kestrel-voice`, then run the updated `systemd-run` command above.
+
+Presets are local files in the ignored `.runtime/voices/` directory. Each preset named `<name>` has a matching `<name>.wav` and `<name>.txt` file. Names contain 1 to 64 lowercase letters, digits, underscores or hyphens, and begin with a letter or digit. The transcript is the exact spoken reference in UTF-8, must not be blank, and is limited to 4 KiB; ASCII control characters are not allowed except tab, carriage return and line feed. The WAV must be nonempty, mono 48 kHz PCM16, no longer than ten seconds and no larger than 1 MiB. To add a preset, place both correctly named files in that directory and put the exact spoken words in the text file; no code change is needed. Keep these local voice files out of commits and publication.
+
+Kestrel selects and validates the pair once during startup, before loading the speech models. A missing or invalid selection or asset stops startup with an explanation rather than switching to another voice. Stop and restart Kestrel before changing files for the selected preset. The reference uses [VoxCPM2's audio and transcript cloning mode](https://github.com/OpenBMB/VoxCPM#-ultimate-cloning), keeping the same speaker reference across sentences and replies.
 
 This prototype supports conversation, local mute and exact volume setting of the selected audio output, and replay of the last spoken reply. It has no browser research or persistent conversation memory. Transcript text can appear in the service's debug output; microphone recordings are not saved by the application. Kestrel opens no listening network service.
 

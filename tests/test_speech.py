@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
-import struct
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 import threading
 import unittest
 import wave
@@ -24,7 +26,76 @@ from pipecat.processors.frame_processor import FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
 import speech
-from speech import NemotronSTT, VOICE_REFERENCE, VOICE_REFERENCE_TEXT, VoxCPMTTS
+from speech import NemotronSTT, VoicePreset, VoxCPMTTS, load_voice_preset
+
+
+TEST_PRESET = VoicePreset(Path("/fixture/voice.wav"), "Fixture voice.", bytes(9600))
+
+
+class VoicePresetTests(unittest.TestCase):
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.directory = Path(home.name)
+        self.pcm = b'\x01\x00' * 480
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(48000)
+            audio.writeframes(self.pcm)
+        self.wav = output.getvalue()
+
+    def test_preset_pair_validation_and_containment(self):
+        (self.directory / 'fixture.wav').write_bytes(self.wav)
+        (self.directory / 'fixture.txt').write_bytes(b' \tLiteral spoken wording.\r\n')
+        observed = []
+        native_open = Path.open
+
+        @contextmanager
+        def observe_open(path, *args, **kwargs):
+            with native_open(path, *args, **kwargs) as source:
+                reader = Mock(wraps=source)
+                yield reader
+                observed.extend((path.suffix, call.args[0]) for call in reader.read.call_args_list)
+
+        with patch.object(Path, 'open', observe_open):
+            preset = load_voice_preset('fixture', voices_dir=self.directory)
+        self.assertEqual(preset.reference, self.directory / 'fixture.wav')
+        self.assertEqual(preset.transcript, 'Literal spoken wording.')
+        self.assertEqual(preset.pcm, self.pcm)
+        self.assertEqual({suffix for suffix, _ in observed}, {'.wav', '.txt'})
+        for suffix, size in observed:
+            self.assertGreater(size, 0)
+            self.assertLessEqual(size, {'.wav': 1048577, '.txt': 4097}[suffix])
+        (self.directory / 'fixture.txt').write_bytes(b'x' * 4096)
+        self.assertEqual(len(load_voice_preset('fixture', voices_dir=self.directory).transcript), 4096)
+        (self.directory / 'fixture.wav').write_bytes(self.wav + bytes(1048576 - len(self.wav)))
+        self.assertEqual(load_voice_preset('fixture', voices_dir=self.directory).pcm, self.pcm)
+        for name in ('', 'UPPER', 'space name', 'a' * 65, '../fixture', '/fixture'):
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, 'name'):
+                load_voice_preset(name, voices_dir=self.directory)
+        linked_directory = self.directory / 'linked-runtime'
+        linked_directory.symlink_to(self.directory, target_is_directory=True)
+        self.assertEqual(load_voice_preset('fixture', voices_dir=linked_directory).reference,
+                         self.directory / 'fixture.wav')
+        nested = self.directory / 'nested'
+        nested.mkdir()
+        (nested / 'reference.wav').write_bytes(self.wav)
+        (self.directory / 'nested.wav').symlink_to(nested / 'reference.wav')
+        (self.directory / 'nested.txt').write_text('Literal spoken wording.')
+        with self.assertRaisesRegex(RuntimeError, 'immediately inside'):
+            load_voice_preset('nested', voices_dir=self.directory)
+
+    def test_additional_pair_needs_no_registry(self):
+        for name, transcript in [('irish-female', 'Irish fixture.'), ('british-male', 'British fixture.'),
+                                 ('third', 'Third fixture.')]:
+            with self.subTest(name=name):
+                (self.directory / (name + '.wav')).write_bytes(self.wav)
+                (self.directory / (name + '.txt')).write_text(transcript)
+                preset = load_voice_preset(name, voices_dir=self.directory)
+                self.assertEqual((preset.reference, preset.transcript, preset.pcm),
+                                 (self.directory / (name + '.wav'), transcript, self.pcm))
 
 
 class RecognitionTests(unittest.IsolatedAsyncioTestCase):
@@ -34,15 +105,6 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
         service.process.stdin.drain = AsyncMock()
         service.process.stdout.readline = AsyncMock(return_value=response)
         return service
-
-    def reference_wav(self, rate=48000):
-        output = io.BytesIO()
-        with wave.open(output, 'wb') as reference:
-            reference.setnchannels(1)
-            reference.setsampwidth(2)
-            reference.setframerate(rate)
-            reference.writeframes(bytes(9600))
-        return output.getvalue()
 
     async def test_load_finishes_reference_inference_before_returning(self):
         service = NemotronSTT()
@@ -61,12 +123,11 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
 
         process.stdout.readline = AsyncMock(side_effect=read_response)
         process.stdin.write.side_effect = lambda request: activity.set()
-        reference = Mock(open=Mock(return_value=io.BytesIO(self.reference_wav())))
+        pcm = bytes(9600)
         with (
             patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
-            patch.object(speech, 'VOICE_REFERENCE', reference),
         ):
-            load = asyncio.create_task(service.load())
+            load = asyncio.create_task(service.load(pcm))
             load.add_done_callback(lambda completed: activity.set())
             try:
                 await asyncio.wait_for(activity.wait(), 5)
@@ -79,7 +140,6 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(audio.getnframes(), 1600)
                     self.assertEqual(len(audio.readframes(1600)), 3200)
                 self.assertFalse(load.done())
-                reference.open.assert_called_once_with('rb')
                 release.set()
                 self.assertIsNone(await load)
                 self.assertEqual(process.stdin.write.call_count, 1)
@@ -89,63 +149,20 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
                 await service.close()
 
     async def test_load_rejects_unusable_reference_or_warmup_failure(self):
-        valid = self.reference_wav()
-        declared_bytes = 480001 * 2
-        oversized = (
-            b'RIFF' + struct.pack('<I', 36 + declared_bytes) + b'WAVEfmt '
-            + struct.pack('<IHHIIHH', 16, 1, 1, 48000, 96000, 2, 16)
-            + b'data' + struct.pack('<I', declared_bytes) + bytes(2)
-        )
-
-        class ObservedReference(io.BytesIO):
-            def __init__(self, data):
-                super().__init__(data)
-                self.reads = []
-
-            def read(self, size=-1):
-                self.reads.append((self.tell(), size))
-                return super().read(size)
-
-        for label, data in [
-            ('malformed', b'not a WAV'),
-            ('oversized', oversized),
-            ('truncated', valid[:-2]),
-            ('wrong_rate', self.reference_wav(rate=44100)),
-            ('worker_error', valid),
-        ]:
-            with self.subTest(label=label):
-                reference = ObservedReference(data)
-                process = Mock(returncode=None)
-                process.stdin.drain = AsyncMock()
-                process.wait = AsyncMock()
-                process.stdout.readline = AsyncMock(side_effect=[
-                    b'{"ready":true}\n', b'{"error":"preparation inference failed"}\n',
-                ])
-                service = NemotronSTT()
-                native_resample = speech.SOXRAudioResampler.resample
-                with (
-                    patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
-                    patch.object(speech, 'VOICE_REFERENCE', Mock(open=Mock(return_value=reference))),
-                    patch.object(
-                        speech.SOXRAudioResampler, 'resample', autospec=True,
-                        side_effect=native_resample,
-                    ) as resample,
-                    patch.object(speech.wave, 'Wave_write', wraps=wave.Wave_write) as encoder,
-                ):
-                    try:
-                        with self.assertRaises(RuntimeError) as failure:
-                            await service.load()
-                        self.assertTrue(str(failure.exception).strip())
-                        if label == 'worker_error':
-                            self.assertEqual(process.stdin.write.call_count, 1)
-                        else:
-                            process.stdin.write.assert_not_called()
-                        if label == 'oversized':
-                            self.assertFalse(any(position >= 44 for position, size in reference.reads))
-                            resample.assert_not_called()
-                            encoder.assert_not_called()
-                    finally:
-                        await service.close()
+        process = Mock(returncode=None)
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        process.stdout.readline = AsyncMock(side_effect=[
+            b'{"ready":true}\n', b'{"error":"preparation inference failed"}\n',
+        ])
+        service = NemotronSTT()
+        with patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)):
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'preparation inference failed'):
+                    await service.load(bytes(9600))
+                self.assertEqual(process.stdin.write.call_count, 1)
+            finally:
+                await service.close()
 
     async def test_transcript_is_finalized_and_audio_is_sent(self):
         service = self.service(b'{"text":"hello kestrel"}\n')
@@ -189,7 +206,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             yield np.zeros(4800, dtype=np.float32)
 
         worker = PipelineWorker(
-            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks)), Sink()]),
+            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET), Sink()]),
             enable_rtvi=False, idle_timeout_secs=None,
         )
         runner = WorkerRunner(handle_sigint=False)
@@ -393,7 +410,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 yield np.zeros(4800, dtype=np.float32)
 
             worker = PipelineWorker(
-                Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks)), Sink()]),
+                Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET), Sink()]),
                 enable_rtvi=False, idle_timeout_secs=None,
             )
             runner = WorkerRunner(handle_sigint=False)
@@ -452,8 +469,8 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         def iter_chunks():
             yield np.zeros(4800, dtype=np.float32)
 
-        first_session = VoxCPMTTS(model)
-        second_session = VoxCPMTTS(model)
+        first_session = VoxCPMTTS(model, TEST_PRESET)
+        second_session = VoxCPMTTS(model, TEST_PRESET)
         for service, text in [
             (first_session, "Hello."), (first_session, "How are you?"),
             (first_session, "Here is another reply."), (second_session, "Welcome back."),
@@ -462,9 +479,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(frames), 1)
         self.assertEqual(model.generate_streaming.call_count, 4)
         for call in model.generate_streaming.call_args_list:
-            self.assertEqual(call.kwargs["reference_wav_path"], str(VOICE_REFERENCE))
-            self.assertEqual(call.kwargs["prompt_wav_path"], str(VOICE_REFERENCE))
-            self.assertEqual(call.kwargs["prompt_text"], VOICE_REFERENCE_TEXT)
+            self.assertEqual(call.kwargs["reference_wav_path"], str(TEST_PRESET.reference))
+            self.assertEqual(call.kwargs["prompt_wav_path"], str(TEST_PRESET.reference))
+            self.assertEqual(call.kwargs["prompt_text"], TEST_PRESET.transcript)
 
     async def test_two_sentences_finish_before_the_response_ends(self):
         started = asyncio.Event()
@@ -485,7 +502,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             yield np.zeros(4800, dtype=np.float32)
 
         worker = PipelineWorker(
-            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks)), Sink()]),
+            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET), Sink()]),
             enable_rtvi=False, idle_timeout_secs=None,
         )
         runner = WorkerRunner(handle_sigint=False)
@@ -515,7 +532,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         def chunks(**kwargs):
             yield np.array([-2, -1, 0, 1, 2], dtype=np.float32)
 
-        voice = VoxCPMTTS(Mock(generate_streaming=chunks))
+        voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
         frames = [frame async for frame in voice.run_tts("hello", "turn")]
         self.assertEqual(len(frames), 1)
         self.assertIsInstance(frames[0], TTSAudioRawFrame)
@@ -546,7 +563,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 events.append((text, "closed"))
 
-        voice = VoxCPMTTS(Mock(generate_streaming=chunks))
+        voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
         old_frames = []
 
         async def consume(text, frames):
@@ -1164,6 +1181,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(speech.asyncio, "create_subprocess_exec", spawn),
               patch.object(bot, "LaptopAudioTransport", return_value=transport),
               patch.object(bot, "NemotronSTT", return_value=stt),
+              patch.object(bot, "load_voice_preset", return_value=TEST_PRESET),
               patch.object(bot, "make_llm", return_value=llm),
               patch.object(bot.VoxCPM, "from_pretrained", return_value=Mock(generate_streaming=chunks)),
               patch.object(bot, "run_conversation", conversation), patch.object(bot.torch, "set_num_threads")):
