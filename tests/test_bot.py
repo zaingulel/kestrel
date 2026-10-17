@@ -435,6 +435,215 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(bot.match_instant_tool('volume thirty percent'))
 
 
+class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def media(**changes):
+        return json.dumps(dict(hasPlayer=True, playing=True, canGoNext=True,
+                               identity='Player', desktopEntry='player.desktop',
+                               title='First track', artist='Artist', album='Album') | changes)
+
+    async def test_media_actions_require_observed_state(self):
+        for phrase, action in (('pause music', 'pause'), ('next track', 'next')):
+            self.assertIsNotNone(bot.match_instant_tool(phrase), 'Exact media turns must select local work')
+            tool = bot.LOCAL_TOOLS[phrase]
+            self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+            for text in (phrase, ' ' + phrase.upper() + '. ', phrase + '!'):
+                self.assertIs(bot.match_instant_tool(text), tool)
+            for text in (phrase + '?', '"' + phrase + '"', phrase + '!!', 'do not ' + phrase,
+                         phrase + ' please', phrase.replace(' ', '\n'), phrase + '; echo bad'):
+                self.assertIsNone(bot.match_instant_tool(text))
+            for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+                with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase)}):
+                    self.assertIsNone(bot.match_instant_tool(phrase))
+            status = ('/usr/bin/omarchy-shell', 'media', 'status')
+            write = ('/usr/bin/omarchy-shell', 'media', action)
+            good = self.media(playing=False) if action == 'pause' else self.media(title='Second track')
+            failure = ("I couldn't confirm pause. Check the media player. I won't retry." if action == 'pause'
+                       else "I couldn't confirm next track. Check the media player. I won't retry.")
+            for initial in (self.media(hasPlayer=False, playing=False), self.media(playing=False)):
+                command = AsyncMock(return_value=initial)
+                result = await tool.run(command=command)
+                self.assertFalse(result.confirmed)
+                self.assertFalse(result.attempted)
+                self.assertEqual(result.message, "I couldn't find a playing media player.")
+                self.assertEqual(command.await_args_list, [call(status)])
+            for lag in range(3):
+                command = AsyncMock(side_effect=[self.media(), 'ok\n', *[self.media()] * lag, good])
+                with patch.object(bot.asyncio, 'sleep', AsyncMock()) as delay:
+                    result = await tool.run(command=command)
+                self.assertTrue(result.confirmed)
+                self.assertTrue(result.attempted)
+                self.assertIsNone(result.message)
+                self.assertEqual(command.await_args_list, [call(status), call(write)] + [call(status)] * (lag + 1))
+                self.assertEqual(delay.await_args_list, [call(.15), call(.35)][:lag])
+            for reply in ('unhandled', 'ok\n\n', 'ok\r\n', ' ok', 'PRIVATE OUTPUT', RuntimeError('PRIVATE')):
+                command = AsyncMock(side_effect=[self.media(), reply])
+                result = await tool.run(command=command)
+                self.assertFalse(result.confirmed)
+                self.assertTrue(result.attempted)
+                self.assertEqual(result.message, failure)
+                self.assertEqual(command.await_args_list, [call(status), call(write)])
+            invalid = ['', 'null', '[]', '{}', 'PRIVATE', '{"hasPlayer":true,"hasPlayer":false}',
+                       self.media(playing=1), self.media(canGoNext='true'), self.media(hasPlayer=False),
+                       self.media(title=None), self.media(identity=[]), self.media(album=3),
+                       self.media(artist=True), self.media(desktopEntry={}), self.media(hasPlayer=1),
+                       self.media(title=float('nan')), '[' * 1100 + '0' + ']' * 1100, ' ' * 4097]
+            missing = json.loads(self.media())
+            del missing['album']
+            invalid.append(json.dumps(missing))
+            for output in invalid:
+                with self.subTest(action=action, invalid=output[:80]):
+                    command = AsyncMock(return_value=output)
+                    result = await tool.run(command=command)
+                    self.assertFalse(result.confirmed)
+                    self.assertFalse(result.attempted)
+                    self.assertEqual(result.message, failure)
+                    self.assertEqual(command.await_args_list, [call(status)])
+            corrupt = [self.media(identity='Other'), self.media(desktopEntry='other'),
+                       self.media(identity=''), self.media(desktopEntry=''),
+                       self.media(hasPlayer=False, playing=False), self.media(), '{}']
+            corrupt += ([self.media(playing=False, title='Other')] if action == 'pause' else
+                        [self.media(playing=False, title='Second'), self.media(title='')])
+            for after in corrupt:
+                with self.subTest(action=action, readback=after):
+                    command = AsyncMock(side_effect=[self.media(), 'ok', after, after, after])
+                    with patch.object(bot.asyncio, 'sleep', AsyncMock()):
+                        result = await tool.run(command=command)
+                    self.assertFalse(result.confirmed)
+                    self.assertTrue(result.attempted)
+                    self.assertEqual(result.message, failure)
+                    self.assertEqual(command.await_args_list.count(call(write)), 1)
+                    self.assertLessEqual(command.await_count, 5)
+            for stage in (0, 2):
+                command = AsyncMock(side_effect=([RuntimeError('PRIVATE')] if stage == 0 else
+                                                 [self.media(), 'ok', RuntimeError('PRIVATE')]))
+                result = await tool.run(command=command)
+                self.assertFalse(result.confirmed)
+                self.assertEqual(result.attempted, stage == 2)
+                self.assertEqual(result.message, failure)
+            for initial in ([self.media(canGoNext=False), self.media(title=''), self.media(identity=''),
+                             self.media(desktopEntry='')] if action == 'next' else []):
+                command = AsyncMock(return_value=initial)
+                result = await tool.run(command=command)
+                self.assertFalse(result.confirmed)
+                self.assertFalse(result.attempted)
+                self.assertEqual(result.message, failure)
+                self.assertEqual(command.await_count, 1)
+
+            # The completed-turn path must consume before a blocked native read and never replay it.
+            started, release = asyncio.Event(), asyncio.Event()
+            async def blocked_command(argv):
+                started.set()
+                await release.wait()
+                return self.media(playing=False)
+            service = bot.HermesLLMService(local_command=blocked_command)
+            service.failure = 'No engine in this direct fixture'
+            service.push_frame = AsyncMock()
+            context = bot.LLMContext([{'role': 'user', 'content': phrase}])
+            frame = LLMContextFrame(context)
+            processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                self.assertEqual(context.get_messages(), [])
+                await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+                release.set()
+                await asyncio.wait_for(processing, 5)
+                notices = [c.args[0] for c in service.push_frame.await_args_list
+                           if isinstance(c.args[0], bot.TTSSpeakFrame)]
+                self.assertEqual([n.text for n in notices], ["I couldn't find a playing media player."])
+                self.assertFalse(notices[0].append_to_context)
+                self.assertFalse(service.local_tasks)
+            finally:
+                release.set()
+                await service.close_local_tools()
+                processing.cancel()
+                await asyncio.gather(processing, return_exceptions=True)
+            for messages, speculative, direction in (
+                ([{'role': 'user', 'content': phrase}], True, FrameDirection.DOWNSTREAM),
+                ([{'role': 'user', 'content': phrase}], False, FrameDirection.UPSTREAM),
+                ([{'role': 'assistant', 'content': phrase}], False, FrameDirection.DOWNSTREAM),
+                ([{'role': 'system', 'content': phrase}], False, FrameDirection.DOWNSTREAM),
+                ([{'role': 'user', 'content': [{'type': 'text', 'text': phrase}]}], False, FrameDirection.DOWNSTREAM),
+            ):
+                command = AsyncMock(side_effect=AssertionError('Ineligible media cannot run'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'No engine in this direct fixture'
+                service.push_frame = AsyncMock()
+                context = bot.LLMContext(deepcopy(messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                command.assert_not_awaited()
+                self.assertEqual(context.get_messages(), messages)
+        with self.assertRaises(ValueError):
+            await bot.media_action('playPause', command=AsyncMock())
+        started, cleaned = asyncio.Event(), asyncio.Event()
+        async def hanging(argv):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleaned.set()
+        with patch.object(bot, 'DESKTOP_TIMEOUT', .01):
+            result = await bot.media_action('pause', command=hanging)
+        self.assertTrue(started.is_set())
+        self.assertTrue(cleaned.is_set())
+        self.assertFalse(result.confirmed)
+        self.assertFalse(result.attempted)
+        task = asyncio.create_task(bot.media_action('pause', command=hanging))
+        started.clear()
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_desktop_environment_is_local_and_bounded(self):
+        selectors = {'WAYLAND_DISPLAY': 'wayland-1', 'HYPRLAND_INSTANCE_SIGNATURE': 'instance_12.ab-3'}
+        uid = os.getuid()
+        baseline = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+                    'XDG_RUNTIME_DIR': f'/run/user/{uid}',
+                    'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
+                    'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus'}
+        poisoned = selectors | {'PATH': '/poison', 'HOME': '/poison', 'OMARCHY_PATH': '/poison',
+                                'PULSE_SERVER': 'tcp:remote', 'DBUS_SESSION_BUS_ADDRESS': 'tcp:remote',
+                                'HTTP_PROXY': 'http://remote', 'PYTHONPATH': '/poison'}
+        for argv in (('/usr/bin/omarchy-shell', 'media', 'status'),
+                     ('/usr/bin/hyprctl', '-j', 'activeworkspace')):
+            process = Mock(pid=9876, returncode=0)
+            process.stdout.read = AsyncMock(side_effect=[b'ok\n', b''])
+            process.wait = AsyncMock(return_value=0)
+            expected = baseline | selectors
+            if argv[0] == '/usr/bin/omarchy-shell':
+                expected['OMARCHY_PATH'] = '/usr/share/omarchy'
+            with (patch.dict(os.environ, poisoned, clear=True),
+                  patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
+                self.assertEqual(await bot.run_local_command(argv), 'ok\n')
+                spawn.assert_awaited_once_with(
+                    *argv, env=expected, stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            for key in selectors:
+                for value in (None, '', 'a' * 257, '../session', 'session:remote', 'bad\nvalue',
+                              'bad;command', 'é', '$(id)', 'white space'):
+                    env = poisoned.copy()
+                    if value is None:
+                        env.pop(key)
+                    else:
+                        env[key] = value
+                    with (patch.dict(os.environ, env, clear=True),
+                          patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn):
+                        with self.assertRaisesRegex(RuntimeError, '^desktop session unavailable$'):
+                            await bot.run_local_command(argv)
+                        spawn.assert_not_awaited()
+        process = Mock(pid=9876, returncode=0)
+        process.stdout.read = AsyncMock(side_effect=[b'ok', b''])
+        process.wait = AsyncMock(return_value=0)
+        with (patch.dict(os.environ, poisoned, clear=True),
+              patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
+            await bot.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
+            self.assertEqual(spawn.await_args.kwargs['env'], baseline)
+
+
+
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_only_handles_completed_exact_user_turns(self):
         accepted = ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? ')
@@ -451,7 +660,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -528,7 +737,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -1694,6 +1903,141 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_media_turns_are_local_and_owned(self):
+        no_player = "I couldn't find a playing media player."
+        failed_next = "I couldn't confirm next track. Check the media player. I won't retry."
+        status = ('/usr/bin/omarchy-shell', 'media', 'status')
+        pause = ('/usr/bin/omarchy-shell', 'media', 'pause')
+        advance = ('/usr/bin/omarchy-shell', 'media', 'next')
+        media = LocalDesktopTests.media
+        brain = ScriptedBrain([[({'content': 'Ordinary follow-up.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            media(hasPlayer=False, playing=False), media(playing=False),
+            media(), 'ok', media(playing=False),
+            media(), 'ok', media(title='Second track'),
+            media(), 'PRIVATE unhandled output',
+        ])
+        transport, spoken, committed, _, processes, close = await self.open_session(brain, local_command=command)
+        try:
+            for phrase, expected in (('pause music', no_player), ('next track', no_player),
+                                     ('pause music!', None), ('NEXT TRACK.', None), ('next track', failed_next)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, phrase)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                if expected:
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty(), 'Local media speech must not be committed')
+                self.assertEqual(brain.requests, [], 'Exact media turns never reach the brain')
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'next track please')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary follow-up.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Ordinary follow-up.')
+            messages = [m for m in brain.requests[0][2]['messages'] if m['role'] != 'system']
+            self.assertEqual(messages, [{'role': 'user', 'content': 'next track please'}])
+            self.assertEqual(command.await_args_list, [call(status), call(status),
+                call(status), call(pause), call(status), call(status), call(advance), call(status),
+                call(status), call(advance)])
+            self.assertFalse(transport.llm.local_tasks)
+            self.assertEqual(len(processes), 1)
+        finally:
+            await close()
+
+        # Keep attempted work owned through interruption; a queued action must share its lock.
+        writes_started, release, queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        calls, actions = [], {}
+        replies = iter([media(), 'ok', media(), media(), media(), media(playing=False)])
+        async def blocked(argv):
+            calls.append(argv)
+            if argv == pause:
+                writes_started.set()
+                await release.wait()
+            return next(replies)
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, interrupted, processes, close = await self.open_session(None, local_command=blocked)
+            native_run = transport.llm.run_local_tool
+            async def observe(tool):
+                actions[tool.subject] = asyncio.current_task()
+                if tool.subject == 'next track':
+                    queued.set()
+                return await native_run(tool)
+            with patch.object(transport.llm, 'run_local_tool', observe):
+                try:
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'pause music')
+                    await asyncio.wait_for(writes_started.wait(), 5)
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    self.assertFalse(actions['pause'].done())
+                    await self.finish_user_turn(transport, 'next track')
+                    await asyncio.wait_for(queued.wait(), 5)
+                    self.assertEqual(calls, [status, pause], 'The queued media read shares the mutation lock')
+                    self.assertFalse(actions['next track'].done())
+                    release.set()
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), no_player)
+                    await asyncio.wait_for(asyncio.gather(*actions.values()), 5)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(spoken.empty(), 'Detached pause failure cannot queue stale speech')
+                    self.assertTrue(committed.empty())
+                    self.assertEqual(calls, [status, pause, status, status, status, status])
+                    self.assertFalse(transport.llm.local_tasks)
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNone(processes[0][0])
+                finally:
+                    release.set()
+                    await close()
+
+            writes_started, cancelled, release_cleanup, cleaned = (
+                asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event())
+            calls, actions = [], {}
+            queued = asyncio.Event()
+            async def hanging(argv):
+                calls.append(argv)
+                if argv == status:
+                    return media()
+                self.assertEqual(argv, pause)
+                writes_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    await release_cleanup.wait()
+                    cleaned.set()
+                    raise
+            transport, _, _, interrupted, _, close = await self.open_session(None, local_command=hanging)
+            native_run = transport.llm.run_local_tool
+            closing = None
+            with patch.object(transport.llm, 'run_local_tool', observe):
+                try:
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'pause music')
+                    await asyncio.wait_for(writes_started.wait(), 5)
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await self.finish_user_turn(transport, 'next track')
+                    await asyncio.wait_for(queued.wait(), 5)
+                    closing = asyncio.create_task(close())
+                    await asyncio.wait_for(cancelled.wait(), 5)
+                    self.assertFalse(closing.done(), 'Shutdown joins native command cleanup')
+                    release_cleanup.set()
+                    await asyncio.wait_for(closing, 5)
+                    self.assertTrue(cleaned.is_set())
+                    self.assertTrue(all(task.done() and task.cancelled() for task in actions.values()))
+                    self.assertFalse(transport.llm.local_tasks)
+                    self.assertEqual(calls, [status, pause], 'Shutdown starts no queued effect or readback')
+                finally:
+                    release_cleanup.set()
+                    if closing is not None:
+                        await asyncio.gather(closing, return_exceptions=True)
+                    await close()
 
     async def test_volume_bypasses_pending_brain_and_history(self):
         held = threading.Event()

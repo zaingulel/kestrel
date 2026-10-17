@@ -44,6 +44,7 @@ ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
 MUTE_TIMEOUT = 5
 VOLUME_TIMEOUT = 5
+DESKTOP_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
 LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
 
@@ -68,6 +69,14 @@ class AudioResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class DesktopResult:
+    confirmed: bool
+    attempted: bool
+    reason: str
+    message: str | None
+
+
 async def run_local_command(argv):
     uid = os.getuid()
     env = {
@@ -76,6 +85,14 @@ async def run_local_command(argv):
         'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
         'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',
     }
+    if argv[0] in ('/usr/bin/omarchy-shell', '/usr/bin/hyprctl'):
+        for key in ('WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE'):
+            value = os.environ.get(key, '')
+            if not re.fullmatch(r'[A-Za-z0-9_.-]{1,256}', value):
+                raise RuntimeError('desktop session unavailable')
+            env[key] = value
+        if argv[0] == '/usr/bin/omarchy-shell':
+            env['OMARCHY_PATH'] = '/usr/share/omarchy'
     process = None
 
     async def reap():
@@ -269,9 +286,82 @@ async def volume_output(percent: int, *, command=run_local_command) -> AudioResu
         return AudioResult(False, attempted, 'command failed')
 
 
+async def read_media_status(*, command=run_local_command) -> dict:
+    output = await command(('/usr/bin/omarchy-shell', 'media', 'status'))
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('invalid media status')
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError('invalid media status')
+
+    try:
+        if not isinstance(output, str) or len(output.encode('utf-8')) > 4096:
+            raise ValueError
+        data = json.loads(output, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        if not isinstance(data, dict):
+            raise ValueError
+        if any(type(data.get(key)) is not bool for key in ('hasPlayer', 'playing', 'canGoNext')):
+            raise ValueError
+        if any(not isinstance(data.get(key), str)
+               for key in ('identity', 'desktopEntry', 'title', 'artist', 'album')):
+            raise ValueError
+        if not data['hasPlayer'] and data['playing']:
+            raise ValueError
+        return data
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError('invalid media status') from None
+
+
+async def media_action(action: str, *, command=run_local_command) -> DesktopResult:
+    if action not in ('pause', 'next'):
+        raise ValueError('invalid media action')
+    subject = 'pause' if action == 'pause' else 'next track'
+    advisory = f"I couldn't confirm {subject}. Check the media player. I won't retry."
+    attempted = False
+    try:
+        async with asyncio.timeout(DESKTOP_TIMEOUT):
+            before = await read_media_status(command=command)
+            if not before['hasPlayer'] or not before['playing']:
+                return DesktopResult(False, False, 'not playing', "I couldn't find a playing media player.")
+            identity = (before['identity'], before['desktopEntry'])
+            metadata = tuple(before[key] for key in ('title', 'artist', 'album'))
+            if action == 'next' and (not before['canGoNext'] or not all(part.strip() for part in identity) or not before['title'].strip()):
+                return DesktopResult(False, False, 'next unavailable', advisory)
+            attempted = True
+            reply = await command(('/usr/bin/omarchy-shell', 'media', action))
+            if reply not in ('ok', 'ok\n'):
+                return DesktopResult(False, True, 'action unhandled', advisory)
+            for delay in (0, .15, .35):
+                if delay:
+                    await asyncio.sleep(delay)
+                after = await read_media_status(command=command)
+                same_player = (after['hasPlayer'] and all(part.strip() for part in identity)
+                               and identity == (after['identity'], after['desktopEntry']))
+                after_metadata = tuple(after[key] for key in ('title', 'artist', 'album'))
+                observed = (not after['playing'] and metadata == after_metadata if action == 'pause' else
+                            after['playing'] and bool(after['title'].strip()) and metadata != after_metadata)
+                if same_player and observed:
+                    return DesktopResult(True, True, 'confirmed', None)
+            return DesktopResult(False, True, 'readback unconfirmed', advisory)
+    except TimeoutError:
+        return DesktopResult(False, attempted, 'desktop timeout', advisory)
+    except ValueError:
+        return DesktopResult(False, attempted, 'invalid media status', advisory)
+    except RuntimeError:
+        return DesktopResult(False, attempted, 'command failed', advisory)
+
+
 LOCAL_TOOLS = {
     'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
+    'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause'),
+    'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track'),
 }
 
 
@@ -298,6 +388,10 @@ def match_instant_tool(text):
     text = text.strip().lower()
     if text in ('mute', 'mute.', 'mute!'):
         tool = LOCAL_TOOLS['mute']
+        return tool if tool.permission is PermissionTier.FREE else None
+    match = re.fullmatch(r'(pause music|next track)[.!]?', text)
+    if match:
+        tool = LOCAL_TOOLS[match[1]]
         return tool if tool.permission is PermissionTier.FREE else None
     match = re.fullmatch(r'volume (0|[1-9][0-9]?|100)(?: percent| ?%)[.!]?', text)
     if match:
@@ -338,7 +432,8 @@ class HermesLLMService(LLMService):
             result = await tool.run(command=self.local_command)
         if not result.confirmed:
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
-            await notify_audio_failure(tool.subject, command=self.local_command)
+            if isinstance(result, AudioResult):
+                await notify_audio_failure(tool.subject, command=self.local_command)
         return result
 
     async def close_local_tools(self):
@@ -461,11 +556,11 @@ class HermesLLMService(LLMService):
                 self.local_tasks.add(task)
                 task.add_done_callback(self.local_tasks.discard)
                 result = await asyncio.shield(task)
-                if not result.confirmed:
-                    await self.push_frame(TTSSpeakFrame(
-                        f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry.",
-                        append_to_context=False,
-                    ))
+                message = (result.message if isinstance(result, DesktopResult) else
+                           f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
+                           if not result.confirmed else None)
+                if message is not None:
+                    await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
                 return
         output = None
         try:
