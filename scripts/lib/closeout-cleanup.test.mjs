@@ -66,7 +66,7 @@ const CALLER_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/tmp/proof.sock', 
 const SYSTEMD_CALLER_VECTOR = [...CALLER_VECTOR.slice(0, -1), '/usr/lib/systemd/systemd'];
 const DAEMON_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/71/fd/3', '/proc/71/ns/mnt', '/proc/71/root', '/proc/71/exe'];
 const SYSTEMD_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/1/fd/9', '/proc/1/ns/mnt', '/proc/1/root', '/proc/1/exe'];
-const SUDO_PREFIX = ['-n', '-u', 'root', '-g', 'root', '--'];
+const SUDO_PREFIX = ['-kn', '-u', 'root', '-g', 'root', '--'];
 
 // Fake Docker selection is synchronous and cannot inherit or permanently alter the caller's selection.
 function withoutDockerSelection(invoke) {
@@ -1428,47 +1428,51 @@ test('ANTI-REGRESSION: passwordless Docker proof verifies every socket activatio
       assert.deepEqual(s.unexpected, []);
     });
   }
-  for (const [name, owners, stat] of [
-    ['systemd executable', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('60:81:', '60:82:')],
-    ['systemd namespace', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:1001:')],
-    ['systemd root', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('50:2:', '50:3:')],
-    ['systemd descriptor', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('10:700:', '10:701:')],
-    ['non-PID-1 second owner', ACTIVATED_SS.replace('pid=1,', 'pid=2,')],
-    ['systemd alone', PROOF_SS.replace('("dockerd",pid=71,fd=3)', '("systemd",pid=1,fd=9)')],
-    ['duplicate PID', ACTIVATED_SS.replace('pid=1,', 'pid=71,')],
-    ['duplicate tuple', ACTIVATED_SS.replace('("systemd",pid=1,fd=9)', '("dockerd",pid=71,fd=3)')],
-    ['extra owner', ACTIVATED_SS.replace('fd=9))', 'fd=9),("other",pid=2,fd=4))')],
-    ['empty users', PROOF_SS.replace('("dockerd",pid=71,fd=3)', '')],
-    ['malformed owner', ACTIVATED_SS.replace('pid=1,fd=9', 'pid=1')],
-    ['truncated listener', ACTIVATED_SS.slice(0, -1)],
-    ['oversized PID', ACTIVATED_SS.replace('pid=1,', 'pid=2147483648,')],
-    ['oversized FD', ACTIVATED_SS.replace('fd=9', 'fd=2147483648')],
-    ['partial stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.split('\n').slice(0, 3).join('\n') + '\n'],
-    ['truncated stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.slice(0, -1)],
-    ['malformed stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:-1:')],
+  for (const [name, owners, stat, reason] of [
+    ['systemd executable', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('60:81:', '60:82:'), 'systemd executable differs from resolved executable'],
+    ['systemd namespace', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:1001:'), 'systemd mount namespace differs from local process'],
+    ['systemd root', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('50:2:', '50:3:'), 'systemd root differs from local root'],
+    ['systemd descriptor', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('10:700:', '10:701:'), 'socket descriptor does not match listener'],
+    ['non-PID-1 second owner', ACTIVATED_SS.replace('pid=1,', 'pid=2,'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['systemd alone', PROOF_SS.replace('("dockerd",pid=71,fd=3)', '("systemd",pid=1,fd=9)'), undefined, 'daemon executable differs from resolved executable'],
+    ['duplicate PID', ACTIVATED_SS.replace('("dockerd",pid=71,fd=3)', '("systemd",pid=1,fd=10)'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['duplicate tuple', ACTIVATED_SS.replace('("systemd",pid=1,fd=9)', '("dockerd",pid=71,fd=3)'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['extra owner', ACTIVATED_SS.replace('fd=9))', 'fd=9),("other",pid=2,fd=4))'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['empty users', PROOF_SS.replace('("dockerd",pid=71,fd=3)', ''), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['malformed owner', ACTIVATED_SS.replace('pid=1,fd=9', 'pid=1'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['truncated listener', ACTIVATED_SS.slice(0, -1), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['oversized PID', ACTIVATED_SS.replace('pid=1,', 'pid=2147483648,'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['oversized FD', ACTIVATED_SS.replace('fd=9', 'fd=2147483648'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['partial stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.split('\n').slice(0, 3).join('\n') + '\n', 'filesystem identity observation is unsupported or malformed'],
+    ['truncated stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.slice(0, -1), 'filesystem identity observation is unsupported or malformed'],
+    ['malformed stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:-1:'), 'filesystem identity observation is unsupported or malformed'],
   ]) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
       passwordlessProof(s, owners);
       if (stat) s.state.privileged.stat = (args) => reply(0, args[4] === '/proc/1/fd/9' ? stat : DAEMON_PROC_STAT);
-      assertProofRetained(s, await s.cleanup(['23', '--scratch', scratch]), scratch);
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
     });
   }
 });
 
 test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and latches changes', async (t) => {
-  for (const [name, caller] of [
-    ['caller namespace', SYSTEMD_CALLER_STAT.replace('40:1000:', '40:1001:')],
-    ['caller root', SYSTEMD_CALLER_STAT.replace('50:2:', '50:3:')],
-    ['caller executable', SYSTEMD_CALLER_STAT.replace('60:81:', '60:82:')],
+  for (const [name, caller, reason] of [
+    ['caller namespace', SYSTEMD_CALLER_STAT.replace('40:1000:', '40:1001:'), 'systemd mount namespace differs from local process'],
+    ['caller root', SYSTEMD_CALLER_STAT.replace('50:2:', '50:3:'), 'systemd root differs from local root'],
+    ['caller executable', SYSTEMD_CALLER_STAT.replace('60:81:', '60:82:'), 'systemd executable differs from resolved executable'],
   ]) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
       passwordlessProof(s);
       s.state.native.stat = (args) => reply(0, args.at(-1) === '/usr/lib/systemd/systemd' ? caller : CALLER_STAT);
-      assertProofRetained(s, await s.cleanup(['23', '--scratch', scratch]), scratch);
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
     });
   }
   for (const change of ['remove systemd', 'change systemd descriptor', 'change systemd identity', 'one failed recheck']) {
@@ -1491,7 +1495,12 @@ test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and l
       };
       const result = await s.cleanup(['23', '--scratch', scratch]);
       assert.equal(result.exitCode, 4);
-      assert.match(result.out.join('\n'), /native identity changed/);
+      const reason = change === 'one failed recheck'
+        ? 'native identity changed or became unreadable: passwordless listener observation was unavailable'
+        : 'native identity changed since initial observation';
+      assert.deepEqual(result.out.filter((line) => line.startsWith('retained container ')), [
+        `retained container aaaaaaaaaaaa: Docker filesystem relationship is unverifiable: ${reason}`,
+      ]);
       assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
       assert.deepEqual(dockerCalls(s, 'rm'), []);
       assert.ok(existsSync(scratch));
@@ -1568,7 +1577,12 @@ test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', 
         s.state.privileged[stage] = stage === 'stat' && name === 'stderr' ? reply(0, DAEMON_PROC_STAT, 'fixture warning') : result;
         const observed = await s.cleanup(['23', '--scratch', scratch]);
         assertProofRetained(s, observed, scratch);
-        assert.match(observed.out.join('\n'), stage === 'ss' && name === 'partial' ? /listener ownership/ : /passwordless|filesystem identity/);
+        const reason = name === 'partial'
+          ? stage === 'ss' ? 'listener ownership observation is missing, ambiguous or unsupported'
+            : 'filesystem identity observation is unsupported or malformed'
+          : stage === 'ss' ? 'passwordless listener observation was unavailable'
+            : 'passwordless systemd filesystem identity observation was unavailable';
+        assert.equal(observed.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
       });
     }
   }
@@ -1580,7 +1594,9 @@ test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', 
       s.state.native.stat = baseline;
       const result = await s.cleanup(['23', '--scratch', scratch]);
       assertProofRetained(s, result, scratch);
-      assert.match(result.out.join('\n'), /caller filesystem identity observation/);
+      const reason = name === 'partial' ? 'caller filesystem identity observation is unsupported or malformed'
+        : 'caller filesystem identity observation command did not complete cleanly';
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
       assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo').map(({ args }) => args),
         [[...SUDO_PREFIX, '/usr/bin/ss', ...PROOF_VECTORS.ss]]);
     });

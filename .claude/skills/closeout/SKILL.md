@@ -65,9 +65,10 @@ process list; nothing is inferred from chat.
    unprivileged caller's observations. Remote endpoints, proxy executables, other ownership and differing
    namespaces or roots, including isolated rootless daemons, retain the targets.
    A valid ownerless initial listener triggers noninteractive observation using existing matching passwordless
-   sudo permissions. Installing or broadening those permissions requires explicit owner approval outside
-   cleanup. Attempts and denials remain subject to the host's sudo auditing policy.
-   The command uses `/usr/bin/sudo -n -u root -g root --` followed by `/usr/bin/ss -H -xlnpe` and the selected
+   sudo permissions. Each metadata command ignores cached credentials without invalidating or updating the
+   owner's cache. Installing or broadening those permissions requires explicit owner approval outside cleanup.
+   Attempts and denials remain subject to the host's sudo auditing policy.
+   The command uses `/usr/bin/sudo -kn -u root -g root --` followed by `/usr/bin/ss -H -xlnpe` and the selected
    socket filter: `src <socket>`, or `( src <endpoint> or src <socket> )` when its alias differs. For each owner,
    it uses the same sudo prefix followed by `/usr/bin/stat -L -c '%d:%i:%Hd:%Ld:%F' --` and exactly
    `/proc/<pid>/fd/<fd>`, `/proc/<pid>/ns/mnt`, `/proc/<pid>/root` and `/proc/<pid>/exe`.

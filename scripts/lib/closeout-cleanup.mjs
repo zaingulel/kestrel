@@ -409,7 +409,8 @@ function proveDockerFilesystem(host, run, platform, env) {
   if (!completeCommand(located)) return fail('daemon executable lookup command did not complete cleanly');
   const executable = completeLine(located.stdout);
   if (!executable || !isCleanPosixAbsolute(executable)) return fail('daemon executable observation is unsupported or malformed');
-  const privileged = (command, args) => native('/usr/bin/sudo', ['-n', '-u', 'root', '-g', 'root', '--', `/usr/bin/${command}`, ...args]);
+  // Command-scoped -k bypasses cached credentials without invalidating or updating the cache.
+  const privileged = (command, args) => native('/usr/bin/sudo', ['-kn', '-u', 'root', '-g', 'root', '--', `/usr/bin/${command}`, ...args]);
   const statArgs = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--'];
   const observationTypes = ['socket', 'namespace', 'directory', 'regular file'];
   const callerObservation = (expected) => native('stat', [...statArgs, socket, '/proc/self/ns/mnt', '/', expected]);
