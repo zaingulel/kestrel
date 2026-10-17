@@ -595,6 +595,86 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
 
+    async def test_stop_cancel_only_consume_completed_exact_turns(self):
+        accepted = ('stop', ' STOP. ', 'Stop!', 'cancel', ' CANCEL. ', 'Cancel!')
+        rejected = ('stop?', 'cancel?', 'stop!!', 'cancel!!', '"stop"', '"cancel"',
+                    'do not stop', 'please cancel', 'stop now', 'cancel that', 'st\nop', 'can\ncel', '')
+        previous = [{'role': 'user', 'content': 'Previous request'},
+                    {'role': 'assistant', 'content': 'Known spoken reply.'}]
+        cases = [(previous + [{'role': 'user', 'content': word}], False, FrameDirection.DOWNSTREAM,
+                  word in accepted) for word in (*accepted, *rejected)]
+        for word in ('stop', 'cancel'):
+            cases.extend([
+                ([{'role': 'user', 'content': word}], True, FrameDirection.DOWNSTREAM, False),
+                ([{'role': 'user', 'content': word}], False, FrameDirection.UPSTREAM, False),
+                ([{'role': 'assistant', 'content': word}], False, FrameDirection.DOWNSTREAM, False),
+                ([{'role': 'system', 'content': word}], False, FrameDirection.DOWNSTREAM, False),
+                ([{'role': 'user', 'content': [{'type': 'text', 'text': word}]}], False, FrameDirection.DOWNSTREAM, False),
+            ])
+        for messages, speculative, direction, consumes in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Stopping a reply cannot call desktop commands'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'This direct fixture has no engine'
+                service.last_spoken_reply = 'Known spoken reply.'
+                service.push_frame = AsyncMock()
+                context = bot.LLMContext(deepcopy(messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                self.assertEqual(context.get_messages(), messages[:-1] if consumes else messages,
+                                 'An exact completed stop/cancel must be consumed locally')
+                if consumes:
+                    service.push_frame.assert_not_awaited()
+                command.assert_not_awaited()
+                self.assertEqual(service.last_spoken_reply, 'Known spoken reply.')
+                self.assertFalse(service.local_tasks)
+
+        for word in ('stop', 'cancel'):
+            started, release = asyncio.Event(), asyncio.Event()
+            calls = []
+            paused = False
+            async def command(argv):
+                nonlocal paused
+                calls.append(argv)
+                if argv == ('/usr/bin/omarchy-shell', 'media', 'pause'):
+                    started.set()
+                    await release.wait()
+                    paused = True
+                    return 'ok'
+                self.assertEqual(argv, ('/usr/bin/omarchy-shell', 'media', 'status'))
+                return self.media(playing=not paused)
+            service = bot.HermesLLMService(local_command=command)
+            service.failure = 'This direct fixture has no engine'
+            service.push_frame = AsyncMock()
+            held_reader = asyncio.create_task(asyncio.Event().wait())
+            service.reader = held_reader
+            context = bot.LLMContext([{'role': 'user', 'content': 'pause music'}])
+            action = asyncio.create_task(service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM))
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                self.assertTrue(service.local_tool_lock.locked())
+                self.assertEqual(len(service.local_tasks), 1)
+                local_task = next(iter(service.local_tasks))
+                stopping = bot.LLMContext([{'role': 'user', 'content': word}])
+                await asyncio.wait_for(service.process_frame(LLMContextFrame(stopping), FrameDirection.DOWNSTREAM), 5)
+                self.assertEqual(stopping.get_messages(), [])
+                self.assertIs(service.reader, held_reader)
+                self.assertFalse(held_reader.done(), 'Stop does not cancel native engine drainage')
+                self.assertFalse(local_task.done(), 'Stop does not cancel an attempted desktop action')
+                self.assertTrue(service.local_tool_lock.locked())
+                self.assertEqual(len(calls), 2)
+                service.push_frame.assert_not_awaited()
+                release.set()
+                await asyncio.wait_for(action, 5)
+                self.assertEqual(calls.count(('/usr/bin/omarchy-shell', 'media', 'pause')), 1)
+                self.assertFalse(service.local_tasks)
+                service.push_frame.assert_not_awaited()
+            finally:
+                release.set()
+                await service.close_local_tools()
+                held_reader.cancel()
+                action.cancel()
+                await asyncio.gather(held_reader, action, return_exceptions=True)
+
     async def test_workspace_focus_requires_matching_readback(self):
         self.assertIsNotNone(bot.match_instant_tool('workspace three'),
                              'A completed numbered workspace phrase must select local work')
@@ -1999,6 +2079,103 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_stop_cancel_discard_reply_without_brain_request(self):
+        cases = [(word, heard, threading.Event(), threading.Event(), threading.Event())
+                 for word in ('stop', 'cancel') for heard in (False, True)]
+        def held_reply(heard, blocked, release, finished):
+            yield {'content': 'Heard prefix. Unheard fragment' if heard else 'Unheard fragment'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Stopped provider reply was never released')
+            yield {'content': ' forbidden tail.'}, None
+            yield {}, 'stop'
+            finished.set()
+        scripts = []
+        for _, heard, blocked, release, finished in cases:
+            self.addCleanup(release.set)
+            scripts.extend([held_reply(heard, blocked, release, finished),
+                            [({'content': 'Fresh reply.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain(scripts)
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=AssertionError('Stop/cancel cannot invoke native desktop commands'))
+        transport, spoken, committed, interrupted, processes, close = await self.open_session(brain, local_command=command)
+        try:
+            for index, (word, heard, blocked, release, finished) in enumerate(cases):
+                with self.subTest(word=word, heard=heard):
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, f'Blocked request {index}.')
+                    self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+                    if heard:
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Heard prefix.')
+                    else:
+                        self.assertTrue(spoken.empty())
+                    reader = transport.llm.reader
+                    self.assertFalse(reader.done())
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await self.finish_user_turn(transport, word)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    if heard:
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Heard prefix.')
+                    self.assertTrue(committed.empty(), 'Only an observed heard prefix can be committed')
+                    self.assertTrue(spoken.empty(), 'Stopping adds no acknowledgement')
+                    self.assertEqual(len(brain.requests), index * 2 + 1)
+                    self.assertIs(transport.llm.reader, reader)
+                    self.assertFalse(reader.done(), 'Local stop finishes while native drainage is blocked')
+                    self.assertFalse(finished.is_set())
+                    self.assertIsNone(processes[0][0].returncode)
+                    release.set()
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 5))
+                    await asyncio.wait_for(asyncio.shield(reader), 5)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(spoken.empty(), 'Released native drainage cannot speak its stopped tail')
+                    self.assertTrue(committed.empty(), 'Stopped tail cannot enter assistant history')
+                    self.assertEqual(len(brain.requests), index * 2 + 1)
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, f'Fresh request {index}.')
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
+                    self.assertTrue(spoken.empty())
+                    self.assertEqual(len(brain.requests), index * 2 + 2)
+                    messages = brain.requests[-1][2]['messages']
+                    self.assertEqual(messages[-1], {'role': 'user', 'content': f'Fresh request {index}.'})
+                    self.assertNotIn('Unheard fragment', json.dumps(messages))
+                    self.assertNotIn('forbidden tail', json.dumps(messages))
+                    self.assertFalse(any(m['role'] == 'user' and m['content'] in ('stop', 'cancel') for m in messages))
+                    prefixes = [m['content'].strip() for m in messages
+                                if m['role'] == 'assistant' and 'Heard prefix' in m['content']]
+                    self.assertTrue(all(text == 'Heard prefix.' for text in prefixes))
+                    self.assertEqual(len(prefixes), sum(item[1] for item in cases[:index + 1]))
+                    command.assert_not_awaited()
+            self.assertEqual(len(processes), 1, 'Stopping never restarts the native worker')
+            self.assertFalse(transport.llm.local_tasks)
+        finally:
+            for _, _, _, release, _ in cases:
+                release.set()
+            await close()
+        command = AsyncMock(side_effect=AssertionError('Idle stop cannot invoke desktop commands'))
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, _, processes, close = await self.open_session(None, local_command=command)
+            try:
+                for phrase in ('stop', 'CANCEL!', 'Stop.'):
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, phrase)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(spoken.empty(), 'Idle stop is silent even without an engine')
+                    self.assertTrue(committed.empty())
+                    command.assert_not_awaited()
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0][0])
+            finally:
+                await close()
 
     async def test_workspace_turn_is_local_and_nonmatches_reach_brain(self):
         replies = ('Longer phrase remains conversation.', 'Invalid number remains conversation.',

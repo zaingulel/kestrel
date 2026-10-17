@@ -588,6 +588,9 @@ class HermesLLMService(LLMService):
         if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
                 and messages[-1].get('role') == 'user'
                 and isinstance(messages[-1].get('content'), str)):
+            if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
+                messages.pop()
+                return
             if messages[-1]['content'].strip().lower() in (
                     'repeat that', 'repeat that.', 'repeat that!', 'repeat that?'):
                 messages.pop()
