@@ -1181,6 +1181,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(speech.asyncio, "create_subprocess_exec", spawn),
               patch.object(bot, "LaptopAudioTransport", return_value=transport),
               patch.object(bot, "NemotronSTT", return_value=stt),
+              patch.object(bot, "load_voice_preset", return_value=TEST_PRESET),
               patch.object(bot, "make_llm", return_value=llm),
               patch.object(bot.VoxCPM, "from_pretrained", return_value=Mock(generate_streaming=chunks)),
               patch.object(bot, "run_conversation", conversation), patch.object(bot.torch, "set_num_threads")):
