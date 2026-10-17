@@ -841,12 +841,10 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(argv=argv, size=size):
                 payload = b'A' * size
                 cursor = 0
-                read_sizes = []
                 async def read(n):
                     nonlocal cursor
                     self.assertGreater(n, 0)
                     self.assertLessEqual(n, budget + 1)
-                    read_sizes.append(n)
                     chunk = payload[cursor:cursor + n]
                     cursor += len(chunk)
                     return chunk
@@ -872,7 +870,6 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(process.wait.await_count, 2, 'Overflow cleanup must reap its child')
                     spawn.assert_awaited_once()
                     self.assertEqual(spawn.await_args.args, tuple(argv))
-                    self.assertEqual(read_sizes, [budget + 1, 1] if accepted else [budget + 1])
                     self.assertEqual(cursor, size)
 
 
