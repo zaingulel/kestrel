@@ -180,7 +180,7 @@ node scripts/run-log.mjs quality flags -- node --test --test-name-pattern='^an a
 At convergence, run `npm run lint`, `npm run test:scripts`, `npm run test:speech` and the Ruff command below;
 documentation changes also run `npm run lint:docs`. `npm test` runs both the factory Node tests and the existing Python speech tests. The speech command requires the ignored local voice environment described in [README.md](../README.md). An unavailable environment is unavailable evidence, never a pass.
 
-In a job worktree with no `.runtime`, run `ln -s /home/zain/Projects/zaingulel/kestrel/.runtime .runtime`. This link points to the preserved real models, environments and voice assets; those target assets are not disposable test storage. Closeout may unlink only a verified disposable, inactive job-local `.runtime` symlink after its ownership and inactive-use checks. Do not delete the linked assets, follow the link during cleanup, or rebuild the assets for tests.
+In a job worktree with no `.runtime`, run `ln -s /home/zain/Projects/zaingulel/kestrel/.runtime .runtime`. This link points to the preserved real models, environments and voice assets; those target assets are not disposable test storage. Closeout removes the verified disposable job-local `.runtime` symlink under [its existing cleanup rules](../.agents/skills/closeout/SKILL.md#closeout). Do not delete the linked assets, follow the link during cleanup, or rebuild the assets for tests.
 
 Ruff requires `uvx` (provided by uv). From the repository root, run:
 
