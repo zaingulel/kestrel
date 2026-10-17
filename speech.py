@@ -6,6 +6,8 @@ import base64
 import io
 import json
 import os
+import re
+from dataclasses import dataclass
 import subprocess
 import threading
 import wave
@@ -29,8 +31,6 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 
 ROOT = Path(__file__).parent
-VOICE_REFERENCE = ROOT / ".runtime/voices/kestrel.wav"
-VOICE_REFERENCE_TEXT = "Hello. Speech recognition and voice generation are now running locally."
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
 ECHO_REMOVAL_CONFIG = "echo-removal.conf"
 ECHO_REMOVAL_MICROPHONE = "kestrel-microphone"
@@ -47,6 +47,74 @@ LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
 LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
+
+
+@dataclass(frozen=True)
+class VoicePreset:
+    name: str
+    reference: Path
+    transcript: str
+    pcm: bytes
+
+
+def load_voice_preset(name: str, *, voices_dir: Path = ROOT / '.runtime/voices') -> VoicePreset:
+    advice = 'Check the voice files and restart Kestrel.'
+    if re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', name) is None:
+        raise RuntimeError(
+            'Voice preset name must be 1 to 64 lowercase letters, digits, underscores or hyphens, '
+            'starting with a letter or digit. ' + advice
+        )
+
+    def refused(asset, reason):
+        return RuntimeError(f"Voice preset '{name}' {asset}: {reason}. {advice}")
+
+    try:
+        directory = voices_dir.resolve()
+    except (OSError, RuntimeError):
+        raise refused('directory', 'cannot resolve the voice files') from None
+
+    def read_asset(suffix, limit):
+        asset = name + suffix
+        try:
+            path = (directory / asset).resolve()
+        except (OSError, RuntimeError):
+            raise refused(asset, 'cannot resolve the file') from None
+        if path.parent != directory:
+            raise refused(asset, 'must stay immediately inside the voices directory')
+        if not path.is_file():
+            raise refused(asset, 'missing or not a regular file')
+        try:
+            with path.open('rb') as source:
+                data = source.read(limit + 1)
+        except OSError:
+            raise refused(asset, 'cannot read the file') from None
+        if len(data) > limit:
+            raise refused(asset, f'exceeds {limit} bytes')
+        return path, data
+
+    reference, wav = read_asset('.wav', 1048576)
+    _, text = read_asset('.txt', 4096)
+    try:
+        transcript = text.decode('utf-8')
+    except UnicodeDecodeError:
+        raise refused(name + '.txt', 'must be valid UTF-8') from None
+    if any(ord(char) < 32 and char not in '\t\n\r' or ord(char) == 127 for char in transcript):
+        raise refused(name + '.txt', 'contains ASCII control characters')
+    transcript = transcript.strip()
+    if not transcript:
+        raise refused(name + '.txt', 'transcript is blank')
+    try:
+        with wave.open(io.BytesIO(wav), 'rb') as audio:
+            frames = audio.getnframes()
+            if (audio.getnchannels() != 1 or audio.getsampwidth() != 2
+                    or audio.getframerate() != 48000 or frames == 0 or frames > 480000):
+                raise refused(name + '.wav', 'requires nonempty mono 48 kHz PCM16 audio of at most ten seconds')
+            pcm = audio.readframes(frames)
+            if len(pcm) != frames * 2:
+                raise refused(name + '.wav', 'WAV data is truncated')
+    except (EOFError, wave.Error):
+        raise refused(name + '.wav', 'malformed WAV audio') from None
+    return VoicePreset(name, reference, transcript, pcm)
 
 
 class EchoRemoval:
@@ -382,7 +450,7 @@ class NemotronSTT(SegmentedSTTService):
         )
         self.process = None
 
-    async def load(self):
+    async def load(self, reference_pcm: bytes):
         self.process = await asyncio.create_subprocess_exec(
             str(ROOT / ".runtime/asr-venv/bin/python"), str(ROOT / "asr_worker.py"),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -390,24 +458,7 @@ class NemotronSTT(SegmentedSTTService):
         response = await asyncio.wait_for(self.process.stdout.readline(), timeout=60)
         if not response or json.loads(response) != {"ready": True}:
             raise RuntimeError("Nemotron failed to load; see the service log")
-        try:
-            with VOICE_REFERENCE.open('rb') as source, wave.open(source, 'rb') as reference:
-                frames = reference.getnframes()
-                if (
-                    reference.getnchannels() != 1 or reference.getsampwidth() != 2
-                    or reference.getframerate() != 48000
-                    or frames == 0 or frames > 480000
-                ):
-                    raise RuntimeError(
-                        'Nemotron preparation requires a nonempty mono 48 kHz PCM16 reference '
-                        'of at most ten seconds'
-                    )
-                pcm = reference.readframes(frames)
-                if len(pcm) != frames * 2:
-                    raise RuntimeError('Nemotron preparation reference is truncated')
-        except (OSError, EOFError, wave.Error) as error:
-            raise RuntimeError('Nemotron preparation could not read the voice reference') from error
-        pcm = await SOXRAudioResampler().resample(pcm, 48000, 16000)
+        pcm = await SOXRAudioResampler().resample(reference_pcm, 48000, 16000)
         prepared = io.BytesIO()
         with wave.open(prepared, 'wb') as audio:
             audio.setnchannels(1)
@@ -1199,12 +1250,13 @@ class SpeechAdvisoryFrame(LLMTextFrame):
 
 
 class VoxCPMTTS(TTSService):
-    def __init__(self, model):
+    def __init__(self, model, preset: VoicePreset):
         super().__init__(
             sample_rate=48000, push_start_frame=True, push_stop_frames=True,
             settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
         )
         self.model = model
+        self.preset = preset
         self._generation_lock = asyncio.Lock()
         self._spoken_reply = SpokenReplyText()
 
@@ -1232,8 +1284,8 @@ class VoxCPMTTS(TTSService):
         async with self._generation_lock:
             chunks = self.model.generate_streaming(
                 text=text,
-                prompt_wav_path=str(VOICE_REFERENCE), prompt_text=VOICE_REFERENCE_TEXT,
-                reference_wav_path=str(VOICE_REFERENCE),
+                prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript,
+                reference_wav_path=str(self.preset.reference),
                 inference_timesteps=10, max_len=400, retry_badcase=False,
             )
             pending = None
