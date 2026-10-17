@@ -119,6 +119,12 @@ Every rule this file does not hold in full has one home:
    requires, which stays the agents' own review and no part of this gate, and both gates above keep their
    meaning. The `resume` skill owns the steps under "4. Plan".
 
+**Routine board updates.** For an owner-approved job, the coordinating session has the owner's standing
+authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
+workflow, including moving the card to `Awaiting push` before requesting push authorisation. The workflow's
+eligibility, ownership and evidence checks and all owner gates still apply. This authorises board bookkeeping only,
+with no permission to publish code.
+
 A material change to the approved outcome, product meaning, or a trade-off goes back to the owner as a
 plain-language decision before it is built; a parser, state machine, or framework the outcome did not name is
 such a change. Anything short of that which the job surfaces and can sensibly finish in the same job, in the

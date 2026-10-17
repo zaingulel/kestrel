@@ -647,6 +647,7 @@ test('a modified, an untracked or an unnamed ignored entry retains the worktree'
   for (const [status, listed] of [[' M tracked.txt\0', ' M tracked.txt'], ['?? new.txt\0', '?? new.txt'], ['!! node_modules/\0!! .env\0', '!! .env']]) {
     const s = scenario(t);
     s.state.status = status;
+    if (listed === '!! .env') mkdirSync(join(s.worktree, 'node_modules'));
     assertWorktreeRetained(s, await s.cleanup(['23', '--regenerated', 'node_modules']), `git status lists "${listed}"`);
   }
 });
@@ -675,6 +676,7 @@ test('ANTI-REGRESSION: unsafe index observations retain the worktree and branch'
 
 test('a named regenerated directory is removed with the worktree, a named ignored file is not', { skip: SKIP_POSIX }, async (t) => {
   const directory = scenario(t);
+  mkdirSync(join(directory.worktree, 'node_modules'));
   directory.state.status = '!! node_modules/\0';
   assert.deepEqual(await directory.cleanup(['23', '--regenerated', 'node_modules']), {
     exitCode: 0,
@@ -683,8 +685,95 @@ test('a named regenerated directory is removed with the worktree, a named ignore
   });
   assert.deepEqual(directory.unexpected, []);
   const file = scenario(t);
+  placeFile(join(file.worktree, '.env'));
   file.state.status = '!! .env\0';
   assertWorktreeRetained(file, await file.cleanup(['23', '--regenerated', '.env']), 'git status lists "!! .env"');
+});
+
+test('ANTI-REGRESSION: regenerated directory descendants preserve the directory-only boundary', { skip: SKIP_POSIX }, async (t) => {
+  for (const [name, directory, status] of [
+    ['collapsed root', 'node_modules', '!! node_modules/\0'],
+    ['file descendant', 'node_modules', '!! node_modules/.gitignore\0'],
+    ['directory descendant', 'node_modules', '!! node_modules/left-pad/\0'],
+    ['nested named root', 'build/cache', '!! build/cache/result\0'],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      placeFile(join(s.worktree, directory, 'sentinel'));
+      s.state.status = status;
+      assert.deepEqual(await s.cleanup(['23', '--regenerated', directory]), {
+        exitCode: 0, out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'], err: [],
+      });
+      assert.equal(existsSync(s.worktree), false);
+      assert.equal(s.state.branch, false);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+  for (const name of ['sibling prefix', 'named file', 'forged file descendant', 'root symlink', 'intermediate symlink', 'missing root', 'looping parent']) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      let directory = 'node_modules';
+      let status = '!! node_modules/child\0';
+      let reason = 'regenerated path node_modules is not a real directory within the worktree';
+      let sentinel;
+      if (name === 'sibling prefix') {
+        mkdirSync(join(s.worktree, directory));
+        sentinel = placeFile(join(s.worktree, 'node_modules-other', 'child'));
+        status = '!! node_modules/child\0!! node_modules-other/child\0';
+        reason = 'git status lists "!! node_modules-other/child"';
+      } else if (name === 'named file') {
+        sentinel = placeFile(join(s.worktree, directory));
+        status = '!! node_modules/\0';
+      } else if (name === 'forged file descendant') {
+        directory = '.env';
+        sentinel = placeFile(join(s.worktree, directory));
+        status = '!! .env/child\0';
+        reason = 'regenerated path .env is not a real directory within the worktree';
+      } else if (name === 'root symlink') {
+        sentinel = placeFile(join(s.root, 'external', 'child'));
+        symlinkSync(dirname(sentinel), join(s.worktree, directory), 'dir');
+      } else if (name === 'intermediate symlink') {
+        directory = 'alias/cache';
+        sentinel = placeFile(join(s.worktree, 'real', 'cache', 'child'));
+        symlinkSync('real', join(s.worktree, 'alias'), 'dir');
+        status = '!! alias/cache/child\0';
+        reason = 'regenerated path alias/cache is not a real directory within the worktree';
+      } else if (name === 'missing root') {
+        reason = 'could not verify regenerated directory node_modules: ENOENT';
+      } else {
+        directory = 'loop/cache';
+        symlinkSync('loop', join(s.worktree, 'loop'), 'dir');
+        status = '!! loop/cache/child\0';
+        reason = 'could not verify regenerated directory loop/cache: ELOOP';
+      }
+      s.state.status = status;
+      assertWorktreeRetained(s, await s.cleanup(['23', '--regenerated', directory]), reason);
+      assertWorktreeNotRemoved(s);
+      if (sentinel) assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+    });
+  }
+});
+
+test('ANTI-REGRESSION: regenerated descendants reject unsafe status paths', { skip: SKIP_POSIX }, async (t) => {
+  for (const [name, status, reason] of [
+    ['modified descendant', ' M node_modules/child\0', 'git status lists " M node_modules/child"'],
+    ['untracked descendant', '?? node_modules/child\0', 'git status lists "?? node_modules/child"'],
+    ['absolute path', '!! /node_modules/child\0', 'git status lists "!! /node_modules/child"'],
+    ['traversal', '!! node_modules/../outside\0', 'git status lists "!! node_modules/../outside"'],
+    ['repeated separators', '!! node_modules//child\0!! node_modules/child//\0', 'git status lists "!! node_modules//child", "!! node_modules/child//"'],
+    ['control characters', '!! node_modules/a\nb\0', 'git status lists "!! node_modules/a\nb"'],
+    ['missing terminal NUL', '!! node_modules/child', 'git status printed an unreadable entry'],
+    ['malformed record', '!! node_modules/child\0invalid\0', 'git status printed an unreadable entry'],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const sentinel = placeFile(join(s.worktree, 'node_modules', 'child'));
+      s.state.status = status;
+      assertWorktreeRetained(s, await s.cleanup(['23', '--regenerated', 'node_modules']), reason);
+      assertWorktreeNotRemoved(s);
+      assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+    });
+  }
 });
 
 test('a refused worktree removal keeps the branch', { skip: SKIP_POSIX }, async (t) => {
@@ -1237,9 +1326,8 @@ function cliFixture(t, docker, overrides = {}) {
   ok(git(['-C', repository, 'add', '--', 'kept.txt']), 'track kept.txt');
   ok(git(['-C', repository, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fixture baseline']), 'baseline commit');
   ok(git(['-C', repository, 'worktree', 'add', '-q', '-b', 'job/23', worktree]), 'job worktree');
-  mkdirSync(join(repository, '.git', 'info'), { recursive: true });
-  writeFileSync(join(repository, '.git', 'info', 'exclude'), 'node_modules/\n');
   placeFile(join(worktree, 'node_modules', 'left-pad', 'index.js'));
+  writeFileSync(join(worktree, 'node_modules', '.gitignore'), '*\n');
   ok(git(['init', '-q', join(root, 'decoy')]), 'decoy git init');
   const scratch = placeFile(join(root, 'scratch', 'notes.md'));
   const bin = join(root, 'bin');
@@ -1264,6 +1352,9 @@ function cliFixture(t, docker, overrides = {}) {
 
 test('the CLI removes an outside scratch file, the worktree with its regenerated directory and the branch through real git', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
   const f = cliFixture(t, DOCKER_EMPTY);
+  const status = f.git(['-C', f.worktree, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.deepEqual(status.stdout.split('\0').sort(), ['', '!! node_modules/.gitignore', '!! node_modules/left-pad/']);
   const run = f.cleanup();
   assert.equal(run.stderr, '');
   assert.equal(run.stdout, [
@@ -1274,6 +1365,30 @@ test('the CLI removes an outside scratch file, the worktree with its regenerated
   assert.equal(existsSync(f.scratch), false);
   assert.equal(existsSync(f.worktree), false);
   assert.equal(f.branchStatus(), 1);
+});
+
+test('ANTI-REGRESSION: the CLI retains ignored sibling prefixes of a regenerated directory', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
+  const f = cliFixture(t, DOCKER_EMPTY);
+  const sentinel = placeFile(join(f.worktree, 'node_modules-other', 'sentinel'));
+  writeFileSync(join(f.worktree, 'node_modules-other', '.gitignore'), '*\n');
+  const status = f.git(['-C', f.worktree, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.deepEqual(status.stdout.split('\0').sort(), [
+    '', '!! node_modules-other/.gitignore', '!! node_modules-other/sentinel',
+    '!! node_modules/.gitignore', '!! node_modules/left-pad/',
+  ]);
+  const run = f.cleanup();
+  assert.equal(run.status, 4, run.stdout + run.stderr);
+  assert.equal(run.stderr, '');
+  assert.equal(run.stdout, [
+    `removed scratch ${f.scratch}`,
+    `retained worktree ${f.worktree}: git status lists "!! node_modules-other/.gitignore", "!! node_modules-other/sentinel"`,
+    'retained branch job/23: its worktree is retained', 'closeout-cleanup: 1 removed, 2 retained', '',
+  ].join('\n'));
+  assert.equal(f.registered(), true);
+  assert.equal(f.branchStatus(), 0);
+  assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+  assert.equal(existsSync(f.scratch), false);
 });
 
 test('ANTI-REGRESSION: the CLI retains tracked edits hidden by index flags', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, async (t) => {

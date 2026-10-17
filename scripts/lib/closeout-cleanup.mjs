@@ -675,15 +675,32 @@ export function parseStatusEntries(stdout) {
   return entries;
 }
 
-// Requires ordinary index flags as well as status showing only regenerated ignored directories: ordinary removal
+// Requires ordinary index flags and only ignored entries within verified regenerated directories: ordinary removal
 // deletes ignored files and edits hidden by skip-worktree or assume-unchanged without refusing.
 function removeWorktree(git, worktree, regenerated, retainWorktree, verify) {
   const status = git('-C', worktree.path, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching');
   if (status.status !== 0) return retainWorktree(`git status failed: ${describe(status)}`);
   const entries = parseStatusEntries(status.stdout);
   if (!entries) return retainWorktree('git status printed an unreadable entry');
+  const directories = [];
+  for (const directory of regenerated.filter((directory) =>
+    entries.some(({ code, path }) => code === '!!' && path.startsWith(directory + '/')))) {
+    try {
+      const path = join(worktree.path, directory);
+      if (!lstatSync(path).isDirectory() || realpathSync(path) !== join(worktree.canonical, directory)) {
+        return retainWorktree(`regenerated path ${directory} is not a real directory within the worktree`);
+      }
+    } catch (error) {
+      return retainWorktree(`could not verify regenerated directory ${directory}: ${error.code ?? error.message}`);
+    }
+    directories.push(directory);
+  }
   const held = entries
-    .filter(({ code, path }) => !(code === '!!' && path.endsWith('/') && regenerated.includes(path.slice(0, -1))))
+    .filter(({ code, path }) => {
+      const relative = path.endsWith('/') ? path.slice(0, -1) : path;
+      return !(code === '!!' && !relative.endsWith('/') && isCleanRelative(relative) &&
+        directories.some((directory) => path.startsWith(directory + '/')));
+    })
     .map(({ code, path }) => `"${code} ${path}"`);
   if (held.length) {
     const more = held.length > 5 ? ` and ${held.length - 5} more` : '';
