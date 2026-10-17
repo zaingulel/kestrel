@@ -346,33 +346,49 @@ const safeSocketPath = (path) => typeof path === 'string' && /^\/[A-Za-z0-9/._-]
 function dockerListener(stdout, sockets) {
   const line = completeLine(stdout);
   if (!line) return null;
-  const match = /^u_str[ \t]+LISTEN[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+(\S+)[ \t]+([0-9]+)[ \t]+\*[ \t]+0[ \t]+users:\(\("[A-Za-z0-9._-]+",pid=([0-9]+),fd=([0-9]+)\)\)[ \t]+(?:(?:<->|<--|-->|---)[ \t]+)?ino:([0-9]+)[ \t]+dev:([0-9]+)\/([0-9]+)(?:[ \t]+peers:(?:[ \t]+[0-9]+)*)?[ \t]*$/.exec(line);
+  const match = /^u_str[ \t]+LISTEN[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+(\S+)[ \t]+([0-9]+)[ \t]+\*[ \t]+0[ \t]+(?:users:\((\("[A-Za-z0-9._-]+",pid=[0-9]+,fd=[0-9]+\)(?:,\("[A-Za-z0-9._-]+",pid=[0-9]+,fd=[0-9]+\))?)\)[ \t]+)?(?:(?:<->|<--|-->|---)[ \t]+)?ino:([0-9]+)[ \t]+dev:([0-9]+)\/([0-9]+)(?:[ \t]+peers:(?:[ \t]+[0-9]+)*)?[ \t]*$/.exec(line);
   if (!match || !sockets.includes(match[1])) return null;
-  const [kernel, pid, fd, inode, printedMajor, printedMinor] = match.slice(2).map((value) => BigInt(value));
-  if (kernel <= 0n || pid <= 0n || pid > 2147483647n || fd > 2147483647n || inode <= 0n) return null;
-  if (printedMajor > 0xfffn || printedMinor > 0xfffffn) return null;
+  const [kernel, inode, printedMajor, printedMinor] = [match[2], ...match.slice(4)].map((value) => BigInt(value));
+  if (kernel <= 0n || inode <= 0n || printedMajor > 0xfffn || printedMinor > 0xfffffn) return null;
+  const owners = [...(match[3] ?? '').matchAll(/\("[A-Za-z0-9._-]+",pid=([0-9]+),fd=([0-9]+)\)/g)]
+    .map((owner) => ({ pid: BigInt(owner[1]), fd: BigInt(owner[2]) }));
+  if (owners.some(({ pid, fd }) => pid <= 0n || pid > 2147483647n || fd > 2147483647n) ||
+    new Set(owners.map(({ pid }) => pid)).size !== owners.length) return null;
+  owners.sort((left, right) => left.pid < right.pid ? -1 : 1);
   // ss prints the kernel's 32-bit device through libc's different major/minor encoding.
-  return { kernel, pid, fd, inode, major: printedMinor >> 8n, minor: (printedMajor << 8n) | (printedMinor & 0xffn) };
+  return { kernel, inode, major: printedMinor >> 8n, minor: (printedMajor << 8n) | (printedMinor & 0xffn), owners };
 }
 
-function dockerIdentity(stdout, listener) {
+function dockerIdentityRows(stdout, types) {
   if (typeof stdout !== 'string' || !stdout.endsWith('\n')) return null;
   const lines = stdout.slice(0, -1).split('\n');
-  if (lines.length !== 8) return null;
+  if (lines.length !== types.length) return null;
   const rows = [];
   for (const line of lines) {
     const row = /^([0-9]+):([0-9]+):([0-9]+):([0-9]+):(socket|directory|regular file|regular empty file)$/.exec(line);
     if (!row) return null;
     rows.push({ numbers: row.slice(1, 5).map((value) => BigInt(value)), type: row[5] });
   }
-  const types = ['socket', 'socket', 'namespace', 'namespace', 'directory', 'directory', 'regular file', 'regular file'];
-  if (rows.some(({ type }, index) => types[index] === 'namespace' ? !['regular file', 'regular empty file'].includes(type) : type !== types[index])) return null;
+  return rows.some(({ type }, index) => types[index] === 'namespace'
+    ? !['regular file', 'regular empty file'].includes(type) : type !== types[index]) ? null : rows;
+}
+
+function dockerIdentity(stdout, listener, role) {
+  const rows = dockerIdentityRows(stdout,
+    ['socket', 'socket', 'namespace', 'namespace', 'directory', 'directory', 'regular file', 'regular file']);
+  if (!rows) return { failure: 'filesystem identity observation is unsupported or malformed' };
   const [socket, descriptor] = rows.map(({ numbers }) => numbers);
-  if (socket[1] !== listener.inode || socket[2] !== listener.major || socket[3] !== listener.minor || descriptor[1] !== listener.kernel) return null;
-  for (const index of [2, 4, 6]) {
-    if (rows[index].numbers[0] !== rows[index + 1].numbers[0] || rows[index].numbers[1] !== rows[index + 1].numbers[1]) return null;
+  if (socket[1] !== listener.inode) return { failure: 'filesystem socket inode does not match listener' };
+  if (socket[2] !== listener.major || socket[3] !== listener.minor) return { failure: 'filesystem socket device does not match listener' };
+  if (descriptor[1] !== listener.kernel) return { failure: 'socket descriptor does not match listener' };
+  for (const [index, failure] of [
+    [2, `${role} mount namespace differs from local process`],
+    [4, `${role} root differs from local root`],
+    [6, `${role} executable differs from resolved executable`],
+  ]) {
+    if (rows[index].numbers[0] !== rows[index + 1].numbers[0] || rows[index].numbers[1] !== rows[index + 1].numbers[1]) return { failure };
   }
-  return rows.map(({ numbers, type }) => `${numbers.join(':')}:${type}`).join('\n');
+  return { identity: rows.map(({ numbers, type }) => `${numbers.join(':')}:${type}`).join('\n') };
 }
 
 // A local Linux proof and a latched verifier. Native observation never inherits redirection variables.
@@ -383,32 +399,74 @@ function proveDockerFilesystem(host, run, platform, env) {
   const nativeEnv = { ...(env.PATH === undefined ? {} : { PATH: env.PATH }), LC_ALL: 'C' };
   const native = (command, args) => run(command, args, { env: nativeEnv });
   const link = native('readlink', ['-e', '--', original]);
-  const socket = completeCommand(link) && completeLine(link.stdout);
-  if (!safeSocketPath(socket)) return fail('socket path could not be resolved');
+  if (!completeCommand(link)) return fail('socket path observation command did not complete cleanly');
+  const socket = completeLine(link.stdout);
+  if (!safeSocketPath(socket)) return fail('socket path observation is unsupported or malformed');
   const sockets = unique([original, socket]);
   const ssArgs = sockets.length === 1 ? ['-H', '-xlnpe', 'src', socket] :
     ['-H', '-xlnpe', '(', 'src', original, 'or', 'src', socket, ')'];
   const located = native('sh', ['-c', 'command -v dockerd']);
-  const executable = completeCommand(located) && completeLine(located.stdout);
-  if (!executable || !isCleanPosixAbsolute(executable)) return fail('daemon executable could not be resolved');
-  const observe = () => {
-    const result = native('ss', ssArgs);
-    const listener = completeCommand(result) && dockerListener(result.stdout, sockets);
-    if (!listener) return null;
-    const tuple = Object.values(listener).join(':');
-    const { pid, fd } = listener;
-    const stat = native('stat', ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', socket, `/proc/${pid}/fd/${fd}`,
-      '/proc/self/ns/mnt', `/proc/${pid}/ns/mnt`, '/', `/proc/${pid}/root`, executable, `/proc/${pid}/exe`]);
-    const identity = completeCommand(stat) && dockerIdentity(stat.stdout, listener);
-    return identity ? `${tuple}\n${identity}` : null;
+  if (!completeCommand(located)) return fail('daemon executable lookup command did not complete cleanly');
+  const executable = completeLine(located.stdout);
+  if (!executable || !isCleanPosixAbsolute(executable)) return fail('daemon executable observation is unsupported or malformed');
+  const privileged = (command, args) => native('/usr/bin/sudo', ['-n', '-u', 'root', '-g', 'root', '--', `/usr/bin/${command}`, ...args]);
+  const statArgs = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--'];
+  const observationTypes = ['socket', 'namespace', 'directory', 'regular file'];
+  const callerObservation = (expected) => native('stat', [...statArgs, socket, '/proc/self/ns/mnt', '/', expected]);
+  const observe = (mode, initial = false) => {
+    const result = mode === 'native' ? native('ss', ssArgs) : privileged('ss', ssArgs);
+    if (!completeCommand(result)) return { failure: mode === 'native'
+      ? 'listener observation command did not complete cleanly' : 'passwordless listener observation was unavailable' };
+    const listener = dockerListener(result.stdout, sockets);
+    const ownershipFailure = { failure: 'listener ownership observation is missing, ambiguous or unsupported' };
+    if (!listener) return ownershipFailure;
+    if (!listener.owners.length) return initial ? { retry: true } : ownershipFailure;
+    if (listener.owners.length === 2 && listener.owners[0].pid !== 1n) return ownershipFailure;
+    const identities = [];
+    for (const { pid, fd } of listener.owners) {
+      const role = listener.owners.length === 2 && pid === 1n ? 'systemd' : 'daemon';
+      const expected = role === 'systemd' ? '/usr/lib/systemd/systemd' : executable;
+      let stdout;
+      if (mode === 'native') {
+        const stat = native('stat', [...statArgs, socket, `/proc/${pid}/fd/${fd}`,
+          '/proc/self/ns/mnt', `/proc/${pid}/ns/mnt`, '/', `/proc/${pid}/root`, expected, `/proc/${pid}/exe`]);
+        if (!completeCommand(stat)) return { failure: 'filesystem identity observation command did not complete cleanly' };
+        stdout = stat.stdout;
+      } else {
+        // Caller identity must remain unprivileged: sudo's namespace and root are not the caller's.
+        const local = callerObservation(expected);
+        if (!completeCommand(local)) return { failure: 'caller filesystem identity observation command did not complete cleanly' };
+        if (!dockerIdentityRows(local.stdout, observationTypes)) return { failure: 'caller filesystem identity observation is unsupported or malformed' };
+        const remote = privileged('stat', [...statArgs, `/proc/${pid}/fd/${fd}`, `/proc/${pid}/ns/mnt`, `/proc/${pid}/root`, `/proc/${pid}/exe`]);
+        if (!completeCommand(remote)) return { failure: `passwordless ${role} filesystem identity observation was unavailable` };
+        if (!dockerIdentityRows(remote.stdout, observationTypes)) {
+          return { failure: 'filesystem identity observation is unsupported or malformed' };
+        }
+        const processRows = remote.stdout.slice(0, -1).split('\n');
+        stdout = local.stdout.slice(0, -1).split('\n').flatMap((row, index) => [row, processRows[index]]).join('\n') + '\n';
+      }
+      const observed = dockerIdentity(stdout, listener, role);
+      if (observed.failure) return observed;
+      identities.push(`${pid}:${fd}\n${observed.identity}`);
+    }
+    return { identity: `${listener.kernel}:${listener.inode}:${listener.major}:${listener.minor}\n${identities.join('\n')}` };
   };
-  const initial = observe();
-  if (!initial) return fail('listener ownership or filesystem identity could not be verified; native process metadata must be readable');
+  let mode = 'native';
+  let initial = observe(mode, true);
+  if (initial.retry) {
+    mode = 'privileged';
+    initial = observe(mode);
+  }
+  if (initial.failure) return fail(initial.failure);
   let failure = null;
   return {
     host: `unix://${socket}`,
     verify() {
-      if (!failure && observe() !== initial) failure = dockerUnverifiable('native identity changed or became unreadable');
+      if (!failure) {
+        const current = observe(mode);
+        if (current.failure) failure = dockerUnverifiable(`native identity changed or became unreadable: ${current.failure}`);
+        else if (current.identity !== initial.identity) failure = dockerUnverifiable('native identity changed since initial observation');
+      }
       return failure;
     },
   };

@@ -1195,12 +1195,12 @@ test('a sync refuses seat settings it cannot apply and writes nothing', (t) => {
     ['inherit', { claude: { builder: { model: 'inherit' } } }, /seats\.claude\.builder\.model: inherit leaves the seat model to the session/],
   ]) {
     putSettings(fixture, seats);
-    for (const cause of causes) {
-      assertRefused(fixture, (error) => {
+    assertRefused(fixture, (error) => {
+      for (const cause of causes) {
         assert.match(String(error), cause, name);
-        return true;
-      });
-    }
+      }
+      return true;
+    });
   }
 });
 
