@@ -78,6 +78,7 @@ class DesktopResult:
 
 
 async def run_local_command(argv):
+    # Native media status may embed cover art; only that read needs a larger allowance.
     budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
               else 4096)
     uid = os.getuid()
@@ -403,19 +404,19 @@ LOCAL_TOOLS = {
 }
 
 
-VOLUME_BASE_WORDS = (
+NUMBER_BASE_WORDS = (
     'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
     'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
     'seventeen', 'eighteen', 'nineteen',
 )
-VOLUME_TENS = ('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety')
-VOLUME_LEVELS = {
-    **{name: value for value, name in enumerate(VOLUME_BASE_WORDS)},
-    **{name: value * 10 for value, name in enumerate(VOLUME_TENS, 2)},
+NUMBER_TENS = ('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety')
+NUMBER_WORDS = {
+    **{name: value for value, name in enumerate(NUMBER_BASE_WORDS)},
+    **{name: value * 10 for value, name in enumerate(NUMBER_TENS, 2)},
     **{
         f'{name}{separator}{unit}': value * 10 + digit
-        for value, name in enumerate(VOLUME_TENS, 2)
-        for digit, unit in enumerate(VOLUME_BASE_WORDS[1:10], 1)
+        for value, name in enumerate(NUMBER_TENS, 2)
+        for digit, unit in enumerate(NUMBER_BASE_WORDS[1:10], 1)
         for separator in (' ', '-')
     },
     'one hundred': 100,
@@ -436,7 +437,7 @@ def match_instant_tool(text):
         number = int(match[1])
     else:
         match = re.fullmatch(r'workspace ([a-z -]+)[.!]?', text)
-        number = VOLUME_LEVELS.get(match[1]) if match else None
+        number = NUMBER_WORDS.get(match[1]) if match else None
     if number is not None and 1 <= number <= 2147483647:
         tool = LOCAL_TOOLS['workspace']
         return replace(tool, run=partial(tool.run, number)) if tool.permission is PermissionTier.FREE else None
@@ -445,9 +446,9 @@ def match_instant_tool(text):
         percent = int(match[1])
     else:
         match = re.fullmatch(r'volume ([a-z -]+) percent[.!]?', text)
-        if not match or match[1] not in VOLUME_LEVELS:
+        if not match or match[1] not in NUMBER_WORDS:
             return None
-        percent = VOLUME_LEVELS[match[1]]
+        percent = NUMBER_WORDS[match[1]]
     tool = LOCAL_TOOLS['volume']
     return replace(tool, run=partial(tool.run, percent)) if tool.permission is PermissionTier.FREE else None
 
