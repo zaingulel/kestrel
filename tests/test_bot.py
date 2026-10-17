@@ -1684,7 +1684,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
         session = asyncio.create_task(bot.run_conversation(
-            bot.NemotronSTT(), speech.VoxCPMTTS(Mock(generate_streaming=chunks), preset),
+            bot.NemotronSTT(), bot.VoxCPMTTS(Mock(generate_streaming=chunks), preset),
             llm=supplied_llm, transport=transport, user_params=user_params,
         ))
         await asyncio.wait_for(started.wait(), 45)
@@ -2917,8 +2917,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_tts = bot.VoxCPMTTS
         worker_requests = []
 
-        def create_tts(voice):
-            tts = native_tts(voice)
+        def create_tts(voice, preset):
+            tts = native_tts(voice, preset)
             native_run_tts = tts.run_tts
             first_stream = True
 
