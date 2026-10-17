@@ -46,6 +46,28 @@ const PROOF_REPLIES = {
   ss: reply(0, PROOF_SS), stat: reply(0, PROOF_STAT),
 };
 
+// Hand-worked procfs tuples: both owners share socket 700, namespace 1000 and root 2;
+// systemd's executable inode 81 is distinct from dockerd's inode 80.
+const SYSTEMD_STAT = [
+  '100:90:0:5:socket', '10:700:0:10:socket',
+  '40:1000:0:40:regular empty file', '40:1000:0:40:regular empty file',
+  '50:2:0:50:directory', '50:2:0:50:directory',
+  '60:81:0:60:regular file', '60:81:0:60:regular file', '',
+].join('\n');
+const CALLER_STAT = '100:90:0:5:socket\n40:1000:0:40:regular empty file\n50:2:0:50:directory\n60:80:0:60:regular file\n';
+const SYSTEMD_CALLER_STAT = '100:90:0:5:socket\n40:1000:0:40:regular empty file\n50:2:0:50:directory\n60:81:0:60:regular file\n';
+const DAEMON_PROC_STAT = '10:700:0:10:socket\n40:1000:0:40:regular empty file\n50:2:0:50:directory\n60:80:0:60:regular file\n';
+const SYSTEMD_PROC_STAT = '10:700:0:10:socket\n40:1000:0:40:regular empty file\n50:2:0:50:directory\n60:81:0:60:regular file\n';
+const ACTIVATED_SS = PROOF_SS.replace('fd=3))', 'fd=3),("systemd",pid=1,fd=9))');
+const OWNERLESS_SS = PROOF_SS.replace('users:(("dockerd",pid=71,fd=3)) ', '');
+const SYSTEMD_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/tmp/proof.sock', '/proc/1/fd/9',
+  '/proc/self/ns/mnt', '/proc/1/ns/mnt', '/', '/proc/1/root', '/usr/lib/systemd/systemd', '/proc/1/exe'];
+const CALLER_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/tmp/proof.sock', '/proc/self/ns/mnt', '/', '/usr/bin/dockerd'];
+const SYSTEMD_CALLER_VECTOR = [...CALLER_VECTOR.slice(0, -1), '/usr/lib/systemd/systemd'];
+const DAEMON_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/71/fd/3', '/proc/71/ns/mnt', '/proc/71/root', '/proc/71/exe'];
+const SYSTEMD_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/1/fd/9', '/proc/1/ns/mnt', '/proc/1/root', '/proc/1/exe'];
+const SUDO_PREFIX = ['-kn', '-u', 'root', '-g', 'root', '--'];
+
 // Fake Docker selection is synchronous and cannot inherit or permanently alter the caller's selection.
 function withoutDockerSelection(invoke) {
   const names = ['DOCKER_HOST', 'DOCKER_CONTEXT'];
@@ -131,11 +153,28 @@ function scenario(t) {
       state.onDocker?.(args.slice(2));
       return result;
     }
-    if (name in PROOF_VECTORS) {
-      assert.deepEqual(args, PROOF_VECTORS[name]);
+    if (name === 'sudo' || name in PROOF_VECTORS) {
       assert.deepEqual(options.env, { ...(capturedPath === undefined ? {} : { PATH: capturedPath }), LC_ALL: 'C' });
-      const result = state.native[name] ?? PROOF_REPLIES[name];
-      return typeof result === 'function' ? result() : result;
+      if (name === 'sudo') {
+        assert.deepEqual(args.slice(0, 6), SUDO_PREFIX);
+        const binary = args[6];
+        assert.ok(['/usr/bin/ss', '/usr/bin/stat'].includes(binary));
+        const operands = args.slice(7);
+        if (binary === '/usr/bin/ss') assert.deepEqual(operands, PROOF_VECTORS.ss);
+        else assert.ok([DAEMON_PROC_VECTOR, SYSTEMD_PROC_VECTOR, SYSTEMD_PROC_VECTOR.with(4, '/proc/1/fd/10')].some((vector) => JSON.stringify(vector) === JSON.stringify(operands)));
+        const result = state.privileged?.[binary === '/usr/bin/ss' ? 'ss' : 'stat'] ?? { absent: true };
+        return typeof result === 'function' ? result(operands) : result;
+      }
+      let fallback = PROOF_REPLIES[name];
+      if (name === 'stat') {
+        const vectors = [[PROOF_VECTORS.stat, PROOF_STAT], [SYSTEMD_VECTOR, SYSTEMD_STAT],
+          [CALLER_VECTOR, CALLER_STAT], [SYSTEMD_CALLER_VECTOR, SYSTEMD_CALLER_STAT]];
+        const vector = vectors.find(([expected]) => JSON.stringify(expected) === JSON.stringify(args));
+        assert.ok(vector, `unexpected native stat: ${args.join(' ')}`);
+        fallback = reply(0, vector[1]);
+      } else assert.deepEqual(args, PROOF_VECTORS[name]);
+      const result = state.native[name] ?? fallback;
+      return typeof result === 'function' ? result(args) : result;
     }
     if (name === 'lsof' && state.lsof) {
       const { listeners } = state.lsof;
@@ -1333,27 +1372,276 @@ test('ANTI-REGRESSION: the CLI retains every target when a remote Docker bind ma
   }
 });
 
+function passwordlessProof(s, owners = ACTIVATED_SS) {
+  s.state.native.ss = reply(0, OWNERLESS_SS);
+  s.state.privileged = {
+    ss: reply(0, owners),
+    stat: (args) => reply(0, args[4].startsWith('/proc/1/fd/') ? SYSTEMD_PROC_STAT : DAEMON_PROC_STAT),
+  };
+}
+
+function proofTargets(s) {
+  const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
+  s.state.docker.containers = [
+    containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] }),
+    containerRecord(ID_B, { running: true, mounts: [bindMount(s.mainDir)] }),
+  ];
+  return scratch;
+}
+
+function assertProofRetained(s, result, scratch) {
+  assert.equal(result.exitCode, 4);
+  assert.match(result.out.join('\n'), /Docker filesystem relationship is unverifiable: \S/);
+  assert.doesNotMatch(result.out.join('\n'), /fixture-secret|fixture warning|removed (?:container|scratch|worktree|branch)/);
+  assert.ok(existsSync(scratch));
+  assert.ok(existsSync(s.worktree));
+  assertWorktreeNotRemoved(s);
+  assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
+  assert.deepEqual(s.unexpected, []);
+}
+
+test('ANTI-REGRESSION: passwordless Docker proof verifies every socket activation owner', async (t) => {
+  for (const [name, privileged, owners] of [
+    ['native singleton', false, PROOF_SS], ['native activated', false, ACTIVATED_SS],
+    ['privileged singleton', true, PROOF_SS], ['privileged activated', true, ACTIVATED_SS],
+    ['reversed display order', true, ACTIVATED_SS.replace('("dockerd",pid=71,fd=3),("systemd",pid=1,fd=9)',
+      '("systemd",pid=1,fd=9),("dockerd",pid=71,fd=3)')],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      if (privileged) passwordlessProof(s, owners);
+      else s.state.native.ss = reply(0, owners);
+      // A display-order-only change between rechecks must keep the same canonical identity.
+      if (name === 'reversed display order') {
+        let reads = 0;
+        s.state.privileged.ss = () => reply(0, ++reads % 2 ? owners : ACTIVATED_SS);
+      }
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assert.equal(result.exitCode, 0, result.out.join('\n'));
+      assert.equal(existsSync(scratch), false);
+      assert.equal(existsSync(s.worktree), false);
+      assert.equal(s.state.branch, false);
+      assert.deepEqual(s.state.docker.containers.map(({ Id, State }) => [Id, State.Running]), [[ID_B, true]]);
+      assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
+      assert.deepEqual(dockerCalls(s, 'rm'), [['docker', 'rm', ID_A]]);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+  for (const [name, owners, stat, reason] of [
+    ['systemd executable', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('60:81:', '60:82:'), 'systemd executable differs from resolved executable'],
+    ['systemd namespace', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:1001:'), 'systemd mount namespace differs from local process'],
+    ['systemd root', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('50:2:', '50:3:'), 'systemd root differs from local root'],
+    ['systemd descriptor', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('10:700:', '10:701:'), 'socket descriptor does not match listener'],
+    ['non-PID-1 second owner', ACTIVATED_SS.replace('pid=1,', 'pid=2,'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['systemd alone', PROOF_SS.replace('("dockerd",pid=71,fd=3)', '("systemd",pid=1,fd=9)'), undefined, 'daemon executable differs from resolved executable'],
+    ['duplicate PID', ACTIVATED_SS.replace('("dockerd",pid=71,fd=3)', '("systemd",pid=1,fd=10)'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['duplicate tuple', ACTIVATED_SS.replace('("systemd",pid=1,fd=9)', '("dockerd",pid=71,fd=3)'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['extra owner', ACTIVATED_SS.replace('fd=9))', 'fd=9),("other",pid=2,fd=4))'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['empty users', PROOF_SS.replace('("dockerd",pid=71,fd=3)', ''), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['malformed owner', ACTIVATED_SS.replace('pid=1,fd=9', 'pid=1'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['truncated listener', ACTIVATED_SS.slice(0, -1), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['oversized PID', ACTIVATED_SS.replace('pid=1,', 'pid=2147483648,'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['oversized FD', ACTIVATED_SS.replace('fd=9', 'fd=2147483648'), undefined, 'listener ownership observation is missing, ambiguous or unsupported'],
+    ['partial stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.split('\n').slice(0, 3).join('\n') + '\n', 'filesystem identity observation is unsupported or malformed'],
+    ['truncated stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.slice(0, -1), 'filesystem identity observation is unsupported or malformed'],
+    ['malformed stat', ACTIVATED_SS, SYSTEMD_PROC_STAT.replace('40:1000:', '40:-1:'), 'filesystem identity observation is unsupported or malformed'],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      passwordlessProof(s, owners);
+      if (stat) s.state.privileged.stat = (args) => reply(0, args[4] === '/proc/1/fd/9' ? stat : DAEMON_PROC_STAT);
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+    });
+  }
+});
+
+test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and latches changes', async (t) => {
+  for (const [name, caller, reason] of [
+    ['caller namespace', SYSTEMD_CALLER_STAT.replace('40:1000:', '40:1001:'), 'systemd mount namespace differs from local process'],
+    ['caller root', SYSTEMD_CALLER_STAT.replace('50:2:', '50:3:'), 'systemd root differs from local root'],
+    ['caller executable', SYSTEMD_CALLER_STAT.replace('60:81:', '60:82:'), 'systemd executable differs from resolved executable'],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      passwordlessProof(s);
+      s.state.native.stat = (args) => reply(0, args.at(-1) === '/usr/lib/systemd/systemd' ? caller : CALLER_STAT);
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+    });
+  }
+  for (const change of ['remove systemd', 'change systemd descriptor', 'change systemd identity', 'one failed recheck']) {
+    await t.test(change, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      passwordlessProof(s);
+      let failedReads = 0;
+      s.state.onDocker = ([verb]) => {
+        if (verb !== 'stop') return;
+        if (change === 'remove systemd') s.state.privileged.ss = reply(0, PROOF_SS);
+        if (change === 'change systemd descriptor') s.state.privileged.ss = reply(0, ACTIVATED_SS.replace('fd=9', 'fd=10'));
+        if (change === 'change systemd identity') {
+          s.state.native.stat = (args) => reply(0, args.at(-1) === '/usr/lib/systemd/systemd'
+            ? SYSTEMD_CALLER_STAT.replace('60:81:', '60:82:') : CALLER_STAT);
+          s.state.privileged.stat = (args) => reply(0, args[4] === '/proc/1/fd/9'
+            ? SYSTEMD_PROC_STAT.replace('60:81:', '60:82:') : DAEMON_PROC_STAT);
+        }
+        if (change === 'one failed recheck') s.state.privileged.ss = () => ++failedReads === 1 ? reply(1) : reply(0, ACTIVATED_SS);
+      };
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assert.equal(result.exitCode, 4);
+      const reason = change === 'one failed recheck'
+        ? 'native identity changed or became unreadable: passwordless listener observation was unavailable'
+        : 'native identity changed since initial observation';
+      assert.deepEqual(result.out.filter((line) => line.startsWith('retained container ')), [
+        `retained container aaaaaaaaaaaa: Docker filesystem relationship is unverifiable: ${reason}`,
+      ]);
+      assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
+      assert.deepEqual(dockerCalls(s, 'rm'), []);
+      assert.ok(existsSync(scratch));
+      assert.ok(existsSync(s.worktree));
+      assertWorktreeNotRemoved(s);
+      assert.equal(s.state.docker.containers[1].State.Running, true);
+      if (change === 'one failed recheck') assert.equal(failedReads, 1);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', async (t) => {
+  for (const trigger of ['native success', 'ownerless']) {
+    await t.test(trigger, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      if (trigger !== 'native success') passwordlessProof(s);
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assert.equal(result.exitCode, 0, result.out.join('\n'));
+      const sudo = s.executions.filter(({ command }) => command === '/usr/bin/sudo');
+      if (trigger === 'native success') assert.deepEqual(sudo, []);
+      else {
+        assert.ok(sudo.length > 0);
+        assert.deepEqual(sudo[0].args, [...SUDO_PREFIX, '/usr/bin/ss', ...PROOF_VECTORS.ss]);
+        for (const { command, args } of sudo) {
+          assert.equal(command, '/usr/bin/sudo');
+          assert.deepEqual(args.slice(0, 6), SUDO_PREFIX);
+          if (args[6] === '/usr/bin/stat') {
+            assert.ok([DAEMON_PROC_VECTOR, SYSTEMD_PROC_VECTOR].some((vector) => JSON.stringify(vector) === JSON.stringify(args.slice(7))));
+          }
+        }
+        assert.ok(s.executions.some(({ command, args }) => command === 'stat' && JSON.stringify(args) === JSON.stringify(CALLER_VECTOR)));
+        assert.ok(s.executions.some(({ command, args }) => command === 'stat' && JSON.stringify(args) === JSON.stringify(SYSTEMD_CALLER_VECTOR)));
+        const observations = s.executions.filter(({ command }) => command === 'ss');
+        assert.equal(observations.length, 1, 'rechecks must pin privileged mode');
+      }
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+  await t.test('native nonzero identity stat does not elevate', async (t) => {
+    const s = scenario(t);
+    const scratch = proofTargets(s);
+    passwordlessProof(s);
+    s.state.native.ss = PROOF_REPLIES.ss;
+    s.state.native.stat = (args) => args.length === 12 ? reply(1)
+      : reply(0, args.at(-1) === '/usr/lib/systemd/systemd' ? SYSTEMD_CALLER_STAT : CALLER_STAT);
+    assertProofRetained(s, await s.cleanup(['23', '--scratch', scratch]), scratch);
+    assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
+    assert.deepEqual(s.executions.filter(({ command, args }) => command === 'stat' && args.length === 8), []);
+  });
+  for (const [name, native] of [
+    ['absent native stat', { absent: true }], ['failed native execution', { failed: 'EACCES' }],
+    ['malformed native stat', reply(0, 'partial\n')], ['native stderr', reply(0, PROOF_STAT, 'fixture warning')],
+    ['native mismatch', reply(0, PROOF_STAT.replace('50:2:', '50:3:'))],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      s.state.native.stat = native;
+      assertProofRetained(s, await s.cleanup(['23', '--scratch', scratch]), scratch);
+      assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
+    });
+  }
+  for (const [name, result] of [
+    ['absent', { absent: true }], ['denied', reply(1, '', 'fixture-secret')], ['failed', { failed: 'ETIMEDOUT' }],
+    ['stderr', reply(0, ACTIVATED_SS, 'fixture warning')], ['partial', reply(0, 'u_str LISTEN\n')],
+  ]) {
+    for (const stage of ['ss', 'stat']) {
+      await t.test(`privileged ${stage} ${name}`, async (t) => {
+        const s = scenario(t);
+        const scratch = proofTargets(s);
+        passwordlessProof(s);
+        s.state.privileged[stage] = stage === 'stat' && name === 'stderr' ? reply(0, DAEMON_PROC_STAT, 'fixture warning') : result;
+        const observed = await s.cleanup(['23', '--scratch', scratch]);
+        assertProofRetained(s, observed, scratch);
+        const reason = name === 'partial'
+          ? stage === 'ss' ? 'listener ownership observation is missing, ambiguous or unsupported'
+            : 'filesystem identity observation is unsupported or malformed'
+          : stage === 'ss' ? 'passwordless listener observation was unavailable'
+            : 'passwordless systemd filesystem identity observation was unavailable';
+        assert.equal(observed.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+      });
+    }
+  }
+  for (const [name, baseline] of [['partial', reply(0, 'partial\n')], ['stderr', reply(0, CALLER_STAT, 'fixture warning')], ['nonzero', reply(1)]]) {
+    await t.test(`privileged caller baseline ${name}`, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      passwordlessProof(s);
+      s.state.native.stat = baseline;
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      const reason = name === 'partial' ? 'caller filesystem identity observation is unsupported or malformed'
+        : 'caller filesystem identity observation command did not complete cleanly';
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+      assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo').map(({ args }) => args),
+        [[...SUDO_PREFIX, '/usr/bin/ss', ...PROOF_VECTORS.ss]]);
+    });
+  }
+  await t.test('native mode never elevates a failed recheck', async (t) => {
+    const s = scenario(t);
+    const scratch = proofTargets(s);
+    s.state.onDocker = ([verb]) => { if (verb === 'stop') s.state.native.stat = reply(1); };
+    const result = await s.cleanup(['23', '--scratch', scratch]);
+    assert.equal(result.exitCode, 4);
+    assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
+    assert.deepEqual(dockerCalls(s, 'rm'), []);
+    assert.ok(existsSync(scratch));
+    assert.ok(existsSync(s.worktree));
+    assertWorktreeNotRemoved(s);
+    assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
+  });
+});
+
 test('Docker filesystem proof rejects incomplete, ambiguous or mismatched native observations', async (t) => {
   const cases = [];
-  for (const name of ['readlink', 'sh', 'ss', 'stat']) {
+  for (const [name, stage] of [
+    ['readlink', 'socket path observation command did not complete cleanly'],
+    ['sh', 'daemon executable lookup command did not complete cleanly'],
+    ['ss', 'listener observation command did not complete cleanly'],
+    ['stat', 'filesystem identity observation command did not complete cleanly'],
+  ]) {
     for (const [kind, result] of [
       ['absent', { absent: true }], ['failed execution', { failed: 'EACCES' }],
       ['nonzero', reply(1)], ['stderr', reply(0, PROOF_REPLIES[name].stdout, 'fixture warning')],
-    ]) cases.push([`${name} ${kind}`, (s) => { s.state.native[name] = result; }]);
+    ]) cases.push([`${name} ${kind}`, (s) => { s.state.native[name] = result; }, stage]);
   }
-  for (const [name, result] of [
-    ['failed context inspection', reply(1)], ['failed context execution', { failed: 'EACCES' }],
-    ['context stderr', reply(0, '{"Host":"unix:///tmp/proof.sock"}', 'warning')],
-    ['malformed JSON', reply(0, '{')], ['array metadata', reply(0, '[]')],
-    ['null metadata', reply(0, 'null')], ['missing Host', reply(0, '{}')],
-    ['non-string Host', reply(0, '{"Host":3}')], ['empty Host', reply(0, '{"Host":""}')],
-    ['control-bearing Host', reply(0, JSON.stringify({ Host: 'unix:///tmp/proof.sock\n' }))],
-    ['credential-bearing remote endpoint', reply(0, '{"Host":"ssh://user:fixture-secret@remote.invalid"}')],
-    ['TCP endpoint', reply(0, '{"Host":"tcp://127.0.0.1:2375"}')],
-    ['abstract socket', reply(0, '{"Host":"unix://@abstract"}')],
-    ['unnormalized socket', reply(0, '{"Host":"unix:///tmp/../proof.sock"}')],
-    ['unsupported socket spelling', reply(0, '{"Host":"unix:///tmp/proof socket"}')],
-  ]) cases.push([name, (s) => { s.state.metadata = result; }]);
+  for (const [name, result, stage] of [
+    ['failed context inspection', reply(1), 'endpoint inspection failed'], ['failed context execution', { failed: 'EACCES' }, 'endpoint inspection failed'],
+    ['context stderr', reply(0, '{"Host":"unix:///tmp/proof.sock"}', 'warning'), 'endpoint inspection failed'],
+    ['malformed JSON', reply(0, '{'), 'endpoint metadata is unreadable'], ['array metadata', reply(0, '[]'), 'endpoint metadata is unreadable'],
+    ['null metadata', reply(0, 'null'), 'endpoint metadata is unreadable'], ['missing Host', reply(0, '{}'), 'endpoint metadata is unreadable'],
+    ['non-string Host', reply(0, '{"Host":3}'), 'endpoint metadata is unreadable'], ['empty Host', reply(0, '{"Host":""}'), 'endpoint metadata is unreadable'],
+    ['control-bearing Host', reply(0, JSON.stringify({ Host: 'unix:///tmp/proof.sock\n' })), 'endpoint metadata is unreadable'],
+    ['credential-bearing remote endpoint', reply(0, '{"Host":"ssh://user:fixture-secret@remote.invalid"}'), 'unsupported endpoint'],
+    ['TCP endpoint', reply(0, '{"Host":"tcp://127.0.0.1:2375"}'), 'unsupported endpoint'],
+    ['abstract socket', reply(0, '{"Host":"unix://@abstract"}'), 'unsupported endpoint'],
+    ['unnormalized socket', reply(0, '{"Host":"unix:///tmp/../proof.sock"}'), 'unsupported endpoint'],
+    ['unsupported socket spelling', reply(0, '{"Host":"unix:///tmp/proof socket"}'), 'unsupported endpoint'],
+  ]) cases.push([name, (s) => { s.state.metadata = result; }, stage]);
   for (const [name, stdout] of [
     ['missing listener', ''], ['duplicate listener', PROOF_SS + PROOF_SS],
     ['duplicate owner', PROOF_SS.replace('fd=3))', 'fd=3),("dockerd",pid=72,fd=4))')],
@@ -1368,25 +1656,27 @@ test('Docker filesystem proof rejects incomplete, ambiguous or mismatched native
     ['negative FD', PROOF_SS.replace('fd=3', 'fd=-1')],
     ['oversized FD', PROOF_SS.replace('fd=3', 'fd=2147483648')],
     ['duplicate identity', PROOF_SS.replace('peers:', 'ino:90 peers:')],
-  ]) cases.push([name, (s) => { s.state.native.ss = reply(0, stdout); }]);
-  for (const [name, stdout] of [
-    ['partial stat', PROOF_STAT.split('\n').slice(0, 7).join('\n') + '\n'],
-    ['truncated stat', PROOF_STAT.slice(0, -1)],
-    ['filesystem socket inode mismatch', PROOF_STAT.replace('100:90:', '100:91:')],
-    ['filesystem socket device mismatch', PROOF_STAT.replace('100:90:0:5', '100:90:0:6')],
-    ['descriptor kernel-inode mismatch', PROOF_STAT.replace('10:700:', '10:90:')],
-    ['proxy named dockerd with different executed binary', PROOF_STAT.replace(/60:80:0:60:regular file\n$/, '60:81:0:60:regular file\n')],
-    ['different mount namespace', PROOF_STAT.replace('40:1000:', '40:1001:')],
-    ['different root', PROOF_STAT.replace('50:2:', '50:3:')],
-    ['wrong socket type', PROOF_STAT.replace('100:90:0:5:socket', '100:90:0:5:directory')],
-    ['unknown stat type', PROOF_STAT.replace('regular empty file', 'mystery')],
-    ['unsafe stat integer', PROOF_STAT.replace('100:90:', '100:-90:')],
-  ]) cases.push([name, (s) => { s.state.native.stat = reply(0, stdout); }]);
-  cases.push(['unresolved canonical path', (s) => { s.state.native.readlink = reply(0, '/tmp/../proof.sock\n'); }]);
-  cases.push(['multiple canonical paths', (s) => { s.state.native.readlink = reply(0, '/tmp/proof.sock\n/tmp/other.sock\n'); }]);
-  cases.push(['relative daemon executable', (s) => { s.state.native.sh = reply(0, 'dockerd\n'); }]);
-  cases.push(['Darwin Docker-present refusal', () => {}, { platform: 'darwin' }]);
-  for (const [name, configure, seams] of cases) {
+  ]) cases.push([name, (s) => { s.state.native.ss = reply(0, stdout); },
+    name === 'missing owner' ? 'passwordless listener observation was unavailable' :
+      'listener ownership observation is missing, ambiguous or unsupported']);
+  for (const [name, stdout, stage] of [
+    ['partial stat', PROOF_STAT.split('\n').slice(0, 7).join('\n') + '\n', 'filesystem identity observation is unsupported or malformed'],
+    ['truncated stat', PROOF_STAT.slice(0, -1), 'filesystem identity observation is unsupported or malformed'],
+    ['filesystem socket inode mismatch', PROOF_STAT.replace('100:90:', '100:91:'), 'filesystem socket inode does not match listener'],
+    ['filesystem socket device mismatch', PROOF_STAT.replace('100:90:0:5', '100:90:0:6'), 'filesystem socket device does not match listener'],
+    ['descriptor kernel-inode mismatch', PROOF_STAT.replace('10:700:', '10:90:'), 'socket descriptor does not match listener'],
+    ['proxy named dockerd with different executed binary', PROOF_STAT.replace(/60:80:0:60:regular file\n$/, '60:81:0:60:regular file\n'), 'daemon executable differs from resolved executable'],
+    ['different mount namespace', PROOF_STAT.replace('40:1000:', '40:1001:'), 'daemon mount namespace differs from local process'],
+    ['different root', PROOF_STAT.replace('50:2:', '50:3:'), 'daemon root differs from local root'],
+    ['wrong socket type', PROOF_STAT.replace('100:90:0:5:socket', '100:90:0:5:directory'), 'filesystem identity observation is unsupported or malformed'],
+    ['unknown stat type', PROOF_STAT.replace('regular empty file', 'mystery'), 'filesystem identity observation is unsupported or malformed'],
+    ['unsafe stat integer', PROOF_STAT.replace('100:90:', '100:-90:'), 'filesystem identity observation is unsupported or malformed'],
+  ]) cases.push([name, (s) => { s.state.native.stat = reply(0, stdout); }, stage]);
+  cases.push(['unresolved canonical path', (s) => { s.state.native.readlink = reply(0, '/tmp/../proof.sock\n'); }, 'socket path observation is unsupported or malformed']);
+  cases.push(['multiple canonical paths', (s) => { s.state.native.readlink = reply(0, '/tmp/proof.sock\n/tmp/other.sock\n'); }, 'socket path observation is unsupported or malformed']);
+  cases.push(['relative daemon executable', (s) => { s.state.native.sh = reply(0, 'dockerd\n'); }, 'daemon executable observation is unsupported or malformed']);
+  cases.push(['Darwin Docker-present refusal', () => {}, 'unsupported endpoint', { platform: 'darwin' }]);
+  for (const [name, configure, stage, seams] of cases) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const target = placeFile(join(s.root, 'scratch', 'proof.txt'));
@@ -1394,11 +1684,18 @@ test('Docker filesystem proof rejects incomplete, ambiguous or mismatched native
       configure(s);
       const result = await s.cleanup(['23', '--scratch', target], seams);
       assert.equal(result.exitCode, 4);
-      assert.match(result.out.join('\n'), /Docker filesystem relationship is unverifiable/);
+      const reason = `Docker filesystem relationship is unverifiable: ${stage}`;
+      assert.deepEqual(result.out, [
+        `retained scratch ${target}: docker failed: ${reason}`,
+        `retained worktree ${s.worktree}: docker failed: ${reason}`,
+        'retained branch job/23: its worktree is retained',
+        'closeout-cleanup: 0 removed, 3 retained',
+      ]);
       assert.doesNotMatch(result.out.join('\n'), /fixture-secret|remote\.invalid|fixture warning/);
       assert.ok(existsSync(target));
       assert.ok(existsSync(s.worktree));
       assertWorktreeNotRemoved(s);
+      assert.equal(s.state.branch, true);
       assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
       assert.deepEqual(s.unexpected, []);
     });
@@ -1446,7 +1743,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     assert.deepEqual(dockerCalls(s, 'rm'), []);
     assert.equal(s.state.docker.containers[0].State.Running, false);
     assert.equal(s.state.docker.containers[1].State.Running, true);
-    const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable';
+    const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable: socket descriptor does not match listener';
     assert.deepEqual(result.out.filter((line) => line.startsWith('retained container ')), [
       `retained container aaaaaaaaaaaa: ${reason}`,
     ]);
@@ -1462,6 +1759,65 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     assert.doesNotMatch(result.out.join('\n'), /removed container|removed scratch|removed worktree|removed branch/);
     assert.deepEqual(s.unexpected, []);
   });
+  await t.test('valid changed fingerprint is retained', async (t) => {
+    const s = scenario(t);
+    const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
+    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    s.state.onDocker = ([verb]) => {
+      if (verb === 'stop') {
+        s.state.native.ss = reply(0, PROOF_SS.replace('700 *', '701 *'));
+        s.state.native.stat = reply(0, PROOF_STAT.replace('10:700:', '10:701:'));
+      }
+    };
+    const result = await s.cleanup(['23', '--scratch', scratch]);
+    const reason = 'Docker filesystem relationship is unverifiable: native identity changed since initial observation';
+    assert.equal(result.exitCode, 4);
+    assert.deepEqual(result.out, [
+      `retained container aaaaaaaaaaaa: ${reason}`,
+      `retained scratch ${scratch}: ${reason}`,
+      `retained worktree ${s.worktree}: ${reason}`,
+      'retained branch job/23: its worktree is retained',
+      'closeout-cleanup: 0 removed, 4 retained',
+    ]);
+    assert.equal(dockerCalls(s, 'stop').length, 1);
+    assert.deepEqual(dockerCalls(s, 'rm'), []);
+    assert.equal(s.state.docker.containers[0].State.Running, false);
+    assert.ok(existsSync(scratch));
+    assert.ok(existsSync(s.worktree));
+    assertWorktreeNotRemoved(s);
+    assert.equal(s.state.branch, true);
+    assert.deepEqual(s.unexpected, []);
+  });
+  await t.test('first failed recheck stays latched', async (t) => {
+    const s = scenario(t);
+    const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
+    let observations = 0;
+    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    s.state.onDocker = ([verb]) => {
+      if (verb === 'stop') {
+        s.state.native.ss = () => ++observations === 1 ? reply(1, 'fixture-secret', 'fixture warning') : PROOF_REPLIES.ss;
+      }
+    };
+    const result = await s.cleanup(['23', '--scratch', scratch]);
+    const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable: listener observation command did not complete cleanly';
+    assert.equal(result.exitCode, 4);
+    assert.equal(observations, 1);
+    assert.deepEqual(result.out, [
+      `retained container aaaaaaaaaaaa: ${reason}`,
+      `retained scratch ${scratch}: ${reason}`,
+      `retained worktree ${s.worktree}: ${reason}`,
+      'retained branch job/23: its worktree is retained',
+      'closeout-cleanup: 0 removed, 4 retained',
+    ]);
+    assert.equal(dockerCalls(s, 'stop').length, 1);
+    assert.deepEqual(dockerCalls(s, 'rm'), []);
+    assert.equal(s.state.docker.containers[0].State.Running, false);
+    assert.ok(existsSync(scratch));
+    assert.ok(existsSync(s.worktree));
+    assertWorktreeNotRemoved(s);
+    assert.equal(s.state.branch, true);
+    assert.deepEqual(s.unexpected, []);
+  });
   for (const boundary of ['scratch use check', 'worktree use check', 'worktree status', 'branch deletion']) {
     await t.test(boundary, async (t) => {
       const s = scenario(t);
@@ -1472,7 +1828,11 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
       if (boundary === 'branch deletion') s.state.onWorktreeRemoved = change;
       const result = await s.cleanup(boundary === 'scratch use check' ? ['23', '--scratch', scratch] : ['23']);
       assert.equal(result.exitCode, 4);
-      assert.match(result.out.join('\n'), /native identity changed/);
+      const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable: daemon root differs from local root';
+      let subject = `worktree ${s.worktree}`;
+      if (boundary === 'scratch use check') subject = `scratch ${scratch}`;
+      if (boundary === 'branch deletion') subject = 'branch job/23';
+      assert.ok(result.out.includes(`retained ${subject}: ${reason}`));
       assert.equal(s.state.branch, true);
       if (boundary === 'scratch use check') assert.ok(existsSync(scratch));
       if (boundary === 'branch deletion') {
@@ -1490,7 +1850,7 @@ test('check mode reports an unverified Docker filesystem relationship', async (t
   s.state.native.stat = reply(0, PROOF_STAT.replace('50:2:', '50:3:'));
   const result = await s.cleanup(['--check', target]);
   assert.equal(result.exitCode, 4);
-  assert.match(result.out[0], /^unverifiable path .*Docker filesystem relationship is unverifiable/);
+  assert.equal(result.out[0], `unverifiable path ${target}: docker failed: Docker filesystem relationship is unverifiable: daemon root differs from local root`);
   assert.equal(result.out.at(-1), SUMMARY(0, 0, 0, 1));
   assert.ok(existsSync(target));
   assertNothingChanged(s);

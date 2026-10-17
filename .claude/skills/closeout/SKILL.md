@@ -59,10 +59,26 @@ process list; nothing is inferred from chat.
    `--scratch` once for each verified scratch target, as an absolute path, and `--regenerated` once for each
    ignored dependency or build directory a command regenerates, such as `node_modules`, as a path relative to the
    worktree; leave out a flag with nothing to name. The command finds the worktree registered for `job/<issue>`
-   itself. Bind paths require proof that the selected Linux daemon shares the local filesystem view. A remote,
-   unreadable or ambiguous relationship retains the targets; missing proof tools are not installed automatically.
-   The proof requires readable listener ownership and procfs process metadata; ordinary unprivileged use of
-   rootful Docker and socket activation may retain targets.
+   itself. Bind paths require proof that the selected Linux dockerd shares the caller's filesystem view.
+   Supported listener ownership is dockerd alone or dockerd sharing the listener with PID-1 systemd. Every
+   owner's socket descriptor and executable must verify, and its mount namespace and root must match the
+   unprivileged caller's observations. Remote endpoints, proxy executables, other ownership and differing
+   namespaces or roots, including isolated rootless daemons, retain the targets.
+   A valid ownerless initial listener triggers noninteractive observation using existing matching passwordless
+   sudo permissions. Each metadata command ignores cached credentials without invalidating or updating the
+   owner's cache. Installing or broadening those permissions requires explicit owner approval outside cleanup.
+   Attempts and denials remain subject to the host's sudo auditing policy.
+   The command uses `/usr/bin/sudo -kn -u root -g root --` followed by `/usr/bin/ss -H -xlnpe` and the selected
+   socket filter: `src <socket>`, or `( src <endpoint> or src <socket> )` when its alias differs. For each owner,
+   it uses the same sudo prefix followed by `/usr/bin/stat -L -c '%d:%i:%Hd:%Ld:%F' --` and exactly
+   `/proc/<pid>/fd/<fd>`, `/proc/<pid>/ns/mnt`, `/proc/<pid>/root` and `/proc/<pid>/exe`.
+   [The installed proof implementation](../../../scripts/lib/closeout-cleanup.mjs) owns the exact argument
+   construction. Caller observations stay unprivileged. The command neither prompts nor installs tools or
+   privilege; unavailable passwordless observation retains the targets.
+   Rechecks keep the initial successful observation mode, and a failed or changed proof retains all remaining
+   targets even if later observations recover. The retention reason identifies the failed observation or
+   comparison. An incomplete command or unsupported observation does not establish permission denial;
+   retain the target and report that evidence limit.
    If Docker is not installed, the command skips containers and still checks the local targets. It stops and
    removes each verified-local container whose recorded bind source lies in that worktree, then removes each
    named scratch target, the worktree, and the branch with an ordinary `git branch -d`, checking each target

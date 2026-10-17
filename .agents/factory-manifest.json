@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "04f1323d69d543c41fdbc1ee938e15118d1e5990",
+  "syncedFrom": "d50b300dfe73644e799831011631a8305f9af9b3",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -8,7 +8,7 @@
     },
     {
       "path": ".agents/skills/closeout/SKILL.md",
-      "sha256": "39017face8e488a34104fc37d2aff12dea14fecd3145c59f45de16bbc99145f0"
+      "sha256": "88a1df0ba5c38733b82f6150c8e1bfa46637c9d7ff425c04fef116c6c6325fb4"
     },
     {
       "path": ".agents/skills/codebase-design/DEEPENING.md",
@@ -428,7 +428,7 @@
     },
     {
       "path": ".claude/skills/closeout/SKILL.md",
-      "sha256": "39017face8e488a34104fc37d2aff12dea14fecd3145c59f45de16bbc99145f0"
+      "sha256": "88a1df0ba5c38733b82f6150c8e1bfa46637c9d7ff425c04fef116c6c6325fb4"
     },
     {
       "path": ".claude/skills/codebase-design/DEEPENING.md",
@@ -837,11 +837,11 @@
     },
     {
       "path": "scripts/lib/closeout-cleanup.mjs",
-      "sha256": "3864bd5cac9eb4db2f7e30906c2716c4a35112dc9e7f335ee24c4ab0c332bef6"
+      "sha256": "a177e93bf0b92ab788b72120221b189a723113ab0f0a096c709366241d93ba74"
     },
     {
       "path": "scripts/lib/closeout-cleanup.test.mjs",
-      "sha256": "04fdb4041c51303330f607055187f50efa6abcf384f4084ff7e6b2f09851e276"
+      "sha256": "1c0c860c14dca90a1ccb6e325cac4add74fcc283af75d53fdd2e755a9ab855c5"
     },
     {
       "path": "scripts/lib/codex-hook-adapters.mjs",
@@ -881,7 +881,7 @@
     },
     {
       "path": "scripts/lib/factory-sync.test.mjs",
-      "sha256": "767bad95f06b0934f6fa8166b57654100b8baaec08da85c72a15eef9438ef7e1"
+      "sha256": "e1d97a08817586aec9a44cabfdd25dac2cd3148e6853b26cf67313638a8c05d5"
     },
     {
       "path": "scripts/lib/fake-gh.mjs",
@@ -997,7 +997,7 @@
     },
     {
       "path": "scripts/lib/workflow-contract.test.mjs",
-      "sha256": "5474ac582ac0364fa50ac90321d3beb571b737f3d0169cf723d88d51e8915883"
+      "sha256": "703e5467fa80c0c030aeae3a9e2e7826483aeec49d91922a22298f098514d5c2"
     },
     {
       "path": "scripts/merge-watch.mjs",
