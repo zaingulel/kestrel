@@ -1,6 +1,6 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "d50b300dfe73644e799831011631a8305f9af9b3",
+  "syncedFrom": "acabf56bea5622d4620eeef49331747a183c229a",
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
@@ -8,7 +8,7 @@
     },
     {
       "path": ".agents/skills/closeout/SKILL.md",
-      "sha256": "88a1df0ba5c38733b82f6150c8e1bfa46637c9d7ff425c04fef116c6c6325fb4"
+      "sha256": "d8c30823bb442dc328fe931c40e14ad1757cba63658d41231897fa003ba38e10"
     },
     {
       "path": ".agents/skills/codebase-design/DEEPENING.md",
@@ -428,7 +428,7 @@
     },
     {
       "path": ".claude/skills/closeout/SKILL.md",
-      "sha256": "88a1df0ba5c38733b82f6150c8e1bfa46637c9d7ff425c04fef116c6c6325fb4"
+      "sha256": "d8c30823bb442dc328fe931c40e14ad1757cba63658d41231897fa003ba38e10"
     },
     {
       "path": ".claude/skills/codebase-design/DEEPENING.md",
@@ -708,7 +708,7 @@
     {
       "path": "AGENTS.md",
       "region": "factory-shared",
-      "sha256": "2039bdc3063d08f34515e03cab53666732b9208f7f3f6a5975f70f42a0bb5f81"
+      "sha256": "a68fce1aa5c7f81ab07c82702d4a097b9fddd784b4ccfafafe53787ff5501c23"
     },
     {
       "path": "CLAUDE.md",
@@ -837,11 +837,11 @@
     },
     {
       "path": "scripts/lib/closeout-cleanup.mjs",
-      "sha256": "a177e93bf0b92ab788b72120221b189a723113ab0f0a096c709366241d93ba74"
+      "sha256": "e2ca4ee915b09f9b4a1da90b3afd6a0220ae38bcba14a1c270790855ba64cece"
     },
     {
       "path": "scripts/lib/closeout-cleanup.test.mjs",
-      "sha256": "1c0c860c14dca90a1ccb6e325cac4add74fcc283af75d53fdd2e755a9ab855c5"
+      "sha256": "2620b80ef6abb96e5b894af0768330bbd827e27d04d9192e4dccfec87ffb73f5"
     },
     {
       "path": "scripts/lib/codex-hook-adapters.mjs",
