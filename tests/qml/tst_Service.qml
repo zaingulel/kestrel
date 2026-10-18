@@ -115,8 +115,18 @@ TestCase {
         service.setPlacementFailure(true)
         compare(service.placementAdvisory, "Panel position could not be confirmed. Try closing and reopening it.")
         compare(service.state, "listening")
+        service.setPlacementFailure(true, "configuration")
+        compare(service.placementAdvisory, "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel.")
+        compare(service.state, "listening")
+        service.setPlacementFailure(true, "private transcript canary")
+        service.setPlacementFailure(false, "private transcript canary")
+        service.setPlacementFailure("true", "position")
+        service.setPlacementFailure(0, "configuration")
+        compare(service.placementAdvisory, "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel.")
+        compare(service.state, "listening")
         service.setPlacementFailure(false)
         compare(service.placementAdvisory, "")
+        compare(service.state, "listening")
     }
 
     function test_motion_requires_successful_fresh_true() {

@@ -17,7 +17,6 @@ Item {
     property string operation: ""
     property string nativeOutput: ""
     property string nativeError: ""
-    property string errorBaseline: ""
     property bool commandFailed: false
 
     readonly property string cleanupLua: `
@@ -201,15 +200,14 @@ Item {
     }
 
     function finishCleanup(success) {
-        if (!success && service) service.setPlacementFailure(true)
+        if (!success && service && service.placementAdvisory === "") service.setPlacementFailure(true)
         closingWindow = false
         ownAddress = ""
         pendingCloseVerification = false
         finishOperation()
     }
 
-    function failPlacement() {
-        if (service) service.setPlacementFailure(true)
+    function failPlacement(reason) {
         watchdog.stop()
         if (operation === "cleanup" || operation === "cleanup-errors") {
             operation = "cleanup-stopped"
@@ -218,6 +216,7 @@ Item {
             placement.signal(9)
             return
         }
+        if (service) service.setPlacementFailure(true, reason)
         requestedOpen = false
         if (window.visible || ownAddress !== "") closingWindow = true
         opened = false
@@ -240,7 +239,7 @@ Item {
         if (stage === "cleanup-stopped") { finishCleanup(false); return }
         const output = nativeOutput.trim()
         if (stage === "cleanup" || stage === "cleanup-errors") {
-            if (!success || commandFailed || output !== (stage === "cleanup" ? "ok" : errorBaseline)) {
+            if (!success || commandFailed || output !== (stage === "cleanup" ? "ok" : "")) {
                 finishCleanup(false)
             } else if (stage === "cleanup") {
                 runNative("cleanup-errors", ["/usr/bin/hyprctl", "configerrors"])
@@ -264,14 +263,13 @@ Item {
             return
         }
         if (stage === "baseline") {
-            if (output !== "") { failPlacement(); return }
-            errorBaseline = output
+            if (output !== "") { failPlacement("configuration"); return }
             runNative("prepare", ["/usr/bin/hyprctl", "eval", prepareLua])
         } else if (stage === "prepare" || stage === "verify-open" || stage === "verify-close") {
             if (output !== "ok") { failPlacement(); return }
             runNative(stage + "-errors", ["/usr/bin/hyprctl", "configerrors"])
         } else {
-            if (output !== errorBaseline) { failPlacement(); return }
+            if (output !== "") { failPlacement(); return }
             if (stage === "prepare-errors") {
                 if (!requestedOpen) {
                     runNative("cleanup", ["/usr/bin/hyprctl", "eval", cleanupLua])

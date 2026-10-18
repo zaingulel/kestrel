@@ -35,10 +35,16 @@ Item {
     }
     QtObject { id: placementValue; property string advisory: "" }
 
-    function setPlacementFailure(failed) {
-        if (typeof failed !== "boolean") return
-        placementValue.advisory = failed
-            ? "Panel position could not be confirmed. Try closing and reopening it." : ""
+    function setPlacementFailure(failed, reason) {
+        if (typeof failed !== "boolean"
+                || (reason !== undefined && reason !== "position" && reason !== "configuration")) return
+        if (!failed) {
+            placementValue.advisory = ""
+            return
+        }
+        placementValue.advisory = reason === "configuration"
+            ? "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel."
+            : "Panel position could not be confirmed. Try closing and reopening it."
     }
 
     function conversationExited() {
