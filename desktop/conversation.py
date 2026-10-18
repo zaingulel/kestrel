@@ -95,16 +95,24 @@ class ConversationFeed:
             self.server = None
 
     def connected(self, reader, writer):
+        if self.server is None:
+            writer.transport.abort()
+            return
         task = asyncio.create_task(self.serve(reader, writer))
         self.tasks.add(task)
-        task.add_done_callback(self.observed)
+        task.add_done_callback(lambda task: self.observed(task, writer))
 
-    def observed(self, task):
+    def observed(self, task, writer):
         self.tasks.discard(task)
-        if not task.cancelled():
+        if task.cancelled():
+            writer.transport.abort()
+        else:
             task.exception()
 
     async def serve(self, reader, writer):
+        if self.server is None:
+            writer.transport.abort()
+            return
         current = asyncio.current_task()
         try:
             if self.reader_task is not None or not same_uid(writer.get_extra_info('socket')):
@@ -175,9 +183,9 @@ class ConversationFeed:
 
     async def close(self):
         server = self.server
+        self.server = None
         if server is not None:
             server.close()
-            self.server = None
         tasks = tuple(self.tasks)
         for task in tasks:
             task.cancel()

@@ -147,6 +147,63 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_restart_backpressure_and_cleanup(self):
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            async def shutdown_accepted_connection(delayed_callback):
+                late = conversation.ConversationFeed()
+                accepted = asyncio.get_running_loop().create_future()
+                listener_closed = asyncio.Event()
+                server = closing = client_writer = None
+                native_connected = late.connected
+
+                def capture_connection(reader, writer):
+                    accepted.set_result((reader, writer))
+
+                async def cleanup_accepted():
+                    if accepted.done() and not accepted.cancelled():
+                        accepted.result()[1].transport.abort()
+                    if closing is not None:
+                        closing.cancel()
+                        await asyncio.wait_for(asyncio.gather(closing, return_exceptions=True), 1)
+                    if client_writer is not None:
+                        await conversation.close_writer(client_writer)
+                    await asyncio.wait_for(late.close(), 1)
+                    if server is not None:
+                        await asyncio.wait_for(server.wait_closed(), 1)
+
+                self.addAsyncCleanup(cleanup_accepted)
+                with patch.object(late, 'connected', side_effect=capture_connection):
+                    await late.start()
+                    server = late.server
+                    client_reader, client_writer = await asyncio.open_unix_connection(conversation.address())
+                    peer_reader, peer_writer = await asyncio.wait_for(accepted, 1)
+                    late.user('Private accepted connection canary')
+                    close_listener = server.close
+
+                    def observe_listener_close():
+                        close_listener()
+                        listener_closed.set()
+
+                    try:
+                        with patch.object(server, 'close', side_effect=observe_listener_close):
+                            if delayed_callback:
+                                closing = asyncio.create_task(late.close())
+                                await asyncio.wait_for(listener_closed.wait(), 1)
+                                native_connected(peer_reader, peer_writer)
+                                await asyncio.wait_for(asyncio.shield(closing), 1)
+                            else:
+                                native_connected(peer_reader, peer_writer)
+                                async with asyncio.timeout(1):
+                                    await late.close()
+                        self.assertEqual(await asyncio.wait_for(client_reader.read(), 1), b'')
+                        await asyncio.wait_for(server.wait_closed(), 1)
+                        self.assertFalse(late.tasks)
+                        self.assertEqual(late.turns, [])
+                    finally:
+                        await cleanup_accepted()
+
+            for delayed_callback in (True, False):
+                with self.subTest(delayed_callback=delayed_callback):
+                    await shutdown_accepted_connection(delayed_callback)
+
             feed = conversation.ConversationFeed()
             self.addAsyncCleanup(feed.close)
             await feed.start()
