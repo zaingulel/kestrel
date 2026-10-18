@@ -441,14 +441,15 @@ def match_instant_tool(text):
     if number is not None and 1 <= number <= 2147483647:
         tool = LOCAL_TOOLS['workspace']
         return replace(tool, run=partial(tool.run, number)) if tool.permission is PermissionTier.FREE else None
-    match = re.fullmatch(r'volume (0|[1-9][0-9]?|100)(?: percent| ?%)[.!]?', text)
-    if match:
-        percent = int(match[1])
-    else:
-        match = re.fullmatch(r'volume ([a-z -]+) percent[.!]?', text)
-        if not match or match[1] not in NUMBER_WORDS:
-            return None
-        percent = NUMBER_WORDS[match[1]]
+    match = re.fullmatch(
+        r'(?:(please) )?(?:volume|set (?:the )?volume(?: to)?) '
+        r'(0|[1-9][0-9]?|100|[a-z]+(?:[ -][a-z]+)*?)(?: percent| ?%)?(?: (please))?[.!]?', text,
+    )
+    if not match or (match[1] and match[3]):
+        return None
+    percent = int(match[2]) if match[2].isdecimal() else NUMBER_WORDS.get(match[2])
+    if percent is None:
+        return None
     tool = LOCAL_TOOLS['volume']
     return replace(tool, run=partial(tool.run, percent)) if tool.permission is PermissionTier.FREE else None
 
