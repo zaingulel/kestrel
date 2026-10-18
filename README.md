@@ -203,9 +203,21 @@ The current tools need no permission first, which the answer states. If a regist
 
 Help executes no tool and sends neither the request nor its reply to brain history. It works with an unavailable or still-preparing engine and does not wait for an interrupted brain request. **Repeat that** replays the spoken help, and speaking again interrupts it through the existing playback controls. These are speech-output behaviours; recognition and audible playback still depend on the local speech and audio setup.
 
-## Native status indicator
+## Native conversation panel and status indicator
 
-The optional `local.kestrel` Omarchy plugin in `desktop/` displays Kestrel's status immediately before the clock in the center of the native bar. Install that directory through Omarchy's manual-plugin mechanism at `~/.config/omarchy/plugins/local.kestrel`, enable the plugin and place `local.kestrel` before `omarchy.clock` in `bar.layout.center`, preserving the clock anchor and unrelated settings. The voice service works without the plugin. The indicator supplies status and a hover tooltip; the conversation panel and click toggle are separate work.
+The optional `local.kestrel` Omarchy plugin in `desktop/` displays Kestrel's status immediately before the clock in the center of the native bar. Install that directory through Omarchy's manual-plugin mechanism at `~/.config/omarchy/plugins/local.kestrel`, enable the plugin and place `local.kestrel` before `omarchy.clock` in `bar.layout.center`, preserving the clock anchor and unrelated settings. The voice service works without the plugin. Click the indicator to open or hide the read-only conversation panel. Finalized user turns and Kestrel's speech-output text appear as they happen through the [private conversation feed](#private-conversation-feed). All text is plain text, with no active links or composer. Healthy empty, unavailable, interrupted, incomplete and oversized states use the [design system's fixed messages](docs/DESIGN-SYSTEM.md#conversation-panel), independently of microphone status.
+
+For keyboard access, first verify `Super + F12` is unused in all compositor submaps. Add exactly this binding to `~/.config/hypr/bindings.lua`, preserving existing bindings:
+
+```lua
+o.bind("SUPER + F12", "Kestrel conversation", "omarchy-shell shell toggle local.kestrel")
+```
+
+Reload with `hyprctl reload` and require `hyprctl configerrors` to remain clean. `Super + F12` opens or hides the panel and opening focuses **Close conversation**. `Tab` and `Shift + Tab` cycle between close and transcript; `Enter` or `Space` activates close. In the transcript, arrows, `PageUp`, `PageDown`, `Home` and `End` scroll. `Escape`, native window close and the close button hide the panel and return compositor focus to the prior window. Updates follow the bottom only while it is already being read; earlier text stays in place.
+
+The panel is 448 by 640 logical pixels. First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and native border. Move it with `Super + left drag`; hide/reopen, native close and shell/plugin reload retain its actual dragged position within the current compositor configuration lifetime. Changed monitors or work areas clamp an otherwise off-screen position. A deliberately partial off-screen drag is retained when the work area is unchanged. Compositor configuration reload resets placement to the focused monitor; cross-reload or restart position storage is not provided.
+
+A scoped native rule and synchronous compositor callbacks place the window before visible composition on the verified Hyprland 0.56.2 build. A changed compositor, Quickshell or host version requires native placement verification again. If placement cannot be confirmed, the indicator actively shows **Panel position could not be confirmed. Try closing and reopening it.** in the native tooltip, even when the panel remains hidden. The same advisory appears in the panel and accessible button name; it does not change microphone status.
 
 The three marks distinguish starting, idle, listening, thinking, speaking, brain trouble, not running and status unavailable by shape. The exact shapes, words and accessibility meaning live in the [design system](docs/DESIGN-SYSTEM.md#the-three-marks). Colours and tooltip typography follow the native host's reactive palette, including theme changes. Thinking and speaking move only when a successful, fresh Hyprland animation-preference query explicitly enables animations; unknown or reduced-motion preferences use the still shapes.
 

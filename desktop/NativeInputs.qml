@@ -9,6 +9,8 @@ Item {
     property bool active: false
     property bool watcherPending: false
     property bool watcherStopping: false
+    property bool conversationPending: false
+    property bool conversationStopping: false
     property bool motionPending: false
     property bool motionFailed: false
     property string motionOutput: ""
@@ -17,6 +19,7 @@ Item {
         if (!owner || active) return
         active = true
         startWatcher()
+        startConversation()
         queryMotion()
     }
 
@@ -32,6 +35,20 @@ Item {
         watcherStopping = true
         watcher.running = false
         watcherKill.restart()
+    }
+
+    function startConversation() {
+        if (!active || conversationPending) return
+        conversationPending = true
+        conversationStopping = false
+        conversation.running = true
+    }
+
+    function stopConversation() {
+        if (conversationStopping) return
+        conversationStopping = true
+        conversation.running = false
+        conversationKill.restart()
     }
 
     function queryMotion() {
@@ -80,6 +97,34 @@ Item {
     }
 
     Process {
+        id: conversation
+        command: ["/usr/bin/python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/local.kestrel/conversation.py", "--watch"]
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function(data) {
+                if (!root.conversationStopping && !root.owner.acceptConversationChunk(data)) root.stopConversation()
+            }
+        }
+        stderr: SplitParser { splitMarker: "" }
+        onExited: {
+            conversationKill.stop()
+            root.conversationPending = false
+            root.owner.conversationExited()
+        }
+    }
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.active
+        onTriggered: root.startConversation()
+    }
+    Timer {
+        id: conversationKill
+        interval: 1000
+        onTriggered: conversation.signal(9)
+    }
+
+    Process {
         id: preference
         command: ["/usr/bin/hyprctl", "-j", "getoption", "animations:enabled"]
         stdout: SplitParser {
@@ -118,6 +163,7 @@ Item {
     Component.onDestruction: {
         active = false
         watcher.running = false
+        conversation.running = false
         preference.running = false
     }
 }
