@@ -11,6 +11,7 @@ Item {
     property bool opened: false
     property bool requestedOpen: false
     property bool closingFromHost: false
+    property bool closingWindow: false
     property bool pendingCloseVerification: false
     property string ownAddress: ""
     property string operation: ""
@@ -159,20 +160,23 @@ Item {
     function open(payloadJson) {
         requestedOpen = true
         closingFromHost = false
-        if (operation !== "" || window.visible) return
+        if (operation !== "" || window.visible || closingWindow) return
         watchdog.restart()
         runNative("baseline", ["/usr/bin/hyprctl", "configerrors"])
     }
 
     function close() {
         requestedOpen = false
+        if (window.visible || ownAddress !== "") closingWindow = true
         opened = false
         closingFromHost = true
         window.visible = false
         closingFromHost = false
-        if (operation === "await-open" && ownAddress === "") {
+        if (operation === "await-open" && ownAddress === "" && !pendingCloseVerification) {
             watchdog.restart()
             runNative("cleanup", ["/usr/bin/hyprctl", "eval", cleanupLua])
+        } else if (operation === "" || operation === "await-open" || operation === "await-close") {
+            finishOperation()
         }
     }
 
@@ -188,16 +192,24 @@ Item {
             pendingCloseVerification = false
             watchdog.restart()
             runNative("verify-close", ["/usr/bin/hyprctl", "eval", verifyCloseLua])
+        } else if (closingWindow && ownAddress !== "") {
+            operation = "await-close"
+            watchdog.restart()
+        } else if (requestedOpen && !window.visible && !closingWindow) {
+            open("{}")
         }
+    }
+
+    function finishCleanup(success) {
+        if (!success && service) service.setPlacementFailure(true)
+        closingWindow = false
+        ownAddress = ""
+        pendingCloseVerification = false
+        finishOperation()
     }
 
     function failPlacement() {
         if (service) service.setPlacementFailure(true)
-        requestedOpen = false
-        opened = false
-        closingFromHost = true
-        window.visible = false
-        closingFromHost = false
         watchdog.stop()
         if (operation === "cleanup" || operation === "cleanup-errors") {
             operation = "cleanup-stopped"
@@ -206,6 +218,12 @@ Item {
             placement.signal(9)
             return
         }
+        requestedOpen = false
+        if (window.visible || ownAddress !== "") closingWindow = true
+        opened = false
+        closingFromHost = true
+        window.visible = false
+        closingFromHost = false
         if (placement.running) {
             commandFailed = true
             placement.running = false
@@ -219,21 +237,33 @@ Item {
 
     function commandFinished(success) {
         const stage = operation
-        if (stage === "cleanup-stopped") { finishOperation(); return }
-        if (!success || commandFailed) {
-            if (stage === "cleanup" || stage === "cleanup-errors") finishOperation()
-            else {
-                operation = ""
-                failPlacement()
+        if (stage === "cleanup-stopped") { finishCleanup(false); return }
+        const output = nativeOutput.trim()
+        if (stage === "cleanup" || stage === "cleanup-errors") {
+            if (!success || commandFailed || output !== (stage === "cleanup" ? "ok" : errorBaseline)) {
+                finishCleanup(false)
+            } else if (stage === "cleanup") {
+                runNative("cleanup-errors", ["/usr/bin/hyprctl", "configerrors"])
+            } else {
+                finishCleanup(true)
             }
             return
         }
-        const output = nativeOutput.trim()
+        if (commandFailed) {
+            watchdog.restart()
+            runNative("cleanup", ["/usr/bin/hyprctl", "eval", cleanupLua])
+            return
+        }
+        if (!success) {
+            operation = ""
+            failPlacement()
+            return
+        }
         if (stage === "baseline") {
             if (output !== "") { failPlacement(); return }
             errorBaseline = output
             runNative("prepare", ["/usr/bin/hyprctl", "eval", prepareLua])
-        } else if (stage === "prepare" || stage === "verify-open" || stage === "verify-close" || stage === "cleanup") {
+        } else if (stage === "prepare" || stage === "verify-open" || stage === "verify-close") {
             if (output !== "ok") { failPlacement(); return }
             runNative(stage + "-errors", ["/usr/bin/hyprctl", "configerrors"])
         } else {
@@ -252,7 +282,7 @@ Item {
                     opened = true
                     if (service) service.setPlacementFailure(false)
                 }
-                if (stage === "verify-close-errors") ownAddress = ""
+                if (stage === "verify-close-errors") closingWindow = false
                 finishOperation()
             }
         }
@@ -269,10 +299,16 @@ Item {
                 if (root.operation === "await-open" && root.requestedOpen)
                     root.runNative("verify-open", ["/usr/bin/hyprctl", "eval", root.verifyOpenLua])
             } else if (event.name === "closewindow" && root.ownAddress !== "" && event.data === root.ownAddress) {
+                const ownedClose = root.closingWindow
+                root.ownAddress = ""
+                root.closingWindow = true
                 root.opened = false
-                root.requestedOpen = false
                 root.pendingCloseVerification = true
-                if (root.operation === "" || root.operation === "await-open") root.finishOperation()
+                if (!ownedClose) {
+                    root.requestedOpen = false
+                    if (root.shell) root.shell.hide("local.kestrel")
+                }
+                if (root.operation === "" || root.operation === "await-open" || root.operation === "await-close") root.finishOperation()
             }
         }
     }
@@ -308,8 +344,10 @@ Item {
         color: Color.popups.background
         onClosed: {
             root.opened = false
-            root.requestedOpen = false
-            if (!root.closingFromHost && root.shell) root.shell.hide("local.kestrel")
+            if (!root.closingWindow) {
+                root.requestedOpen = false
+                if (!root.closingFromHost && root.shell) root.shell.hide("local.kestrel")
+            }
         }
         Conversation {
             id: content
