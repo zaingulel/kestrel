@@ -10,7 +10,9 @@ import os
 import pwd
 import re
 import signal
+import stat
 import tempfile
+import time
 
 import torch
 from loguru import logger
@@ -98,7 +100,8 @@ async def run_local_command(argv, *, stdin_data: bytes | None = None):
         'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
         'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',
     }
-    if argv[0] in ('/usr/bin/omarchy-shell', '/usr/bin/hyprctl'):
+    screenshot = tuple(argv) == ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+    if screenshot or argv[0] in ('/usr/bin/omarchy-shell', '/usr/bin/hyprctl'):
         for key in ('WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE'):
             value = os.environ.get(key, '')
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,256}', value):
@@ -106,6 +109,16 @@ async def run_local_command(argv, *, stdin_data: bytes | None = None):
             env[key] = value
         if argv[0] == '/usr/bin/omarchy-shell':
             env['OMARCHY_PATH'] = '/usr/share/omarchy'
+    if screenshot:
+        env['HOME'] = pwd.getpwuid(uid).pw_dir
+        env['OMARCHY_PATH'] = '/usr/share/omarchy'
+        for key in ('OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR'):
+            if key in os.environ:
+                value = os.environ[key]
+                if (not os.path.isabs(value) or len(value) > 4096
+                        or re.search(r'[\x00-\x1f\x7f-\x9f]', value)):
+                    raise RuntimeError('screenshot destination unavailable')
+                env[key] = value
     process = None
 
     async def reap():
@@ -412,6 +425,23 @@ async def workspace_action(number: int, *, command=run_local_command) -> Desktop
         return DesktopResult(False, attempted, 'command failed', advisory)
 
 
+async def screenshot_action(*, command=run_local_command) -> DesktopResult:
+    advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
+    started = time.time_ns()
+    try:
+        path = (await command(('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'))).removesuffix('\n')
+        if (not os.path.isabs(path) or re.search(r'[\x00-\x1f\x7f-\x9f]', path)
+                or not re.fullmatch(r'screenshot-[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\.png',
+                                    os.path.basename(path))):
+            return DesktopResult(False, True, 'screenshot unconfirmed', advisory)
+        metadata = os.lstat(path)
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0 and metadata.st_mtime_ns >= started:
+            return DesktopResult(True, True, 'confirmed', None)
+    except (OSError, ValueError, RuntimeError, TimeoutError):
+        pass
+    return DesktopResult(False, True, 'screenshot unconfirmed', advisory)
+
+
 def app_discovery_environment() -> tuple[str, ...]:
     home = pwd.getpwuid(os.getuid()).pw_dir
     data_home = os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local/share')
@@ -474,6 +504,7 @@ LOCAL_TOOLS = {
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track'),
     'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace'),
     'open app': LocalTool(PermissionTier.FREE, open_app, 'open app'),
+    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot'),
 }
 
 
@@ -501,7 +532,7 @@ def match_instant_tool(text):
     if text in ('mute', 'mute.', 'mute!'):
         tool = LOCAL_TOOLS['mute']
         return tool if tool.permission is PermissionTier.FREE else None
-    match = re.fullmatch(r'(pause music|next track)[.!]?', text)
+    match = re.fullmatch(r'(pause music|next track|take a screenshot)[.!]?', text)
     if match:
         tool = LOCAL_TOOLS[match[1]]
         return tool if tool.permission is PermissionTier.FREE else None
