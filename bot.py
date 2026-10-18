@@ -30,7 +30,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.frames.frames import (
-    LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, StartFrame, UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     TTSSpeakFrame, TTSTextFrame,
 )
 from pipecat.services.llm_service import LLMService
@@ -603,9 +604,37 @@ class HermesLLMService(LLMService):
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
         self.status = status
+        self._indicator_ready = False
+        self._indicator_user = False
+        self._indicator_output = False
+        self._indicator_pending = False
+        self._indicator_reply = object()
+        self._indicator_output_reply = None
+        self._indicator_local_reply = None
         self.local_tasks = set()
         self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
+
+    def refresh_indicator(self):
+        if self.status is not None and self._indicator_ready:
+            state = ('listening' if self._indicator_user else
+                     'speaking' if self._indicator_output else
+                     'thinking' if self._indicator_pending else
+                     'trouble' if self.failure else 'idle')
+            self.status.set_state(state)
+
+    def indicator_user_started(self):
+        self._indicator_reply = object()
+        self._indicator_user = True
+        self._indicator_output = False
+        self._indicator_pending = False
+        self._indicator_local_reply = None
+        self.refresh_indicator()
+
+    def indicator_reply_finished(self, token):
+        if token is self._indicator_reply:
+            self._indicator_pending = False
+            self.refresh_indicator()
 
     async def run_local_tool(self, tool):
         async with self.local_tool_lock:
@@ -650,6 +679,7 @@ class HermesLLMService(LLMService):
             self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
             logger.error(self.failure)
+            self.refresh_indicator()
             await self.reap_engine()
 
     def start_preparation(self):
@@ -718,6 +748,7 @@ class HermesLLMService(LLMService):
             self.failure_advisory = advisory
             self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
             logger.error(self.failure)
+            self.refresh_indicator()
             await self.reap_engine()
         finally:
             if self.output is output:
@@ -728,12 +759,18 @@ class HermesLLMService(LLMService):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
+        token = self._indicator_reply
+        self._indicator_user = False
+        self._indicator_pending = True
+        self._indicator_local_reply = token
+        self.refresh_indicator()
         messages = frame.context.get_messages()
         if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
                 and messages[-1].get('role') == 'user'
                 and isinstance(messages[-1].get('content'), str)):
             if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
+                self.indicator_reply_finished(token)
                 return
             if re.fullmatch(r'repeat that[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
@@ -780,7 +817,10 @@ class HermesLLMService(LLMService):
                            if not result.confirmed else None)
                 if message is not None:
                     await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+                else:
+                    self.indicator_reply_finished(token)
                 return
+        self._indicator_local_reply = None
         output = None
         try:
             if self.reader is not None:
@@ -806,7 +846,10 @@ class HermesLLMService(LLMService):
             if self.output is output:
                 self.output = None
             await self.stop_processing_metrics()
-            await self.push_frame(LLMFullResponseEndFrame())
+            end = LLMFullResponseEndFrame()
+            # The output queue, not generation completion, owns the visible reply's end.
+            end.indicator_reply_token = token
+            await self.push_frame(end)
 
 
 def make_llm():
@@ -873,6 +916,22 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
     assistant = aggregators.assistant()
+    if status is not None:
+        llm.status = status
+
+    @transport.input().event_handler('on_after_process_frame')
+    async def indicator_input_ready(processor, frame):
+        if isinstance(frame, StartFrame):
+            llm._indicator_ready = True
+            llm.refresh_indicator()
+
+    @aggregators.user().event_handler('on_before_push_frame')
+    async def indicator_user_turn(processor, frame):
+        if isinstance(frame, UserStartedSpeakingFrame):
+            llm.indicator_user_started()
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            llm._indicator_user = False
+            llm.refresh_indicator()
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):
@@ -887,6 +946,19 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
 
     @output.event_handler('on_after_push_frame')
     async def remember_local_reply(processor, frame):
+        if isinstance(frame, BotStartedSpeakingFrame) and not llm._indicator_user:
+            llm._indicator_output_reply = llm._indicator_reply
+            llm._indicator_output = True
+            llm.refresh_indicator()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            if llm._indicator_output_reply is llm._indicator_reply:
+                llm._indicator_output = False
+                if llm._indicator_local_reply is llm._indicator_reply:
+                    llm.indicator_reply_finished(llm._indicator_output_reply)
+                else:
+                    llm.refresh_indicator()
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            llm.indicator_reply_finished(frame.indicator_reply_token)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 
