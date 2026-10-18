@@ -1855,6 +1855,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop('KESTREL_VOICE', None)
+        runtime = self.voices / 'runtime'
+        runtime.mkdir(mode=0o700)
+        os.environ['XDG_RUNTIME_DIR'] = str(runtime)
         self.audio = Mock(open=AsyncMock(), close=AsyncMock(), failure=None)
         audio = patch.object(bot, "LaptopAudioTransport", return_value=self.audio)
         audio.start()
@@ -1871,6 +1874,108 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         ))
         engine.start()
         self.addCleanup(engine.stop)
+
+    async def test_indicator_startup_and_release_order(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            snapshot = Path(runtime) / 'kestrel/indicator.json'
+            observations = []
+            self.audio.capture = None
+
+            def observe(boundary):
+                exists = snapshot.exists()
+                state = json.loads(snapshot.read_text())['state'] if exists else None
+                observations.append((boundary, exists, state))
+
+            stt = Mock(load=AsyncMock(), close=AsyncMock())
+            self.audio.close.side_effect = lambda: observe('transport-close')
+            loop = asyncio.get_running_loop()
+            with (
+                patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
+                patch.object(bot, 'NemotronSTT', return_value=stt),
+                patch.object(bot, 'run_conversation', new=AsyncMock()),
+                patch.object(bot.ECHO_REMOVAL, 'start', side_effect=lambda callback: observe('echo-start')),
+                patch.object(bot.ECHO_REMOVAL, 'close', side_effect=lambda: observe('echo-close')),
+                patch.object(loop, 'add_signal_handler'),
+                patch.object(loop, 'remove_signal_handler'),
+                patch.object(bot.torch, 'set_num_threads'),
+            ):
+                await bot.run_voice_service()
+            self.assertTrue(observations[0][1], 'Starting status must exist before microphone startup')
+            self.assertEqual(observations[0], ('echo-start', True, 'starting'))
+            self.assertEqual([row[0] for row in observations], ['echo-start', 'transport-close', 'echo-close'])
+            self.assertTrue(all(row[2] != 'released' for row in observations[1:]))
+            self.assertTrue(snapshot.exists(), 'Cleanup must leave a release receipt')
+            self.assertEqual(json.loads(snapshot.read_text())['state'], 'released')
+
+    async def test_indicator_publication_failure_preserves_voice(self):
+        for failure in ('publication', 'delayed-startup', 'model-startup', 'transport-close', 'echo-close', 'echo-failure'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as runtime:
+                self.audio.capture = None
+                self.audio.reset_mock()
+                self.audio.close.side_effect = RuntimeError('transport cleanup failed') if failure == 'transport-close' else None
+                if failure == 'publication':
+                    (Path(runtime) / 'kestrel').symlink_to(self.voices, target_is_directory=True)
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def load(reference_pcm):
+                    entered.set()
+                    if failure == 'delayed-startup':
+                        await release.wait()
+                    if failure == 'model-startup':
+                        raise RuntimeError('model startup failed')
+
+                stt = Mock(load=AsyncMock(side_effect=load), close=AsyncMock())
+                loop = asyncio.get_running_loop()
+                handlers, echo_callbacks = {}, []
+
+                async def converse(*args, **kwargs):
+                    if failure == 'echo-failure':
+                        echo_callbacks[0]()
+                        await asyncio.Event().wait()
+
+                conversation = AsyncMock(side_effect=converse)
+                errors = io.StringIO()
+                with (
+                    patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'run_conversation', conversation),
+                    patch.object(bot.ECHO_REMOVAL, 'start', side_effect=echo_callbacks.append),
+                    patch.object(bot.ECHO_REMOVAL, 'close', side_effect=(
+                        RuntimeError('echo cleanup failed') if failure == 'echo-close' else None)),
+                    patch.object(loop, 'add_signal_handler', side_effect=lambda sig, callback: handlers.update({sig: callback})),
+                    patch.object(loop, 'remove_signal_handler'),
+                    patch.object(bot.os, 'kill', side_effect=lambda pid, sig: handlers[sig]()),
+                    patch.object(bot.torch, 'set_num_threads'),
+                    patch('sys.stderr', errors),
+                ):
+                    task = asyncio.create_task(bot.run_voice_service())
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        snapshot = Path(runtime) / 'kestrel/indicator.json'
+                        if failure == 'delayed-startup':
+                            self.assertEqual(json.loads(snapshot.read_text())['state'], 'starting')
+                            self.assertFalse(task.done())
+                        release.set()
+                        if failure in ('model-startup', 'transport-close', 'echo-close', 'echo-failure'):
+                            with self.assertRaises(RuntimeError):
+                                await asyncio.wait_for(task, 5)
+                        else:
+                            await asyncio.wait_for(task, 5)
+                        stt.close.assert_awaited_once()
+                        self.audio.close.assert_awaited_once()
+                        if failure == 'publication':
+                            conversation.assert_awaited_once()
+                            self.assertEqual(errors.getvalue().count('Microphone use unknown.'), 1)
+                            self.assertFalse(snapshot.exists())
+                        else:
+                            self.assertTrue(snapshot.exists())
+                            expected = 'released' if failure == 'delayed-startup' else 'unavailable'
+                            self.assertEqual(json.loads(snapshot.read_text())['state'], expected)
+                    finally:
+                        release.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
 
     async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
         preparing = asyncio.Event()
@@ -1894,7 +1999,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.close_engine = AsyncMock(wraps=service.close_engine)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.reader.done())
 
@@ -2246,12 +2351,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = Forward(output=True)
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertTrue(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
-                        handle_signals=handle_signals, user_params=bot.LLMUserAggregatorParams(
+                        handle_signals=handle_signals, status=status, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
 

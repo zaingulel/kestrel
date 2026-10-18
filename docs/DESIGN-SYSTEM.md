@@ -69,6 +69,8 @@ Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above
 | State | Shape | Motion |
 | --- | --- | --- |
 | Not running | One unbroken bar, 15 wide and 2 high, at 0.6 opacity | None |
+| Starting | Three outlined 3 by 3 squares with 1-pixel strokes, at full bar-text opacity | None |
+| Status unavailable | Three 3 by 3 squares raised left-to-right by 0, 3 and 6, at full bar-text opacity | None |
 | Idle | Three squares, 3 high, at 0.6 opacity | None |
 | Listening | Three bars, 12 high | None |
 | Thinking | Three squares, one raised by 5 | The raised square steps to the next position every 280 ms |
@@ -82,6 +84,8 @@ A click on the indicator opens the panel, and a second click closes it. Hovering
 | State | Tooltip |
 | --- | --- |
 | Not running | `Kestrel is not running. It is not holding the microphone.` |
+| Starting | `Starting. Microphone may be in use.` |
+| Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Kestrel: idle. Microphone in use. Waiting for you to speak.` |
 | Listening | `Kestrel: listening to you. Microphone in use.` |
 | Thinking | `Kestrel: thinking about your message. Microphone in use.` |
@@ -103,6 +107,8 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 | State | Status sentence |
 | --- | --- |
 | Not running | `Not running. Microphone released by Kestrel.` |
+| Starting | `Starting. Microphone may be in use.` |
+| Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Idle. Microphone in use.` |
 | Listening | `Listening. Microphone in use.` |
 | Thinking | `Thinking. Microphone in use.` |

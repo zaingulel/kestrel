@@ -40,6 +40,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
+from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import HERMES_PYTHON, child_environment
 from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
@@ -588,7 +589,7 @@ def stop_kestrel():
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, *, local_command=None):
+    def __init__(self, *, local_command=None, status=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -601,6 +602,7 @@ class HermesLLMService(LLMService):
         self.failure = None
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
+        self.status = status
         self.local_tasks = set()
         self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
@@ -811,14 +813,20 @@ def make_llm():
     return HermesLLMService()
 
 
-async def bot():
+async def bot(*, status=None):
     preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
     transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
     stt = NemotronSTT()
+    if status is not None:
+        status._transport_released = False
     llm = None
     try:
         await transport.open()
+        if status is not None and transport.capture is not None:
+            status.remember_owner(transport.capture.pid)
         llm = make_llm()
+        if status is not None:
+            llm.status = status
         llm.start_preparation()
         logger.info("Loading local speech models for the conversation")
         await stt.load(preset.pcm)
@@ -833,7 +841,7 @@ async def bot():
             has_audio = has_audio or bool(frame.audio)
         if not has_audio:
             raise RuntimeError('VoxCPM preparation produced no audio')
-        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True)
+        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True, status=status)
     finally:
         try:
             if llm is not None:
@@ -846,11 +854,13 @@ async def bot():
                 await stt.close()
             finally:
                 await transport.close()
+                if status is not None:
+                    status._transport_released = True
                 if transport.failure:
                     raise RuntimeError(transport.failure)
 
 
-async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False):
+async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -911,6 +921,9 @@ async def run_voice_service():
     task = asyncio.current_task()
     stopping = False
     echo_failure = None
+    orderly = False
+    status = IndicatorStatus()
+    status.set_state('starting')
 
     def cancel():
         nonlocal stopping
@@ -923,18 +936,34 @@ async def run_voice_service():
         echo_failure = "Echo removal has stopped. Restart Kestrel."
         stop_kestrel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, cancel)
+    heartbeat = asyncio.create_task(status.heartbeat())
     try:
-        ECHO_REMOVAL.start(echo_stopped)
-        try:
-            await bot()
-        except asyncio.CancelledError:
-            pass
-    finally:
-        ECHO_REMOVAL.close()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
+            loop.add_signal_handler(sig, cancel)
+        ECHO_REMOVAL.start(echo_stopped)
+        if ECHO_REMOVAL.process is not None:
+            status.remember_owner(ECHO_REMOVAL.process.pid)
+        try:
+            await bot(status=status)
+        except asyncio.CancelledError:
+            orderly = stopping
+        else:
+            orderly = True
+    finally:
+        try:
+            ECHO_REMOVAL.close()
+            if orderly and echo_failure is None and status._transport_released:
+                status.mark_released()
+            else:
+                status.set_state('unavailable')
+        except BaseException:
+            status.set_state('unavailable')
+            raise
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
     if echo_failure:
         raise RuntimeError(echo_failure)
 
