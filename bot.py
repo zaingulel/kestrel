@@ -498,15 +498,15 @@ class HermesLLMService(LLMService):
     async def open_engine(self):
         try:
             managed_brain = os.environ.get('KESTREL_MANAGED_BRAIN', '')
-            if managed_brain:
+            if managed_brain not in ('', '1'):
+                raise RuntimeError('Invalid KESTREL_MANAGED_BRAIN setting. Restart Kestrel and try again.')
+            if managed_brain == '1':
                 try:
-                    if managed_brain != '1':
-                        raise ValueError('Invalid managed brain marker')
                     await run_local_command([
                         '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
                     ])
                 except Exception as error:
-                    raise RuntimeError('kestrel-brain.service is unavailable. Restart Kestrel and try again.') from error
+                    raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
             self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
             async with asyncio.timeout(ENGINE_TIMEOUT):
                 self.process = await asyncio.create_subprocess_exec(

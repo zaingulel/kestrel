@@ -6,7 +6,7 @@ PartOf=graphical-session.target kestrel-voice.service
 Type=exec
 WorkingDirectory=%h/Projects/zaingulel/kestrel
 ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh
-ExecStartPost=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh
+ExecStartPost=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh
 TimeoutStartSec=130s
 TimeoutStopSec=15s
 Restart=no

@@ -2456,6 +2456,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await close()
 
     async def test_volume_bypasses_pending_brain_and_history(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('KESTREL_MANAGED_BRAIN', None)
+        status_patch = patch.object(bot, 'run_local_command', AsyncMock())
+        status = status_patch.start()
+        self.addCleanup(status_patch.stop)
         held = threading.Event()
         release = threading.Event()
 
@@ -2560,9 +2567,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(preparation.done())
         self.assertIsNotNone(processes[0][0].returncode)
         self.assertFalse(processes[0][1].exists())
+        status.assert_not_awaited()
 
     async def test_failed_managed_brain_does_not_contact_unrelated_provider(self):
-        for marker, error in [('1', RuntimeError('inactive')), ('1', FileNotFoundError('systemctl unavailable')),
+        for marker, error in [('1', RuntimeError('command failed')), ('1', RuntimeError('command unavailable')),
                               ('invalid', None)]:
             with self.subTest(marker=marker, status_error=error):
                 brain = ScriptedBrain([[({'content': 'Unrelated provider reply.'}, None), ({}, 'stop')]])
@@ -2581,8 +2589,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((len(brain.requests), len(processes)), (0, 0),
                                          'Failed managed startup must not contact another provider or start Hermes')
                         self.assertIsNone(transport.llm.home)
-                        self.assertIn('kestrel-brain.service', transport.llm.failure)
-                        self.assertIn('Restart Kestrel', transport.llm.failure)
+                        if marker == '1':
+                            self.assertIn(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.',
+                                          transport.llm.failure)
+                        else:
+                            self.assertEqual(transport.llm.failure,
+                                             'Hermes engine unavailable: Invalid KESTREL_MANAGED_BRAIN setting. '
+                                             'Restart Kestrel and try again.')
                         self.assertTrue(spoken.empty())
                         self.assertTrue(committed.empty())
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())

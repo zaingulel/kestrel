@@ -180,7 +180,7 @@ class NativeHermesTests(unittest.TestCase):
         for name in ('bot.py', 'hermes_worker.py'):
             for node in ast.walk(ast.parse((ROOT / name).read_text())):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    endpoints.extend(re.findall(r"""https?://[^"'\s]+""", node.value))
+                    endpoints.extend(re.findall(r"""https?://[^"'\s]*""", node.value))
         self.assertEqual(endpoints, ['http://127.0.0.1:8080/v1'])
 
     def test_bonsai_default_configuration(self):
@@ -512,12 +512,16 @@ class BonsaiStartupTests(unittest.TestCase):
         shutil.copyfile(ROOT / 'check-brain-ready.sh', root / 'check-brain-ready.sh')
         return root
 
-    def run_readiness(self, root):
+    def run_readiness(self, root, main_pid=None):
+        environment = dict(os.environ, PATH=f'{root}:/usr/bin:/bin',
+                           http_proxy='http://poison.invalid:99', HTTP_PROXY='http://poison.invalid:99',
+                           ALL_PROXY='http://poison.invalid:99', HOME=str(root), CURL_HOME=str(root))
+        environment.pop('MAINPID', None)
+        if main_pid is not None:
+            environment['MAINPID'] = main_pid
         return subprocess.run(
             ['/usr/bin/bash', str(root / 'check-brain-ready.sh')],
-            env=dict(os.environ, PATH=f'{root}:/usr/bin:/bin',
-                     http_proxy='http://poison.invalid:99', HTTP_PROXY='http://poison.invalid:99',
-                     ALL_PROXY='http://poison.invalid:99', HOME=str(root), CURL_HOME=str(root)),
+            env=environment,
             capture_output=True, text=True, timeout=5,
         )
 
@@ -529,6 +533,73 @@ class BonsaiStartupTests(unittest.TestCase):
             '--output', '/dev/null', '--write-out', '%{http_code}',
             'http://127.0.0.1:8080/health',
         ])
+
+    def test_brain_readiness_requires_owned_listener(self):
+        root = self.readiness_fixture()
+
+        class HealthRequest(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), HealthRequest)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'],
+                                 stdin=subprocess.PIPE)
+
+        def close_child():
+            child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+        self.addCleanup(close_child)
+        curl = root / 'curl'
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--connect-to", '
+            f'"127.0.0.1:8080:127.0.0.1:{server.server_port}"])\n'
+        )
+        curl.chmod(0o755)
+        lsof = root / 'lsof'
+        lsof.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            'arguments = sys.argv[1:]\n'
+            'assert arguments == ["-nP", "-a", "-p", arguments[3], "-iTCP@127.0.0.1:8080", "-sTCP:LISTEN", "-t"]\n'
+            f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(arguments))\n'
+            'os.execv("/usr/bin/lsof", ["lsof", *arguments[:4], '
+            f'"-iTCP@127.0.0.1:{server.server_port}", *arguments[5:]])\n'
+        )
+        lsof.chmod(0o755)
+        self.assertIsNone(child.poll())
+        for pid, owns_listener in [(child.pid, False), (os.getpid(), True)]:
+            with self.subTest(pid=pid, owns_listener=owns_listener):
+                result = self.run_readiness(root, str(pid))
+                self.assert_readiness_arguments(root)
+                if owns_listener:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0,
+                                        'HTTP 200 from an unrelated listener must not admit the wrong live PID')
+                    self.assertIn('Bonsai did not become ready.', result.stderr)
+                self.assertTrue((root / 'lsof-arguments.json').exists(), 'Readiness must invoke lsof')
+                self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
+                    '-nP', '-a', '-p', str(pid), '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                ])
 
     def test_brain_readiness_requires_200_and_success(self):
         root = self.readiness_fixture()
@@ -552,6 +623,52 @@ class BonsaiStartupTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.',
                                   result.stderr)
+
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'print("200", end="")\n'
+        )
+        timeout = root / 'timeout'
+        timeout.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "timeout-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'os.execvp(sys.argv[4], sys.argv[4:])\n'
+        )
+        timeout.chmod(0o755)
+        lsof = root / 'lsof'
+        cases = [('23', '23', 0), ('23', '', 0), ('23', '23\n24', 0), ('23', '24', 0),
+                 ('23', '', 1), ('23', '', 127), ('23', '', 124), ('', '23', 0), ('invalid', '23', 0)]
+        for pid, output, code in cases:
+            with self.subTest(pid=pid, ownership=output, exit_code=code):
+                for name in ('timeout-arguments.json', 'lsof-arguments.json'):
+                    (root / name).unlink(missing_ok=True)
+                lsof.write_text(
+                    '#!/usr/bin/python3\nimport json, pathlib, sys\n'
+                    f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+                    f'print({output!r}, end="")\nsys.exit({code})\n'
+                )
+                lsof.chmod(0o755)
+                result = self.run_readiness(root, pid)
+                self.assert_readiness_arguments(root)
+                if pid == '23':
+                    self.assertEqual(json.loads((root / 'timeout-arguments.json').read_text()), [
+                        '--signal=TERM', '--kill-after=1s', '2s', 'lsof', '-nP', '-a', '-p', pid,
+                        '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                    ])
+                    self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
+                        '-nP', '-a', '-p', pid, '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                    ])
+                else:
+                    self.assertFalse((root / 'timeout-arguments.json').exists())
+                    self.assertFalse((root / 'lsof-arguments.json').exists())
+                if pid == '23' and output == '23' and code == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.',
+                                  result.stderr)
+                self.assertEqual(result.stdout, '')
 
     def test_brain_readiness_wire_and_redirect_refusal(self):
         root = self.readiness_fixture()
@@ -620,7 +737,8 @@ class BonsaiStartupTests(unittest.TestCase):
         prefix = '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash '
         self.assertEqual(brain['Service']['ExecStart'], prefix + '%h/Projects/zaingulel/kestrel/run-brain.sh')
         self.assertEqual(brain['Service']['ExecStartPost'],
-                         prefix + '%h/Projects/zaingulel/kestrel/check-brain-ready.sh')
+                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
+                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
         self.assertNotIn('Install', brain)
         self.assertEqual(voice['Service']['ExecStart'], '%h/Projects/zaingulel/kestrel/run-voice.sh')
         self.assertEqual(voice['Service']['KillMode'], 'mixed')
