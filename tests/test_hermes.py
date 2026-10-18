@@ -595,7 +595,8 @@ class BonsaiStartupTests(unittest.TestCase):
                 else:
                     self.assertNotEqual(result.returncode, 0,
                                         'HTTP 200 from an unrelated listener must not admit the wrong live PID')
-                    self.assertIn('Bonsai did not become ready.', result.stderr)
+                    self.assertIn('Bonsai listener ownership could not be verified. '
+                                  'Check kestrel-brain.service and port 8080, then restart Kestrel.', result.stderr)
                 self.assertTrue((root / 'lsof-arguments.json').exists(), 'Readiness must invoke lsof')
                 self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
                     '-nP', '-a', '-p', str(pid), '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
@@ -666,7 +667,7 @@ class BonsaiStartupTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                 else:
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.',
+                    self.assertIn('Bonsai listener ownership could not be verified. Check kestrel-brain.service and port 8080, then restart Kestrel.',
                                   result.stderr)
                 self.assertEqual(result.stdout, '')
 

@@ -19,6 +19,8 @@ if status="$(curl -q --noproxy '*' --fail --silent --show-error \
     [[ "$owner" == "$MAINPID" ]]; then
     exit 0
   fi
+  printf '%s\n' 'Bonsai listener ownership could not be verified. Check kestrel-brain.service and port 8080, then restart Kestrel.' >&2
+  exit 1
 fi
 printf '%s\n' 'Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.' >&2
 exit 1
