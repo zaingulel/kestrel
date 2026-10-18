@@ -1,0 +1,15 @@
+[Unit]
+Description=Kestrel local Bonsai brain
+PartOf=graphical-session.target kestrel-voice.service
+
+[Service]
+Type=exec
+WorkingDirectory=%h/Projects/zaingulel/kestrel
+ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh
+ExecStartPost=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh
+TimeoutStartSec=130s
+TimeoutStopSec=15s
+Restart=no
+KillMode=control-group
+StandardOutput=append:%h/Projects/zaingulel/kestrel/.runtime/brain-server.log
+StandardError=inherit

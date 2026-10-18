@@ -107,7 +107,7 @@ Installed-engine evidence is required locally; its absence blocks delivery. Host
 skips native cases when the interpreter is absent: those skips do not prove installed-engine behaviour,
 and local native results do not prove hosted execution. Tracked recognition adapter tests use doubles and
 do not establish actual recognition-worker execution. Controlled providers and speech doubles do not prove
-live recognition accuracy, physical playback, the Ally network, Saluki's answers or spoken latency.
+live recognition accuracy, physical playback, live Bonsai answers or graphical-login startup or spoken latency.
 
 ## 3. Evidence classes stay distinct
 

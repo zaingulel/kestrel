@@ -8,12 +8,12 @@ from pathlib import Path
 import sys
 
 HERMES_PYTHON = Path('/home/zain/.local/share/mise/installs/pipx-hermes-agent/0.19.0/hermes-agent/bin/python')
-ALLY_URL = 'http://192.168.0.150:1234/v1'
+BONSAI_URL = 'http://127.0.0.1:8080/v1'
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Use plain spoken text without markdown, lists, or stage directions. "
-    "This session is a conversation trial. You have no tools, desktop access, web access, "
+    "This session is a local conversation. You have no tools, desktop access, web access, "
     "or persistent memory. Be honest about that and never claim to have performed an action. "
     "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
     "for a request to mute, explain that the owner must say mute on its own. "
@@ -34,7 +34,7 @@ def child_environment(home):
     return environment
 
 
-def main(*, base_url=ALLY_URL):
+def main(*, base_url=BONSAI_URL):
     wire = sys.stdout
 
     def emit(event):
@@ -61,7 +61,7 @@ def main(*, base_url=ALLY_URL):
 
             agent = AIAgent(
                 base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
-                model='underdog-saluki-27b-1.0', enabled_toolsets=[], disabled_toolsets=['terminal'],
+                model='bonsai-2-9b', enabled_toolsets=[], disabled_toolsets=['terminal'],
                 skip_memory=True, skip_context_files=True, load_soul_identity=False,
                 session_db=None, fallback_model=None, save_trajectories=False,
                 checkpoints_enabled=False, quiet_mode=True, max_tokens=180,

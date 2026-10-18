@@ -1,4 +1,4 @@
-"""First local Kestrel conversation trial."""
+"""Local Kestrel conversation orchestration."""
 
 import asyncio
 from copy import deepcopy
@@ -572,7 +572,7 @@ class HermesLLMService(LLMService):
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = "I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again."
+                        advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
                         raise RuntimeError(event['error'])
                     else:
                         raise RuntimeError('Invalid or incomplete Hermes response')

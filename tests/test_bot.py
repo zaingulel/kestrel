@@ -2684,7 +2684,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(committed.empty())
             await self.assert_failed_reply(
                 transport, spoken, committed, 'Answer after failed preparation.',
-                expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.",
+                expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
             )
             self.assertEqual(len(brain.requests), 1)
         finally:
@@ -3446,10 +3446,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertIsNotNone(processes[0][0].returncode)
         await self.assert_failed_reply(transport, spoken, committed, 'Try another request.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
 
     async def test_partial_native_reply_speaks_failure(self):
@@ -3457,7 +3457,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.',
-                                         expected_advisory="I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again.")
+                                         expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertIn('Incomplete synthetic reply.', context)
         self.assertIsNotNone(processes[0][0].returncode)
 
