@@ -405,6 +405,13 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
             'volume one hundred percent': 100, 'volume 0 percent': 0,
             'volume 30%': 30, 'volume 30 %': 30, 'volume 100 percent': 100,
             ' VOLUME THIRTY PERCENT! ': 30, 'Volume 1%.': 1,
+            'volume thirty%': 30, 'please volume 30%': 30, 'volume 30 percent please': 30,
+            'volume fifty%': 50, 'volume two percent': 2, 'volume 0%': 0, 'set volume 30': 30,
+            'set volume to thirty percent': 30, 'set the volume thirty-one': 31,
+            'set the volume to forty two %': 42, 'please set volume to 100': 100,
+            'set the volume to one hundred percent please!': 100,
+            ' PLEASE SET THE VOLUME TO ZERO. ': 0, 'set volume to 1% please.': 1,
+            **{f'set the volume to {percent}': percent for percent in range(101)},
         }
         for text, percent in phrases.items():
             with self.subTest(text=text):
@@ -420,19 +427,33 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                     await tool.run(command=command)
                     action.assert_awaited_once_with(percent, command=command)
         for text in (
+            'volume one', 'Volume two.', 'volume zero', 'volume 30',
+            'please volume two', 'volume zero please!',
             'volume 101 percent', 'volume -1 percent', 'volume +30 percent',
             'volume 030 percent', 'volume 00%', 'volume 30.0 percent', 'volume ٣٠ percent',
-            'volume thirty%', 'volume hundred percent', 'volume twenty ten percent',
+            'volume hundred percent', 'volume twenty ten percent',
             'volume thirty  one percent', 'volume thirty--one percent', 'volume thirty percent?',
-            'volume 30%!!', '"volume 30%"', 'do not volume 30%', 'please volume 30%',
-            'volume 30 percent please', 'volume 30 percent and mute', 'volume\n30 percent',
+            'volume 30%!!', '"volume 30%"', 'do not volume 30%',
+            'volume 30 percent and mute', 'volume\n30 percent',
             'volume\t30 percent', 'volume  30 percent', 'volume 1e2 percent', '',
+            '30', 'volume to 30', 'set the volume to', 'set volume to 101',
+            'set the volume to -1', 'set the volume to +30', 'set the volume to 030',
+            'set the volume to 00', 'set the volume to 30.0', 'set the volume to ٣٠',
+            'set the volume to hundred', 'set volume to twenty ten', 'set volume to 1e2',
+            'please set volume to 30 please', 'please please volume 30',
+            'set volume to 30 please please', 'set the volume to 30?',
+            '"set the volume to 30"', 'set the volume to 30!!',
+            'do not set the volume to 30', "don't set the volume to 30",
+            'never set the volume to 30', 'set the volume to 30 and mute',
+            'please set the volume to 30 and tell me a fact',
+            'set  the volume to 30', 'set the volume  to 30', 'set the volume to  30',
+            'set the volume to\n30', 'set the volume to\t30',
         ):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
             with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(permission, AsyncMock(), 'volume')):
-                self.assertIsNone(bot.match_instant_tool('volume thirty percent'))
+                self.assertIsNone(bot.match_instant_tool('set the volume to 30'))
 
 
 class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
@@ -2468,11 +2489,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 {'role': 'user', 'content': 'Hello.'},
             ])
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-            await self.finish_user_turn(transport, 'volume thirty percent')
+            await self.finish_user_turn(transport, 'set the volume to 30')
             barrier = DataFrame()
             await transport.input().queue_frame(barrier)
             self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
             self.assertEqual(command.await_count, 11)
+            self.assertEqual(command.await_args_list.count(
+                call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')),
+            ), 1)
             self.assertFalse(preparation.done())
             self.assertFalse(release.is_set())
             self.assertEqual(len(brain.requests), 1)
@@ -2522,7 +2546,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(committed.empty())
                 self.assertEqual(len(brain.requests), 2)
                 self.assertIn(
-                    'Kestrel handles volume <level> percent locally, from zero to one hundred percent.',
+                    'Kestrel handles volume <level> percent or %, set volume [to] <level>, and set the volume [to] <level> locally.',
                     ' '.join(m['content'] for m in brain.requests[1][2]['messages'] if m['role'] == 'system'),
                 )
                 self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
@@ -3091,14 +3115,17 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         brain = ScriptedBrain([
             [({'content': 'Invalid level is conversation.'}, None), ({}, 'stop')],
             [({'content': 'Longer phrase is conversation.'}, None), ({}, 'stop')],
+            [({'content': 'Negated request is conversation.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('An invalid or longer turn cannot act'))
         transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
         for index, segment, tail, expected, reply in (
-            (0, 'volume 101 percent', None, 'volume 101 percent', 'Invalid level is conversation.'),
-            (1, 'volume thirty percent', 'and tell me a fact.',
-             'volume thirty percent and tell me a fact.', 'Longer phrase is conversation.'),
+            (0, 'set the volume to 101', None, 'set the volume to 101', 'Invalid level is conversation.'),
+            (1, 'set the volume to thirty percent', 'and tell me a fact.',
+             'set the volume to thirty percent and tell me a fact.', 'Longer phrase is conversation.'),
+            (2, 'do not set the volume to 30', None,
+             'do not set the volume to 30', 'Negated request is conversation.'),
         ):
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await transport.input().queue_frame(
