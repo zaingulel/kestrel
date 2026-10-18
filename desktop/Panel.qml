@@ -254,6 +254,10 @@ Item {
             runNative("cleanup", ["/usr/bin/hyprctl", "eval", cleanupLua])
             return
         }
+        if (stage === "verify-open" && closingWindow) {
+            finishOperation()
+            return
+        }
         if (!success) {
             operation = ""
             failPlacement()
