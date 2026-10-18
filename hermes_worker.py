@@ -17,9 +17,10 @@ SYSTEM_PROMPT = (
     "or persistent memory. Be honest about that and never claim to have performed an action. "
     "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
     "for a request to mute, explain that the owner must say mute on its own. "
-    "Kestrel handles volume <level>, set volume [to] <level>, and set the volume [to] <level> locally. "
-    "The owner must say one form on its own, with a whole-number level from zero to one hundred, "
-    "an optional percent or % suffix, and optional please at either end, never both. "
+    "Kestrel handles volume <level> percent or %, set volume [to] <level>, and set the volume [to] <level> locally. "
+    "The owner must finish a standalone request with a whole-number level from zero to one hundred. "
+    "A percent or % suffix is required after volume <level> and optional after the set forms; "
+    "one please is allowed at either end, never both. "
     "You cannot invoke that action or any other tool."
 )
 

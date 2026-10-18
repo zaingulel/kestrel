@@ -442,12 +442,16 @@ def match_instant_tool(text):
         tool = LOCAL_TOOLS['workspace']
         return replace(tool, run=partial(tool.run, number)) if tool.permission is PermissionTier.FREE else None
     match = re.fullmatch(
-        r'(?:(please) )?(?:volume|set (?:the )?volume(?: to)?) '
-        r'(0|[1-9][0-9]?|100|[a-z]+(?:[ -][a-z]+)*?)(?: percent| ?%)?(?: (please))?[.!]?', text,
+        r'(?:(?P<leading_please>please) )?'
+        r'(?P<command>volume|set (?:the )?volume(?: to)?) '
+        r'(?P<level>0|[1-9][0-9]?|100|[a-z]+(?:[ -][a-z]+)*?)'
+        r'(?P<unit> percent| ?%)?(?: (?P<trailing_please>please))?[.!]?', text,
     )
-    if not match or (match[1] and match[3]):
+    if not match or (match['leading_please'] and match['trailing_please']):
         return None
-    percent = int(match[2]) if match[2].isdecimal() else NUMBER_WORDS.get(match[2])
+    if match['command'] == 'volume' and match['unit'] is None:
+        return None
+    percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
     if percent is None:
         return None
     tool = LOCAL_TOOLS['volume']

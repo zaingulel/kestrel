@@ -406,7 +406,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
             'volume 30%': 30, 'volume 30 %': 30, 'volume 100 percent': 100,
             ' VOLUME THIRTY PERCENT! ': 30, 'Volume 1%.': 1,
             'volume thirty%': 30, 'please volume 30%': 30, 'volume 30 percent please': 30,
-            'volume fifty%': 50, 'volume 30': 30, 'set volume 30': 30,
+            'volume fifty%': 50, 'volume two percent': 2, 'volume 0%': 0, 'set volume 30': 30,
             'set volume to thirty percent': 30, 'set the volume thirty-one': 31,
             'set the volume to forty two %': 42, 'please set volume to 100': 100,
             'set the volume to one hundred percent please!': 100,
@@ -427,6 +427,8 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                     await tool.run(command=command)
                     action.assert_awaited_once_with(percent, command=command)
         for text in (
+            'volume one', 'Volume two.', 'volume zero', 'volume 30',
+            'please volume two', 'volume zero please!',
             'volume 101 percent', 'volume -1 percent', 'volume +30 percent',
             'volume 030 percent', 'volume 00%', 'volume 30.0 percent', 'volume ٣٠ percent',
             'volume hundred percent', 'volume twenty ten percent',
@@ -2544,7 +2546,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(committed.empty())
                 self.assertEqual(len(brain.requests), 2)
                 self.assertIn(
-                    'Kestrel handles volume <level>, set volume [to] <level>, and set the volume [to] <level> locally.',
+                    'Kestrel handles volume <level> percent or %, set volume [to] <level>, and set the volume [to] <level> locally.',
                     ' '.join(m['content'] for m in brain.requests[1][2]['messages'] if m['role'] == 'system'),
                 )
                 self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
