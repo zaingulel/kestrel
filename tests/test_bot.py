@@ -1205,6 +1205,10 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=key):
                 self.assertIsInstance(tool.spoken, str)
                 self.assertTrue(tool.spoken.strip())
+                if tool.permission is bot.PermissionTier.FREE and key != 'open app':
+                    matched = bot.match_instant_tool(tool.spoken)
+                    self.assertIsNotNone(matched)
+                    self.assertEqual(matched.subject, tool.subject)
         action = AsyncMock(side_effect=AssertionError('Formatting help cannot execute tools'))
         free = bot.PermissionTier.FREE
         ask = bot.PermissionTier.ASK
