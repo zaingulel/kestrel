@@ -1,5 +1,6 @@
 """Native Hermes boundary proofs; each child uses an owned, disposable runtime home."""
 
+import ast
 import configparser
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -7,6 +8,7 @@ from io import BytesIO, StringIO, TextIOWrapper
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import sqlite3
@@ -173,6 +175,14 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_conversation_source_confines_literal_endpoints(self):
+        endpoints = []
+        for name in ('bot.py', 'hermes_worker.py'):
+            for node in ast.walk(ast.parse((ROOT / name).read_text())):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    endpoints.extend(re.findall(r"""https?://[^"'\s]+""", node.value))
+        self.assertEqual(endpoints, ['http://127.0.0.1:8080/v1'])
+
     def test_bonsai_default_configuration(self):
         import hermes_worker
 
@@ -598,10 +608,9 @@ class BonsaiStartupTests(unittest.TestCase):
             self.assertEqual(unit['Service']['Restart'], 'no')
             self.assertEqual(unit['Service']['TimeoutStopSec'], '15s')
             self.assertIn('graphical-session.target', unit['Unit']['PartOf'].split())
-            self.assertNotIn('graphical-session.target', unit['Unit'].get('After', '').split())
             self.assertEqual(unit['Service']['WorkingDirectory'], '%h/Projects/zaingulel/kestrel')
             self.assertEqual(unit['Service']['StandardOutput'],
-                             f'append:%h/Projects/zaingulel/kestrel/.runtime/{"brain" if name == "brain" else "voice"}-server.log')
+                             f'append:%h/Projects/zaingulel/kestrel/.runtime/{name}-server.log')
             self.assertEqual(unit['Service']['StandardError'], 'inherit')
         brain, voice = units['brain'], units['voice']
         self.assertEqual(set(brain['Unit']['PartOf'].split()),
@@ -615,9 +624,10 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertNotIn('Install', brain)
         self.assertEqual(voice['Service']['ExecStart'], '%h/Projects/zaingulel/kestrel/run-voice.sh')
         self.assertEqual(voice['Service']['KillMode'], 'mixed')
-        self.assertEqual(voice['Service']['Environment'], 'KESTREL_VOICE=irish-female')
+        self.assertEqual(set(voice['Service']['Environment'].split()),
+                         {'KESTREL_VOICE=irish-female', 'KESTREL_MANAGED_BRAIN=1'})
         self.assertEqual(voice['Install']['WantedBy'], 'graphical-session.target')
-        for directive in ('Wants', 'After'):
-            self.assertEqual(set(voice['Unit'][directive].split()),
-                             {'kestrel-brain.service', 'pipewire.service', 'wireplumber.service'})
+        dependencies = {'kestrel-brain.service', 'pipewire.service', 'wireplumber.service'}
+        self.assertEqual(set(voice['Unit']['Wants'].split()), dependencies)
+        self.assertEqual(set(voice['Unit']['After'].split()), dependencies | {'graphical-session.target'})
         self.assertFalse(voice['Unit'].get('Requires'))

@@ -2561,7 +2561,60 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(processes[0][0].returncode)
         self.assertFalse(processes[0][1].exists())
 
+    async def test_failed_managed_brain_does_not_contact_unrelated_provider(self):
+        for marker, error in [('1', RuntimeError('inactive')), ('1', FileNotFoundError('systemctl unavailable')),
+                              ('invalid', None)]:
+            with self.subTest(marker=marker, status_error=error):
+                brain = ScriptedBrain([[({'content': 'Unrelated provider reply.'}, None), ({}, 'stop')]])
+                self.addCleanup(brain.close)
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+                ])
+                status = AsyncMock(side_effect=error)
+                with (patch.dict(os.environ, {'KESTREL_MANAGED_BRAIN': marker}),
+                      patch.object(bot, 'run_local_command', status)):
+                    transport, spoken, committed, _, processes, close = await self.open_session(
+                        brain, local_command=command, prepare_engine=True,
+                    )
+                    try:
+                        await asyncio.wait_for(asyncio.shield(transport.llm.reader), 5)
+                        self.assertEqual((len(brain.requests), len(processes)), (0, 0),
+                                         'Failed managed startup must not contact another provider or start Hermes')
+                        self.assertIsNone(transport.llm.home)
+                        self.assertIn('kestrel-brain.service', transport.llm.failure)
+                        self.assertIn('Restart Kestrel', transport.llm.failure)
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'mute')
+                        barrier = DataFrame()
+                        await transport.input().queue_frame(barrier)
+                        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                        self.assertEqual(command.await_count, 7)
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        await self.assert_failed_reply(
+                            transport, spoken, committed, 'Answer after failed managed startup.',
+                            expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.",
+                        )
+                        self.assertEqual(brain.requests, [])
+                        self.assertEqual(processes, [])
+                        if marker == '1':
+                            status.assert_awaited_once_with([
+                                '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
+                            ])
+                        else:
+                            status.assert_not_awaited()
+                    finally:
+                        await close()
+
     async def test_native_preparation_is_silent_private_and_does_not_block_mute(self):
+        managed = patch.dict(os.environ, {'KESTREL_MANAGED_BRAIN': '1'})
+        managed.start()
+        self.addCleanup(managed.stop)
+        status_patch = patch.object(bot, 'run_local_command', AsyncMock(return_value=''))
+        status = status_patch.start()
+        self.addCleanup(status_patch.stop)
         held = threading.Event()
         release = threading.Event()
 
@@ -2586,6 +2639,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         preparation = transport.llm.reader
         try:
             self.assertTrue(await asyncio.to_thread(held.wait, 5))
+            status.assert_awaited_once_with([
+                '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
+            ])
             self.assertFalse(preparation.done())
             self.assertTrue(spoken.empty())
             self.assertTrue(committed.empty())
