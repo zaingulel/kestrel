@@ -65,6 +65,7 @@ class LocalTool:
     permission: PermissionTier
     run: object
     subject: str
+    spoken: str
 
 
 @dataclass(frozen=True)
@@ -500,13 +501,13 @@ async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool
 
 
 LOCAL_TOOLS = {
-    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute'),
-    'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
-    'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause'),
-    'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track'),
-    'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace'),
-    'open app': LocalTool(PermissionTier.FREE, open_app, 'open app'),
-    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot'),
+    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute', 'mute'),
+    'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume', 'set the volume to thirty'),
+    'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause', 'pause music'),
+    'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track', 'next track'),
+    'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace', 'workspace three'),
+    'open app': LocalTool(PermissionTier.FREE, open_app, 'open app', "open followed by an installed app's exact name"),
+    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot'),
 }
 
 
@@ -527,6 +528,24 @@ NUMBER_WORDS = {
     },
     'one hundred': 100,
 }
+
+
+def capability_help() -> str:
+    free = []
+    ask = []
+    for tool in LOCAL_TOOLS.values():
+        if tool.permission == PermissionTier.FREE:
+            free.append(tool.spoken)
+        elif tool.permission == PermissionTier.ASK:
+            ask.append(tool.spoken)
+    if not free and not ask:
+        return "No local tools are available. Check Kestrel's setup."
+    message = ('You can say: ' + '; '.join(free) + '.' if free else
+               'No local tools are available without permission.')
+    if ask:
+        return (message + ' Permission required: ' + '; '.join(ask)
+                + ". These tools aren't available by voice yet.")
+    return message + ' None of these tools needs permission first.'
 
 
 def match_instant_tool(text):
@@ -721,6 +740,11 @@ class HermesLLMService(LLMService):
                     self.last_spoken_reply or "I haven't said anything to repeat yet.",
                     append_to_context=False,
                 ))
+                return
+            if messages[-1]['content'].strip().lower() in (
+                    'what can i say', 'what can i say.', 'what can i say!', 'what can i say?'):
+                messages.pop()
+                await self.push_frame(TTSSpeakFrame(capability_help(), append_to_context=False))
                 return
             tool = match_instant_tool(messages[-1]['content'])
             name = match_app_name(messages[-1]['content']) if tool is None else None

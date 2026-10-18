@@ -423,7 +423,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(tool, bot.LOCAL_TOOLS['volume'])
                 command = AsyncMock()
                 action = AsyncMock()
-                with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(bot.PermissionTier.FREE, action, 'volume')):
+                with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(bot.PermissionTier.FREE, action, 'volume', 'set the volume to thirty')):
                     tool = bot.match_instant_tool(text)
                     await tool.run(command=command)
                     action.assert_awaited_once_with(percent, command=command)
@@ -453,7 +453,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(permission, AsyncMock(), 'volume')):
+            with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(permission, AsyncMock(), 'volume', 'set the volume to thirty')):
                 self.assertIsNone(bot.match_instant_tool('set the volume to 30'))
 
 
@@ -475,7 +475,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                      phrase + ' please', 'take a\nscreenshot', phrase + '; echo bad'):
             self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase)}):
+            with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
                 self.assertIsNone(bot.match_instant_tool(phrase))
         argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
         advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
@@ -541,7 +541,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                          phrase + ' please', phrase.replace(' ', '\n'), phrase + '; echo bad'):
                 self.assertIsNone(bot.match_instant_tool(text))
             for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-                with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase)}):
+                with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
                     self.assertIsNone(bot.match_instant_tool(phrase))
             status = ('/usr/bin/omarchy-shell', 'media', 'status')
             write = ('/usr/bin/omarchy-shell', 'media', action)
@@ -804,7 +804,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                      'workspace one hundred one', 'workspace 1' + '0' * 5000):
             self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, workspace=bot.LocalTool(permission, AsyncMock(), 'workspace')):
+            with patch.dict(bot.LOCAL_TOOLS, workspace=bot.LocalTool(permission, AsyncMock(), 'workspace', 'workspace three')):
                 self.assertIsNone(bot.match_instant_tool('workspace three'))
         command = AsyncMock()
         for value in (True, False, 0, -1, 2147483648, '3', 3.0, None):
@@ -1043,7 +1043,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(nonmatch=phrase):
                     self.assertIsNone(bot.match_app_name(phrase))
             for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-                with patch.dict(bot.LOCAL_TOOLS, {'open app': bot.LocalTool(permission, AsyncMock(), 'open app')}):
+                with patch.dict(bot.LOCAL_TOOLS, {'open app': bot.LocalTool(permission, AsyncMock(), 'open app', "open followed by an installed app's exact name")}):
                     self.assertIsNone(bot.match_app_name('open FixtureApp'))
             for phrase, expected_name in (('open UnknownApp', 'UnknownApp'), ('open AmbiguousApp', 'AmbiguousApp'),
                                           ('open FixtureApp and tell me a fact', 'FixtureApp and tell me a fact')):
@@ -1163,6 +1163,82 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_help_only_handles_completed_exact_user_turns(self):
+        expected = ("You can say: mute; set the volume to thirty; pause music; next track; "
+                    "workspace three; open followed by an installed app's exact name; take a screenshot. "
+                    "None of these tools needs permission first.")
+        accepted = ('what can I say', ' WHAT CAN I SAY. ', 'What can I say!', ' What Can I Say? ')
+        rejected = ('"what can I say"', 'what can I say!!', 'what can I say??',
+                    'do not tell me what can I say', 'what can I say please', 'what can I say? now',
+                    'what can I say; mute', 'what can I say && delete everything', 'what\ncan I say', '')
+        prior = [{'role': 'user', 'content': 'Earlier question.'},
+                 {'role': 'assistant', 'content': 'Earlier answer.'}]
+        cases = [([{'role': 'user', 'content': text}], False, FrameDirection.DOWNSTREAM,
+                  text in accepted) for text in (*accepted, *rejected)]
+        cases.extend([
+            ([{'role': 'user', 'content': 'what can I say'}], True, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'user', 'content': 'what can I say'}], False, FrameDirection.UPSTREAM, False),
+            ([{'role': 'assistant', 'content': 'what can I say'}], False, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'system', 'content': 'what can I say'}], False, FrameDirection.DOWNSTREAM, False),
+            ([{'role': 'user', 'content': [{'type': 'text', 'text': 'what can I say'}]}],
+             False, FrameDirection.DOWNSTREAM, False),
+            ([], False, FrameDirection.DOWNSTREAM, False),
+        ])
+        for messages, speculative, direction, consumes in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Help must not invoke a desktop command'))
+                service = bot.HermesLLMService(local_command=command)
+                service.failure = 'This direct processor fixture has no engine'
+                service.push_frame = AsyncMock()
+                context = bot.LLMContext(deepcopy(prior + messages))
+                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                self.assertEqual(context.get_messages(), prior if consumes else prior + messages)
+                replies = [args.args[0] for args in service.push_frame.await_args_list
+                           if isinstance(args.args[0], bot.TTSSpeakFrame)]
+                self.assertEqual([frame.text for frame in replies], [expected] if consumes else [])
+                if consumes:
+                    self.assertFalse(replies[0].append_to_context)
+                command.assert_not_awaited()
+
+    def test_help_tracks_registry_permissions_without_inventing_tools(self):
+        for key, tool in bot.LOCAL_TOOLS.items():
+            with self.subTest(tool=key):
+                self.assertIsInstance(tool.spoken, str)
+                self.assertTrue(tool.spoken.strip())
+        action = AsyncMock(side_effect=AssertionError('Formatting help cannot execute tools'))
+        free = bot.PermissionTier.FREE
+        ask = bot.PermissionTier.ASK
+        forbidden = bot.PermissionTier.FORBIDDEN
+        with patch.dict(bot.LOCAL_TOOLS, {
+            'alpha': bot.LocalTool(free, action, 'alpha', 'alpha example'),
+        }, clear=True):
+            self.assertEqual(bot.capability_help(),
+                             'You can say: alpha example. None of these tools needs permission first.')
+            bot.LOCAL_TOOLS['beta'] = bot.LocalTool(free, action, 'beta', 'beta example')
+            self.assertEqual(bot.capability_help(),
+                             'You can say: alpha example; beta example. None of these tools needs permission first.')
+            del bot.LOCAL_TOOLS['alpha']
+            self.assertEqual(bot.capability_help(),
+                             'You can say: beta example. None of these tools needs permission first.')
+            bot.LOCAL_TOOLS['beta'] = bot.LocalTool(ask, action, 'beta', 'beta example')
+            self.assertEqual(bot.capability_help(),
+                             'No local tools are available without permission. Permission required: beta example. '
+                             "These tools aren't available by voice yet.")
+            bot.LOCAL_TOOLS['alpha'] = bot.LocalTool(free, action, 'alpha', 'alpha example')
+            bot.LOCAL_TOOLS['gamma'] = bot.LocalTool(ask, action, 'gamma', 'gamma example')
+            self.assertEqual(bot.capability_help(),
+                             'You can say: alpha example. Permission required: beta example; gamma example. '
+                             "These tools aren't available by voice yet.")
+            bot.LOCAL_TOOLS['beta'] = bot.LocalTool(forbidden, action, 'beta', 'beta example')
+            del bot.LOCAL_TOOLS['gamma']
+            self.assertEqual(bot.capability_help(),
+                             'You can say: alpha example. None of these tools needs permission first.')
+            del bot.LOCAL_TOOLS['alpha']
+            self.assertEqual(bot.capability_help(), "No local tools are available. Check Kestrel's setup.")
+            bot.LOCAL_TOOLS.clear()
+            self.assertEqual(bot.capability_help(), "No local tools are available. Check Kestrel's setup.")
+        action.assert_not_called()
+
     async def test_repeat_only_handles_completed_exact_user_turns(self):
         accepted = ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? ')
         rejected = ('"repeat that"', 'repeat that!!', 'repeat that??', 'do not repeat that',
@@ -1267,7 +1343,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, mute=bot.LocalTool(permission, AsyncMock(), 'mute')):
+            with patch.dict(bot.LOCAL_TOOLS, mute=bot.LocalTool(permission, AsyncMock(), 'mute', 'mute')):
                 self.assertIsNone(bot.match_instant_tool('mute'))
 
 
@@ -3427,6 +3503,50 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(processes[0][1].exists())
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
+
+    async def test_capability_help_is_spoken_locally_without_history(self):
+        expected = ("You can say: mute; set the volume to thirty; pause music; next track; "
+                    "workspace three; open followed by an installed app's exact name; take a screenshot. "
+                    "None of these tools needs permission first.")
+        brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=AssertionError('Help cannot execute desktop actions'))
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        for text in ('what can I say?', 'repeat that'):
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, text)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(committed.empty())
+            self.assertEqual(brain.requests, [])
+            command.assert_not_awaited()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'An ordinary question.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Ordinary reply.')
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'An ordinary question.'}])
+        command.assert_not_awaited()
+        await close()
+
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, _, processes, close = await self.open_session(None, local_command=command)
+            for text in ('what can I say', 'repeat that'):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, text)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(committed.empty())
+                self.assertEqual(len(brain.requests), 1)
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0][0])
+                command.assert_not_awaited()
+            await close()
 
     async def test_repeat_preserves_spoken_reply_without_brain_or_history(self):
         brain = ScriptedBrain([
