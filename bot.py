@@ -51,6 +51,7 @@ VOLUME_TIMEOUT = 5
 DESKTOP_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
 LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
+SCREENSHOT_COMMAND = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
 
 
 class PermissionTier(Enum):
@@ -100,18 +101,17 @@ async def run_local_command(argv, *, stdin_data: bytes | None = None):
         'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
         'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',
     }
-    screenshot = tuple(argv) == ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+    screenshot = tuple(argv) == SCREENSHOT_COMMAND
     if screenshot or argv[0] in ('/usr/bin/omarchy-shell', '/usr/bin/hyprctl'):
         for key in ('WAYLAND_DISPLAY', 'HYPRLAND_INSTANCE_SIGNATURE'):
             value = os.environ.get(key, '')
             if not re.fullmatch(r'[A-Za-z0-9_.-]{1,256}', value):
                 raise RuntimeError('desktop session unavailable')
             env[key] = value
-        if argv[0] == '/usr/bin/omarchy-shell':
+        if screenshot or argv[0] == '/usr/bin/omarchy-shell':
             env['OMARCHY_PATH'] = '/usr/share/omarchy'
     if screenshot:
         env['HOME'] = pwd.getpwuid(uid).pw_dir
-        env['OMARCHY_PATH'] = '/usr/share/omarchy'
         for key in ('OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR'):
             if key in os.environ:
                 value = os.environ[key]
@@ -429,7 +429,7 @@ async def screenshot_action(*, command=run_local_command) -> DesktopResult:
     advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
     started = time.time_ns()
     try:
-        path = (await command(('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'))).removesuffix('\n')
+        path = (await command(SCREENSHOT_COMMAND)).removesuffix('\n')
         if (not os.path.isabs(path) or re.search(r'[\x00-\x1f\x7f-\x9f]', path)
                 or not re.fullmatch(r'screenshot-[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\.png',
                                     os.path.basename(path))):
@@ -439,7 +439,7 @@ async def screenshot_action(*, command=run_local_command) -> DesktopResult:
             return DesktopResult(True, True, 'confirmed', None)
     except RuntimeError as error:
         return DesktopResult(False, True, str(error), advisory)
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, TimeoutError):
         pass
     return DesktopResult(False, True, 'screenshot unconfirmed', advisory)
 
