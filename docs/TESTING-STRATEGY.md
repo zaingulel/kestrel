@@ -109,6 +109,19 @@ and local native results do not prove hosted execution. Tracked recognition adap
 do not establish actual recognition-worker execution. Controlled providers and speech doubles do not prove
 live recognition accuracy, physical playback, live Bonsai answers or graphical-login startup or spoken latency.
 
+### Native indicator evidence
+
+The native Qt Test cases load the production `desktop/Service.qml` with its real host-injected shell naturally unassigned. They call its actual bounded ingress and trigger its named expiry Timer signals, without starting native children or replacing the shell. The production Loader starts `NativeInputs.qml` only after host injection. The fixed status-byte and observed Hyprland object contracts supply the policy oracle; the [design system](DESIGN-SYSTEM.md#the-three-marks) supplies literal geometry and motion values for the actual `Marks.qml` objects.
+
+```sh
+node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes
+node scripts/run-log.mjs indicator qml -- /usr/lib/qt6/bin/qmllint desktop/Service.qml desktop/Marks.qml
+```
+
+Require all four selected functions to execute without skips; report Qt initialization and cleanup separately from the four slice cases. These checks do not prove native Process bridging, host injection, palette refresh, accessible-tree exposure, rendered contrast, physical audio or microphone release. Drive those boundaries on the installed Omarchy host and record native observations separately, including watcher termination and reaping on reload or removal. A missing native observation is unavailable evidence.
+
+Native integration and visual receipts are invalidated by changes to desktop QML or the manifest, Qt tests, or the installed Qt, Quickshell or Omarchy environment. Policy and geometry receipts rerun for their corresponding production or test changes. Runtime privacy and release claims also retain the Python lifecycle and reader evidence; native rendering alone cannot establish them.
+
 ## 3. Evidence classes stay distinct
 
 Functional green never substitutes for structural, lint, generated-artifact, documentation, accessibility,

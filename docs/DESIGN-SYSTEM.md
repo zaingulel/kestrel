@@ -1,6 +1,6 @@
 # Design system
 
-The current conversation uses native laptop audio, operated as [README.md](../README.md) describes. It has no browser client. The desktop notification pattern and approved future indicator and panel patterns live below.
+The current conversation uses native laptop audio, operated as [README.md](../README.md) describes. It has no browser client. The desktop notification, native indicator and approved future panel patterns live below.
 
 This manual owns visual controls, interaction and accessibility. Spoken behaviour and product meaning stay with [AGENTS.md](../AGENTS.md#product) and the operation manual.
 
@@ -27,20 +27,20 @@ The indicator sits in Omarchy's top bar immediately left of the clock, and the c
 
 ### Colour
 
-Kestrel defines no colour of its own. Every colour is a role read from the active Omarchy theme in `~/.local/state/omarchy/current/theme/`: the `shell.toml` key where the theme sets one, otherwise the `colors.toml` value. A `shell.toml` value that names another role resolves to that role.
+Kestrel defines no colour of its own. It binds the native host's reactive `Color` palette, which resolves the active Omarchy theme's `shell.toml` roles and `colors.toml` fallbacks. Text roles use `Color.flatColor(Color.pick(key, fallback), fallback)` so role aliases resolve through the host. Backgrounds and tooltips use the host's composed roles and native tooltip component.
 
 | Role | `shell.toml` key | `colors.toml` fallback |
 | --- | --- | --- |
 | Bar background | `bar.background` | `background` |
 | Bar text | `bar.text` | `foreground` |
-| Bar active | `bar.active` | `red` |
+| Bar active | `bar.active` | Host urgent (`red`) |
 | Popups background | `popups.background` | `background` |
 | Popups text | `popups.text` | `foreground` |
 | Accent | none | `accent` |
 | Tooltip background, text and border | `tooltip.background`, `tooltip.text`, `tooltip.border` | `background`, `foreground`, `foreground` |
 
 - A background role and the tooltip border are composed with the theme's alpha companion key where the theme sets one, and are fully opaque otherwise: `bar.background-alpha`, `popups.background-alpha`, `tooltip.background-alpha` and `tooltip.border-alpha`.
-- Colours are read again when Omarchy switches theme. Omarchy replaces the theme directory whole and then rewrites `theme.name` beside it, so the reload watches `theme.name`; a watch on the files inside the directory does not survive the switch.
+- Native palette bindings update when the host applies a theme through its shell interface. Kestrel does not parse theme files or watch `theme.name`.
 - Resting marks use their text role at 0.6 opacity. No other colour is derived.
 - State is never carried by colour alone. Bar active marks trouble only; every other indicator state uses bar text.
 - The desktop supplies the window border, the font family (`monospace`) and the window opacity. The panel draws no border of its own.
@@ -79,7 +79,7 @@ Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above
 
 Where the desktop asks for reduced motion, nothing loops: thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 
-A click on the indicator opens the panel, and a second click closes it. Hovering shows the state in words:
+The status indicator is static text for assistive technology, with its accessible name equal to the status sentence below. Its marks are decorative and excluded from assistive technology. It has no press action. The approved panel integration will add the button, keyboard route and click toggle. Hovering uses the host tooltip to show the state in words:
 
 | State | Tooltip |
 | --- | --- |
@@ -121,7 +121,7 @@ Every pointer target is at least 24 by 24.
 
 The first approved interface plan must specify native accessible roles, names and actions for controls, keyboard navigation, initial focus, closing and focus restoration. Use [Qt accessibility metadata](https://doc.qt.io/qt-6/accessible-qtquick.html) compatible with the installed Qt version, which the plan must verify. Decorative header marks remain excluded from assistive technology; the adjacent status sentence carries their meaning.
 
-Before build, that plan must bind a verified reduced-motion preference source and the fallback when its signal is absent. A published desktop setting does not prove that the installed backend supplies it. Preserve the still shapes specified above when reduced motion is requested.
+The indicator queries `hyprctl -j getoption animations:enabled` initially and every five seconds, with at most one outstanding query, a one-second watchdog and a 4096-character output limit. Only a successful, fresh object naming `animations:enabled` with boolean `bool: true` enables loops. False, absent, malformed, failed or ten-second-stale results preserve the still shapes above. The host-injected singleton owns the watcher and preference query across monitors.
 
 During the native visual drive, verify keyboard and assistive-technology interaction, pointer target dimensions at the actual display scale, enlarged text and long content. Check that text and controls remain readable and usable. Measure rendered text and control contrast after theme opacity and background composition; inherited theme roles alone are not evidence of sufficient contrast. Record unavailable observations as limitations. Follow the resume skill's visual and accessibility review requirements; browser scans and screenshots alone do not prove native accessibility.
 
