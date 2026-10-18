@@ -20,6 +20,7 @@ from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
     CancelFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
+    TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings, TTSSettings
@@ -47,6 +48,15 @@ LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
 LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
+
+
+@dataclass(eq=False)
+class ConversationAudioContext:
+    reply_token: object | None
+    source_bytes: int = 0
+    previous_text_end: int = 0
+    source_valid: bool = True
+    write_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -245,6 +255,7 @@ class LaptopOutput(BaseOutputTransport):
         self.playback_deadline: float | None = None
         self.write_gate = asyncio.Event()
         self.write_gate.set()
+        self.conversation_audio_context = None
 
     async def start(self, frame):
         await super().start(frame)
@@ -256,6 +267,7 @@ class LaptopOutput(BaseOutputTransport):
             try:
                 # Native sender cancellation discards its queued audio and cancels the pacing wait.
                 await super().process_frame(frame, direction)
+                self.conversation_audio_context = None
                 async with self.write_lock:
                     if self.audio.playback is not None:
                         await self.audio._discard_playback()
@@ -265,27 +277,55 @@ class LaptopOutput(BaseOutputTransport):
         else:
             await super().process_frame(frame, direction)
 
+    async def write_transport_frame(self, frame):
+        if isinstance(frame, TTSStartedFrame):
+            self.conversation_audio_context = getattr(frame, 'conversation_audio_context', None)
+        elif (isinstance(frame, LLMFullResponseEndFrame)
+              and self.conversation_audio_context is not None
+              and self.conversation_audio_context.reply_token is getattr(frame, 'indicator_reply_token', None)):
+            self.conversation_audio_context = None
+        await super().write_transport_frame(frame)
+
+    async def cancel(self, frame):
+        try:
+            await super().cancel(frame)
+        finally:
+            self.conversation_audio_context = None
+
+    async def stop(self, frame):
+        try:
+            await super().stop(frame)
+        finally:
+            self.conversation_audio_context = None
+
     async def write_audio_frame(self, frame) -> bool:
-        await self.write_gate.wait()
-        async with self.write_lock:
-            if self.audio.closed or self.audio.failure or not self.write_gate.is_set():
-                return False
-            try:
-                if self.audio.playback is None:
-                    await self.audio._open_playback()
-                duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
-                deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
-                self.audio.playback.stdin.write(frame.audio)
-                await self.audio.playback.stdin.drain()
-                now = monotonic()
-                if deadline <= now:
-                    deadline = now + duration
-                await sleep(deadline - now)
-                self.playback_deadline = deadline
-                return True
-            except (OSError, RuntimeError):
-                self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
-                return False
+        context = self.conversation_audio_context
+        success = False
+        try:
+            await self.write_gate.wait()
+            async with self.write_lock:
+                if self.audio.closed or self.audio.failure or not self.write_gate.is_set():
+                    return False
+                try:
+                    if self.audio.playback is None:
+                        await self.audio._open_playback()
+                    duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+                    deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
+                    self.audio.playback.stdin.write(frame.audio)
+                    await self.audio.playback.stdin.drain()
+                    now = monotonic()
+                    if deadline <= now:
+                        deadline = now + duration
+                    await sleep(deadline - now)
+                    self.playback_deadline = deadline
+                    success = True
+                    return True
+                except (OSError, RuntimeError):
+                    self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+                    return False
+        finally:
+            if context is not None and not success:
+                context.write_failed = True
 
 
 class LaptopAudioTransport:
@@ -1258,8 +1298,43 @@ class VoxCPMTTS(TTSService):
         self.preset = preset
         self._generation_lock = asyncio.Lock()
         self._spoken_reply = SpokenReplyText()
+        self._conversation_reply_token = None
+        self._conversation_context_tokens = {}
+        self._conversation_audio_contexts = {}
+
+    async def on_turn_context_created(self, context_id: str):
+        await super().on_turn_context_created(context_id)
+        self._conversation_context_tokens[context_id] = self._conversation_reply_token
+
+    async def on_audio_context_completed(self, context_id: str):
+        await super().on_audio_context_completed(context_id)
+        self._conversation_context_tokens.pop(context_id, None)
+        self._conversation_audio_contexts.pop(context_id, None)
+
+    async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+        if direction == FrameDirection.DOWNSTREAM:
+            context_id = getattr(frame, 'context_id', None)
+            if isinstance(frame, TTSStartedFrame):
+                context = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
+                self._conversation_audio_contexts[context_id] = context
+                frame.conversation_audio_context = context
+            else:
+                context = self._conversation_audio_contexts.get(context_id)
+                if isinstance(frame, TTSAudioRawFrame) and context is not None:
+                    context.source_bytes += len(frame.audio)
+                    context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
+                elif isinstance(frame, TTSTextFrame) and frame.text.strip():
+                    frame.conversation_audio_span = ((context, context.previous_text_end, context.source_bytes, context.source_valid)
+                                                     if context is not None else (None, 0, 0, False))
+                    if context is not None:
+                        context.previous_text_end = context.source_bytes
+                elif isinstance(frame, TTSStoppedFrame):
+                    frame.conversation_audio_context = context
+        await super().push_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
+        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, (LLMFullResponseStartFrame, TTSSpeakFrame)):
+            self._conversation_reply_token = getattr(frame, 'conversation_reply_token', None)
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
             self._spoken_reply.reset()
         elif direction == FrameDirection.DOWNSTREAM:
@@ -1277,6 +1352,10 @@ class VoxCPMTTS(TTSService):
                 if tail:
                     await super().process_frame(LLMTextFrame(tail), direction)
         await super().process_frame(frame, direction)
+        if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
+            self._conversation_context_tokens.clear()
+            self._conversation_audio_contexts.clear()
+            self._conversation_reply_token = None
 
     async def run_tts(self, text, context_id):
         # Never overlap model calls, including a chunk still finishing after interruption.

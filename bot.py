@@ -32,7 +32,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame, BotStoppedSpeakingFrame, StartFrame, UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
-    TTSSpeakFrame, TTSTextFrame, InterruptionFrame,
+    TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
@@ -608,6 +608,10 @@ class HermesLLMService(LLMService):
         self.conversation = None
         self._conversation_attempt = None
         self._conversation_interrupting = None
+        self._conversation_output_context = None
+        self._conversation_output_bytes = 0
+        self._conversation_pending_spans = []
+        self._conversation_incomplete = False
         self._indicator_ready = False
         self._indicator_user = False
         self._indicator_output = False
@@ -662,8 +666,71 @@ class HermesLLMService(LLMService):
             self.conversation.finish(token, interrupted=interrupted, failed=failed)
         if self._conversation_attempt is token:
             self._conversation_attempt = None
+            self._conversation_output_context = None
+            self._conversation_output_bytes = 0
+            self._conversation_pending_spans.clear()
+            self._conversation_incomplete = False
         if self._conversation_interrupting is token:
             self._conversation_interrupting = None
+
+    def conversation_output(self, frame):
+        if self.conversation is None:
+            return
+        if isinstance(frame, InterruptionFrame):
+            self.finish_conversation_reply(getattr(frame, 'conversation_reply_token', None), interrupted=True)
+            return
+        if isinstance(frame, LLMFullResponseEndFrame):
+            token = frame.indicator_reply_token
+            if token is self._conversation_attempt:
+                context = self._conversation_output_context
+                self.finish_conversation_reply(
+                    token, interrupted=token is self._conversation_interrupting,
+                    failed=frame.conversation_reply_failed or self._conversation_incomplete
+                    or bool(self._conversation_pending_spans) or bool(context and context.write_failed),
+                )
+            return
+        if isinstance(frame, TTSStartedFrame):
+            context = getattr(frame, 'conversation_audio_context', None)
+            if context is not None and context.reply_token is not None and context.reply_token is self._conversation_attempt:
+                previous = self._conversation_output_context
+                self._conversation_incomplete |= bool(self._conversation_pending_spans) or bool(previous and previous.write_failed)
+                self._conversation_output_context = context
+                self._conversation_output_bytes = 0
+                self._conversation_pending_spans.clear()
+            return
+        context = self._conversation_output_context
+        if isinstance(frame, TTSTextFrame) and frame.text.strip():
+            span = getattr(frame, 'conversation_audio_span', None)
+            if span is not None and span[0] is not None and span[0] is not context:
+                return
+            if context is None and self._conversation_attempt is not None:
+                self._conversation_incomplete = True
+        if context is None or context.reply_token is not self._conversation_attempt:
+            return
+        if isinstance(frame, TTSAudioRawFrame):
+            if frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0:
+                self._conversation_output_bytes += len(frame.audio)
+            else:
+                self._conversation_incomplete = True
+        elif isinstance(frame, TTSTextFrame) and frame.text.strip():
+            if span is None or span[0] is not context or not span[3] or span[2] <= span[1]:
+                self._conversation_incomplete = True
+            else:
+                self._conversation_pending_spans.append((span[2], frame.text))
+        elif isinstance(frame, TTSStoppedFrame):
+            if getattr(frame, 'conversation_audio_context', None) is not context:
+                return
+        else:
+            return
+        if not context.write_failed:
+            while self._conversation_pending_spans and self._conversation_pending_spans[0][0] <= self._conversation_output_bytes:
+                _, text = self._conversation_pending_spans.pop(0)
+                self.conversation.spoken(context.reply_token, text)
+        if isinstance(frame, TTSStoppedFrame):
+            self._conversation_incomplete |= bool(self._conversation_pending_spans) or context.write_failed
+            self._conversation_pending_spans.clear()
+            self._conversation_output_context = None
+            self._conversation_output_bytes = 0
 
     async def push_reply_end(self, token, *, failed=False):
         end = LLMFullResponseEndFrame()
@@ -675,8 +742,11 @@ class HermesLLMService(LLMService):
     async def speak_local_reply(self, message, token):
         if self.conversation is not None:
             self._conversation_attempt = token
+            self._conversation_incomplete = False
             self.conversation.begin_reply(token)
-        await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+        frame = TTSSpeakFrame(message, append_to_context=False)
+        frame.conversation_reply_token = self._conversation_attempt
+        await self.push_frame(frame)
         await self.push_reply_end(token)
 
     async def run_local_tool(self, tool):
@@ -816,8 +886,7 @@ class HermesLLMService(LLMService):
             if self.conversation is not None:
                 self.conversation.user(messages[-1]['content'])
             if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
-                if self.conversation is not None:
-                    self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
+                self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
                 messages.pop()
                 self.indicator_reply_finished(token)
                 return
@@ -875,8 +944,11 @@ class HermesLLMService(LLMService):
                 await asyncio.shield(self.reader)
             if self.conversation is not None:
                 self._conversation_attempt = token
+                self._conversation_incomplete = False
                 self.conversation.begin_reply(token)
-            await self.push_frame(LLMFullResponseStartFrame())
+            start = LLMFullResponseStartFrame()
+            start.conversation_reply_token = self._conversation_attempt
+            await self.push_frame(start)
             await self.start_processing_metrics()
             if self.failure:
                 raise RuntimeError(self.failure)
@@ -996,16 +1068,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
                 llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
-        if conversation is not None:
-            if isinstance(frame, InterruptionFrame):
-                llm.finish_conversation_reply(getattr(frame, 'conversation_reply_token', None), interrupted=True)
-            elif isinstance(frame, LLMFullResponseEndFrame):
-                token = frame.indicator_reply_token
-                llm.finish_conversation_reply(
-                    token, interrupted=token is llm._conversation_interrupting, failed=frame.conversation_reply_failed,
-                )
-            elif isinstance(frame, TTSTextFrame):
-                conversation.spoken(llm._indicator_output_reply, frame.text)
+        llm.conversation_output(frame)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 

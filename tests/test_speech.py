@@ -18,7 +18,7 @@ import numpy as np
 from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
-    StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStoppedFrame, TTSTextFrame,
+    StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -499,10 +499,12 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 await self.push_frame(frame, direction)
 
         def chunks(**kwargs):
-            yield np.zeros(4800, dtype=np.float32)
+            if kwargs['text'] != 'No audio.':
+                yield np.zeros(4800 if kwargs['text'] == 'Hello.' else 1500, dtype=np.float32)
 
+        voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
         worker = PipelineWorker(
-            Pipeline([VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET), Sink()]),
+            Pipeline([voice, Sink()]),
             enable_rtvi=False, idle_timeout_secs=None,
         )
         runner = WorkerRunner(handle_sigint=False)
@@ -510,8 +512,11 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         running = asyncio.create_task(runner.run())
         try:
             await asyncio.wait_for(started.wait(), 5)
+            start = LLMFullResponseStartFrame()
+            token = object()
+            start.conversation_reply_token = token
             await worker.queue_frames([
-                LLMFullResponseStartFrame(), LLMTextFrame("Hello. "),
+                start, LLMTextFrame("Hello. "),
                 LLMTextFrame("I am listening."), LLMFullResponseEndFrame(),
             ])
             await asyncio.wait_for(finished.wait(), 5)
@@ -521,6 +526,41 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum(isinstance(f, TTSStoppedFrame) for f in frames), 1)
             end = next(i for i, f in enumerate(frames) if isinstance(f, LLMFullResponseEndFrame))
             self.assertTrue(all(i < end for i, f in enumerate(frames) if isinstance(f, TTSTextFrame)))
+            texts = [f for f in frames if isinstance(f, TTSTextFrame)]
+            first, second = [f.conversation_audio_span for f in texts]
+            context = first[0]
+            self.assertIs(context.reply_token, token)
+            self.assertIs(second[0], context)
+            self.assertEqual(first[1:], (0, 9600, True))
+            self.assertEqual(second[1:], (9600, 12600, True))
+            self.assertIsNot(first, second)
+            self.assertEqual(texts[0].context_id, texts[1].context_id)
+            self.assertIs(next(f for f in frames if isinstance(f, TTSStoppedFrame)).conversation_audio_context, context)
+
+            for unusable in (False, True):
+                finished.clear()
+                frames.clear()
+                await voice.set_usable(not unusable)
+                start = LLMFullResponseStartFrame()
+                start.conversation_reply_token = token
+                await worker.queue_frames([start, LLMTextFrame('No audio.'), LLMFullResponseEndFrame()])
+                await asyncio.wait_for(finished.wait(), 5)
+                text = next(f for f in frames if isinstance(f, TTSTextFrame))
+                self.assertEqual(text.conversation_audio_span[1:], (0, 0, True))
+                self.assertIsNot(text.conversation_audio_span[0], context)
+            await voice.set_usable(True)
+
+            for audio, rate, channels in ((b'\x01\x00', 44100, 1), (b'\x01\x00', 48000, 2), (b'\x01', 48000, 1)):
+                started_frame = TTSStartedFrame(context_id='malformed')
+                await voice.push_frame(started_frame)
+                await voice.push_frame(TTSAudioRawFrame(audio, rate, channels, context_id='malformed'))
+                text = TTSTextFrame('Malformed.', aggregated_by='sentence')
+                text.context_id = 'malformed'
+                await voice.push_frame(text)
+                self.assertEqual(text.conversation_audio_span[1:], (0, len(audio), False))
+                self.assertIs(text.conversation_audio_span[0], started_frame.conversation_audio_context)
+                await voice.push_frame(TTSStoppedFrame(context_id='malformed'))
+                await voice.on_audio_context_completed('malformed')
             await worker.queue_frame(EndFrame())
             await running
         finally:
@@ -1067,16 +1107,36 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
                     try:
                         await transport.open()
+                        receipt = speech.ConversationAudioContext(object())
+                        start = TTSStartedFrame()
+                        start.conversation_audio_context = receipt
+                        await transport.output().write_transport_frame(start)
                         if premature_exit:
                             await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1))
                             await asyncio.wait_for(transport.playback.wait(), 5)
                             await asyncio.wait_for(stopped.wait(), 5)
                             self.assertEqual(transport.failure, "Laptop audio playback failed. Restart Kestrel.")
                             transport.on_stopped.assert_called_once_with()
+                            self.assertFalse(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
+                            self.assertTrue(receipt.write_failed)
                         else:
                             self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
                             self.assertEqual(await asyncio.wait_for(transport.playback.stdout.readexactly(3840), 5), b"P" * 3840)
                             self.assertIsNone(transport.failure)
+                            self.assertFalse(receipt.write_failed)
+                            transport.output().write_gate.clear()
+                            cancelled = asyncio.create_task(transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
+                            asyncio.get_running_loop().call_soon(cancelled.cancel)
+                            with self.assertRaises(asyncio.CancelledError):
+                                await cancelled
+                            transport.output().write_gate.set()
+                            self.assertTrue(receipt.write_failed)
+                            self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
+                            self.assertTrue(receipt.write_failed)
+                            end = LLMFullResponseEndFrame()
+                            end.indicator_reply_token = receipt.reply_token
+                            await transport.output().write_transport_frame(end)
+                            self.assertIsNone(transport.output().conversation_audio_context)
                     finally:
                         await transport.close()
                         await transport.close()
@@ -1108,9 +1168,15 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                         active = asyncio.create_task(transport.open())
                     else:
                         await transport.open()
+                        receipt = speech.ConversationAudioContext(object())
+                        start = TTSStartedFrame()
+                        start.conversation_audio_context = receipt
+                        await transport.output().write_transport_frame(start)
                         active = asyncio.create_task(transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
                     with self.assertRaises((RuntimeError, asyncio.CancelledError)):
                         await active
+                    if failed_spawn == 2:
+                        self.assertTrue(receipt.write_failed)
                     await transport.close()
                     await transport.close()
                 transport.on_stopped.assert_called_once_with()
@@ -1158,6 +1224,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         stt.close = AsyncMock()
         llm = Forward()
         llm.start_preparation = Mock()
+        llm.conversation_output = Mock()
         llm.close_local_tools = AsyncMock()
         llm.close_engine = AsyncMock()
 
@@ -1188,12 +1255,17 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(bot.bot())
             try:
                 await asyncio.wait_for(started.wait(), 5)
+                receipt = speech.ConversationAudioContext(object())
+                start = TTSStartedFrame()
+                start.conversation_audio_context = receipt
+                await transport.output().write_transport_frame(start)
                 await transport.output().queue_frame(TTSAudioRawFrame(b"W" * 3840, 48000, 1))
                 await asyncio.wait_for(drain_entered.wait(), 5)
                 await asyncio.wait_for(error_seen.wait(), 5)
                 with self.assertRaisesRegex(RuntimeError, "Laptop audio playback failed. Restart Kestrel"):
                     await asyncio.wait_for(task, 5)
                 self.assertEqual(transport.failure, "Laptop audio playback failed. Restart Kestrel.")
+                self.assertTrue(receipt.write_failed)
                 transport.on_stopped.assert_called_once_with()
                 for child in (capture, playback):
                     child.kill.assert_called_once_with()

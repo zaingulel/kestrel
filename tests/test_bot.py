@@ -2469,9 +2469,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
+        llm = Forward()
+        llm.conversation_output = Mock()
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=llm, transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -2510,10 +2512,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
+        llm = Forward()
+        llm.conversation_output = Mock()
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=llm, transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -2720,6 +2724,115 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_panel_attributes_each_synthesis_to_delivered_audio(self):
+        brain = ScriptedBrain([
+            [({'content': 'Prepared.'}, None), ({}, 'stop')],
+            [({'content': 'Spoken first. Unheard second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Clean later.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+
+        def finite_chunks(**kwargs):
+            if kwargs['text'] != 'Unheard second.':
+                value = 0.25 if kwargs['text'] == 'Boundary second.' else 0.5
+                yield np.full(4800 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            transport, _, _, interrupted, _, close = await self.open_session(
+                brain, through_service=True, synthesis_chunks=finite_chunks,
+            )
+            output = transport.output()
+            write = output.write_audio_frame
+            written = []
+            final_write = asyncio.Event()
+            release_write = asyncio.Event()
+            self.addCleanup(release_write.set)
+            hold_final = False
+            text_frames = []
+
+            @output.event_handler('on_after_push_frame')
+            async def retain_receipt(processor, frame):
+                if isinstance(frame, TTSTextFrame):
+                    text_frames.append(frame)
+
+            async def observe_write(frame):
+                if hold_final and len(written) == 1:
+                    final_write.set()
+                    await release_write.wait()
+                success = await write(frame)
+                if success:
+                    written.append(frame.audio)
+                return success
+
+            output.write_audio_frame = observe_write
+            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+
+            async def rows_until(predicate):
+                async with asyncio.timeout(5):
+                    while True:
+                        snapshot = json.loads(await reader.readline())
+                        if 'turns' in snapshot and predicate(snapshot['turns']):
+                            return snapshot['turns']
+
+            async def start(text):
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                await self.finish_user_turn(transport, text)
+
+            try:
+                await start('Mixed synthesis.')
+                rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1]['text'], 'Spoken first.')
+                self.assertEqual(rows[-1]['state'], 'failed')
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 4800 + bytes(1920))
+                stale_text = text_frames[0]
+
+                for interrupt in (False, True):
+                    with self.subTest(interrupt=interrupt):
+                        written.clear()
+                        final_write.clear()
+                        release_write.clear()
+                        hold_final = True
+                        await start('Interrupted boundary.' if interrupt else 'Completed boundary.')
+                        await asyncio.wait_for(final_write.wait(), 5)
+                        rows = await rows_until(lambda rows: rows[-2]['text'] in
+                                                ('Interrupted boundary.', 'Completed boundary.')
+                                                and rows[-1]['text'].startswith('Boundary first.'))
+                        self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                        self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                        transport.llm.conversation_output(stale_text)
+                        if interrupt:
+                            interrupted.clear()
+                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                            self.assertEqual(len(written), 1)
+                        else:
+                            release_write.set()
+                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'complete')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 1500 + bytes(1680))
+
+                hold_final = False
+                release_write.set()
+                written.clear()
+                await self.finish_user_turn(transport, 'A clean later turn.')
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'A clean later turn.'
+                                        and rows[-1]['state'] == 'complete')
+                self.assertEqual(rows[-1]['text'], 'Clean later.')
+                self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'interrupted'})
+            finally:
+                release_write.set()
+                writer.close()
+                await writer.wait_closed()
+                await close()
 
     async def test_panel_receives_final_turns_and_spoken_prefix(self):
         blocked, release = threading.Event(), threading.Event()
