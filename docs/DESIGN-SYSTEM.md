@@ -64,7 +64,9 @@ Dimensions and type sizes use Qt logical (device-independent) pixels at Omarchy 
 | Panel width | 448 |
 | Panel height | 640 |
 | Owner turn inset | 32 |
-| Close control width | 33 |
+| Close control minimum side | 33 |
+
+Panel text follows the host's text size. The panel's text scale is the host `Style.fontScale` multiplied by 12/14, so host base size 14 gives exactly the token values above and base size 28 doubles them; a scale that is not a finite positive number falls back to 1. Caption, body and title text, the body line height and the transcript's one-line scroll step are each the token value times the scale, rounded to the nearest pixel and at least 1. The close control stays square, each side the larger of 33 and its glyph's larger rendered extent plus both sides of the focus stroke, and the title row takes the taller of the close control and the title. Panel size, padding, gaps, inset, focus stroke and the marks stay fixed: text wraps within them and the transcript scrolls in the space that remains.
 
 ### The three marks
 
@@ -101,8 +103,8 @@ The status indicator is an accessible button named `Open conversation` or `Close
 A floating window of fixed size, 448 by 640, which the owner moves with `Super` and a left drag.
 
 - **Placement.** First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and the native border. Later openings retain the actual dragged position within the compositor configuration lifetime. When the monitor or its work area changes, clamp a position only if it would leave the panel off screen. Preserve a deliberately partly off-screen drag when that work area has not changed. Compositor configuration reload resets placement; cross-reload or restart storage is not provided.
-- **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its 33 by 33 `Close conversation` button. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. The conversation stays in the voice service while it runs.
-- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the three marks for the current state, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text.
+- **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its square `Close conversation` button, at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. The conversation stays in the voice service while it runs.
+- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the three marks for the current state, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text, wrapping within the header width.
 - **Header marks.** The same drawing, sizes and motion as the bar, in popups text, with resting states at 0.6 opacity and trouble in bar active. They are decorative: no click, tooltip or keyboard focus, and hidden from assistive technology, because the sentence beside them says the state.
 - **Conversation.** Kestrel's turns sit flush left under a bold `Kestrel` label in accent. The owner's turns are inset by 32 under a bold `You` label in popups text. The reply in progress shows `Thinking` or `Speaking` beside its label. All transcript text is plain text, wraps long words and scrolls vertically. Auto-follow only while already at the bottom; updates never jump away from earlier text being read. This read-only panel has no composer, send control or active links.
 - **Empty and failure copy.** A healthy empty feed says `Say something. Kestrel replies after you.` A stale, malformed or disconnected feed clears the transcript and says `Conversation unavailable. Reopen the panel.` An oversized conversation says `Conversation is too large to display. Restart Kestrel to begin a new conversation.` Interrupted or failed rows end with an accent warning triangle and `Reply interrupted.` or `Reply could not be completed.` These states make no microphone claim.

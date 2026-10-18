@@ -366,6 +366,8 @@ Item {
             announcementsEnabled: window.visible && root.opened
             conversationMessage: root.service ? root.service.conversationMessage : "Conversation unavailable. Reopen the panel."
             placementAdvisory: root.service ? root.service.placementAdvisory : ""
+            // The host scale is relative to base size 12; the panel tokens are set at base size 14.
+            textScale: Style.fontScale * 12 / 14
             onCloseRequested: root.requestClose()
         }
     }

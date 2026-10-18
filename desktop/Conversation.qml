@@ -19,6 +19,12 @@ FocusScope {
     property string announcementSession: ""
     property var seenTerminalStates: []
     property bool baselineRequired: true
+    property real textScale: 1
+    readonly property real effectiveTextScale: isFinite(textScale) && textScale > 0 ? textScale : 1
+    readonly property int captionPixelSize: Math.max(1, Math.round(12 * effectiveTextScale))
+    readonly property int bodyPixelSize: Math.max(1, Math.round(14 * effectiveTextScale))
+    readonly property int titlePixelSize: Math.max(1, Math.round(16 * effectiveTextScale))
+    readonly property int bodyLineHeight: Math.max(1, Math.round(21 * effectiveTextScale))
     signal closeRequested()
     implicitWidth: 448
     implicitHeight: 640
@@ -71,35 +77,40 @@ FocusScope {
         spacing: 9
         Item {
             width: parent.width
-            height: 33
+            height: Math.max(closeButton.height, titleText.implicitHeight)
             Text {
+                id: titleText
+                objectName: "conversationTitle"
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Kestrel"
                 textFormat: Text.PlainText
                 color: root.ink
                 font.family: "monospace"
-                font.pixelSize: 16
+                font.pixelSize: root.titlePixelSize
                 font.bold: true
             }
             Button {
                 id: closeButton
                 objectName: "closeConversation"
                 anchors.right: parent.right
-                width: 33
-                height: 33
+                anchors.verticalCenter: parent.verticalCenter
+                // 4 leaves room for the 2-pixel focus stroke on both sides of the glyph.
+                width: Math.max(33, Math.ceil(Math.max(closeGlyph.implicitWidth, closeGlyph.implicitHeight)) + 4)
+                height: width
                 padding: 0
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close conversation"
                 KeyNavigation.tab: transcript
                 KeyNavigation.backtab: transcript
                 contentItem: Text {
+                    id: closeGlyph
                     text: "×"
                     textFormat: Text.PlainText
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                     font.family: "monospace"
-                    font.pixelSize: 16
+                    font.pixelSize: root.titlePixelSize
                     color: root.ink
                     Accessible.ignored: true
                 }
@@ -130,8 +141,8 @@ FocusScope {
                 wrapMode: Text.Wrap
                 color: root.ink
                 font.family: "monospace"
-                font.pixelSize: 14
-                lineHeight: 21
+                font.pixelSize: root.bodyPixelSize
+                lineHeight: root.bodyLineHeight
                 lineHeightMode: Text.FixedHeight
             }
         }
@@ -139,9 +150,10 @@ FocusScope {
             width: parent.width
             text: "Move: Super + left drag"
             textFormat: Text.PlainText
+            wrapMode: Text.Wrap
             color: root.ink
             font.family: "monospace"
-            font.pixelSize: 12
+            font.pixelSize: root.captionPixelSize
         }
         Text {
             width: parent.width
@@ -151,8 +163,8 @@ FocusScope {
             wrapMode: Text.Wrap
             color: root.ink
             font.family: "monospace"
-            font.pixelSize: 14
-            lineHeight: 21
+            font.pixelSize: root.bodyPixelSize
+            lineHeight: root.bodyLineHeight
             lineHeightMode: Text.FixedHeight
         }
     }
@@ -189,13 +201,13 @@ FocusScope {
         function scrollBy(amount) {
             contentY = Math.max(0, Math.min(Math.max(0, contentHeight - height), contentY + amount))
         }
-        Accessible.onScrollUpAction: scrollBy(-21)
-        Accessible.onScrollDownAction: scrollBy(21)
+        Accessible.onScrollUpAction: scrollBy(-root.bodyLineHeight)
+        Accessible.onScrollDownAction: scrollBy(root.bodyLineHeight)
         Accessible.onPreviousPageAction: scrollBy(-height)
         Accessible.onNextPageAction: scrollBy(height)
         Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_Up) scrollBy(-21)
-            else if (event.key === Qt.Key_Down) scrollBy(21)
+            if (event.key === Qt.Key_Up) scrollBy(-root.bodyLineHeight)
+            else if (event.key === Qt.Key_Down) scrollBy(root.bodyLineHeight)
             else if (event.key === Qt.Key_PageUp) scrollBy(-height)
             else if (event.key === Qt.Key_PageDown) scrollBy(height)
             else if (event.key === Qt.Key_Home) contentY = 0
@@ -226,8 +238,8 @@ FocusScope {
                 wrapMode: Text.Wrap
                 color: root.ink
                 font.family: "monospace"
-                font.pixelSize: 14
-                lineHeight: 21
+                font.pixelSize: root.bodyPixelSize
+                lineHeight: root.bodyLineHeight
                 lineHeightMode: Text.FixedHeight
             }
             Repeater {
@@ -252,7 +264,7 @@ FocusScope {
                             textFormat: Text.PlainText
                             color: turnItem.modelData.speaker === "you" ? root.ink : root.accentInk
                             font.family: "monospace"
-                            font.pixelSize: 14
+                            font.pixelSize: root.bodyPixelSize
                             font.bold: true
                         }
                         Text {
@@ -261,7 +273,7 @@ FocusScope {
                             textFormat: Text.PlainText
                             color: root.ink
                             font.family: "monospace"
-                            font.pixelSize: 12
+                            font.pixelSize: root.captionPixelSize
                         }
                     }
                     Text {
@@ -272,8 +284,8 @@ FocusScope {
                         wrapMode: Text.Wrap
                         color: root.ink
                         font.family: "monospace"
-                        font.pixelSize: 14
-                        lineHeight: 21
+                        font.pixelSize: root.bodyPixelSize
+                        lineHeight: root.bodyLineHeight
                         lineHeightMode: Text.FixedHeight
                         Accessible.ignored: true
                     }
@@ -283,22 +295,23 @@ FocusScope {
                         spacing: 5
                         Accessible.ignored: true
                         Text {
+                            id: warningIcon
                             text: "⚠"
                             textFormat: Text.PlainText
                             color: root.accentInk
                             font.family: "monospace"
-                            font.pixelSize: 14
+                            font.pixelSize: root.bodyPixelSize
                         }
                         Text {
                             objectName: "turnNotice" + turnItem.index
-                            width: parent.width - 21
+                            width: parent.width - warningIcon.width - parent.spacing
                             text: turnItem.notice
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             color: root.ink
                             font.family: "monospace"
-                            font.pixelSize: 14
-                            lineHeight: 21
+                            font.pixelSize: root.bodyPixelSize
+                            lineHeight: root.bodyLineHeight
                             lineHeightMode: Text.FixedHeight
                         }
                     }

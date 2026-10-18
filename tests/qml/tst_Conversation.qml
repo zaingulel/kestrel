@@ -194,7 +194,80 @@ TestCase {
         verify(close.activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(transcript.activeFocus)
+
+        const title = findChild(content, "conversationTitle")
+        const hint = textWith(content, "Move: Super + left drag")
+        const status = textWith(content, "Idle. Microphone in use.")
+        verify(title !== null && hint !== null && status !== null)
+        function sizes() {
+            const notice = findChild(content, "turnNotice20")
+            return [findChild(content, "turnText0").font.pixelSize, title.font.pixelSize, hint.font.pixelSize,
+                status.lineHeight, notice.lineHeight, notice.parent.children[0].font.pixelSize].join()
+        }
+        compare(sizes(), "14,16,12,21,21,14", "host base size 14 keeps the token sizes")
+        content.placementAdvisory = "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel."
+        content.textScale = 2
+        verify(waitForRendering(content))
+        compare(sizes(), "28,32,24,42,42,28", "host base size 28 doubles the token sizes")
+        const advisory = textWith(content, content.placementAdvisory)
+        for (const item of [status, hint, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
+            const left = item.mapToItem(content, 0, 0).x
+            verify(left >= 16 && left + item.width <= 432 && item.contentWidth <= item.width,
+                item.text + " must stay inside the panel: x=" + left + " width=" + item.width + " content=" + item.contentWidth)
+        }
+        const closeLeft = close.mapToItem(content, 0, 0).x
+        verify(title.mapToItem(content, 0, 0).x + title.width <= closeLeft && closeLeft + close.width <= 432)
+        verify(close.width >= 33, "close width " + close.width)
+        compare(close.height, close.width)
+        verify(close.contentItem.implicitWidth <= close.width - 4 && close.contentItem.implicitHeight <= close.height - 4)
+        const notice = findChild(content, "turnNotice20")
+        const warning = notice.parent.children[0]
+        verify(warning.x + warning.width <= notice.x && notice.x + notice.width <= notice.parent.width)
+        const headerBottom = advisory.mapToItem(content, 0, 0).y + advisory.height
+        verify(transcript.y >= headerBottom && transcript.height > 0 && transcript.y + transcript.height <= 624,
+            "transcript y=" + transcript.y + " height=" + transcript.height + " header bottom=" + headerBottom)
+        verify(transcript.activeFocus)
+        keyClick(Qt.Key_Home)
+        compare(transcript.contentY, 0)
+        keyClick(Qt.Key_Down)
+        compare(transcript.contentY, 42)
+        keyClick(Qt.Key_Up)
+        compare(transcript.contentY, 0)
+        keyClick(Qt.Key_PageDown)
+        const longBody = findChild(content, "turnText0")
+        const bodyTop = longBody.mapToItem(transcript, 0, 0).y
+        verify(bodyTop < transcript.height && bodyTop + longBody.height > 0,
+            "long body top " + bodyTop + " viewport " + transcript.height)
+        keyClick(Qt.Key_PageUp)
+        compare(transcript.contentY, 0)
+        keyClick(Qt.Key_End)
+        verify(transcript.atYEnd)
+        const noticeBottom = notice.mapToItem(transcript, 0, 0).y + notice.height
+        verify(noticeBottom > 0 && noticeBottom <= transcript.height, "final notice bottom " + noticeBottom)
+        keyClick(Qt.Key_Tab)
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Return)
+        compare(closeSpy.count, 6)
+        keyClick(Qt.Key_Space)
+        compare(closeSpy.count, 7)
+        keyClick(Qt.Key_Escape)
+        compare(closeSpy.count, 8)
+        keyClick(Qt.Key_Backtab)
+        verify(transcript.activeFocus)
+        for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {
+            content.textScale = invalid
+            compare(sizes(), "14,16,12,21,21,14", "invalid text scale " + invalid + " falls back to 1")
+        }
         closeSpy.target = null
         component.destroy()
+    }
+
+    function textWith(item, value) {
+        if (item.text === value) return item
+        for (let i = 0; i < item.children.length; i++) {
+            const found = textWith(item.children[i], value)
+            if (found !== null) return found
+        }
+        return null
     }
 }
