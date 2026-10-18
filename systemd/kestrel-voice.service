@@ -1,0 +1,19 @@
+[Unit]
+Description=Kestrel local voice conversation
+Wants=kestrel-brain.service pipewire.service wireplumber.service
+After=kestrel-brain.service pipewire.service wireplumber.service graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/Projects/zaingulel/kestrel
+Environment=KESTREL_VOICE=irish-female KESTREL_MANAGED_BRAIN=1
+ExecStart=%h/Projects/zaingulel/kestrel/run-voice.sh
+TimeoutStopSec=15s
+Restart=no
+KillMode=mixed
+StandardOutput=append:%h/Projects/zaingulel/kestrel/.runtime/voice-server.log
+StandardError=inherit
+
+[Install]
+WantedBy=graphical-session.target

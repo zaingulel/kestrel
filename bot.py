@@ -1,4 +1,4 @@
-"""First local Kestrel conversation trial."""
+"""Local Kestrel conversation orchestration."""
 
 import asyncio
 from copy import deepcopy
@@ -497,6 +497,16 @@ class HermesLLMService(LLMService):
 
     async def open_engine(self):
         try:
+            managed_brain = os.environ.get('KESTREL_MANAGED_BRAIN', '')
+            if managed_brain not in ('', '1'):
+                raise RuntimeError('Invalid KESTREL_MANAGED_BRAIN setting. Restart Kestrel and try again.')
+            if managed_brain == '1':
+                try:
+                    await run_local_command([
+                        '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
+                    ])
+                except Exception as error:
+                    raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
             self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
             async with asyncio.timeout(ENGINE_TIMEOUT):
                 self.process = await asyncio.create_subprocess_exec(
@@ -572,7 +582,7 @@ class HermesLLMService(LLMService):
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = "I couldn't get a complete reply from the brain on the Ally. Restart Kestrel and try again."
+                        advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
                         raise RuntimeError(event['error'])
                     else:
                         raise RuntimeError('Invalid or incomplete Hermes response')

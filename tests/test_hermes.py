@@ -1,17 +1,23 @@
 """Native Hermes boundary proofs; each child uses an owned, disposable runtime home."""
 
+import ast
+import configparser
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO, StringIO, TextIOWrapper
 import json
 import os
 from pathlib import Path
+import re
 import selectors
+import shutil
 import sqlite3
 import subprocess
 import tempfile
 import threading
+from types import ModuleType
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_PYTHON = Path('/home/zain/.local/share/mise/installs/pipx-hermes-agent/0.19.0/hermes-agent/bin/python')
@@ -41,7 +47,7 @@ class ScriptedBrain:
                 self.end_headers()
                 for delta, finish in reply:
                     chunk = {'id': 'scripted', 'object': 'chat.completion.chunk', 'created': 0,
-                             'model': 'underdog-saluki-27b-1.0',
+                             'model': 'bonsai-2-9b',
                              'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
@@ -169,6 +175,52 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_conversation_source_confines_literal_endpoints(self):
+        endpoints = []
+        for name in ('bot.py', 'hermes_worker.py'):
+            for node in ast.walk(ast.parse((ROOT / name).read_text())):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    endpoints.extend(re.findall(r"""https?://[^"'\s]*""", node.value))
+        self.assertEqual(endpoints, ['http://127.0.0.1:8080/v1'])
+
+    def test_bonsai_default_configuration(self):
+        import hermes_worker
+
+        run_agent = ModuleType('run_agent')
+        run_agent.AIAgent = Mock()
+        protocol = StringIO()
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory).resolve()
+            try:
+                with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
+                      patch.dict('sys.modules', {'run_agent': run_agent}),
+                      patch.object(hermes_worker, 'version', return_value='0.19.0'),
+                      patch('sys.stdin', TextIOWrapper(BytesIO())),
+                      patch('sys.stdout', protocol)):
+                    hermes_worker.main()
+                config = json.loads((home / 'config.yaml').read_text())
+            finally:
+                os.chdir(original_cwd)
+        run_agent.AIAgent.assert_called_once_with(
+            base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
+            api_mode='chat_completions', model='bonsai-2-9b', enabled_toolsets=[],
+            disabled_toolsets=['terminal'], skip_memory=True, skip_context_files=True,
+            load_soul_identity=False, session_db=None, fallback_model=None,
+            save_trajectories=False, checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+            reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
+        )
+        self.assertEqual(config, {
+            'model': {'context_length': 64000},
+            'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
+            'sessions': {'write_json_snapshots': False},
+            'compression': {'enabled': False},
+            'auxiliary': {'title_generation': {'enabled': False}},
+            'plugins': {'enabled': []}, 'mcp_servers': {},
+        })
+        self.assertEqual(json.loads(protocol.getvalue()), {'ready': True})
+        run_agent.AIAgent.return_value.close.assert_called_once_with()
+
     def test_production_worker_entrypoint_becomes_ready_without_a_turn(self):
         require_native_hermes()
         from hermes_worker import child_environment
@@ -399,3 +451,302 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertIn('failure-private-nonce', dump.read_text())
             self.assertEqual(len(brain.requests), 1)
         self.assertTrue((ROOT / '.runtime/voice-venv/bin/python').exists())
+
+
+class BonsaiStartupTests(unittest.TestCase):
+    def launcher_fixture(self):
+        directory = tempfile.TemporaryDirectory(prefix='bonsai-startup-')
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        shutil.copyfile(ROOT / 'run-brain.sh', root / 'run-brain.sh')
+        prism = root / '.runtime/tools/bonsai-prism-b10777-e3de715'
+        server = prism / 'cuda-12.8/llama-prism-b10777-e3de715/llama-server'
+        server.parent.mkdir(parents=True)
+        server.write_text(
+            '#!/usr/bin/python3\n'
+            'import json, os, sys\n'
+            'print(json.dumps({"arguments": sys.argv[1:], "environment": dict(os.environ), "cwd": os.getcwd()}))\n'
+        )
+        server.chmod(0o755)
+        return root, prism, server
+
+    def test_brain_launcher_pins_f16_and_scrubs_environment(self):
+        root, prism, _ = self.launcher_fixture()
+        environment = dict(os.environ, HOME=str(root), HTTPS_PROXY='http://poison.invalid:99',
+                           LLAMA_ARG_HOST='0.0.0.0', LLAMA_ARG_CTX_SIZE='12',
+                           LD_PRELOAD='/nonexistent/poison.so', OPENAI_API_KEY='poison')
+        result = subprocess.run(['/usr/bin/bash', str(root / 'run-brain.sh')], cwd='/',
+                                env=environment, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed['arguments'], [
+            '-m', str(root / '.runtime/models/bonsai-2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf'),
+            '--alias', 'bonsai-2-9b', '--host', '127.0.0.1', '--port', '8080',
+            '-ngl', '99', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
+            '--fit', 'off', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
+            '--no-context-shift', '--no-webui', '--no-slots', '--no-agent', '--no-ui-mcp-proxy',
+            '--cors-origins', 'http://127.0.0.1:8080', '--reasoning', 'off', '--temp', '0.4',
+            '--top-p', '0.8', '--top-k', '20', '--min-p', '0', '--presence-penalty', '1.5',
+            '--repeat-penalty', '1', '--repeat-last-n', '64', '-lv', '3',
+        ])
+        libraries = root / '.runtime/voice-venv/lib/python3.12/site-packages/nvidia'
+        self.assertEqual(observed['environment'], {
+            'HOME': str(root), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
+            'LD_LIBRARY_PATH': ':'.join(str(libraries / name / 'lib') for name in
+                                      ('cuda_runtime', 'cublas', 'cuda_nvrtc', 'nvjitlink')),
+        })
+        self.assertEqual(observed['cwd'], str(prism))
+
+    def test_brain_launcher_propagates_failure(self):
+        root, _, server = self.launcher_fixture()
+        server.write_text('#!/usr/bin/bash\necho "server refused" >&2\nexit 23\n')
+        result = subprocess.run(['/usr/bin/bash', str(root / 'run-brain.sh')],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 23)
+        self.assertIn('server refused', result.stderr)
+
+    def readiness_fixture(self):
+        directory = tempfile.TemporaryDirectory(prefix='bonsai-health-')
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        shutil.copyfile(ROOT / 'check-brain-ready.sh', root / 'check-brain-ready.sh')
+        return root
+
+    def run_readiness(self, root, main_pid=None):
+        environment = dict(os.environ, PATH=f'{root}:/usr/bin:/bin',
+                           http_proxy='http://poison.invalid:99', HTTP_PROXY='http://poison.invalid:99',
+                           ALL_PROXY='http://poison.invalid:99', HOME=str(root), CURL_HOME=str(root))
+        environment.pop('MAINPID', None)
+        if main_pid is not None:
+            environment['MAINPID'] = main_pid
+        return subprocess.run(
+            ['/usr/bin/bash', str(root / 'check-brain-ready.sh')],
+            env=environment,
+            capture_output=True, text=True, timeout=5,
+        )
+
+    def assert_readiness_arguments(self, root):
+        self.assertEqual(json.loads((root / 'curl-arguments.json').read_text()), [
+            '-q', '--noproxy', '*', '--fail', '--silent', '--show-error',
+            '--retry', '120', '--retry-all-errors', '--retry-delay', '1',
+            '--retry-max-time', '120', '--max-time', '5', '--max-filesize', '4096',
+            '--output', '/dev/null', '--write-out', '%{http_code}',
+            'http://127.0.0.1:8080/health',
+        ])
+
+    def test_brain_readiness_requires_owned_listener(self):
+        root = self.readiness_fixture()
+
+        class HealthRequest(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), HealthRequest)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'],
+                                 stdin=subprocess.PIPE)
+
+        def close_child():
+            child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+        self.addCleanup(close_child)
+        curl = root / 'curl'
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--connect-to", '
+            f'"127.0.0.1:8080:127.0.0.1:{server.server_port}"])\n'
+        )
+        curl.chmod(0o755)
+        lsof = root / 'lsof'
+        lsof.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            'arguments = sys.argv[1:]\n'
+            'assert arguments == ["-nP", "-a", "-p", arguments[3], "-iTCP@127.0.0.1:8080", "-sTCP:LISTEN", "-t"]\n'
+            f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(arguments))\n'
+            'os.execv("/usr/bin/lsof", ["lsof", *arguments[:4], '
+            f'"-iTCP@127.0.0.1:{server.server_port}", *arguments[5:]])\n'
+        )
+        lsof.chmod(0o755)
+        self.assertIsNone(child.poll())
+        for pid, owns_listener in [(child.pid, False), (os.getpid(), True)]:
+            with self.subTest(pid=pid, owns_listener=owns_listener):
+                result = self.run_readiness(root, str(pid))
+                self.assert_readiness_arguments(root)
+                if owns_listener:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0,
+                                        'HTTP 200 from an unrelated listener must not admit the wrong live PID')
+                    self.assertIn('Bonsai listener ownership could not be verified. '
+                                  'Check kestrel-brain.service and port 8080, then restart Kestrel.', result.stderr)
+                self.assertTrue((root / 'lsof-arguments.json').exists(), 'Readiness must invoke lsof')
+                self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
+                    '-nP', '-a', '-p', str(pid), '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                ])
+
+    def test_brain_readiness_requires_200_and_success(self):
+        root = self.readiness_fixture()
+        curl = root / 'curl'
+        for status, code in [('200', 0), ('204', 0), ('302', 0), ('000', 56),
+                             ('200', 63), ('000', 28), ('200', 22)]:
+            with self.subTest(status=status, exit_code=code):
+                curl.write_text(
+                    '#!/usr/bin/python3\nimport json, pathlib, sys\n'
+                    f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+                    f'print({status!r}, end="")\nsys.exit({code})\n'
+                )
+                curl.chmod(0o755)
+                result = self.run_readiness(root)
+                self.assert_readiness_arguments(root)
+                self.assertEqual(result.stdout, '')
+                if status == '200' and code == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr, '')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.',
+                                  result.stderr)
+
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'print("200", end="")\n'
+        )
+        timeout = root / 'timeout'
+        timeout.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "timeout-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'os.execvp(sys.argv[4], sys.argv[4:])\n'
+        )
+        timeout.chmod(0o755)
+        lsof = root / 'lsof'
+        cases = [('23', '23', 0), ('23', '', 0), ('23', '23\n24', 0), ('23', '24', 0),
+                 ('23', '', 1), ('23', '', 127), ('23', '', 124), ('', '23', 0), ('invalid', '23', 0)]
+        for pid, output, code in cases:
+            with self.subTest(pid=pid, ownership=output, exit_code=code):
+                for name in ('timeout-arguments.json', 'lsof-arguments.json'):
+                    (root / name).unlink(missing_ok=True)
+                lsof.write_text(
+                    '#!/usr/bin/python3\nimport json, pathlib, sys\n'
+                    f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+                    f'print({output!r}, end="")\nsys.exit({code})\n'
+                )
+                lsof.chmod(0o755)
+                result = self.run_readiness(root, pid)
+                self.assert_readiness_arguments(root)
+                if pid == '23':
+                    self.assertEqual(json.loads((root / 'timeout-arguments.json').read_text()), [
+                        '--signal=TERM', '--kill-after=1s', '2s', 'lsof', '-nP', '-a', '-p', pid,
+                        '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                    ])
+                    self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
+                        '-nP', '-a', '-p', pid, '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
+                    ])
+                else:
+                    self.assertFalse((root / 'timeout-arguments.json').exists())
+                    self.assertFalse((root / 'lsof-arguments.json').exists())
+                if pid == '23' and output == '23' and code == 0:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Bonsai listener ownership could not be verified. Check kestrel-brain.service and port 8080, then restart Kestrel.',
+                                  result.stderr)
+                self.assertEqual(result.stdout, '')
+
+    def test_brain_readiness_wire_and_redirect_refusal(self):
+        root = self.readiness_fixture()
+        requests = []
+        response_status = 200
+
+        class HealthRequest(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                requests.append(self.path)
+                self.send_response(response_status)
+                self.send_header('Location', '/redirect-target')
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), HealthRequest)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        curl = root / 'curl'
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--connect-to", '
+            f'"127.0.0.1:8080:127.0.0.1:{server.server_port}"])\n'
+        )
+        curl.chmod(0o755)
+        (root / '.curlrc').write_text('location\nproxy = "http://poison.invalid:99"\n')
+        ready = self.run_readiness(root)
+        self.assert_readiness_arguments(root)
+        self.assertEqual(ready.returncode, 0, ready.stderr)
+        self.assertEqual(ready.stdout, '')
+        response_status = 302
+        refused = self.run_readiness(root)
+        self.assert_readiness_arguments(root)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('Bonsai did not become ready.', refused.stderr)
+        self.assertEqual(refused.stdout, '')
+        self.assertEqual(requests, ['/health', '/health'])
+
+    def test_user_units_pin_login_lifecycle(self):
+        units = {}
+        for name in ('brain', 'voice'):
+            unit = configparser.ConfigParser(interpolation=None)
+            with (ROOT / f'systemd/kestrel-{name}.service').open() as source:
+                unit.read_file(source)
+            units[name] = unit
+            self.assertEqual(unit['Service']['Type'], 'exec')
+            self.assertEqual(unit['Service']['Restart'], 'no')
+            self.assertEqual(unit['Service']['TimeoutStopSec'], '15s')
+            self.assertIn('graphical-session.target', unit['Unit']['PartOf'].split())
+            self.assertEqual(unit['Service']['WorkingDirectory'], '%h/Projects/zaingulel/kestrel')
+            self.assertEqual(unit['Service']['StandardOutput'],
+                             f'append:%h/Projects/zaingulel/kestrel/.runtime/{name}-server.log')
+            self.assertEqual(unit['Service']['StandardError'], 'inherit')
+        brain, voice = units['brain'], units['voice']
+        self.assertEqual(set(brain['Unit']['PartOf'].split()),
+                         {'graphical-session.target', 'kestrel-voice.service'})
+        self.assertEqual(brain['Service']['KillMode'], 'control-group')
+        self.assertEqual(brain['Service']['TimeoutStartSec'], '130s')
+        prefix = '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash '
+        self.assertEqual(brain['Service']['ExecStart'], prefix + '%h/Projects/zaingulel/kestrel/run-brain.sh')
+        self.assertEqual(brain['Service']['ExecStartPost'],
+                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
+                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
+        self.assertNotIn('Install', brain)
+        self.assertEqual(voice['Service']['ExecStart'], '%h/Projects/zaingulel/kestrel/run-voice.sh')
+        self.assertEqual(voice['Service']['KillMode'], 'mixed')
+        self.assertEqual(set(voice['Service']['Environment'].split()),
+                         {'KESTREL_VOICE=irish-female', 'KESTREL_MANAGED_BRAIN=1'})
+        self.assertEqual(voice['Install']['WantedBy'], 'graphical-session.target')
+        dependencies = {'kestrel-brain.service', 'pipewire.service', 'wireplumber.service'}
+        self.assertEqual(set(voice['Unit']['Wants'].split()), dependencies)
+        self.assertEqual(set(voice['Unit']['After'].split()), dependencies | {'graphical-session.target'})
+        self.assertFalse(voice['Unit'].get('Requires'))

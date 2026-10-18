@@ -227,7 +227,7 @@ sync, of every adopter. An intentional adopter exception needs owner agreement a
 
 ## Product
 
-Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Saluki brain runs through LM Studio on the Ally. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
+Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Bonsai 2 9B brain runs locally through the pinned Prism server with F16 key and value caches and a 64,000-token context. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
 
 Product discovery and drilling with the owner must precede any further product implementation. Factory adoption preserves the prototype and stops before product work.
 
@@ -244,7 +244,9 @@ Product discovery and drilling with the owner must precede any further product i
 - `speech.py` owns speech adapters.
 - `asr_worker.py` is the speech recognition process boundary.
 - `hermes_worker.py` is the conversation-engine process boundary.
-- `run-voice.sh` owns startup.
+- `run-voice.sh` owns voice startup.
+- `run-brain.sh` owns the pinned local brain invocation; `check-brain-ready.sh` owns its bounded HTTP readiness check.
+- `systemd/kestrel-brain.service` and `systemd/kestrel-voice.service` own graphical-login startup and session lifetime.
 - `README.md` is the operation manual.
 - [.agents/REPOSITORY.md](.agents/REPOSITORY.md) owns the local repository profile.
 
@@ -254,14 +256,14 @@ Product discovery and drilling with the owner must precede any further product i
 |---|---|
 | plan-first | Product implementation after owner discovery and drilling; conversation orchestration, speech adapters, the recognition process boundary and service startup; the workflow trust perimeter and sync contract. |
 | owner-directed | Product direction and changes to the approved voice service behaviour; workflow owner gates and review tiers. |
-| sign-off | Changes to microphone access, audio or transcript handling, the localhost service boundary, the Ally connection, or the workflow trust perimeter. |
-| security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, service exposure and the Ally connection; runtime hooks, permission settings, workflow triggers and token permissions, and sync integrity. |
+| sign-off | Changes to microphone access, audio or transcript handling, the localhost brain service boundary, or the workflow trust perimeter. |
+| security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, local brain service exposure; runtime hooks, permission settings, workflow triggers and token permissions, and sync integrity. |
 | hard to undo | Recordings, transcripts or credentials exposed through commits, logs or publication; loss or replacement of local microphone and model assets; repository hosting settings and rulesets. |
 | wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
 
 Standing security guarantees:
 
-1. Microphone recognition and voice generation stay on the laptop; conversation transcripts and system context go to LM Studio on the Ally over the local network.
-2. Kestrel opens no listening network service. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
+1. Microphone recognition and voice generation stay on the laptop; the Bonsai brain, conversation transcripts and system context stay on the laptop. The enabled voice service starts at graphical login and can use the microphone during startup.
+2. Bonsai listens on unauthenticated loopback at `127.0.0.1:8080`; other local processes can reach it. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
 3. Runtime model weights, reference audio and logs remain ignored and are never published. Transcript text may appear in local debug logs.
 4. Shared workflow bytes retain canonical integrity through sync; the repository administrator bypass remains owner-only and no write deploy key is allowed.

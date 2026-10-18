@@ -1,8 +1,8 @@
 // runtime-boundary.test.mjs — the privacy and runtime boundary the README promises.
 //
-// The native service opens no listening network service, the only remote endpoint is LM Studio
-// on the Ally, and local echo removal loads only local PipeWire modules. The exact privacy
-// disclosure is the user promise; the executed launcher fixture observes its real arguments.
+// Bonsai listens only on local loopback, and local echo removal loads only local PipeWire
+// modules. The exact privacy disclosure is the user promise; executed Python startup fixtures
+// observe the brain configuration, environment and health checks.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,8 +16,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const read = (path) => readFileSync(resolve(ROOT, path), 'utf8');
 
 const DISCLOSURE = [
-  'Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context are sent to Saluki through the Ally\'s LM Studio server at `http://192.168.0.150:1234/v1` over the local area network. On startup, Kestrel starts a preparation request to the Ally with the fixed public text `Hello.`. Its reply is discarded, and neither preparation message enters caller conversation history. Kestrel opens no listening network service. It captures only from its verified owned echo-removed microphone and refuses unverified capture without falling back to a raw microphone. Kestrel\'s desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke them or any other tool. Audio failure notifications contain fixed status text, never conversation text. Kestrel has no browser research or persistent conversation memory and adds no network destination. Deleting, sending messages, publishing and arbitrary command execution are not available by voice.',
-  'Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local service\'s debug output; the application does not save microphone recordings.',
+  "Microphone recognition and voice generation run locally on the laptop. Conversation transcripts and system context stay on the laptop and are sent to the local Bonsai server at `http://127.0.0.1:8080/v1`. Bonsai listens on unauthenticated loopback at `127.0.0.1:8080`; other local processes can reach it. When the brain is available, Kestrel starts a preparation request to Bonsai with the fixed public text `Hello.`. Its reply is discarded, and neither preparation message enters caller conversation history. The enabled voice service starts at graphical login after reboot and can use the microphone during startup. It captures only from its verified owned echo-removed microphone and refuses unverified capture without falling back to a raw microphone. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, and numbered workspace focus. The brain cannot invoke them or any other tool. Audio failure notifications contain fixed status text, never conversation text. Kestrel has no browser research or persistent conversation memory. Deleting, sending messages, publishing and arbitrary command execution are not available by voice.",
+  'Runtime models, reference audio and logs remain ignored in `.runtime/` and must never be published. Transcript text may appear in the local voice and brain service logs, which are retained across restarts; the application does not save microphone recordings.',
   'Echo removal runs on the laptop in a PipeWire process that starts and stops with the voice service. While the voice service runs, that process can open the default microphone and read it at any time, including during startup: it does so whenever any program is sending sound to the default output or recording from the `kestrel-microphone` source. Treat the microphone as in use for as long as Kestrel runs. The process also reads the sound sent to the default output. It holds both in memory only, passes on the microphone signal with that sound removed, sends nothing over the network and saves nothing.',
   'Hermes provider-error diagnostics can also contain transcript text in `sessions/request_dump_*.json` inside the service\'s owned temporary Hermes home under `.runtime/`. On an orderly shutdown, these local diagnostics are removed with that home after the worker exits; a hard-killed service or power loss can leave the folder behind. They are not reusable conversation storage. Do not publish them.',
 ];
@@ -34,11 +34,6 @@ test('the launcher starts the native conversation without a browser service', (t
     cwd: '/', encoding: 'utf8',
   });
   assert.deepEqual(output.trim().split('\n'), ['bot.py']);
-});
-
-test('the conversation goes only to LM Studio on the Ally', () => {
-  const urls = (read('bot.py') + '\n' + read('hermes_worker.py')).match(/https?:\/\/[^"'\s]+/g);
-  assert.deepEqual(urls, ['http://192.168.0.150:1234/v1']);
 });
 
 test('the echo removal process loads only local PipeWire modules', () => {
