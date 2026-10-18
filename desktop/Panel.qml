@@ -362,6 +362,8 @@ Item {
             statusSentence: root.service ? root.service.statusSentence : "Status unavailable. Microphone use unknown."
             motionEnabled: root.service ? root.service.motionEnabled : false
             turns: root.service ? root.service.turns : []
+            conversationSession: root.service ? root.service.conversationSession : ""
+            announcementsEnabled: window.visible && root.opened
             conversationMessage: root.service ? root.service.conversationMessage : "Conversation unavailable. Reopen the panel."
             placementAdvisory: root.service ? root.service.placementAdvisory : ""
             onCloseRequested: root.requestClose()

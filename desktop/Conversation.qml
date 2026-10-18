@@ -14,6 +14,11 @@ FocusScope {
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
     property string placementAdvisory: ""
     property var displayedTurns: []
+    property string conversationSession: ""
+    property bool announcementsEnabled: false
+    property string announcementSession: ""
+    property var seenTerminalStates: []
+    property bool baselineRequired: true
     signal closeRequested()
     implicitWidth: 448
     implicitHeight: 640
@@ -24,13 +29,19 @@ FocusScope {
     function updateTurns() {
         const follow = transcript.followBottom
         const previousY = transcript.contentY
-        const previous = displayedTurns
         transcript.restoring = true
         displayedTurns = turns
-        for (let i = 0; i < turns.length; i++) {
+        // A baseline, a hidden panel or an unavailable session records terminal states silently.
+        const silent = baselineRequired || !announcementsEnabled || conversationSession !== announcementSession
+        const seen = seenTerminalStates
+        seenTerminalStates = turns.map(function(turn) {
+            return ["complete", "interrupted", "failed"].indexOf(turn.state) !== -1 ? turn.state : ""
+        })
+        announcementSession = conversationSession
+        baselineRequired = conversationSession === ""
+        for (let i = 0; !silent && i < turns.length; i++) {
             const turn = turns[i]
-            if (["complete", "interrupted", "failed"].indexOf(turn.state) !== -1
-                    && (!previous[i] || previous[i].state !== turn.state || previous[i].text !== turn.text)) {
+            if (seenTerminalStates[i] && !seen[i]) {
                 announceTurn((turn.speaker === "you" ? "You: " : "Kestrel: ")
                     + turn.text + (turn.state === "interrupted" ? " Reply interrupted."
                         : turn.state === "failed" ? " Reply could not be completed." : ""))
@@ -42,7 +53,13 @@ FocusScope {
             transcript.restoring = false
         })
     }
-    onTurnsChanged: updateTurns()
+    // Deferred so one accepted snapshot's session and turns are observed together.
+    onTurnsChanged: Qt.callLater(updateTurns)
+    onConversationSessionChanged: Qt.callLater(updateTurns)
+    onAnnouncementsEnabledChanged: {
+        baselineRequired = true
+        Qt.callLater(updateTurns)
+    }
     Keys.onEscapePressed: closeRequested()
 
     Rectangle { anchors.fill: parent; color: root.background }

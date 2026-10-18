@@ -23,6 +23,7 @@ Item {
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
     readonly property string conversationMessage: conversationValue.message
+    readonly property string conversationSession: conversationValue.session
     readonly property string placementAdvisory: placementValue.advisory
 
     QtObject {

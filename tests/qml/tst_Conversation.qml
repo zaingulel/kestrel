@@ -1,5 +1,6 @@
 import QtQuick
 import QtTest
+import "../../desktop" as Desktop
 
 TestCase {
     id: test
@@ -10,6 +11,110 @@ TestCase {
     when: windowShown
 
     SignalSpy { id: closeSpy; signalName: "closeRequested" }
+    Component {
+        id: announcementComponent
+        Desktop.Conversation {
+            signal announcementRequested(string text)
+            function announceTurn(text) { announcementRequested(text) }
+        }
+    }
+
+    function test_announcements_follow_visible_session_updates() {
+        const requests = []
+        function makeContent() {
+            const content = createTemporaryObject(announcementComponent, test, {
+                width: 448, height: 640, background: "#121212", ink: "#bebebe",
+                accentInk: "#e68e0d", troubleInk: "#D35F5F"
+            })
+            verify(content !== null)
+            compare(typeof content.announceTurn, "function")
+            content.announcementRequested.connect(function(text) { requests.push(text) })
+            return content
+        }
+        function settle() {
+            let settled = false
+            Qt.callLater(function() { settled = true })
+            tryVerify(function() { return settled })
+        }
+        function session(content, value) {
+            if (content.conversationSession !== undefined) content.conversationSession = value
+        }
+        function shown(content, value) {
+            content.visible = value
+            if (content.announcementsEnabled !== undefined) content.announcementsEnabled = value
+        }
+        let content = makeContent()
+        shown(content, true)
+        const history = [{speaker: "you", text: "Existing owner turn.", state: "complete"},
+            {speaker: "kestrel", text: "Existing reply.", state: "complete"}]
+        session(content, "session-a")
+        content.turns = history
+        settle()
+        compare(JSON.stringify(requests), "[]", "initial history must be a silent baseline")
+        content.turns = history.concat([{speaker: "kestrel", text: "", state: "thinking"}])
+        settle()
+        content.turns = history.concat([{speaker: "kestrel", text: "Live", state: "speaking"}])
+        settle()
+        compare(JSON.stringify(requests), "[]", "streaming updates must be silent")
+        const live = history.concat([{speaker: "kestrel", text: "Live reply.", state: "complete"}])
+        content.turns = live
+        settle()
+        content.turns = JSON.parse(JSON.stringify(live))
+        settle()
+        compare(JSON.stringify(requests), '["Kestrel: Live reply."]')
+        requests.length = 0
+        shown(content, false)
+        settle()
+        const hidden = live.concat([{speaker: "kestrel", text: "Hidden reply.", state: "complete"}])
+        content.turns = hidden
+        settle()
+        compare(JSON.stringify(requests), "[]", "hidden updates must be silent")
+        shown(content, true)
+        settle()
+        content.turns = JSON.parse(JSON.stringify(hidden))
+        settle()
+        compare(JSON.stringify(requests), "[]", "reopening must not replay history")
+        const interrupted = hidden.concat([{speaker: "kestrel", text: "Heard prefix.", state: "interrupted"}])
+        content.turns = interrupted
+        settle()
+        const failed = interrupted.concat([{speaker: "kestrel", text: "", state: "failed"}])
+        content.turns = failed
+        settle()
+        compare(JSON.stringify(requests), '["Kestrel: Heard prefix. Reply interrupted.","Kestrel:  Reply could not be completed."]')
+        requests.length = 0
+        session(content, "")
+        content.turns = []
+        settle()
+        compare(content.displayedTurns.length, 0)
+        compare(JSON.stringify(requests), "[]", "unavailable must be silent")
+        session(content, "session-a")
+        content.turns = failed
+        settle()
+        compare(JSON.stringify(requests), "[]", "same-session reconnect must not replay history")
+        content.turns = failed.concat([{speaker: "kestrel", text: "After reconnect.", state: "complete"}])
+        settle()
+        compare(JSON.stringify(requests), '["Kestrel: After reconnect."]')
+        requests.length = 0
+        session(content, "session-b")
+        content.turns = history
+        settle()
+        compare(JSON.stringify(requests), "[]", "new session history must be silent")
+        content.turns = history.concat([{speaker: "you", text: "New live turn.", state: "complete"}])
+        settle()
+        compare(JSON.stringify(requests), '["You: New live turn."]')
+        requests.length = 0
+        content.destroy()
+        settle()
+        content = makeContent()
+        shown(content, true)
+        session(content, "session-b")
+        content.turns = history
+        settle()
+        compare(JSON.stringify(requests), "[]", "recreated component must not replay history")
+        content.turns = history.concat([{speaker: "kestrel", text: "After recreation.", state: "complete"}])
+        settle()
+        compare(JSON.stringify(requests), '["Kestrel: After recreation."]')
+    }
 
     function test_plain_text_keyboard_and_scroll() {
         const component = Qt.createComponent(Qt.resolvedUrl("../../desktop/Conversation.qml"))
