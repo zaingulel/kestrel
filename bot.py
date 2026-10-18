@@ -919,19 +919,19 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
     if status is not None:
         llm.status = status
 
-    @transport.input().event_handler('on_after_process_frame')
-    async def indicator_input_ready(processor, frame):
-        if isinstance(frame, StartFrame):
-            llm._indicator_ready = True
-            llm.refresh_indicator()
+        @transport.input().event_handler('on_after_process_frame')
+        async def indicator_input_ready(processor, frame):
+            if isinstance(frame, StartFrame):
+                llm._indicator_ready = True
+                llm.refresh_indicator()
 
-    @aggregators.user().event_handler('on_before_push_frame')
-    async def indicator_user_turn(processor, frame):
-        if isinstance(frame, UserStartedSpeakingFrame):
-            llm.indicator_user_started()
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            llm._indicator_user = False
-            llm.refresh_indicator()
+        @aggregators.user().event_handler('on_before_push_frame')
+        async def indicator_user_turn(processor, frame):
+            if isinstance(frame, UserStartedSpeakingFrame):
+                llm.indicator_user_started()
+            elif isinstance(frame, UserStoppedSpeakingFrame):
+                llm._indicator_user = False
+                llm.refresh_indicator()
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):
@@ -946,19 +946,20 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
 
     @output.event_handler('on_after_push_frame')
     async def remember_local_reply(processor, frame):
-        if isinstance(frame, BotStartedSpeakingFrame) and not llm._indicator_user:
-            llm._indicator_output_reply = llm._indicator_reply
-            llm._indicator_output = True
-            llm.refresh_indicator()
-        elif isinstance(frame, BotStoppedSpeakingFrame):
-            if llm._indicator_output_reply is llm._indicator_reply:
-                llm._indicator_output = False
-                if llm._indicator_local_reply is llm._indicator_reply:
-                    llm.indicator_reply_finished(llm._indicator_output_reply)
-                else:
-                    llm.refresh_indicator()
-        elif isinstance(frame, LLMFullResponseEndFrame):
-            llm.indicator_reply_finished(frame.indicator_reply_token)
+        if status is not None:
+            if isinstance(frame, BotStartedSpeakingFrame) and not llm._indicator_user:
+                llm._indicator_output_reply = llm._indicator_reply
+                llm._indicator_output = True
+                llm.refresh_indicator()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                if llm._indicator_output_reply is llm._indicator_reply:
+                    llm._indicator_output = False
+                    if llm._indicator_local_reply is llm._indicator_reply:
+                        llm.indicator_reply_finished(llm._indicator_output_reply)
+                    else:
+                        llm.refresh_indicator()
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                llm.indicator_reply_finished(frame.indicator_reply_token)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 
