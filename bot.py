@@ -437,7 +437,9 @@ async def screenshot_action(*, command=run_local_command) -> DesktopResult:
         metadata = os.lstat(path)
         if stat.S_ISREG(metadata.st_mode) and metadata.st_size > 0 and metadata.st_mtime_ns >= started:
             return DesktopResult(True, True, 'confirmed', None)
-    except (OSError, ValueError, RuntimeError, TimeoutError):
+    except RuntimeError as error:
+        return DesktopResult(False, True, str(error), advisory)
+    except (OSError, ValueError, TimeoutError):
         pass
     return DesktopResult(False, True, 'screenshot unconfirmed', advisory)
 

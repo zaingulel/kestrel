@@ -514,10 +514,12 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                                      'confirmed' if confirmed else 'screenshot unconfirmed',
                                      None if confirmed else advisory))
                     command.assert_awaited_once_with(argv)
-            for error in (RuntimeError('PRIVATE output'), OSError('PRIVATE path'), TimeoutError()):
+            for error, expected_reason in ((RuntimeError('command failed'), 'command failed'),
+                                           (OSError('PRIVATE path'), 'screenshot unconfirmed'),
+                                           (TimeoutError(), 'screenshot unconfirmed')):
                 command = AsyncMock(side_effect=error)
                 result = await tool.run(command=command)
-                self.assertEqual(result, bot.DesktopResult(False, True, 'screenshot unconfirmed', advisory))
+                self.assertEqual(result, bot.DesktopResult(False, True, expected_reason, advisory))
                 command.assert_awaited_once_with(argv)
             command = AsyncMock(return_value=str(path))
             with patch.object(os, 'lstat', side_effect=PermissionError('PRIVATE path')):
