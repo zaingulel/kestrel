@@ -2757,8 +2757,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             [({'content': 'Prepared.'}, None), ({}, 'stop')],
             [({'content': 'Spoken first. Unheard second.'}, None), ({}, 'stop')],
             [({'content': 'Spoken first. Failed before audio.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Failed after audio.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Failed after audio.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. B'}, None),
+             ({'content': 'oundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. U'}, None),
+             ({'content': 'nheard second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. U'}, None),
+             ({'content': 'nheard second.'}, None), ({}, 'stop')],
             [({'content': 'Spoken first. Failed after stop.'}, None), ({}, 'stop')],
             recreated(),
             [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
@@ -2775,11 +2779,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     raise AssertionError('Synthetic delayed failure was never released')
                 raise RuntimeError('Synthetic synthesis failure after native stop')
             if kwargs['text'] == 'Failed after audio.':
-                yield np.full(1500, 0.25, dtype=np.float32)
+                yield np.full(2340, 0.25, dtype=np.float32)
                 raise RuntimeError('Synthetic synthesis failure after partial audio')
             if kwargs['text'] != 'Unheard second.':
                 value = 0.25 if kwargs['text'] == 'Boundary second.' else 0.5
-                yield np.full(4800 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
+                yield np.full(5760 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
             transport, _, _, interrupted, _, close = await self.open_session(
@@ -2823,8 +2827,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 async with asyncio.timeout(5):
                     while True:
                         snapshot = json.loads(await reader.readline())
-                        if 'turns' in snapshot and predicate(snapshot['turns']):
-                            return snapshot['turns']
+                        if 'turns' in snapshot:
+                            for turn in snapshot['turns']:
+                                if turn['speaker'] == 'kestrel':
+                                    self.assertNotIn('Unheard second.', turn['text'])
+                            if predicate(snapshot['turns']):
+                                return snapshot['turns']
 
             async def start(text):
                 interrupted.clear()
@@ -2844,7 +2852,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                         and rows[-1]['state'] in ('complete', 'failed'))
                 self.assertEqual(rows[-1]['text'], 'Spoken first.')
                 self.assertEqual(rows[-1]['state'], 'failed')
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 4800 + bytes(1920))
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
                 stale_text = text_frames[0]
 
                 written.clear()
@@ -2852,12 +2860,29 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 rows = await rows_until(lambda rows: rows[-2]['text'] == 'Failure before synthesis audio.'
                                         and rows[-1]['state'] in ('complete', 'failed'))
                 self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 4800 + bytes(1920))
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
                 stale_failure = synthesis_failures[-1]
+
+                written.clear()
+                final_write.clear()
+                release_write.clear()
+                hold_final = True
+                await start('Audible segment after synthesis failure.')
+                await asyncio.wait_for(final_write.wait(), 5)
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
+                                        and rows[-1]['text'].startswith('Boundary first.'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
+                self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                release_write.set()
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'failed'})
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 3840 + bytes(840))
 
                 for interrupt in (False, True):
                     with self.subTest(exception_interrupted=interrupt):
                         written.clear()
+                        output.generation_done.clear()
                         final_write.clear()
                         release_write.clear()
                         hold_final = True
@@ -2868,6 +2893,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                                 and rows[-1]['text'].startswith('Boundary first.'))
                         self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
                         self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                        await asyncio.wait_for(output.generation_done.wait(), 5)
                         if interrupt:
                             interrupted.clear()
                             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
@@ -2879,7 +2905,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             release_write.set()
                             rows = await rows_until(lambda rows: rows[-1]['state'] in ('complete', 'failed'))
                             self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'failed'})
-                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 1500 + bytes(1680))
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 2340)
 
                 hold_final = False
                 release_write.set()
@@ -2895,7 +2921,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 rows = await rows_until(lambda rows: rows[-2]['text'] == 'Delayed synthesis failure.'
                                         and rows[-1]['state'] in ('complete', 'failed'))
                 self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 4800 + bytes(1920))
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
 
                 written.clear()
                 started_contexts.clear()
@@ -2915,7 +2941,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                         and rows[-1]['state'] in ('complete', 'failed'))
                 self.assertEqual(started_contexts, [first_context, first_context])
                 self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 4800 + bytes(1920))
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
 
                 for interrupt in (False, True):
                     with self.subTest(interrupt=interrupt):

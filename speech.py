@@ -1321,6 +1321,28 @@ class VoxCPMTTS(TTSService):
         await super().on_audio_context_completed(context_id)
         self._conversation_audio_contexts.pop(context_id, None)
 
+    def _record_conversation_source(self, frame, context_id) -> None:
+        if not isinstance(frame, (TTSAudioRawFrame, TTSTextFrame)) or getattr(frame, '_conversation_source_recorded', False):
+            return
+        context = self._conversation_audio_contexts.get(context_id)
+        if isinstance(frame, TTSAudioRawFrame):
+            if context is not None:
+                context.source_bytes += len(frame.audio)
+                context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
+        elif frame.text.strip():
+            frame.conversation_audio_span = ((context, context.previous_text_end, context.source_bytes, context.source_valid)
+                                             if context is not None else (None, 0, 0, False))
+            if context is not None:
+                context.previous_text_end = context.source_bytes
+        else:
+            return
+        frame._conversation_source_recorded = True
+
+    async def append_to_audio_context(self, context_id: str | None, frame):
+        await super().append_to_audio_context(context_id, frame)
+        if self.audio_context_available(context_id):
+            self._record_conversation_source(frame, context_id)
+
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if direction == FrameDirection.DOWNSTREAM:
             context_id = getattr(frame, 'context_id', None)
@@ -1331,17 +1353,9 @@ class VoxCPMTTS(TTSService):
                     self._conversation_audio_contexts[context_id] = context
                 frame.conversation_audio_context = context
             else:
-                context = self._conversation_audio_contexts.get(context_id)
-                if isinstance(frame, TTSAudioRawFrame) and context is not None:
-                    context.source_bytes += len(frame.audio)
-                    context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
-                elif isinstance(frame, TTSTextFrame) and frame.text.strip():
-                    frame.conversation_audio_span = ((context, context.previous_text_end, context.source_bytes, context.source_valid)
-                                                     if context is not None else (None, 0, 0, False))
-                    if context is not None:
-                        context.previous_text_end = context.source_bytes
-                elif isinstance(frame, TTSStoppedFrame):
-                    frame.conversation_audio_context = context
+                self._record_conversation_source(frame, context_id)
+                if isinstance(frame, TTSStoppedFrame):
+                    frame.conversation_audio_context = self._conversation_audio_contexts.get(context_id)
         await super().push_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
@@ -1396,6 +1410,9 @@ class VoxCPMTTS(TTSService):
                         await pending
                     await asyncio.to_thread(chunks.close)
         except Exception:
+            live_context = self._conversation_audio_contexts.get(context_id)
+            if context is not None and live_context is not None and live_context.reply_token is context.reply_token:
+                live_context.previous_text_end = live_context.source_bytes
             if context is not None and context.reply_token is not None:
                 await self.push_frame(ConversationSynthesisFailedFrame(context=context))
             raise
