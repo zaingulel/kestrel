@@ -895,6 +895,107 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+class LocalAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_app_resolution_and_literal_dispatch(self):
+        desktop_id = 'Fixture ; $(literal) "App".desktop'
+        home = '/fixture/home ; $literal'
+        expected_env = (
+            f'HOME={home}', 'XDG_DATA_HOME=/fixture/caller data',
+            'XDG_DATA_DIRS=/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP=Hyprland:Fixture_1',
+        )
+        with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {
+            'HOME': '/wrong/caller/home', 'XDG_DATA_HOME': '/fixture/caller data',
+            'XDG_DATA_DIRS': '/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP': 'Hyprland:Fixture_1',
+        }, clear=True):
+            for phrase in ('open Fixture App', ' OPEN Fixture App. ', 'Open Fixture App!'):
+                with self.subTest(phrase=phrase):
+                    command = AsyncMock(return_value=json.dumps(desktop_id))
+                    tool = await bot.resolve_app_tool(phrase, command=command)
+                    self.assertIsNotNone(tool)
+                    self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+                    command.assert_awaited_once_with((
+                        '/usr/bin/env', *expected_env, '/usr/bin/python', '-I',
+                        str(ROOT / 'app_resolver.py'), 'Fixture App',
+                    ))
+                    with patch.dict(os.environ, {'XDG_DATA_HOME': '/activation/data', 'XDG_DATA_DIRS': '/activation/dirs'}):
+                        result = await tool.run(command=command)
+                    self.assertTrue(result.accepted)
+                    self.assertTrue(result.attempted)
+                    self.assertIsNone(result.message, 'Exit status cannot establish visible success')
+                    self.assertEqual(command.await_args_list[-1], call((
+                        '/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env', *expected_env,
+                        '/usr/bin/gtk-launch', desktop_id,
+                    )))
+                    self.assertEqual(command.await_count, 2, 'Exactly one lookup and one launch request')
+            for phrase in ('open', 'open  ', 'open FixtureApp?', 'please open FixtureApp',
+                           '"open FixtureApp"', "'open FixtureApp'", 'open Fixture\nApp', 'do not open FixtureApp'):
+                command = AsyncMock()
+                with self.subTest(nonmatch=phrase):
+                    self.assertIsNone(await bot.resolve_app_tool(phrase, command=command))
+                    command.assert_not_awaited()
+            for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+                command = AsyncMock()
+                with patch.dict(bot.LOCAL_TOOLS, {'open app': bot.LocalTool(permission, AsyncMock(), 'open app')}):
+                    self.assertIsNone(await bot.resolve_app_tool('open FixtureApp', command=command))
+                command.assert_not_awaited()
+            for phrase in ('open UnknownApp', 'open AmbiguousApp', 'open FixtureApp and tell me a fact'):
+                command = AsyncMock(return_value='null\n')
+                self.assertIsNone(await bot.resolve_app_tool(phrase, command=command))
+                self.assertEqual(command.await_count, 1, 'Unknown names cannot launch')
+            for output in ('', '{', 'null null', 'false', '42', '[]', '{}', '""',
+                           '"../fixture.desktop"', '"-fixture.desktop"', '".fixture.desktop"',
+                           '"fixture"', '"a:b.desktop"', '"a\\\\b.desktop"', '"a\\n.desktop"',
+                           json.dumps('é' * 510 + '.desktop'), ' ' * 4097 + 'null'):
+                with self.subTest(output=output[:80]):
+                    command = AsyncMock(return_value=output)
+                    with self.assertRaises(ValueError):
+                        await bot.resolve_app_tool('open FixtureApp', command=command)
+                    self.assertEqual(command.await_count, 1)
+            command = AsyncMock(side_effect=RuntimeError('unavailable'))
+            with self.assertRaises(RuntimeError):
+                await bot.resolve_app_tool('open FixtureApp', command=command)
+            self.assertEqual(command.await_count, 1)
+            for error in (RuntimeError('launch failed'), FileNotFoundError('missing'), TimeoutError()):
+                command = AsyncMock(side_effect=error)
+                result = await bot.open_app(desktop_id, expected_env, command=command)
+                self.assertFalse(result.accepted)
+                self.assertTrue(result.attempted)
+                self.assertEqual(result.message, "I couldn't confirm the app opened. Check the desktop. I won't retry.")
+                self.assertEqual(command.await_count, 1)
+            command = AsyncMock()
+            result = await bot.open_app('../bad.desktop', expected_env, command=command)
+            self.assertFalse(result.accepted)
+            self.assertFalse(result.attempted)
+            command.assert_not_awaited()
+        defaults = (f'HOME={home}', f'XDG_DATA_HOME={home}/.local/share',
+                    'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=')
+        with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
+            command = AsyncMock(return_value='"fixture.desktop"')
+            tool = await bot.resolve_app_tool('open FixtureApp', command=command)
+            with patch.dict(os.environ, {'XDG_DATA_HOME': '/changed', 'XDG_DATA_DIRS': '/changed'}):
+                await tool.run(command=command)
+            self.assertEqual(command.await_args_list[0].args[0][1:5], defaults)
+            self.assertEqual(command.await_args_list[1].args[0][5:9], defaults)
+            for key in ('XDG_DATA_HOME', 'XDG_DATA_DIRS'):
+                with patch.dict(os.environ, {key: ''}):
+                    self.assertEqual(bot.app_discovery_environment(), defaults)
+            for key, value in (('XDG_DATA_HOME', 'relative'), ('XDG_DATA_HOME', '/a\n'),
+                               ('XDG_DATA_DIRS', ':/a'), ('XDG_DATA_DIRS', '/a:'),
+                               ('XDG_DATA_DIRS', '/a:relative'), ('XDG_DATA_HOME', '/' + 'a' * 4096),
+                               ('XDG_CURRENT_DESKTOP', 'Hyprland;bad'), ('XDG_CURRENT_DESKTOP', 'A::B'),
+                               ('XDG_CURRENT_DESKTOP', 'é')):
+                with self.subTest(key=key, value=value[:80]), patch.dict(os.environ, {key: value}):
+                    command = AsyncMock()
+                    with self.assertRaises(ValueError):
+                        await bot.resolve_app_tool('open FixtureApp', command=command)
+                    command.assert_not_awaited()
+            for name in ('x' * 1025, 'a\x00b', 'a\tb'):
+                command = AsyncMock()
+                with self.assertRaises(ValueError):
+                    await bot.resolve_app_tool(f'open {name}', command=command)
+                command.assert_not_awaited()
+
+
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_repeat_only_handles_completed_exact_user_turns(self):
         accepted = ('repeat that', ' REPEAT THAT. ', 'Repeat that!', ' Repeat That? ')
@@ -911,7 +1012,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -988,7 +1089,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -2154,6 +2255,221 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_open_app_routes_unknown_without_losing_context(self):
+        brain = ScriptedBrain([
+            [({'content': 'Prior reply.'}, None), ({}, 'stop')],
+            [({'content': 'Unknown reply.'}, None), ({}, 'stop')],
+            [({'content': 'Unexpected brain dispatch.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        calls = []
+
+        async def command(argv):
+            calls.append(argv)
+            return 'null' if argv[-1] == 'UnknownApp' else '"fixture.desktop"' if argv[0] == '/usr/bin/env' else ''
+
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            for text, reply in (('Tell me something.', 'Prior reply.'), ('OPEN UnknownApp!', 'Unknown reply.')):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, text)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), reply)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), reply)
+            self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Tell me something.'},
+                {'role': 'assistant', 'content': 'Prior reply.'},
+                {'role': 'user', 'content': 'OPEN UnknownApp!'},
+            ])
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Open FixtureApp.')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(len(brain.requests), 2, 'A known installed app must stay local')
+            self.assertEqual([a[0] for a in calls], ['/usr/bin/env', '/usr/bin/env', '/usr/bin/uwsm-app'])
+            self.assertEqual(calls[-1][-1], 'fixture.desktop')
+            self.assertTrue(spoken.empty(), 'Accepted dispatch does not claim a visible window')
+            self.assertTrue(committed.empty())
+        finally:
+            await close()
+        calls.clear()
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, _, processes, close = await self.open_session(None, local_command=command)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'open FixtureApp')
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertEqual([a[0] for a in calls], ['/usr/bin/env', '/usr/bin/uwsm-app'])
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                self.assertIsNone(processes[0][0])
+            finally:
+                await close()
+
+    async def test_open_app_attempt_is_owned_and_never_retried(self):
+        launch_failure = "I couldn't confirm the app opened. Check the desktop. I won't retry."
+        lookup_failure = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
+        brain = ScriptedBrain([[({'content': 'Fresh reply.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        calls = []
+
+        async def failing(argv):
+            calls.append(argv)
+            if argv[-1] == 'Unavailable':
+                raise RuntimeError('PRIVATE lookup failure')
+            if argv[-1] == 'Corrupt':
+                return '{}'
+            if argv[0] == '/usr/bin/env':
+                return '"fixture.desktop"'
+            raise RuntimeError('PRIVATE launch failure')
+
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=failing)
+        try:
+            for phrase, expected in (('open Unavailable', lookup_failure), ('open Corrupt', lookup_failure),
+                                     ('open FixtureApp', launch_failure), ('repeat that', launch_failure)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, phrase)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertTrue(committed.empty(), 'Local advisories do not enter brain history')
+                self.assertEqual(brain.requests, [])
+            self.assertEqual([a[0] for a in calls], ['/usr/bin/env'] * 3 + ['/usr/bin/uwsm-app'])
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'A fresh question.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'],
+                             [{'role': 'user', 'content': 'A fresh question.'}])
+            self.assertEqual(len(calls), 4, 'Brain fallback and repeat never retry a failed launch')
+            self.assertFalse(transport.llm.local_tasks)
+        finally:
+            await close()
+
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            calls, owners = [], []
+
+            async def blocked(argv):
+                calls.append(argv)
+                if argv[0] == '/usr/bin/env':
+                    return '"fixture.desktop"'
+                owners.append(asyncio.current_task())
+                if len(owners) == 1:
+                    entered.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                    raise RuntimeError('unconfirmed')
+                return ''
+
+            transport, spoken, committed, interrupted, _, close = await self.open_session(None, local_command=blocked)
+            native_run = transport.llm.run_local_tool
+            queued, actions = asyncio.Event(), []
+
+            async def observe(tool):
+                actions.append(asyncio.current_task())
+                if len(actions) == 2:
+                    queued.set()
+                return await native_run(tool)
+
+            try:
+                with patch.object(transport.llm, 'run_local_tool', observe):
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'open FixtureApp')
+                    await asyncio.wait_for(entered.wait(), 5)
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    self.assertFalse(cancelled.is_set(), 'Speech interruption retains an attempted launch')
+                    await self.finish_user_turn(transport, 'open FixtureApp')
+                    await asyncio.wait_for(queued.wait(), 5)
+                    self.assertEqual(len(owners), 1, 'The next explicit request waits for the older action')
+                    release.set()
+                    await asyncio.wait_for(asyncio.gather(*actions), 5)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(spoken.empty(), 'Interrupted failure cannot queue stale speech')
+                    self.assertTrue(committed.empty())
+                    self.assertEqual([a[0] for a in calls],
+                                     ['/usr/bin/env', '/usr/bin/uwsm-app', '/usr/bin/env', '/usr/bin/uwsm-app'])
+                    self.assertEqual(owners, actions)
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'repeat that')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                    self.assertEqual(len(calls), 4)
+                    self.assertFalse(transport.llm.local_tasks)
+            finally:
+                release.set()
+                await close()
+
+            for stage in ('lookup', 'launch'):
+                with self.subTest(cancelled_stage=stage):
+                    entered, cancelled, cleanup_release, cleaned = (
+                        asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event(),
+                    )
+                    calls, owners = [], []
+
+                    async def hanging(argv):
+                        calls.append(argv)
+                        if stage == 'launch' and argv[0] == '/usr/bin/env':
+                            return '"fixture.desktop"'
+                        owners.append(asyncio.current_task())
+                        entered.set()
+                        try:
+                            await asyncio.Event().wait()
+                        except asyncio.CancelledError:
+                            cancelled.set()
+                            await cleanup_release.wait()
+                            cleaned.set()
+                            raise
+
+                    transport, spoken, committed, interrupted, _, close = await self.open_session(None, local_command=hanging)
+                    closing = None
+                    try:
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'open FixtureApp')
+                        await asyncio.wait_for(entered.wait(), 5)
+                        self.assertIn(owners[0], transport.llm.local_tasks)
+                        if stage == 'lookup':
+                            interrupted.clear()
+                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                            await asyncio.wait_for(cancelled.wait(), 5)
+                        else:
+                            closing = asyncio.create_task(close())
+                            await asyncio.wait_for(cancelled.wait(), 5)
+                            self.assertFalse(closing.done(), 'Shutdown joins attempted-command cleanup')
+                        self.assertFalse(owners[0].done(), 'Ownership continues until cleanup finishes')
+                        cleanup_release.set()
+                        await asyncio.gather(*owners, return_exceptions=True)
+                        self.assertTrue(cleaned.is_set())
+                        if closing is not None:
+                            await asyncio.wait_for(closing, 5)
+                        else:
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            await self.finish_user_turn(transport, 'stop')
+                            barrier = DataFrame()
+                            await transport.input().queue_frame(barrier)
+                            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                        self.assertTrue(owners[0].cancelled())
+                        self.assertFalse(transport.llm.local_tasks)
+                        self.assertEqual([a[0] for a in calls],
+                                         ['/usr/bin/env'] + (['/usr/bin/uwsm-app'] if stage == 'launch' else []))
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                    finally:
+                        cleanup_release.set()
+                        if closing is not None:
+                            await asyncio.gather(closing, return_exceptions=True)
+                        await close()
 
     async def test_stop_cancel_discard_reply_without_brain_request(self):
         cases = [(word, heard, threading.Event(), threading.Event(), threading.Event())
