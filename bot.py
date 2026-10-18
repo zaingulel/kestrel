@@ -856,12 +856,10 @@ def make_llm():
     return HermesLLMService()
 
 
-async def bot(*, status=None):
+async def bot(*, status=None, on_transport_released=None):
     preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
     transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
     stt = NemotronSTT()
-    if status is not None:
-        status._transport_released = False
     llm = None
     try:
         await transport.open()
@@ -897,8 +895,8 @@ async def bot(*, status=None):
                 await stt.close()
             finally:
                 await transport.close()
-                if status is not None:
-                    status._transport_released = True
+                if on_transport_released is not None:
+                    on_transport_released()
                 if transport.failure:
                     raise RuntimeError(transport.failure)
 
@@ -995,6 +993,7 @@ async def run_voice_service():
     stopping = False
     echo_failure = None
     orderly = False
+    transport_released = False
     status = IndicatorStatus()
     status.set_state('starting')
 
@@ -1009,6 +1008,10 @@ async def run_voice_service():
         echo_failure = "Echo removal has stopped. Restart Kestrel."
         stop_kestrel()
 
+    def transport_closed():
+        nonlocal transport_released
+        transport_released = True
+
     heartbeat = asyncio.create_task(status.heartbeat())
     try:
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1017,7 +1020,7 @@ async def run_voice_service():
         if ECHO_REMOVAL.process is not None:
             status.remember_owner(ECHO_REMOVAL.process.pid)
         try:
-            await bot(status=status)
+            await bot(status=status, on_transport_released=transport_closed)
         except asyncio.CancelledError:
             orderly = stopping
         else:
@@ -1025,7 +1028,7 @@ async def run_voice_service():
     finally:
         try:
             ECHO_REMOVAL.close()
-            if orderly and echo_failure is None and status._transport_released:
+            if orderly and echo_failure is None and transport_released:
                 status.mark_released()
             else:
                 status.set_state('unavailable')

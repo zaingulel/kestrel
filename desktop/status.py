@@ -197,7 +197,6 @@ class IndicatorStatus:
         self._state = 'starting'
         self._owners = []
         self._failed = False
-        self._transport_released = True
         try:
             self._publisher = _identity(os.getpid(), _PROC_ROOT)
             self._boot_id = _boot(_PROC_ROOT)

@@ -1910,7 +1910,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(snapshot.read_text())['state'], 'released')
 
     async def test_indicator_publication_failure_preserves_voice(self):
-        for failure in ('publication', 'delayed-startup', 'model-startup', 'transport-close', 'echo-close', 'echo-failure'):
+        for failure in ('publication', 'delayed-startup', 'model-startup', 'transport-close', 'echo-close', 'echo-failure', 'transport-close-interrupted'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as runtime:
                 self.audio.capture = None
                 self.audio.reset_mock()
@@ -1929,6 +1929,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 stt = Mock(load=AsyncMock(side_effect=load), close=AsyncMock())
                 loop = asyncio.get_running_loop()
                 handlers, echo_callbacks = {}, []
+
+                if failure == 'transport-close-interrupted':
+                    async def interrupted_close():
+                        handlers[signal.SIGTERM]()
+                        raise asyncio.CancelledError
+
+                    self.audio.close.side_effect = interrupted_close
 
                 async def converse(*args, **kwargs):
                     if failure == 'echo-failure':
@@ -1958,7 +1965,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(json.loads(snapshot.read_text())['state'], 'starting')
                             self.assertFalse(task.done())
                         release.set()
-                        if failure in ('model-startup', 'transport-close', 'echo-close', 'echo-failure'):
+                        if failure == 'transport-close-interrupted':
+                            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+                        elif failure in ('model-startup', 'transport-close', 'echo-close', 'echo-failure'):
                             with self.assertRaises(RuntimeError):
                                 await asyncio.wait_for(task, 5)
                         else:
