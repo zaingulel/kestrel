@@ -5,10 +5,18 @@ import sys
 import unicodedata
 
 
+def valid_app_text(value: object, byte_limit: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode('utf-8')) <= byte_limit and not any(unicodedata.category(c) == 'Cc' for c in value)
+    except UnicodeEncodeError:
+        return False
+
+
 def valid_desktop_id(value) -> bool:
-    return (isinstance(value, str) and bool(value) and len(value.encode('utf-8')) <= 1024
-            and value.endswith('.desktop') and value[0] not in '.-'
-            and not any(c in '/\\:' or unicodedata.category(c) == 'Cc' for c in value))
+    return (valid_app_text(value, 1024) and bool(value) and value.endswith('.desktop')
+            and value[0] not in '.-' and not any(c in '/\\:' for c in value))
 
 
 def resolve_app(name: str, apps) -> str | None:
@@ -29,8 +37,15 @@ def resolve_app(name: str, apps) -> str | None:
 
 def main(argv=None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if (len(args) != 1 or not args[0].strip() or len(args[0].encode('utf-8')) > 1024
-            or any(unicodedata.category(c) == 'Cc' for c in args[0])):
+    if args:
+        print('Invalid app name', file=sys.stderr)
+        return 1
+    try:
+        name = sys.stdin.buffer.read(1025).decode('utf-8', errors='strict')
+    except UnicodeDecodeError:
+        print('Invalid app name', file=sys.stderr)
+        return 1
+    if not valid_app_text(name, 1024) or not name.strip():
         print('Invalid app name', file=sys.stderr)
         return 1
     try:
@@ -39,7 +54,7 @@ def main(argv=None) -> int:
         print('Gio unavailable', file=sys.stderr)
         return 1
     try:
-        desktop_id = resolve_app(args[0], Gio.AppInfo.get_all())
+        desktop_id = resolve_app(name, Gio.AppInfo.get_all())
     except (ValueError, TypeError, AttributeError, RuntimeError):
         print('Invalid installed-app metadata', file=sys.stderr)
         return 1

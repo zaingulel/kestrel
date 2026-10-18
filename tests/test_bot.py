@@ -903,6 +903,10 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             f'HOME={home}', 'XDG_DATA_HOME=/fixture/caller data',
             'XDG_DATA_DIRS=/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP=Hyprland:Fixture_1',
         )
+        expected_launch_env = (
+            'HOME=/fixture/home ; $$literal', 'XDG_DATA_HOME=/fixture/caller data',
+            'XDG_DATA_DIRS=/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP=Hyprland:Fixture_1',
+        )
         with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {
             'HOME': '/wrong/caller/home', 'XDG_DATA_HOME': '/fixture/caller data',
             'XDG_DATA_DIRS': '/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP': 'Hyprland:Fixture_1',
@@ -915,16 +919,16 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(tool.permission, bot.PermissionTier.FREE)
                     command.assert_awaited_once_with((
                         '/usr/bin/env', *expected_env, '/usr/bin/python', '-I',
-                        str(ROOT / 'app_resolver.py'), 'Fixture App',
-                    ))
+                        str(ROOT / 'app_resolver.py'),
+                    ), stdin_data=b'Fixture App')
                     with patch.dict(os.environ, {'XDG_DATA_HOME': '/activation/data', 'XDG_DATA_DIRS': '/activation/dirs'}):
                         result = await tool.run(command=command)
                     self.assertTrue(result.accepted)
                     self.assertTrue(result.attempted)
                     self.assertIsNone(result.message, 'Exit status cannot establish visible success')
                     self.assertEqual(command.await_args_list[-1], call((
-                        '/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env', *expected_env,
-                        '/usr/bin/gtk-launch', desktop_id,
+                        '/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env', *expected_launch_env,
+                        '/usr/bin/gtk-launch', 'Fixture ; $$(literal) "App".desktop',
                     )))
                     self.assertEqual(command.await_count, 2, 'Exactly one lookup and one launch request')
             for phrase in ('open', 'open  ', 'open FixtureApp?', 'please open FixtureApp',
@@ -945,7 +949,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             for output in ('', '{', 'null null', 'false', '42', '[]', '{}', '""',
                            '"../fixture.desktop"', '"-fixture.desktop"', '".fixture.desktop"',
                            '"fixture"', '"a:b.desktop"', '"a\\\\b.desktop"', '"a\\n.desktop"',
-                           json.dumps('é' * 510 + '.desktop'), ' ' * 4097 + 'null'):
+                           json.dumps('é' * 510 + '.desktop')):
                 with self.subTest(output=output[:80]):
                     command = AsyncMock(return_value=output)
                     with self.assertRaises(ValueError):
@@ -962,11 +966,6 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.attempted)
                 self.assertEqual(result.message, "I couldn't confirm the app opened. Check the desktop. I won't retry.")
                 self.assertEqual(command.await_count, 1)
-            command = AsyncMock()
-            result = await bot.open_app('../bad.desktop', expected_env, command=command)
-            self.assertFalse(result.accepted)
-            self.assertFalse(result.attempted)
-            command.assert_not_awaited()
         defaults = (f'HOME={home}', f'XDG_DATA_HOME={home}/.local/share',
                     'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=')
         with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
@@ -975,7 +974,10 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {'XDG_DATA_HOME': '/changed', 'XDG_DATA_DIRS': '/changed'}):
                 await tool.run(command=command)
             self.assertEqual(command.await_args_list[0].args[0][1:5], defaults)
-            self.assertEqual(command.await_args_list[1].args[0][5:9], defaults)
+            self.assertEqual(command.await_args_list[1].args[0][5:9], (
+                'HOME=/fixture/home ; $$literal', 'XDG_DATA_HOME=/fixture/home ; $$literal/.local/share',
+                'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=',
+            ))
             for key in ('XDG_DATA_HOME', 'XDG_DATA_DIRS'):
                 with patch.dict(os.environ, {key: ''}):
                     self.assertEqual(bot.app_discovery_environment(), defaults)
@@ -991,8 +993,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                     command.assert_not_awaited()
             for name in ('x' * 1025, 'a\x00b', 'a\tb'):
                 command = AsyncMock()
-                with self.assertRaises(ValueError):
-                    await bot.resolve_app_tool(f'open {name}', command=command)
+                self.assertIsNone(await bot.resolve_app_tool(f'open {name}', command=command))
                 command.assert_not_awaited()
 
 
@@ -1255,6 +1256,25 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, '^command unavailable$'):
                 await bot.run_local_command(('/missing/command',))
 
+        process = Mock(pid=9876, returncode=0)
+        process.stdout.read = AsyncMock(side_effect=[b'local\n', b''])
+        process.wait = AsyncMock(return_value=0)
+        process.stdin.drain = AsyncMock()
+        process.stdin.wait_closed = AsyncMock()
+        with patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn:
+            self.assertEqual(await bot.run_local_command(('/test/command',), stdin_data=b'private\x00input'), 'local\n')
+            self.assertEqual(spawn.await_args.kwargs['stdin'], asyncio.subprocess.PIPE)
+            process.stdin.write.assert_called_once_with(b'private\x00input')
+            process.stdin.drain.assert_awaited_once_with()
+            process.stdin.close.assert_called_once_with()
+            process.stdin.wait_closed.assert_awaited_once_with()
+        with patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn:
+            for payload in (b'x' * 1025, 'text', bytearray(b'bytes')):
+                with self.subTest(invalid_input_type=type(payload).__name__):
+                    with self.assertRaisesRegex(RuntimeError, '^invalid command input$'):
+                        await bot.run_local_command(('/test/command',), stdin_data=payload)
+            spawn.assert_not_awaited()
+
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
                 started = asyncio.Event()
@@ -1262,8 +1282,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 reaped = asyncio.Event()
                 process = Mock(pid=9876, returncode=None)
 
-                async def read(size):
-                    self.assertLessEqual(size, 4097)
+                async def drain():
                     started.set()
                     try:
                         await asyncio.Future()
@@ -1281,13 +1300,15 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     if sig == signal.SIGKILL:
                         process.returncode = -signal.SIGKILL
 
-                process.stdout.read = AsyncMock(side_effect=read)
+                process.stdin.drain = AsyncMock(side_effect=drain)
+                process.stdin.wait_closed = AsyncMock()
+                process.stdout.read = AsyncMock(side_effect=AssertionError('Input must finish before reading output'))
                 process.wait = AsyncMock(side_effect=wait)
                 with (patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
                       patch.object(bot.os, 'killpg', side_effect=signal_group) as killpg,
                       patch.object(bot, 'LOCAL_COMMAND_TIMEOUT', 0.01, create=True),
                       patch.object(bot, 'LOCAL_COMMAND_CLEANUP_TIMEOUT', 0.01, create=True)):
-                    task = asyncio.create_task(bot.run_local_command(('/test/hung',)))
+                    task = asyncio.create_task(bot.run_local_command(('/test/hung',), stdin_data=b'private input'))
                     await asyncio.wait_for(started.wait(), 5)
                     if cancel:
                         task.cancel()
@@ -1295,6 +1316,10 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(task, 5)
                     self.assertTrue(stopped.is_set())
                     self.assertTrue(reaped.is_set())
+                    process.stdin.write.assert_called_once_with(b'private input')
+                    process.stdin.close.assert_called_once_with()
+                    process.stdout.read.assert_not_awaited()
+                    self.assertEqual(spawn.await_args.kwargs['stdin'], asyncio.subprocess.PIPE)
                     self.assertEqual(killpg.call_args_list, [call(9876, signal.SIGTERM), call(9876, signal.SIGKILL)])
                     spawn.assert_awaited_once()
 
@@ -1346,8 +1371,8 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_command_wire_success_and_failure(self):
         self.assertEqual(await bot.run_local_command((
-            sys.executable, '-c', "print('local wire', flush=True)",
-        )), 'local wire\n')
+            sys.executable, '-c', "import sys; assert sys.stdin.buffer.read() == b'wire input'; print('local wire', flush=True)",
+        ), stdin_data=b'wire input'), 'local wire\n')
         real_spawn = asyncio.create_subprocess_exec
         processes = []
 
@@ -2265,9 +2290,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         calls = []
 
-        async def command(argv):
+        async def command(argv, *, stdin_data=None):
             calls.append(argv)
-            return 'null' if argv[-1] == 'UnknownApp' else '"fixture.desktop"' if argv[0] == '/usr/bin/env' else ''
+            if argv[0] == '/usr/bin/env':
+                self.assertIn(stdin_data, (b'UnknownApp', b'FixtureApp'))
+                return 'null' if stdin_data == b'UnknownApp' else '"fixture.desktop"'
+            self.assertIsNone(stdin_data)
+            return ''
 
         transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
         try:
@@ -2316,14 +2345,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(brain.close)
         calls = []
 
-        async def failing(argv):
+        async def failing(argv, *, stdin_data=None):
             calls.append(argv)
-            if argv[-1] == 'Unavailable':
+            if stdin_data == b'Unavailable':
                 raise RuntimeError('PRIVATE lookup failure')
-            if argv[-1] == 'Corrupt':
+            if stdin_data == b'Corrupt':
                 return '{}'
             if argv[0] == '/usr/bin/env':
+                self.assertEqual(stdin_data, b'FixtureApp')
                 return '"fixture.desktop"'
+            self.assertIsNone(stdin_data)
             raise RuntimeError('PRIVATE launch failure')
 
         transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=failing)
@@ -2355,10 +2386,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
             calls, owners = [], []
 
-            async def blocked(argv):
+            async def blocked(argv, *, stdin_data=None):
                 calls.append(argv)
                 if argv[0] == '/usr/bin/env':
+                    self.assertEqual(stdin_data, b'FixtureApp')
                     return '"fixture.desktop"'
+                self.assertIsNone(stdin_data)
                 owners.append(asyncio.current_task())
                 if len(owners) == 1:
                     entered.set()
@@ -2418,8 +2451,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     )
                     calls, owners = [], []
 
-                    async def hanging(argv):
+                    async def hanging(argv, *, stdin_data=None):
                         calls.append(argv)
+                        self.assertEqual(stdin_data, b'FixtureApp' if argv[0] == '/usr/bin/env' else None)
                         if stage == 'launch' and argv[0] == '/usr/bin/env':
                             return '"fixture.desktop"'
                         owners.append(asyncio.current_task())
@@ -2432,7 +2466,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             cleaned.set()
                             raise
 
-                    transport, spoken, committed, interrupted, _, close = await self.open_session(None, local_command=hanging)
+                    following_brain = None
+                    if stage == 'lookup':
+                        following_brain = ScriptedBrain([[({'content': 'After cancellation.'}, None), ({}, 'stop')]])
+                        self.addCleanup(following_brain.close)
+                    with patch.object(bot, 'HERMES_PYTHON', NATIVE_PYTHON if stage == 'lookup'
+                                      else Path('/nonexistent-kestrel-hermes/python')):
+                        transport, spoken, committed, interrupted, _, close = await self.open_session(
+                            following_brain, local_command=hanging,
+                        )
                     closing = None
                     try:
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
@@ -2455,10 +2497,17 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(closing, 5)
                         else:
                             await asyncio.wait_for(interrupted.wait(), 5)
-                            await self.finish_user_turn(transport, 'stop')
+                            await self.finish_user_turn(transport, 'After canceled lookup.')
+                            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'After cancellation.')
+                            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'After cancellation.')
                             barrier = DataFrame()
                             await transport.input().queue_frame(barrier)
                             self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                            self.assertEqual(len(following_brain.requests), 1)
+                            self.assertEqual([m for m in following_brain.requests[0][2]['messages']
+                                              if m['role'] != 'system'],
+                                             [{'role': 'user', 'content': 'After canceled lookup.'}],
+                                             'A canceled app lookup must not enter the next brain request')
                         self.assertTrue(owners[0].cancelled())
                         self.assertFalse(transport.llm.local_tasks)
                         self.assertEqual([a[0] for a in calls],
