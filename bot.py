@@ -653,11 +653,15 @@ class HermesLLMService(LLMService):
             self._indicator_pending = False
             self.refresh_indicator()
 
-    async def speak_local_reply(self, message, token):
-        await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+    async def push_reply_end(self, token):
         end = LLMFullResponseEndFrame()
+        # The output queue, not generation completion, owns the visible reply's end.
         end.indicator_reply_token = token
         await self.push_frame(end)
+
+    async def speak_local_reply(self, message, token):
+        await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+        await self.push_reply_end(token)
 
     async def run_local_tool(self, tool):
         async with self.local_tool_lock:
@@ -865,10 +869,7 @@ class HermesLLMService(LLMService):
             if self.output is output:
                 self.output = None
             await self.stop_processing_metrics()
-            end = LLMFullResponseEndFrame()
-            # The output queue, not generation completion, owns the visible reply's end.
-            end.indicator_reply_token = token
-            await self.push_frame(end)
+            await self.push_reply_end(token)
 
 
 def make_llm():

@@ -7,6 +7,7 @@ BarWidget {
     moduleName: "local.kestrel"
     readonly property var service: bar?.shell?.serviceFor("local.kestrel") ?? null
     readonly property string currentState: service ? service.state : "unavailable"
+    readonly property bool tooltipHovered: visible && hover.containsMouse
     readonly property string statusSentence: ({
         "not-running": "Not running. Microphone released by Kestrel.",
         "starting": "Starting. Microphone may be in use.",
