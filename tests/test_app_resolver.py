@@ -71,7 +71,9 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(bot.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=home)), \
                     patch.dict(os.environ, {'XDG_DATA_HOME': data_home, 'XDG_DATA_DIRS': data_dirs,
                                             'XDG_CURRENT_DESKTOP': 'Fixture_1'}):
-                tool = await bot.resolve_app_tool('open Fixture Query', command=command)
+                name = bot.match_app_name('open Fixture Query')
+                self.assertEqual(name, 'Fixture Query')
+                tool = await bot.resolve_app_tool(name, command=command)
                 self.assertIsNotNone(tool)
                 result = await tool.run(command=command)
             self.assertTrue(result.accepted, result.reason)
@@ -228,7 +230,9 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(bot.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(caller))), \
                     patch.dict(os.environ, caller_env):
-                tool = await bot.resolve_app_tool(f'open {private_name}', command=command)
+                name = bot.match_app_name(f'open {private_name}')
+                self.assertEqual(name, 'FixturePrivateQuery_3a61')
+                tool = await bot.resolve_app_tool(name, command=command)
                 self.assertIsNotNone(tool)
                 result = await tool.run(command=command)
             self.assertTrue(result.accepted)

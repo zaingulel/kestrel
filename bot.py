@@ -443,7 +443,7 @@ async def open_app(desktop_id: str, discovery_env: tuple[str, ...], *, command=r
                                "I couldn't confirm the app opened. Check the desktop. I won't retry.")
 
 
-async def resolve_app_tool(text: str, *, command=run_local_command) -> LocalTool | None:
+def match_app_name(text: str) -> str | None:
     match = re.fullmatch(r'open ([^\r\n?!]+?)[.!]?', text.strip(), re.IGNORECASE)
     if not match:
         return None
@@ -453,6 +453,10 @@ async def resolve_app_tool(text: str, *, command=run_local_command) -> LocalTool
     name = match[1].strip()
     if not name or not valid_app_text(name, 1024):
         return None
+    return name
+
+
+async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool | None:
     discovery_env = app_discovery_environment()
     output = await command(('/usr/bin/env', *discovery_env, '/usr/bin/python', '-I',
                             str(ROOT / 'app_resolver.py')), stdin_data=name.encode('utf-8'))
@@ -461,6 +465,7 @@ async def resolve_app_tool(text: str, *, command=run_local_command) -> LocalTool
         return None
     if not valid_desktop_id(desktop_id):
         raise ValueError('invalid app resolution')
+    tool = LOCAL_TOOLS['open app']
     return replace(tool, run=partial(tool.run, desktop_id, discovery_env))
 
 
@@ -687,9 +692,10 @@ class HermesLLMService(LLMService):
                 ))
                 return
             tool = match_instant_tool(messages[-1]['content'])
-            if tool is None:
+            name = match_app_name(messages[-1]['content']) if tool is None else None
+            if name is not None:
                 lookup_message = messages[-1]
-                lookup = asyncio.create_task(resolve_app_tool(lookup_message['content'], command=self.local_command))
+                lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_command))
                 self.local_tasks.add(lookup)
                 lookup.add_done_callback(self.local_tasks.discard)
                 try:
