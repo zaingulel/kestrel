@@ -733,16 +733,14 @@ class HermesLLMService(LLMService):
             if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
                 return
-            if messages[-1]['content'].strip().lower() in (
-                    'repeat that', 'repeat that.', 'repeat that!', 'repeat that?'):
+            if re.fullmatch(r'repeat that[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
                 await self.push_frame(TTSSpeakFrame(
                     self.last_spoken_reply or "I haven't said anything to repeat yet.",
                     append_to_context=False,
                 ))
                 return
-            if messages[-1]['content'].strip().lower() in (
-                    'what can i say', 'what can i say.', 'what can i say!', 'what can i say?'):
+            if re.fullmatch(r'what can i say[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
                 await self.push_frame(TTSSpeakFrame(capability_help(), append_to_context=False))
                 return
