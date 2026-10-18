@@ -2520,7 +2520,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None):
+    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None, synthesis_chunks=None):
         if brain is not None:
             require_native_hermes()
         started = asyncio.Event()
@@ -2604,7 +2604,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         spawn_patch = patch.object(bot.asyncio, 'create_subprocess_exec', spawn)
         spawn_patch.start()
         self.addCleanup(spawn_patch.stop)
-        supplied_llm = bot.HermesLLMService(local_command=local_command, status=status)
+        supplied_llm = bot.HermesLLMService(local_command=local_command)
         transport.llm = supplied_llm
         session = None
 
@@ -2640,7 +2640,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
         )
         session = asyncio.create_task(bot.run_conversation(
-            bot.NemotronSTT(), bot.VoxCPMTTS(Mock(generate_streaming=chunks), preset),
+            bot.NemotronSTT(), bot.VoxCPMTTS(Mock(generate_streaming=chunks if synthesis_chunks is None else synthesis_chunks), preset),
             llm=supplied_llm, transport=transport, user_params=user_params, status=status,
         ))
         await asyncio.wait_for(started.wait(), 45)
@@ -2651,6 +2651,57 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_indicator_local_speech_without_audio_finishes_turn(self):
+        for failing in (False, True):
+            with self.subTest(synthesis='failure' if failing else 'empty'):
+                brain = ScriptedBrain([])
+                self.addCleanup(brain.close)
+                attempts = []
+
+                def chunks(**kwargs):
+                    attempts.append(kwargs['text'])
+                    if failing:
+                        raise RuntimeError('Finite synthesis failure')
+                    yield from ()
+
+                command = AsyncMock(side_effect=AssertionError('Local speech cannot invoke a tool'))
+                with tempfile.TemporaryDirectory() as runtime:
+                    status = bot.IndicatorStatus(Path(runtime))
+                    transport, _, committed, _, _, close = await self.open_session(
+                        brain, local_command=command, status=status, synthesis_chunks=chunks,
+                    )
+                    output_events, contexts = [], []
+
+                    @transport.output().event_handler('on_after_push_frame')
+                    async def output_event(processor, frame):
+                        if isinstance(frame, BotStartedSpeakingFrame):
+                            output_events.append(frame)
+
+                    @transport.llm.event_handler('on_after_process_frame')
+                    async def context_after_turn(processor, frame):
+                        if isinstance(frame, LLMContextFrame):
+                            contexts.append(deepcopy(frame.context.get_messages()))
+
+                    try:
+                        for phrase in ('repeat that', 'what can i say'):
+                            with self.subTest(phrase=phrase):
+                                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                                await self.finish_user_turn(transport, phrase)
+                                barrier = DataFrame()
+                                await transport.input().queue_frame(barrier)
+                                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                                snapshot = json.loads((Path(runtime) / 'kestrel/indicator.json').read_text())
+                                self.assertEqual(snapshot['state'], 'idle',
+                                                 'A completed local turn without audio cannot remain thinking')
+                                self.assertEqual(output_events, [], 'No audio means no native speaking event')
+                                self.assertTrue(committed.empty())
+                                self.assertEqual(contexts[-1], [], 'Local speech stays outside brain history')
+                        self.assertEqual(len(attempts), 2)
+                        self.assertEqual(brain.requests, [])
+                        command.assert_not_awaited()
+                    finally:
+                        await close()
 
     async def test_indicator_tracks_output_interruption_and_local_turns(self):
         blocked, release = threading.Event(), threading.Event()

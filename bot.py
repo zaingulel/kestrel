@@ -590,7 +590,7 @@ def stop_kestrel():
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, *, local_command=None, status=None):
+    def __init__(self, *, local_command=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -603,14 +603,13 @@ class HermesLLMService(LLMService):
         self.failure = None
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
-        self.status = status
+        self.status = None
         self._indicator_ready = False
         self._indicator_user = False
         self._indicator_output = False
         self._indicator_pending = False
         self._indicator_reply = object()
         self._indicator_output_reply = None
-        self._indicator_local_reply = None
         self.local_tasks = set()
         self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
@@ -623,18 +622,42 @@ class HermesLLMService(LLMService):
                      'trouble' if self.failure else 'idle')
             self.status.set_state(state)
 
+    def indicator_input_ready(self):
+        self._indicator_ready = True
+        self.refresh_indicator()
+
+    def indicator_user_stopped(self):
+        self._indicator_user = False
+        self.refresh_indicator()
+
+    def indicator_output_started(self):
+        if not self._indicator_user:
+            self._indicator_output_reply = self._indicator_reply
+            self._indicator_output = True
+            self.refresh_indicator()
+
+    def indicator_output_stopped(self):
+        if self._indicator_output_reply is self._indicator_reply:
+            self._indicator_output = False
+            self.refresh_indicator()
+
     def indicator_user_started(self):
         self._indicator_reply = object()
         self._indicator_user = True
         self._indicator_output = False
         self._indicator_pending = False
-        self._indicator_local_reply = None
         self.refresh_indicator()
 
     def indicator_reply_finished(self, token):
         if token is self._indicator_reply:
             self._indicator_pending = False
             self.refresh_indicator()
+
+    async def speak_local_reply(self, message, token):
+        await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+        end = LLMFullResponseEndFrame()
+        end.indicator_reply_token = token
+        await self.push_frame(end)
 
     async def run_local_tool(self, tool):
         async with self.local_tool_lock:
@@ -762,7 +785,6 @@ class HermesLLMService(LLMService):
         token = self._indicator_reply
         self._indicator_user = False
         self._indicator_pending = True
-        self._indicator_local_reply = token
         self.refresh_indicator()
         messages = frame.context.get_messages()
         if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
@@ -774,14 +796,13 @@ class HermesLLMService(LLMService):
                 return
             if re.fullmatch(r'repeat that[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
-                await self.push_frame(TTSSpeakFrame(
-                    self.last_spoken_reply or "I haven't said anything to repeat yet.",
-                    append_to_context=False,
-                ))
+                await self.speak_local_reply(
+                    self.last_spoken_reply or "I haven't said anything to repeat yet.", token,
+                )
                 return
             if re.fullmatch(r'what can i say[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
-                await self.push_frame(TTSSpeakFrame(capability_help(), append_to_context=False))
+                await self.speak_local_reply(capability_help(), token)
                 return
             tool = match_instant_tool(messages[-1]['content'])
             name = match_app_name(messages[-1]['content']) if tool is None else None
@@ -801,10 +822,9 @@ class HermesLLMService(LLMService):
                     raise
                 except (ValueError, RuntimeError, OSError, TimeoutError):
                     messages.pop()
-                    await self.push_frame(TTSSpeakFrame(
-                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.",
-                        append_to_context=False,
-                    ))
+                    await self.speak_local_reply(
+                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
+                    )
                     return
             if tool is not None:
                 messages.pop()
@@ -816,11 +836,10 @@ class HermesLLMService(LLMService):
                            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
                            if not result.confirmed else None)
                 if message is not None:
-                    await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+                    await self.speak_local_reply(message, token)
                 else:
                     self.indicator_reply_finished(token)
                 return
-        self._indicator_local_reply = None
         output = None
         try:
             if self.reader is not None:
@@ -866,8 +885,6 @@ async def bot(*, status=None, on_transport_released=None):
         if status is not None and transport.capture is not None:
             status.remember_owner(transport.capture.pid)
         llm = make_llm()
-        if status is not None:
-            llm.status = status
         llm.start_preparation()
         logger.info("Loading local speech models for the conversation")
         await stt.load(preset.pcm)
@@ -920,16 +937,14 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
         @transport.input().event_handler('on_after_process_frame')
         async def indicator_input_ready(processor, frame):
             if isinstance(frame, StartFrame):
-                llm._indicator_ready = True
-                llm.refresh_indicator()
+                llm.indicator_input_ready()
 
         @aggregators.user().event_handler('on_before_push_frame')
         async def indicator_user_turn(processor, frame):
             if isinstance(frame, UserStartedSpeakingFrame):
                 llm.indicator_user_started()
             elif isinstance(frame, UserStoppedSpeakingFrame):
-                llm._indicator_user = False
-                llm.refresh_indicator()
+                llm.indicator_user_stopped()
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):
@@ -943,19 +958,12 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
     output = transport.output()
 
     @output.event_handler('on_after_push_frame')
-    async def remember_local_reply(processor, frame):
+    async def on_output_frame(processor, frame):
         if status is not None:
-            if isinstance(frame, BotStartedSpeakingFrame) and not llm._indicator_user:
-                llm._indicator_output_reply = llm._indicator_reply
-                llm._indicator_output = True
-                llm.refresh_indicator()
+            if isinstance(frame, BotStartedSpeakingFrame):
+                llm.indicator_output_started()
             elif isinstance(frame, BotStoppedSpeakingFrame):
-                if llm._indicator_output_reply is llm._indicator_reply:
-                    llm._indicator_output = False
-                    if llm._indicator_local_reply is llm._indicator_reply:
-                        llm.indicator_reply_finished(llm._indicator_output_reply)
-                    else:
-                        llm.refresh_indicator()
+                llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
