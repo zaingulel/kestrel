@@ -19,6 +19,7 @@ FocusScope {
     implicitHeight: 640
 
     function focusClose() { closeButton.forceActiveFocus() }
+    function announceTurn(text) { root.Accessible.announce(text, Accessible.Polite) }
 
     function updateTurns() {
         const follow = transcript.followBottom
@@ -30,9 +31,9 @@ FocusScope {
             const turn = turns[i]
             if (["complete", "interrupted", "failed"].indexOf(turn.state) !== -1
                     && (!previous[i] || previous[i].state !== turn.state || previous[i].text !== turn.text)) {
-                root.Accessible.announce((turn.speaker === "you" ? "You: " : "Kestrel: ")
+                announceTurn((turn.speaker === "you" ? "You: " : "Kestrel: ")
                     + turn.text + (turn.state === "interrupted" ? " Reply interrupted."
-                        : turn.state === "failed" ? " Reply could not be completed." : ""), Accessible.Polite)
+                        : turn.state === "failed" ? " Reply could not be completed." : ""))
             }
         }
         Qt.callLater(function() {
