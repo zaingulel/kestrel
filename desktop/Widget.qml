@@ -5,8 +5,7 @@ import qs.Ui
 BarWidget {
     id: root
     moduleName: "local.kestrel"
-    property var shell: null
-    readonly property var service: shell ? shell.serviceFor("local.kestrel") : null
+    readonly property var service: bar?.shell?.serviceFor("local.kestrel") ?? null
     readonly property string currentState: service ? service.state : "unavailable"
     readonly property string statusSentence: ({
         "not-running": "Not running. Microphone released by Kestrel.",
