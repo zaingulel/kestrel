@@ -45,7 +45,7 @@ from desktop.conversation import ConversationFeed
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import HERMES_PYTHON, child_environment
-from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
+from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
@@ -612,6 +612,7 @@ class HermesLLMService(LLMService):
         self._conversation_output_bytes = 0
         self._conversation_pending_spans = []
         self._conversation_incomplete = False
+        self._conversation_synthesis_failed = False
         self._indicator_ready = False
         self._indicator_user = False
         self._indicator_output = False
@@ -670,11 +671,20 @@ class HermesLLMService(LLMService):
             self._conversation_output_bytes = 0
             self._conversation_pending_spans.clear()
             self._conversation_incomplete = False
+            self._conversation_synthesis_failed = False
         if self._conversation_interrupting is token:
             self._conversation_interrupting = None
 
     def conversation_output(self, frame):
         if self.conversation is None:
+            return
+        if isinstance(frame, ConversationSynthesisFailedFrame):
+            token = frame.context.reply_token
+            if token is None or token is not self._conversation_attempt:
+                return
+            self._conversation_synthesis_failed = True
+            if frame.context.output_stopped and self._conversation_output_context is None:
+                self.finish_conversation_reply(token, failed=True, interrupted=token is self._conversation_interrupting)
             return
         if isinstance(frame, InterruptionFrame):
             self.finish_conversation_reply(getattr(frame, 'conversation_reply_token', None), interrupted=True)
@@ -685,7 +695,7 @@ class HermesLLMService(LLMService):
                 context = self._conversation_output_context
                 self.finish_conversation_reply(
                     token, interrupted=token is self._conversation_interrupting,
-                    failed=frame.conversation_reply_failed or self._conversation_incomplete
+                    failed=frame.conversation_reply_failed or self._conversation_incomplete or self._conversation_synthesis_failed
                     or bool(self._conversation_pending_spans) or bool(context and context.write_failed),
                 )
             return
@@ -727,10 +737,13 @@ class HermesLLMService(LLMService):
                 _, text = self._conversation_pending_spans.pop(0)
                 self.conversation.spoken(context.reply_token, text)
         if isinstance(frame, TTSStoppedFrame):
+            context.output_stopped = True
             self._conversation_incomplete |= bool(self._conversation_pending_spans) or context.write_failed
             self._conversation_pending_spans.clear()
             self._conversation_output_context = None
             self._conversation_output_bytes = 0
+            if self._conversation_synthesis_failed:
+                self.finish_conversation_reply(context.reply_token, failed=True, interrupted=context.reply_token is self._conversation_interrupting)
 
     async def push_reply_end(self, token, *, failed=False):
         end = LLMFullResponseEndFrame()
@@ -743,6 +756,7 @@ class HermesLLMService(LLMService):
         if self.conversation is not None:
             self._conversation_attempt = token
             self._conversation_incomplete = False
+            self._conversation_synthesis_failed = False
             self.conversation.begin_reply(token)
         frame = TTSSpeakFrame(message, append_to_context=False)
         frame.conversation_reply_token = self._conversation_attempt
@@ -945,6 +959,7 @@ class HermesLLMService(LLMService):
             if self.conversation is not None:
                 self._conversation_attempt = token
                 self._conversation_incomplete = False
+                self._conversation_synthesis_failed = False
                 self.conversation.begin_reply(token)
             start = LLMFullResponseStartFrame()
             start.conversation_reply_token = self._conversation_attempt

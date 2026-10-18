@@ -18,7 +18,7 @@ import numpy as np
 from loguru import logger
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
-    CancelFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
+    CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
     TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame,
 )
@@ -57,6 +57,12 @@ class ConversationAudioContext:
     previous_text_end: int = 0
     source_valid: bool = True
     write_failed: bool = False
+    output_stopped: bool = False
+
+
+@dataclass
+class ConversationSynthesisFailedFrame(DataFrame):
+    context: ConversationAudioContext
 
 
 @dataclass(frozen=True)
@@ -1304,19 +1310,25 @@ class VoxCPMTTS(TTSService):
 
     async def on_turn_context_created(self, context_id: str):
         await super().on_turn_context_created(context_id)
+        self._conversation_context_tokens.clear()
         self._conversation_context_tokens[context_id] = self._conversation_reply_token
+
+    async def create_audio_context(self, context_id: str):
+        self._conversation_audio_contexts[context_id] = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
+        await super().create_audio_context(context_id)
 
     async def on_audio_context_completed(self, context_id: str):
         await super().on_audio_context_completed(context_id)
-        self._conversation_context_tokens.pop(context_id, None)
         self._conversation_audio_contexts.pop(context_id, None)
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if direction == FrameDirection.DOWNSTREAM:
             context_id = getattr(frame, 'context_id', None)
             if isinstance(frame, TTSStartedFrame):
-                context = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
-                self._conversation_audio_contexts[context_id] = context
+                context = self._conversation_audio_contexts.get(context_id)
+                if context is None:
+                    context = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
+                    self._conversation_audio_contexts[context_id] = context
                 frame.conversation_audio_context = context
             else:
                 context = self._conversation_audio_contexts.get(context_id)
@@ -1358,26 +1370,32 @@ class VoxCPMTTS(TTSService):
             self._conversation_reply_token = None
 
     async def run_tts(self, text, context_id):
-        # Never overlap model calls, including a chunk still finishing after interruption.
-        async with self._generation_lock:
-            chunks = self.model.generate_streaming(
-                text=text,
-                prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript,
-                reference_wav_path=str(self.preset.reference),
-                inference_timesteps=10, max_len=400, retry_badcase=False,
-            )
-            pending = None
-            try:
-                while True:
-                    pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
-                    chunk = await asyncio.shield(pending)
-                    if chunk is None:
-                        break
-                    pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
-                    yield TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
-            finally:
-                # Cancellation stops playback immediately in Pipecat. Finish only the
-                # current GPU chunk before closing its generator and releasing the model.
-                if pending is not None:
-                    await pending
-                await asyncio.to_thread(chunks.close)
+        context = self._conversation_audio_contexts.get(context_id)
+        try:
+            # Never overlap model calls, including a chunk still finishing after interruption.
+            async with self._generation_lock:
+                chunks = self.model.generate_streaming(
+                    text=text,
+                    prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript,
+                    reference_wav_path=str(self.preset.reference),
+                    inference_timesteps=10, max_len=400, retry_badcase=False,
+                )
+                pending = None
+                try:
+                    while True:
+                        pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
+                        chunk = await asyncio.shield(pending)
+                        if chunk is None:
+                            break
+                        pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
+                        yield TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
+                finally:
+                    # Cancellation stops playback immediately in Pipecat. Finish only the
+                    # current GPU chunk before closing its generator and releasing the model.
+                    if pending is not None:
+                        await pending
+                    await asyncio.to_thread(chunks.close)
+        except Exception:
+            if context is not None and context.reply_token is not None:
+                await self.push_frame(ConversationSynthesisFailedFrame(context=context))
+            raise
