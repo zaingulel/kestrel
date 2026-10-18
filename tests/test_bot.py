@@ -2882,6 +2882,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     # A delayed native end cannot change a terminal row or a newer attempt.
                     late = LLMFullResponseEndFrame()
                     late.indicator_reply_token = token
+                    late.conversation_reply_failed = False
                     await output.push_frame(late)
                     hold_text = False
                     cancel_without_audio = False
@@ -2912,6 +2913,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': expected_failure, 'state': 'failed'})
                 late = LLMFullResponseEndFrame()
                 late.indicator_reply_token = old_token
+                late.conversation_reply_failed = False
                 await output.push_frame(late)
                 await barrier()
                 self.assertNotIn('Unheard', json.dumps(rows))
@@ -2923,6 +2925,34 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 history = [m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system']
                 self.assertNotIn('what can I say', json.dumps(history))
                 self.assertNotIn('Unheard continuation', json.dumps(history))
+                async with asyncio.timeout(5):
+                    while await committed.get() != expected_failure:
+                        pass
+                local_histories = []
+
+                @transport.llm.event_handler('on_after_process_frame')
+                async def local_history(processor, frame):
+                    if isinstance(frame, LLMContextFrame):
+                        local_histories.append(deepcopy(frame.context.get_messages()))
+
+                expected_help = (
+                    "You can say: mute; set the volume to thirty; pause music; next track; "
+                    "workspace three; open followed by an installed app's exact name; take a screenshot. "
+                    "None of these tools needs permission first."
+                )
+                for local_turn in ('what can I say?', 'repeat that'):
+                    await start()
+                    await self.finish_user_turn(transport, local_turn)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected_help)
+                    await barrier()
+                    rows = await turns_until(lambda turns: turns[-2]['text'] == local_turn
+                                             and turns[-1]['state'] in ('complete', 'failed'))
+                    self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': expected_help, 'state': 'complete'})
+                    self.assertEqual(len(brain.requests), 6, 'Local speech after failure makes no brain request')
+                    self.assertTrue(committed.empty(), 'Local speech after failure adds no assistant context')
+                    self.assertTrue(local_histories)
+                    self.assertNotIn(local_turn, json.dumps(local_histories[-1]))
+                    self.assertNotIn(expected_help, json.dumps(local_histories[-1]))
             finally:
                 release.set()
                 release_text.set()

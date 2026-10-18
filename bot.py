@@ -657,18 +657,19 @@ class HermesLLMService(LLMService):
             self._indicator_pending = False
             self.refresh_indicator()
 
-    def finish_conversation_reply(self, token, *, interrupted=False):
+    def finish_conversation_reply(self, token, *, interrupted=False, failed=False):
         if self.conversation is not None:
-            self.conversation.finish(token, interrupted=interrupted, failed=bool(self.failure))
+            self.conversation.finish(token, interrupted=interrupted, failed=failed)
         if self._conversation_attempt is token:
             self._conversation_attempt = None
         if self._conversation_interrupting is token:
             self._conversation_interrupting = None
 
-    async def push_reply_end(self, token):
+    async def push_reply_end(self, token, *, failed=False):
         end = LLMFullResponseEndFrame()
         # The output queue, not generation completion, owns the visible reply's end.
         end.indicator_reply_token = token
+        end.conversation_reply_failed = failed
         await self.push_frame(end)
 
     async def speak_local_reply(self, message, token):
@@ -867,6 +868,7 @@ class HermesLLMService(LLMService):
                     self.indicator_reply_finished(token)
                 return
         output = None
+        failed = False
         try:
             if self.reader is not None:
                 # Speech cancellation detaches output; native work still reaches a terminal event.
@@ -887,6 +889,7 @@ class HermesLLMService(LLMService):
             if self.failure:
                 raise RuntimeError(self.failure)
         except Exception as error:
+            failed = True
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
@@ -894,7 +897,7 @@ class HermesLLMService(LLMService):
             if self.output is output:
                 self.output = None
             await self.stop_processing_metrics()
-            await self.push_reply_end(token)
+            await self.push_reply_end(token, failed=failed)
 
 
 def make_llm():
@@ -998,7 +1001,9 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
                 llm.finish_conversation_reply(getattr(frame, 'conversation_reply_token', None), interrupted=True)
             elif isinstance(frame, LLMFullResponseEndFrame):
                 token = frame.indicator_reply_token
-                llm.finish_conversation_reply(token, interrupted=token is llm._conversation_interrupting)
+                llm.finish_conversation_reply(
+                    token, interrupted=token is llm._conversation_interrupting, failed=frame.conversation_reply_failed,
+                )
             elif isinstance(frame, TTSTextFrame):
                 conversation.spoken(llm._indicator_output_reply, frame.text)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
