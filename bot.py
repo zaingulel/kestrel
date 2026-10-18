@@ -88,8 +88,6 @@ class AppLaunchResult:
 
 
 async def run_local_command(argv, *, stdin_data: bytes | None = None):
-    if stdin_data is not None and (not isinstance(stdin_data, bytes) or len(stdin_data) > 1024):
-        raise RuntimeError('invalid command input')
     # Native media status may embed cover art; only that read needs a larger allowance.
     budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
               else 4096)

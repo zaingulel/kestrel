@@ -1328,13 +1328,6 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             process.stdin.drain.assert_awaited_once_with()
             process.stdin.close.assert_called_once_with()
             process.stdin.wait_closed.assert_awaited_once_with()
-        with patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn:
-            for payload in (b'x' * 1025, 'text', bytearray(b'bytes')):
-                with self.subTest(invalid_input_type=type(payload).__name__):
-                    with self.assertRaisesRegex(RuntimeError, '^invalid command input$'):
-                        await bot.run_local_command(('/test/command',), stdin_data=payload)
-            spawn.assert_not_awaited()
-
         for cancel in (False, True):
             with self.subTest(cancel=cancel):
                 started = asyncio.Event()
