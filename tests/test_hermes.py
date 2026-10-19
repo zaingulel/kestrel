@@ -654,7 +654,7 @@ class NativeHermesTests(unittest.TestCase):
     previous_traces = set(hermes_worker.TRACE_ROOT.glob('session-*/events.jsonl'))
     original_print = builtins.print
     def observed_print(*values, **options):
-        if options.get('file') is protocol_wire and values == ('{"done": true}',):
+        if options.get('file') is protocol_wire and json.loads(values[0]) == {'done': True}:
             current = set(hermes_worker.TRACE_ROOT.glob('session-*/events.jsonl')) - previous_traces
             if len(current) == 1:
                 (home / 'events-before-done.jsonl').write_bytes(current.pop().read_bytes())
