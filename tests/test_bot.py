@@ -10,6 +10,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
@@ -463,6 +464,72 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                                identity='Player', desktopEntry='player.desktop',
                                title='First track', artist='Artist', album='Album') | changes)
 
+    async def test_screenshot_requires_fresh_file_without_reading_content(self):
+        phrase = 'take a screenshot'
+        self.assertIsNotNone(bot.match_instant_tool(phrase), 'Exact screenshot turns must select local work')
+        tool = bot.LOCAL_TOOLS[phrase]
+        self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+        for text in (phrase, ' TAKE A SCREENSHOT. ', phrase + '!'):
+            self.assertIs(bot.match_instant_tool(text), tool)
+        for text in (phrase + '?', '"' + phrase + '"', phrase + '!!', 'do not ' + phrase,
+                     phrase + ' please', 'take a\nscreenshot', phrase + '; echo bad'):
+            self.assertIsNone(bot.match_instant_tool(text))
+        for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+            with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase)}):
+                self.assertIsNone(bot.match_instant_tool(phrase))
+        argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
+        started = 2_000_000_000_000_000_000
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'screenshot-2026-10-18_12-34-56.png'
+            path.write_bytes(b'Not image content: metadata alone confirms the native save')
+            os.utime(path, ns=(started, started))
+            empty = Path(folder) / 'screenshot-2026-10-18_12-34-57.png'
+            empty.touch()
+            old = Path(folder) / 'screenshot-2026-10-18_12-34-58.png'
+            old.write_bytes(b'old')
+            os.utime(old, ns=(started - 1, started - 1))
+            link = Path(folder) / 'screenshot-2026-10-18_12-34-59.png'
+            link.symlink_to(path)
+            directory = Path(folder) / 'screenshot-2026-10-18_12-35-00.png'
+            directory.mkdir()
+            for output, confirmed in ((str(path), True), (str(path) + '\n', True),
+                                      ('', False), ('\n', False), ('relative.png', False),
+                                      (str(path) + '\n\n', False), (str(path) + '\r\n', False),
+                                      (str(path) + '\n/other.png', False),
+                                      (str(path).replace('screenshot-', 'other-'), False),
+                                      (str(path).replace('.png', '.jpg'), False),
+                                      (str(path).replace('/screenshot-', '/bad\x85/screenshot-'), False),
+                                      (str(path.parent / 'screenshot-2026-10-18_00-00-00.png'), False),
+                                      (str(empty), False), (str(old), False), (str(link), False),
+                                      (str(directory), False)):
+                with self.subTest(output=output):
+                    command = AsyncMock(return_value=output)
+                    with (patch.object(time, 'time_ns', return_value=started),
+                          patch('builtins.open', side_effect=AssertionError('Screenshot content must not be opened')),
+                          patch.object(io, 'open', side_effect=AssertionError('Screenshot content must not be opened')),
+                          patch.object(os, 'open', side_effect=AssertionError('Screenshot content must not be opened'))):
+                        result = await tool.run(command=command)
+                    self.assertEqual(result, bot.DesktopResult(confirmed, True,
+                                     'confirmed' if confirmed else 'screenshot unconfirmed',
+                                     None if confirmed else advisory))
+                    command.assert_awaited_once_with(argv)
+            for error, expected_reason in ((RuntimeError('command failed'), 'command failed'),
+                                           (OSError('PRIVATE path'), 'screenshot unconfirmed'),
+                                           (TimeoutError(), 'screenshot unconfirmed')):
+                command = AsyncMock(side_effect=error)
+                result = await tool.run(command=command)
+                self.assertEqual(result, bot.DesktopResult(False, True, expected_reason, advisory))
+                command.assert_awaited_once_with(argv)
+            command = AsyncMock(return_value=str(path))
+            with patch.object(os, 'lstat', side_effect=PermissionError('PRIVATE path')):
+                result = await tool.run(command=command)
+            self.assertEqual(result, bot.DesktopResult(False, True, 'screenshot unconfirmed', advisory))
+            command = AsyncMock(side_effect=asyncio.CancelledError())
+            with self.assertRaises(asyncio.CancelledError):
+                await tool.run(command=command)
+            command.assert_awaited_once_with(argv)
+
     async def test_media_actions_require_observed_state(self):
         for phrase, action in (('pause music', 'pause'), ('next track', 'next')):
             self.assertIsNotNone(bot.match_instant_tool(phrase), 'Exact media turns must select local work')
@@ -809,16 +876,24 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                     'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus'}
         poisoned = selectors | {'PATH': '/poison', 'HOME': '/poison', 'OMARCHY_PATH': '/poison',
                                 'PULSE_SERVER': 'tcp:remote', 'DBUS_SESSION_BUS_ADDRESS': 'tcp:remote',
-                                'HTTP_PROXY': 'http://remote', 'PYTHONPATH': '/poison'}
+                                'HTTP_PROXY': 'http://remote', 'PYTHONPATH': '/poison',
+                                'OMARCHY_SCREENSHOT_DIR': '/shots/$(literal)',
+                                'XDG_PICTURES_DIR': '/pictures/white space'}
         for argv in (('/usr/bin/omarchy-shell', 'media', 'status'),
-                     ('/usr/bin/hyprctl', '-j', 'activeworkspace')):
+                     ('/usr/bin/hyprctl', '-j', 'activeworkspace'),
+                     ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')):
             process = Mock(pid=9876, returncode=0)
             process.stdout.read = AsyncMock(side_effect=[b'ok\n', b''])
             process.wait = AsyncMock(return_value=0)
             expected = baseline | selectors
             if argv[0] == '/usr/bin/omarchy-shell':
                 expected['OMARCHY_PATH'] = '/usr/share/omarchy'
+            if argv[0] == '/usr/bin/omarchy':
+                expected |= {'HOME': '/canonical/home', 'OMARCHY_PATH': '/usr/share/omarchy',
+                             'OMARCHY_SCREENSHOT_DIR': '/shots/$(literal)',
+                             'XDG_PICTURES_DIR': '/pictures/white space'}
             with (patch.dict(os.environ, poisoned, clear=True),
+                  patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
                   patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
                 self.assertEqual(await bot.run_local_command(argv), 'ok\n')
                 spawn.assert_awaited_once_with(
@@ -847,6 +922,35 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             await bot.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
             self.assertEqual(spawn.await_args.kwargs['env'], baseline)
 
+        screenshot = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        for key in ('OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR'):
+            for value in ('', 'relative', 'a' * 4097, '/' + 'a' * 4096, '/bad\npath', '/bad\x85path'):
+                with (patch.dict(os.environ, poisoned | {key: value}, clear=True),
+                      patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn):
+                    with self.assertRaisesRegex(RuntimeError, '^screenshot destination unavailable$'):
+                        await bot.run_local_command(screenshot)
+                    spawn.assert_not_awaited()
+        for destinations in ({}, {'OMARCHY_SCREENSHOT_DIR': '/' + 'é' * 4095}):
+            process = Mock(pid=9876, returncode=0)
+            process.stdout.read = AsyncMock(side_effect=[b'ok', b''])
+            process.wait = AsyncMock(return_value=0)
+            with (patch.dict(os.environ, selectors | destinations, clear=True),
+                  patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
+                  patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
+                await bot.run_local_command(screenshot)
+                self.assertEqual(spawn.await_args.kwargs['env'], baseline | selectors | destinations |
+                                 {'HOME': '/canonical/home', 'OMARCHY_PATH': '/usr/share/omarchy'})
+        for argv in (('/tmp/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'),
+                     ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'copy'),
+                     (*screenshot, 'extra'), screenshot[:-1]):
+            process = Mock(pid=9876, returncode=0)
+            process.stdout.read = AsyncMock(side_effect=[b'ok', b''])
+            process.wait = AsyncMock(return_value=0)
+            with (patch.dict(os.environ, poisoned, clear=True),
+                  patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
+                await bot.run_local_command(argv)
+                self.assertEqual(spawn.await_args.kwargs['env'], baseline)
+
         cases = []
         for argv in (('/usr/bin/omarchy-shell', 'media', 'status'),
                      ['/usr/bin/omarchy-shell', 'media', 'status']):
@@ -857,6 +961,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             ('/usr/bin/omarchy-shell', 'media', 'next'),
             ('/usr/bin/hyprctl', '-j', 'activeworkspace'),
             ('/usr/bin/omarchy-shell', 'media', 'status', 'extra'),
+            ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'),
         ))
         for argv, budget, size, accepted in cases:
             with self.subTest(argv=argv, size=size):
@@ -1073,7 +1178,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -1150,7 +1255,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -2669,6 +2774,106 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(processes[0][0])
             finally:
                 await close()
+
+    async def test_screenshot_turn_stays_local_without_content(self):
+        clock = patch.object(time, 'time_ns', return_value=2_000_000_000_000_000_000)
+        clock.start()
+        self.addCleanup(clock.stop)
+        replies = ('Longer request remains conversation.', 'Question remains conversation.',
+                   'Negation remains conversation.', 'Newline remains conversation.')
+        ordinary = ('take a screenshot please', 'take a screenshot?', 'do not take a screenshot',
+                    'take a\nscreenshot')
+        brain = ScriptedBrain([[({'content': text}, None), ({}, 'stop')] for text in replies])
+        self.addCleanup(brain.close)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'screenshot-2026-10-18_12-34-56.png'
+        path.write_bytes(b'PRIVATE screenshot content must never be opened')
+        os.utime(path, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+        argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
+        command = AsyncMock(side_effect=[str(path) + '\n', 'PRIVATE native output'])
+        logs = []
+        sink = logger.add(lambda message: logs.append(str(message)))
+        self.addCleanup(logger.remove, sink)
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            for phrase, expected in ((' TAKE A SCREENSHOT! ', None), ('take a screenshot', advisory)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, phrase)
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                if expected:
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty(), 'Screenshot advice must not enter conversation history')
+                self.assertEqual(brain.requests, [])
+                self.assertFalse(transport.llm.local_tasks)
+            self.assertEqual(command.await_args_list, [call(argv), call(argv)])
+            for index, (text, reply) in enumerate(zip(ordinary, replies)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                if index == 0:
+                    await transport.input().queue_frame(
+                        TranscriptionFrame('take a screenshot', '', '2026-01-01T00:00:00Z', finalized=True))
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertEqual(command.await_count, 2, 'A segment cannot dispatch before a complete turn')
+                    self.assertEqual(brain.requests, [])
+                    await self.finish_user_turn(transport, 'please')
+                else:
+                    await self.finish_user_turn(transport, text)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), reply)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), reply)
+                self.assertEqual(len(brain.requests), index + 1)
+                users = [m for m in brain.requests[index][2]['messages'] if m['role'] == 'user']
+                self.assertEqual(users, [{'role': 'user', 'content': t} for t in ordinary[:index + 1]])
+                history = json.dumps(brain.requests[index][2])
+                self.assertNotIn(advisory, history)
+                self.assertNotIn(str(path), history)
+                self.assertNotIn('PRIVATE', history)
+                self.assertEqual(command.await_count, 2, 'Screenshot failure and nonmatches never retry')
+        finally:
+            await close()
+        # A newer local turn leaves the native save owned, while suppressing its stale failure speech.
+        started, release = asyncio.Event(), asyncio.Event()
+        calls, pending = [], []
+        async def blocked(argv):
+            calls.append(argv)
+            if len(calls) == 1:
+                pending.append(asyncio.current_task())
+                started.set()
+                await release.wait()
+                return 'PRIVATE native output'
+            return str(path)
+        with patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')):
+            transport, spoken, committed, interrupted, processes, close = await self.open_session(None, local_command=blocked)
+            try:
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'take a screenshot')
+                await asyncio.wait_for(started.wait(), 5)
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                self.assertFalse(pending[0].done())
+                release.set()
+                await asyncio.wait_for(pending[0], 5)
+                await self.finish_user_turn(transport, 'take a screenshot.')
+                barrier = DataFrame()
+                await transport.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertEqual(calls, [argv, argv])
+                self.assertTrue(spoken.empty(), 'Stale failure and confirmed save stay silent without an engine')
+                self.assertTrue(committed.empty())
+                self.assertFalse(transport.llm.local_tasks)
+                self.assertEqual(len(processes), 1)
+                self.assertIsNone(processes[0][0])
+            finally:
+                release.set()
+                await close()
+        self.assertNotIn(str(path), ''.join(logs))
+        self.assertNotIn('PRIVATE', ''.join(logs))
 
     async def test_workspace_turn_is_local_and_nonmatches_reach_brain(self):
         replies = ('Longer phrase remains conversation.', 'Invalid number remains conversation.',

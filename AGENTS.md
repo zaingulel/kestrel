@@ -227,7 +227,7 @@ sync, of every adopter. An intentional adopter exception needs owner agreement a
 
 ## Product
 
-Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Bonsai 2 9B brain runs locally through the pinned Prism server with F16 key and value caches and a 64,000-token context. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, and launching a uniquely matched visible installed app by name. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
+Kestrel is a local conversation prototype. Nemotron speech recognition and VoxCPM2 voice generation run on the RTX 5080 laptop; the Bonsai 2 9B brain runs locally through the pinned Prism server with F16 key and value caches and a 64,000-token context. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, saving a native screenshot, and launching a uniquely matched visible installed app by name. The brain cannot invoke tools. Kestrel has no browser research or persistent conversation memory.
 
 Product discovery and drilling with the owner must precede any further product implementation. Factory adoption preserves the prototype and stops before product work.
 
@@ -265,6 +265,6 @@ Product discovery and drilling with the owner must precede any further product i
 Standing security guarantees:
 
 1. Microphone recognition and voice generation stay on the laptop; the Bonsai brain, conversation transcripts and system context stay on the laptop. The enabled voice service starts at graphical login and can use the microphone during startup.
-2. Bonsai listens on unauthenticated loopback at `127.0.0.1:8080`; other local processes can reach it. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, and launching a uniquely matched visible installed app by name. Launched apps keep their normal permissions and behaviour, including any network access or side effects. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
+2. Bonsai listens on unauthenticated loopback at `127.0.0.1:8080`; other local processes can reach it. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, saving a native screenshot, and launching a uniquely matched visible installed app by name. Launched apps keep their normal permissions and behaviour, including any network access or side effects. Kestrel does not read, copy or send screenshot content. The brain cannot invoke tools. Kestrel has no persistent conversation memory and cannot delete, send messages, publish or run arbitrary commands by voice.
 3. Runtime model weights, reference audio and logs remain ignored and are never published. Transcript text may appear in local debug logs.
 4. Shared workflow bytes retain canonical integrity through sync; the repository administrator bypass remains owner-only and no write deploy key is allowed.
