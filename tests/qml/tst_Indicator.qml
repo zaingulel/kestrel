@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import QtTest
 import "../../desktop" as Desktop
 
@@ -32,7 +33,7 @@ TestCase {
         for (let i = 0; i < 3; i++) {
             const mark = findChild(marks, "mark" + i)
             verify(mark !== null)
-            compare(mark.visible, kind !== "not-running")
+            compare(mark.visible, kind !== "not-running" && kind !== "listening")
             compare(mark.x, [5, 11, 17][i])
             compare(mark.width, 3)
             compare(mark.height, heights[i])
@@ -50,6 +51,53 @@ TestCase {
         compare(stem.height, 7)
     }
 
+    function checkRing(marks, index, radius, opacity) {
+        const ring = findChild(marks, "listeningRing" + index)
+        verify(ring !== null)
+        compare(ring.x, 5)
+        compare(ring.y, 6)
+        compare(ring.width, 15)
+        compare(ring.preferredRendererType, Shape.CurveRenderer)
+        compare(ring.height, 15)
+        fuzzyCompare(ring.opacity, opacity, 0.00001)
+        const path = findChild(ring, "listeningPath" + index)
+        verify(path !== null)
+        compare(path.strokeWidth, 1.5)
+        compare(path.strokeColor, Qt.color("white"))
+        compare(path.fillColor, Qt.rgba(0, 0, 0, 0))
+        const arc = findChild(path, "listeningArc" + index)
+        verify(arc !== null)
+        compare(arc.centerX, 7.5)
+        compare(arc.centerY, 7.5)
+        fuzzyCompare(arc.radiusX, radius, 0.00001)
+        fuzzyCompare(arc.radiusY, radius, 0.00001)
+        compare(arc.sweepAngle, 360)
+    }
+
+    function checkStillInflow(marks) {
+        const listening = findChild(marks, "listeningMark")
+        verify(listening !== null)
+        compare(listening.visible, true)
+        compare(listening.phase, 0)
+        compare(findChild(listening, "listeningLoop").running, false)
+        compare(findChild(listening, "listeningRing0").visible, true)
+        compare(findChild(listening, "listeningRing1").visible, false)
+        checkRing(marks, 0, 3.75, 0.6)
+        const dot = findChild(listening, "listeningDot")
+        verify(dot !== null)
+        compare(dot.visible, true)
+        compare(dot.x, 11)
+        compare(dot.y, 12)
+        compare(dot.width, 3)
+        compare(dot.height, 3)
+        compare(dot.radius, 1.5)
+        compare(dot.color, Qt.color("white"))
+        compare(dot.opacity, 1)
+        compare(dot.scale, 1)
+        compare(dot.transformOrigin, Item.Center)
+        compare(marks.Accessible.ignored, true)
+    }
+
     function test_all_state_shapes() {
         const marks = createTemporaryObject(marksComponent, this)
         verify(marks !== null)
@@ -57,7 +105,8 @@ TestCase {
         checkShape(marks, "starting", [3, 3, 3], [0, 0, 0], 1)
         checkShape(marks, "unavailable", [3, 3, 3], [0, 3, 6], 1)
         checkShape(marks, "idle", [3, 3, 3], [0, 0, 0], 0.6)
-        checkShape(marks, "listening", [12, 12, 12], [0, 0, 0], 1)
+        checkShape(marks, "listening", [3, 3, 3], [0, 0, 0], 1)
+        checkStillInflow(marks)
         checkShape(marks, "thinking", [3, 3, 3], [0, 5, 0], 1)
         checkShape(marks, "speaking", [6, 12, 8], [0, 0, 0], 1)
         checkShape(marks, "trouble", [3, 3, 3], [0, 0, 0], 1)
@@ -89,10 +138,76 @@ TestCase {
             marks.kind = kind
             marks.motionEnabled = true
             marks.motionEnabled = false
+            const listening = findChild(marks, "listeningMark")
+            verify(listening !== null)
+            compare(listening.visible, kind === "listening")
+            compare(findChild(listening, "listeningLoop").running, false)
+            if (kind === "listening") checkStillInflow(marks)
             compare(findChild(marks, "thinkingStep").running, false)
             for (let i = 0; i < 3; i++) compare(animationPart(marks, "speakingLoop", i).running, false)
         }
         checkShape(marks, "thinking", [3, 3, 3], [0, 5, 0], 1)
         checkShape(marks, "speaking", [6, 12, 8], [0, 0, 0], 1)
+    }
+
+    function test_listening_inflow_motion() {
+        const marks = createTemporaryObject(marksComponent, this)
+        verify(marks !== null)
+        const listening = findChild(marks, "listeningMark")
+        verify(listening !== null)
+        const loop = findChild(listening, "listeningLoop")
+        verify(loop !== null)
+        compare(loop.from, 0)
+        compare(loop.to, 1)
+        compare(loop.duration, 1600)
+        compare(loop.easing.type, Easing.Linear)
+        // Qt normalizes the Animation.Infinite loop count to -1 on readback.
+        compare(loop.loops, -1)
+        compare(listening.visible, false)
+        compare(loop.running, false)
+        marks.motionEnabled = true
+        marks.kind = "listening"
+        compare(listening.visible, true)
+        compare(loop.running, true)
+        compare(listening.phase, 0)
+        tryVerify(function() { return listening.phase > 0 }, 5000)
+        loop.pause()
+        verify(loop.paused)
+        listening.phase = 0
+        compare(findChild(listening, "listeningRing0").visible, true)
+        compare(findChild(listening, "listeningRing1").visible, true)
+        checkRing(marks, 0, 6.75, 0)
+        checkRing(marks, 1, 4.19897959185, 0.5102040816)
+        listening.phase = 0.35
+        checkRing(marks, 0, 5.5, 0.25)
+        listening.phase = 0.7
+        checkRing(marks, 0, 1.75, 1)
+        listening.phase = 0.85
+        checkRing(marks, 0, 1.5, 0.5)
+        const dot = findChild(listening, "listeningDot")
+        listening.phase = 0.0375
+        fuzzyCompare(dot.scale, 1.1, 0.00001)
+        listening.phase = 0.075
+        compare(dot.scale, 1)
+        marks.kind = "idle"
+        compare(listening.visible, false)
+        compare(loop.running, false)
+        compare(listening.phase, 0)
+        marks.kind = "listening"
+        compare(loop.running, true)
+        compare(loop.paused, false)
+        compare(listening.phase, 0)
+        loop.pause()
+        listening.phase = 0.35
+        marks.motionEnabled = false
+        checkStillInflow(marks)
+        marks.motionEnabled = true
+        compare(loop.running, true)
+        compare(loop.paused, false)
+        compare(listening.phase, 0)
+        marks.kind = "speaking"
+        compare(loop.running, false)
+        compare(listening.visible, false)
+        compare(listening.phase, 0)
     }
 }

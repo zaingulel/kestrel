@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Shapes
 
 Item {
     id: root
@@ -31,6 +32,68 @@ Item {
         running: root.kind === "thinking" && root.motionEnabled
         onTriggered: root.thinkingIndex = (root.thinkingIndex + 1) % 3
     }
+    Item {
+        id: listening
+        objectName: "listeningMark"
+        property real phase: 0
+        readonly property bool active: root.kind === "listening" && root.motionEnabled
+        visible: root.kind === "listening"
+        onActiveChanged: if (!active) phase = 0
+
+        NumberAnimation {
+            objectName: "listeningLoop"
+            target: listening
+            property: "phase"
+            from: 0
+            to: 1
+            duration: 1600
+            easing.type: Easing.Linear
+            loops: Animation.Infinite
+            running: listening.active
+        }
+        Repeater {
+            model: 2
+            delegate: Shape {
+                id: ring
+                required property int index
+                readonly property real ringPhase: (listening.phase + index * 0.5) % 1
+                readonly property real diameter: !root.motionEnabled ? 9
+                    : ringPhase <= 0.7 ? 15 - 10 * Math.pow(ringPhase / 0.7, 2)
+                    : 5 - 2 * Math.pow((ringPhase - 0.7) / 0.3, 2)
+                objectName: "listeningRing" + index
+                preferredRendererType: Shape.CurveRenderer
+                x: 5; y: 6; width: 15; height: 15
+                visible: root.motionEnabled || index === 0
+                opacity: !root.motionEnabled ? 0.6
+                    : ringPhase <= 0.7 ? Math.pow(ringPhase / 0.7, 2)
+                    : 1 - (ringPhase - 0.7) / 0.3
+                ShapePath {
+                    objectName: "listeningPath" + ring.index
+                    strokeColor: root.ink
+                    strokeWidth: 1.5
+                    fillColor: "transparent"
+                    PathAngleArc {
+                        objectName: "listeningArc" + ring.index
+                        centerX: 7.5
+                        centerY: 7.5
+                        radiusX: (ring.diameter - 1.5) / 2
+                        radiusY: radiusX
+                        startAngle: 0
+                        sweepAngle: 360
+                    }
+                }
+            }
+        }
+        Rectangle {
+            readonly property real pulseTime: (1600 * listening.phase) % 800
+            objectName: "listeningDot"
+            x: 11; y: 12; width: 3; height: 3
+            radius: 1.5
+            color: root.ink
+            scale: root.motionEnabled && pulseTime < 120
+                ? 1 + 0.1 * Math.sin(Math.PI * pulseTime / 120) : 1
+        }
+    }
     Repeater {
         model: 3
         delegate: Rectangle {
@@ -38,13 +101,12 @@ Item {
             required property int index
             property real animatedHeight: [6, 12, 8][index]
             objectName: "mark" + index
-            visible: root.kind !== "not-running"
+            visible: root.kind !== "not-running" && root.kind !== "listening"
             x: 5 + index * 6
             y: 21 - height - (root.kind === "unavailable" ? index * 3
                 : root.kind === "thinking" && root.thinkingIndex === index ? 5 : 0)
             width: 3
-            height: root.kind === "listening" ? 12
-                : root.kind === "speaking" ? (root.motionEnabled ? animatedHeight : [6, 12, 8][index]) : 3
+            height: root.kind === "speaking" ? (root.motionEnabled ? animatedHeight : [6, 12, 8][index]) : 3
             color: root.kind === "starting" ? "transparent" : root.kind === "trouble" ? root.troubleInk : root.ink
             border.width: root.kind === "starting" ? 1 : 0
             border.color: root.ink
