@@ -22,10 +22,57 @@ RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by t
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
+DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
+DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+
+
+class ReplyDeliveryPrefix:
+    def __init__(self):
+        self.prefix = ''
+        self.delivery = None
+        self.has_text = False
+        self.failed = False
+
+    def feed(self, text: str) -> list[dict]:
+        if self.failed:
+            return []
+        if not isinstance(text, str):
+            self.failed = True
+            return []
+        events = []
+        if self.delivery is None:
+            headers = {f'[delivery:{label}]\n': label for label in DELIVERY_LABELS}
+            for index, char in enumerate(text):
+                self.prefix += char
+                if self.prefix in headers:
+                    self.delivery = headers[self.prefix]
+                    self.prefix = ''
+                    events.append({'delivery': self.delivery})
+                    text = text[index + 1:]
+                    break
+                if not any(header.startswith(self.prefix) for header in headers):
+                    self.failed = True
+                    self.prefix = ''
+                    return []
+            else:
+                return []
+        if text:
+            self.has_text |= bool(text.strip())
+            events.append({'text': text})
+        return events
+
+    def finish(self) -> None:
+        if self.failed or self.delivery is None or not self.has_text:
+            raise RuntimeError(DELIVERY_ERROR)
+
+
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
-    "Use plain spoken text without markdown, lists, or stage directions. "
+    "Choose delivery from neutral, curious, gently_pleased or reassuring from the conversation meaning. "
+    "Keep it subtle and prefer neutral when uncertain. Begin exactly once with [delivery:LABEL] "
+    "using your chosen label, followed by a newline and then concise plain spoken words. "
+    "Use no markdown, lists, acting directions, accent changes or persona changes. "
     "This session is a local conversation. You have no tools, desktop access, web access, "
     "or persistent memory. Be honest about that and never claim to have performed an action. "
     "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
@@ -231,12 +278,13 @@ def main(*, base_url=BONSAI_URL):
                             historical['content'] = [{'type': 'text', 'text': message['content']}]
                         history.append(historical)
                     streamed = False
+                    delivery = ReplyDeliveryPrefix()
 
                     def delta(text):
                         nonlocal streamed
-                        if text:
-                            streamed = True
-                            emit({'text': text})
+                        streamed = True
+                        for event in delivery.feed(text):
+                            emit(event)
 
                     try:
                         result = agent.run_conversation(
@@ -257,7 +305,9 @@ def main(*, base_url=BONSAI_URL):
                     if not isinstance(final, str) or not final.strip():
                         raise RuntimeError('Hermes returned an empty reply.')
                     if not streamed:
-                        emit({'text': final})
+                        for event in delivery.feed(final):
+                            emit(event)
+                    delivery.finish()
                     emit({'done': True})
                 except Exception as error:
                     print(f'Hermes turn failed: {error}', file=sys.stderr, flush=True)

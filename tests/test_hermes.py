@@ -182,6 +182,83 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class HermesWorkerTests(unittest.TestCase):
+    def test_delivery_prefix_is_bounded_and_fails_closed(self):
+        import hermes_worker
+
+        for label in ('neutral', 'curious', 'gently_pleased', 'reassuring'):
+            header = '[delivery:' + label + ']\n'
+            for split in range(len(header) + 1):
+                with self.subTest(label=label, split=split):
+                    reader = hermes_worker.ReplyDeliveryPrefix()
+                    events = reader.feed(header[:split]) + reader.feed(header[split:] + 'Hello.')
+                    reader.finish()
+                    self.assertEqual(events, [{'delivery': label}, {'text': 'Hello.'}])
+                    self.assertEqual(reader.feed(' More.'), [{'text': ' More.'}])
+                    self.assertEqual(reader.prefix, '')
+            reader = hermes_worker.ReplyDeliveryPrefix()
+            events = []
+            for char in header + 'Hello.':
+                events.extend(reader.feed(char))
+                self.assertLessEqual(len(reader.prefix), len('[delivery:gently_pleased]\n'))
+            reader.finish()
+            self.assertEqual(events[0], {'delivery': label})
+            self.assertEqual(''.join(e['text'] for e in events[1:]), 'Hello.')
+        for raw in ('Hello.', ' [delivery:neutral]\nHello.', '[delivery:unknown]\nHello.',
+                    '[delivery:' + 'x' * 100000, '[delivery:neutral]', '', None, 7, {}, []):
+            with self.subTest(raw=repr(raw)[:80]):
+                reader = hermes_worker.ReplyDeliveryPrefix()
+                self.assertEqual(reader.feed(raw), [])
+                self.assertEqual(reader.feed('later prose'), [])
+                with self.assertRaisesRegex(RuntimeError, 'delivery header'):
+                    reader.finish()
+        for raw in ('[delivery:neutral]\n', '[delivery:curious]\n  '):
+            reader = hermes_worker.ReplyDeliveryPrefix()
+            reader.feed(raw)
+            with self.assertRaisesRegex(RuntimeError, 'empty reply'):
+                reader.finish()
+
+        # Exercise the worker's final-response fallback without a provider stream callback.
+        run_agent, relay_runtime, native = (ModuleType(name) for name in
+                                           ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
+        agent = Mock()
+        agent.run_conversation.side_effect = [
+            {'completed': True, 'final_response': '[delivery:reassuring]\nFirst.'},
+            {'completed': True, 'final_response': '[delivery:neutral]\nSecond.'},
+        ]
+        run_agent.AIAgent = Mock(return_value=agent)
+        relay_runtime.get_runtime = Mock(return_value=Mock())
+        native.AtofExporterConfig = Mock
+        native.AtofExporterMode = Mock(Append='append')
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            home.chmod(0o700)
+            def exporter(config):
+                event_file = Path(config.output_directory) / config.filename
+                event_file.touch(mode=0o600)
+                return Mock(path=str(event_file))
+            native.AtofExporter = exporter
+            request = json.dumps({'messages': [{'role': 'user', 'content': 'Hello.'}]}) + '\n'
+            output = StringIO()
+            cwd, mask = os.getcwd(), os.umask(0o077)
+            try:
+                with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
+                                                'nemo_relay': native}),
+                      patch.dict(os.environ, HERMES_HOME=str(home)),
+                      patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
+                      patch.object(hermes_worker, 'validate_hermes_source'),
+                      patch.object(hermes_worker, 'validate_local_configuration'),
+                      patch('sys.stdin', TextIOWrapper(BytesIO((request * 2).encode()))),
+                      patch('sys.stdout', output)):
+                    self.assertEqual(hermes_worker.main(), 0)
+            finally:
+                os.chdir(cwd)
+                os.umask(mask)
+            self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()], [
+                {'ready': True}, {'delivery': 'reassuring'}, {'text': 'First.'}, {'done': True},
+                {'delivery': 'neutral'}, {'text': 'Second.'}, {'done': True},
+            ])
+            self.assertEqual(agent.run_conversation.call_count, 2)
+
     def test_trace_privacy_disclosure(self):
         self.assertIn(
             'Conversation traces stay on this laptop until you delete them; '
@@ -242,7 +319,7 @@ def create_exporter(config):
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
 agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users'])
-agent.run_conversation.return_value = {'completed': True, 'final_response': 'Synthetic reply.'}
+agent.run_conversation.return_value = {'completed': True, 'final_response': '[delivery:neutral]\\nSynthetic reply.'}
 if case == 'provider shutdown':
     agent.run_conversation.side_effect = RuntimeError('synthetic provider refusal')
 def close_agent():
@@ -659,6 +736,17 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_invalid_delivery_header_is_explicit_failure(self):
+        with native_worker([[({'content': '[delivery:unknown]\nDo not speak.'}, None),
+                             ({'content': ' Nor this.'}, None), ({}, 'stop')]]) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            events = worker.request([{'role': 'user', 'content': 'Hello.'}])
+            self.assertEqual(len(events), 1)
+            self.assertEqual(set(events[0]), {'error'})
+            self.assertIn('invalid delivery header', events[0]['error'])
+            self.assertIn('Restart Kestrel', events[0]['error'])
+            self.assertEqual(len(brain.requests), 1)
+
     def test_trace_flush_failure_refuses_done(self):
         require_native_hermes()
         original_command = WorkerProcess.command
@@ -685,7 +773,7 @@ class NativeHermesTests(unittest.TestCase):
             return command
 
         with patch.object(WorkerProcess, 'command', staticmethod(failing_flush_command)):
-            with native_worker([[({'content': 'Synthetic flush reply.'}, None), ({}, 'stop')]]) as (worker, brain):
+            with native_worker([[({'content': '[delivery:neutral]\nSynthetic flush reply.'}, None), ({}, 'stop')]]) as (worker, brain):
                 self.assertEqual(worker.event(), {'ready': True})
                 events = worker.request([{'role': 'user', 'content': 'Synthetic flush prompt.'}])
                 self.assertNotIn({'done': True}, events)
@@ -759,7 +847,7 @@ class NativeHermesTests(unittest.TestCase):
                 ('retained-first-prompt-canary', 'retained-first-reply-canary'),
                 ('retained-second-prompt-canary', 'retained-second-reply-canary'),
             ):
-                brain = ScriptedBrain([[({'content': reply}, None), ({}, 'stop')]])
+                brain = ScriptedBrain([[({'content': '[delivery:neutral]\n' + reply}, None), ({}, 'stop')]])
                 try:
                     with tempfile.TemporaryDirectory(prefix='worker-', dir=base) as home_directory:
                         home = Path(home_directory)
@@ -775,7 +863,7 @@ class NativeHermesTests(unittest.TestCase):
                         try:
                             self.assertEqual(worker.event(), {'ready': True})
                             self.assertEqual(worker.request([{'role': 'user', 'content': prompt}]),
-                                             [{'text': reply}, {'done': True}])
+                                             [{'delivery': 'neutral'}, {'text': reply}, {'done': True}])
                             traces = sorted(trace_root.glob('session-*/events.jsonl'))
                             self.assertEqual(len(traces), 1 if previous is None else 2,
                                              'Successful provider turn produced no retained native events')
@@ -817,9 +905,9 @@ class NativeHermesTests(unittest.TestCase):
 
     def test_source_dotenv_refuses_before_import_and_proxy_use(self):
         require_native_hermes()
-        provider = ScriptedBrain([[({'content': 'Provider reply.'}, None), ({}, 'stop')]])
+        provider = ScriptedBrain([[({'content': '[delivery:neutral]\nProvider reply.'}, None), ({}, 'stop')]])
         self.addCleanup(provider.close)
-        proxy = ScriptedBrain([[({'content': 'Proxy received transcript.'}, None), ({}, 'stop')]])
+        proxy = ScriptedBrain([[({'content': '[delivery:neutral]\nProxy received transcript.'}, None), ({}, 'stop')]])
         self.addCleanup(proxy.close)
         original_command = WorkerProcess.command
 
@@ -1027,15 +1115,18 @@ class NativeHermesTests(unittest.TestCase):
             self.assertIs(ready['ready'], True)
 
     def test_native_reply_streams_once_and_uses_caller_history(self):
-        replies = [[({'content': 'Hello nonce-22.'}, None), ({}, 'stop')],
-                   [({'content': 'Next nonce-23.'}, None), ({}, 'stop')]]
+        replies = [[({'content': '[deliv'}, None), ({'content': 'ery:curious]'}, None),
+                    ({'content': '\nHello nonce-22.'}, None), ({}, 'stop')],
+                   [({'content': '[delivery:neutral]\nNext nonce-23.'}, None), ({}, 'stop')]]
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             history = [{'role': 'user', 'content': 'Hello Kestrel.'}]
-            self.assertEqual(worker.request(history), [{'text': 'Hello nonce-22.'}, {'done': True}])
+            self.assertEqual(worker.request(history), [{'delivery': 'curious'},
+                                                       {'text': 'Hello nonce-22.'}, {'done': True}])
             history += [{'role': 'assistant', 'content': 'Hello nonce-22.'},
                         {'role': 'user', 'content': 'What next?'}]
-            self.assertEqual(worker.request(history), [{'text': 'Next nonce-23.'}, {'done': True}])
+            self.assertEqual(worker.request(history), [{'delivery': 'neutral'},
+                                                       {'text': 'Next nonce-23.'}, {'done': True}])
             self.assertEqual(len(brain.requests), 2)
             self.assertEqual(brain.requests[1][0], '/v1/chat/completions')
             body = brain.requests[1][2]
@@ -1055,8 +1146,8 @@ class NativeHermesTests(unittest.TestCase):
     def test_unanswered_turns_preserve_text_roles_and_context(self):
         from hermes_worker import SYSTEM_PROMPT
 
-        replies = [[({'content': 'Blue.'}, None), ({}, 'stop')],
-                   [({'content': 'Fresh reply.'}, None), ({}, 'stop')]]
+        replies = [[({'content': '[delivery:neutral]\nBlue.'}, None), ({}, 'stop')],
+                   [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')]]
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             history = [
@@ -1066,7 +1157,7 @@ class NativeHermesTests(unittest.TestCase):
                 {'role': 'user', 'content': 'Explain how rain forms in five sentences.'},
                 {'role': 'user', 'content': 'Tell me one colour instead.'},
             ]
-            self.assertEqual(worker.request(history), [{'text': 'Blue.'}, {'done': True}])
+            self.assertEqual(worker.request(history), [{'delivery': 'neutral'}, {'text': 'Blue.'}, {'done': True}])
             self.assertEqual(len(brain.requests), 1)
             self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
                 {'role': 'user', 'content': 'My favourite colour is green.'},
@@ -1076,7 +1167,7 @@ class NativeHermesTests(unittest.TestCase):
                 {'role': 'user', 'content': 'Tell me one colour instead.'},
             ])
             self.assertEqual(worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}]),
-                             [{'text': 'Fresh reply.'}, {'done': True}])
+                             [{'delivery': 'neutral'}, {'text': 'Fresh reply.'}, {'done': True}])
             self.assertEqual(len(brain.requests), 2)
             self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
                 {'role': 'user', 'content': 'A fresh caller turn.'},
@@ -1152,7 +1243,7 @@ case.assertEqual(messages, original)
                    b'{"messages":[{"role":"user"}]}\n',
                    b'{"messages":[{"role":"user","content":"   "}]}\n',
                    b'x' * (1024 * 1024 + 1) + b'\n']
-        with native_worker([[({'content': 'Should not be reached.'}, None), ({}, 'stop')]] * 10) as (worker, brain):
+        with native_worker([[({'content': '[delivery:neutral]\nShould not be reached.'}, None), ({}, 'stop')]] * 10) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             for request in invalid:
                 worker.send(request)
@@ -1162,10 +1253,11 @@ case.assertEqual(messages, original)
             self.assertEqual(brain.requests, [])
 
     def test_partial_provider_reply_is_explicit_failure(self):
-        with native_worker([[({'content': 'Incomplete nonce-24'}, None), ({}, 'length')]] * 4) as (worker, brain):
+        with native_worker([[({'content': '[delivery:neutral]\nIncomplete nonce-24'}, None), ({}, 'length')]] * 4) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             events = worker.request([{'role': 'user', 'content': 'Answer completely.'}])
-            self.assertEqual(events[0], {'text': 'Incomplete nonce-24'})
+            self.assertEqual(events[0], {'delivery': 'neutral'})
+            self.assertEqual(events[1], {'text': 'Incomplete nonce-24'})
             self.assertEqual(set(events[-1]), {'error'})
             self.assertTrue(events[-1]['error'].strip())
             self.assertNotIn({'done': True}, events)
@@ -1187,8 +1279,8 @@ case.assertEqual(messages, original)
                  'function': {'name': 'session_search', 'arguments': json.dumps({'query': 'private-nonce'})}},
             ]
             brain.replies = iter([[({'tool_calls': calls}, None), ({}, 'tool_calls')],
-                                  [({'content': 'Conversation only nonce-25.'}, None), ({}, 'stop')],
-                                  [({'content': 'Fresh caller nonce-26.'}, None), ({}, 'stop')]])
+                                  [({'content': '[delivery:neutral]\nConversation only nonce-25.'}, None), ({}, 'stop')],
+                                  [({'content': '[delivery:neutral]\nFresh caller nonce-26.'}, None), ({}, 'stop')]])
             self.assertEqual(worker.event(), {'ready': True})
             events = worker.request([{'role': 'user', 'content': 'Use tools private-nonce.'}])
             self.assertFalse(terminal_marker.exists())
@@ -1197,9 +1289,9 @@ case.assertEqual(messages, original)
             self.assertEqual(len(refusals), 3)
             for message, name in zip(refusals, ('terminal', 'write_file', 'session_search')):
                 self.assertIn(f"Tool '{name}' does not exist", message['content'])
-            self.assertEqual(events, [{'text': 'Conversation only nonce-25.'}, {'done': True}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Conversation only nonce-25.'}, {'done': True}])
             events = worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}])
-            self.assertEqual(events, [{'text': 'Fresh caller nonce-26.'}, {'done': True}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Fresh caller nonce-26.'}, {'done': True}])
             self.assertNotIn('private-nonce', json.dumps(brain.requests[-1][2]))
             files = list(worker.home.rglob('*'))
             databases = [path for path in files if path.name == 'state.db' or path.suffix in ('.db', '.sqlite', '.sqlite3')]
@@ -1252,13 +1344,13 @@ case.assertEqual(messages, original)
             }
             (normal_home / 'sitecustomize.py').write_text("raise RuntimeError('Python injection loaded')")
             with patch.dict(os.environ, poison):
-                with native_worker([[({'content': 'Clean nonce-27.'}, None), ({}, 'stop')]],
+                with native_worker([[({'content': '[delivery:neutral]\nClean nonce-27.'}, None), ({}, 'stop')]],
                                    synthetic_default_home=normal_home) as (worker, brain):
                     self.assertEqual(worker.event(), {'ready': True})
                     self.assertFalse(list(normal_hermes.glob('state.db*')))
                     self.assertFalse((normal_home / 'managed-poison').exists())
                     self.assertEqual(worker.request([{'role': 'user', 'content': 'Clean caller.'}]),
-                                     [{'text': 'Clean nonce-27.'}, {'done': True}])
+                                     [{'delivery': 'neutral'}, {'text': 'Clean nonce-27.'}, {'done': True}])
                     self.assertEqual(len(brain.requests), 1)
                     self.assertNotIn('normal-home-private-nonce', json.dumps(brain.requests))
                     self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
