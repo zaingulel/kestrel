@@ -178,6 +178,74 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class HermesSourceIdentityTests(unittest.TestCase):
+    def test_local_configuration_refuses_ambient_entries(self):
+        import hermes_worker
+
+        source_refusal = ('Hermes source .env is not supported. Keep environment files outside '
+                          'the pinned source and restart Kestrel.')
+        system_refusal = ('System NeMo Relay plugins are not supported by Kestrel. Use an '
+                          'environment without /etc/nemo-relay/plugins.toml and restart Kestrel.')
+        verification_refusal = ('Kestrel could not verify isolated Hermes configuration. '
+                                'Check runtime permissions and restart Kestrel.')
+        original_lstat = Path.lstat
+        with tempfile.TemporaryDirectory(prefix='hermes-configuration-') as directory:
+            base = Path(directory)
+            source = base / 'source'
+            source.mkdir()
+            source_entry = source / '.env'
+            system_path = Path('/etc/nemo-relay/plugins.toml')
+            system_entry = base / 'plugins.toml'
+            secret = base / 'secret'
+            secret.write_text('synthetic configuration secret')
+
+            def fixture_lstat(path):
+                return original_lstat(system_entry if path == system_path else path)
+
+            with (patch.object(hermes_worker, 'HERMES_SOURCE', source),
+                  patch.object(Path, 'lstat', fixture_lstat)):
+                self.assertIsNone(hermes_worker.validate_local_configuration())
+                for entry, refusal in ((source_entry, source_refusal), (system_entry, system_refusal)):
+                    for kind in ('file', 'directory', 'live symlink', 'broken symlink', 'unreadable'):
+                        with self.subTest(entry=entry.name, kind=kind):
+                            if kind == 'directory':
+                                entry.mkdir()
+                            elif kind == 'live symlink':
+                                entry.symlink_to(secret)
+                            elif kind == 'broken symlink':
+                                entry.symlink_to(base / 'missing')
+                            else:
+                                entry.write_text('synthetic configuration secret')
+                                if kind == 'unreadable':
+                                    entry.chmod(0)
+                            before = entry.lstat()
+                            try:
+                                with (patch('builtins.open', side_effect=AssertionError('Must not read entries')),
+                                      patch.object(Path, 'open', side_effect=AssertionError('Must not read entries'))):
+                                    with self.assertRaises(RuntimeError) as raised:
+                                        hermes_worker.validate_local_configuration()
+                                self.assertEqual(str(raised.exception), refusal)
+                                self.assertEqual(entry.lstat(), before)
+                            finally:
+                                if kind == 'directory':
+                                    entry.rmdir()
+                                else:
+                                    entry.unlink()
+                for failing_path in (source_entry, system_path):
+                    for failure in (PermissionError('synthetic configuration secret'),
+                                    OSError('synthetic configuration secret')):
+                        with self.subTest(path=failing_path, failure=type(failure).__name__):
+                            def failing_lstat(path):
+                                if path == failing_path:
+                                    raise failure
+                                return fixture_lstat(path)
+
+                            with patch.object(Path, 'lstat', failing_lstat):
+                                with self.assertRaises(RuntimeError) as raised:
+                                    hermes_worker.validate_local_configuration()
+                            self.assertEqual(str(raised.exception), verification_refusal)
+                self.assertEqual(secret.read_text(), 'synthetic configuration secret')
+                self.assertIsNone(hermes_worker.validate_local_configuration())
+
     def test_source_identity_checks_git_and_import_origin(self):
         import hermes_worker
 
@@ -272,6 +340,130 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_source_dotenv_refuses_before_import_and_proxy_use(self):
+        require_native_hermes()
+        provider = ScriptedBrain([[({'content': 'Provider reply.'}, None), ({}, 'stop')]])
+        self.addCleanup(provider.close)
+        proxy = ScriptedBrain([[({'content': 'Proxy received transcript.'}, None), ({}, 'stop')]])
+        self.addCleanup(proxy.close)
+        original_command = WorkerProcess.command
+
+        def contaminated_command(home, brain, **kwargs):
+            command = original_command(home, brain, **kwargs)
+            payload = ('HTTP_PROXY=' + proxy.url.removesuffix('/v1') + '\nNO_PROXY=\n'
+                       'OPENAI_API_KEY=synthetic-source-key\n')
+            injected = '''
+    import builtins, io, os
+    import hermes_worker
+    source_env = hermes_worker.HERMES_SOURCE / '.env'
+    payload = SOURCE_PAYLOAD
+    original_exists = pathlib.Path.exists
+    original_lstat = pathlib.Path.lstat
+    original_read_bytes = pathlib.Path.read_bytes
+    original_open = builtins.open
+    original_import = builtins.__import__
+    def fixture_exists(path):
+        return True if path == source_env else original_exists(path)
+    def fixture_lstat(path):
+        return original_lstat(home) if path == source_env else original_lstat(path)
+    def fixture_read_bytes(path):
+        return payload.encode() if path == source_env else original_read_bytes(path)
+    def fixture_open(path, mode='r', *args, **kwargs):
+        if isinstance(path, (str, pathlib.Path)) and pathlib.Path(path) == source_env:
+            if mode != 'r':
+                raise AssertionError('No writes to source allowed')
+            return io.StringIO(payload)
+        return original_open(path, mode, *args, **kwargs)
+    def observed_import(name, *args, **kwargs):
+        if name == 'run_agent':
+            (home / 'run-agent-imported').write_text('imported')
+        return original_import(name, *args, **kwargs)
+    with (patch.object(pathlib.Path, 'exists', fixture_exists),
+          patch.object(pathlib.Path, 'lstat', fixture_lstat),
+          patch.object(pathlib.Path, 'read_bytes', fixture_read_bytes),
+          patch('builtins.open', fixture_open),
+          patch('builtins.__import__', observed_import)):
+        hermes_worker.main(base_url=sys.argv[4])
+    print(json.dumps({'proxy_loaded': os.environ.get('HTTP_PROXY') == PROXY_URL,
+                      'credential_loaded': os.environ.get('OPENAI_API_KEY') == 'synthetic-source-key'}),
+          file=sys.stderr)
+'''.replace('SOURCE_PAYLOAD', repr(payload)).replace('PROXY_URL', repr(proxy.url.removesuffix('/v1')))
+            command[2] = command[2].replace(
+                '    import hermes_worker\n    hermes_worker.main(base_url=sys.argv[4])', injected.rstrip())
+            return command
+
+        with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory).resolve()
+            with patch.object(WorkerProcess, 'command', staticmethod(contaminated_command)):
+                worker = WorkerProcess(home, Mock(server=proxy.server, url=provider.url))
+            try:
+                first_event = worker.event()
+                if first_event == {'ready': True}:
+                    worker.request([{'role': 'user', 'content': 'Synthetic private source-env canary.'}])
+                worker.process.stdin.close()
+                self.assertEqual(worker.process.wait(timeout=5), 0)
+                worker.stderr.seek(0)
+                diagnostic = worker.stderr.read()
+                self.assertEqual(first_event, {
+                    'error': 'Hermes source .env is not supported. Keep environment files outside '
+                             'the pinned source and restart Kestrel.',
+                }, f'imported={(home / "run-agent-imported").exists()}, '
+                   f'provider_requests={len(provider.requests)}, proxy_requests={len(proxy.requests)}, '
+                   f'diagnostic={diagnostic}')
+                self.assertFalse((home / 'run-agent-imported').exists())
+                self.assertEqual(provider.requests, [])
+                self.assertEqual(proxy.requests, [])
+                self.assertIn('"proxy_loaded": false, "credential_loaded": false', diagnostic)
+                self.assertNotIn('synthetic-source-key', diagnostic)
+                connections = home / 'connections.jsonl'
+                self.assertFalse(connections.exists())
+                self.assertEqual(worker.buffer, b'')
+                self.assertEqual(worker.process.stdout.read(), b'')
+            finally:
+                worker.close()
+
+    def test_system_plugins_refuse_before_import(self):
+        require_native_hermes()
+        original_command = WorkerProcess.command
+
+        def contaminated_command(home, brain, **kwargs):
+            command = original_command(home, brain, **kwargs)
+            injected = '''
+    import builtins
+    import hermes_worker
+    original_lstat = pathlib.Path.lstat
+    original_import = builtins.__import__
+    def fixture_lstat(path):
+        if path == pathlib.Path('/etc/nemo-relay/plugins.toml'):
+            return original_lstat(home)
+        return original_lstat(path)
+    def observed_import(name, *args, **kwargs):
+        if name == 'run_agent':
+            (home / 'run-agent-imported').write_text('imported')
+        return original_import(name, *args, **kwargs)
+    with (patch.object(pathlib.Path, 'lstat', fixture_lstat),
+          patch('builtins.__import__', observed_import)):
+        hermes_worker.main(base_url=sys.argv[4])
+'''
+            command[2] = command[2].replace(
+                '    import hermes_worker\n    hermes_worker.main(base_url=sys.argv[4])', injected.rstrip())
+            return command
+
+        with patch.object(WorkerProcess, 'command', staticmethod(contaminated_command)):
+            with native_worker([]) as (worker, brain):
+                first_event = worker.event()
+                worker.process.stdin.close()
+                self.assertEqual(worker.process.wait(timeout=5), 0)
+                self.assertEqual(first_event, {
+                    'error': 'System NeMo Relay plugins are not supported by Kestrel. Use an '
+                             'environment without /etc/nemo-relay/plugins.toml and restart Kestrel.',
+                }, f'imported={(worker.home / "run-agent-imported").exists()}')
+                self.assertFalse((worker.home / 'run-agent-imported').exists())
+                self.assertEqual(brain.requests, [])
+                self.assertFalse((worker.home / 'connections.jsonl').exists())
+                self.assertEqual(worker.buffer, b'')
+                self.assertEqual(worker.process.stdout.read(), b'')
+
     def test_conversation_source_confines_literal_endpoints(self):
         endpoints = []
         for name in ('bot.py', 'hermes_worker.py'):

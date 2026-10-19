@@ -51,6 +51,25 @@ def validate_hermes_source() -> None:
         raise RuntimeError(refusal) from None
 
 
+def validate_local_configuration() -> None:
+    for path, refusal in (
+        (HERMES_SOURCE / '.env',
+         'Hermes source .env is not supported. Keep environment files outside '
+         'the pinned source and restart Kestrel.'),
+        (Path('/etc/nemo-relay/plugins.toml'),
+         'System NeMo Relay plugins are not supported by Kestrel. Use an environment '
+         'without /etc/nemo-relay/plugins.toml and restart Kestrel.'),
+    ):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            raise RuntimeError('Kestrel could not verify isolated Hermes configuration. '
+                               'Check runtime permissions and restart Kestrel.') from None
+        raise RuntimeError(refusal)
+
+
 def preserve_user_turns(messages, *, drop_codex_reasoning_items=True, drop_nudge_marker=None):
     """Keep unanswered turns distinct while retaining the pinned Hermes filters."""
     from run_agent import AIAgent
@@ -94,6 +113,7 @@ def main(*, base_url=BONSAI_URL):
             }
             (home / 'config.yaml').write_text(json.dumps(config))
             validate_hermes_source()
+            validate_local_configuration()
             from run_agent import AIAgent
 
             agent = AIAgent(
