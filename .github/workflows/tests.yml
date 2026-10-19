@@ -79,7 +79,7 @@ jobs:
       - run: npm run lint
       - run: npm run test:scripts
       - run: npm run lint:docs
-      - run: .runtime/voice-venv/bin/python -m ruff check --select F bot.py speech.py asr_worker.py hermes_worker.py app_resolver.py tests
+      - run: .runtime/voice-venv/bin/python -m ruff check --select F bot.py speech.py asr_worker.py hermes_worker.py app_resolver.py desktop tests
       - run: npm run test:speech
         env:
           HF_HUB_OFFLINE: '1'

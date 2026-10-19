@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "local.kestrel",
+  "name": "Kestrel",
+  "version": "1.0.0",
+  "description": "Local conversation status",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": { "service": "Service.qml", "barWidget": "Widget.qml" },
+  "barWidget": {
+    "displayName": "Kestrel",
+    "category": "Status",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}

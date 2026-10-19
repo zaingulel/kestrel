@@ -30,7 +30,8 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.frames.frames import (
-    LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, StartFrame, UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     TTSSpeakFrame, TTSTextFrame,
 )
 from pipecat.services.llm_service import LLMService
@@ -40,6 +41,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
+from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import HERMES_PYTHON, child_environment
 from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
@@ -601,9 +603,65 @@ class HermesLLMService(LLMService):
         self.failure = None
         self.failure_advisory = None
         self.local_command = local_command if local_command is not None else run_local_command
+        self.status = None
+        self._indicator_ready = False
+        self._indicator_user = False
+        self._indicator_output = False
+        self._indicator_pending = False
+        self._indicator_reply = object()
+        self._indicator_output_reply = None
         self.local_tasks = set()
         self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
+
+    def refresh_indicator(self):
+        if self.status is not None and self._indicator_ready:
+            state = ('listening' if self._indicator_user else
+                     'speaking' if self._indicator_output else
+                     'thinking' if self._indicator_pending else
+                     'trouble' if self.failure else 'idle')
+            self.status.set_state(state)
+
+    def indicator_input_ready(self):
+        self._indicator_ready = True
+        self.refresh_indicator()
+
+    def indicator_user_stopped(self):
+        self._indicator_user = False
+        self.refresh_indicator()
+
+    def indicator_output_started(self):
+        if not self._indicator_user:
+            self._indicator_output_reply = self._indicator_reply
+            self._indicator_output = True
+            self.refresh_indicator()
+
+    def indicator_output_stopped(self):
+        if self._indicator_output_reply is self._indicator_reply:
+            self._indicator_output = False
+            self.refresh_indicator()
+
+    def indicator_user_started(self):
+        self._indicator_reply = object()
+        self._indicator_user = True
+        self._indicator_output = False
+        self._indicator_pending = False
+        self.refresh_indicator()
+
+    def indicator_reply_finished(self, token):
+        if token is self._indicator_reply:
+            self._indicator_pending = False
+            self.refresh_indicator()
+
+    async def push_reply_end(self, token):
+        end = LLMFullResponseEndFrame()
+        # The output queue, not generation completion, owns the visible reply's end.
+        end.indicator_reply_token = token
+        await self.push_frame(end)
+
+    async def speak_local_reply(self, message, token):
+        await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+        await self.push_reply_end(token)
 
     async def run_local_tool(self, tool):
         async with self.local_tool_lock:
@@ -648,6 +706,7 @@ class HermesLLMService(LLMService):
             self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
             logger.error(self.failure)
+            self.refresh_indicator()
             await self.reap_engine()
 
     def start_preparation(self):
@@ -716,6 +775,7 @@ class HermesLLMService(LLMService):
             self.failure_advisory = advisory
             self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
             logger.error(self.failure)
+            self.refresh_indicator()
             await self.reap_engine()
         finally:
             if self.output is output:
@@ -726,23 +786,27 @@ class HermesLLMService(LLMService):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
+        token = self._indicator_reply
+        self._indicator_user = False
+        self._indicator_pending = True
+        self.refresh_indicator()
         messages = frame.context.get_messages()
         if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
                 and messages[-1].get('role') == 'user'
                 and isinstance(messages[-1].get('content'), str)):
             if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
+                self.indicator_reply_finished(token)
                 return
             if re.fullmatch(r'repeat that[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
-                await self.push_frame(TTSSpeakFrame(
-                    self.last_spoken_reply or "I haven't said anything to repeat yet.",
-                    append_to_context=False,
-                ))
+                await self.speak_local_reply(
+                    self.last_spoken_reply or "I haven't said anything to repeat yet.", token,
+                )
                 return
             if re.fullmatch(r'what can i say[.!?]?', messages[-1]['content'].strip().lower()):
                 messages.pop()
-                await self.push_frame(TTSSpeakFrame(capability_help(), append_to_context=False))
+                await self.speak_local_reply(capability_help(), token)
                 return
             tool = match_instant_tool(messages[-1]['content'])
             name = match_app_name(messages[-1]['content']) if tool is None else None
@@ -762,10 +826,9 @@ class HermesLLMService(LLMService):
                     raise
                 except (ValueError, RuntimeError, OSError, TimeoutError):
                     messages.pop()
-                    await self.push_frame(TTSSpeakFrame(
-                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.",
-                        append_to_context=False,
-                    ))
+                    await self.speak_local_reply(
+                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
+                    )
                     return
             if tool is not None:
                 messages.pop()
@@ -777,7 +840,9 @@ class HermesLLMService(LLMService):
                            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
                            if not result.confirmed else None)
                 if message is not None:
-                    await self.push_frame(TTSSpeakFrame(message, append_to_context=False))
+                    await self.speak_local_reply(message, token)
+                else:
+                    self.indicator_reply_finished(token)
                 return
         output = None
         try:
@@ -804,20 +869,22 @@ class HermesLLMService(LLMService):
             if self.output is output:
                 self.output = None
             await self.stop_processing_metrics()
-            await self.push_frame(LLMFullResponseEndFrame())
+            await self.push_reply_end(token)
 
 
 def make_llm():
     return HermesLLMService()
 
 
-async def bot():
+async def bot(*, status=None, on_transport_released=None):
     preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
     transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
     stt = NemotronSTT()
     llm = None
     try:
         await transport.open()
+        if status is not None and transport.capture is not None:
+            status.remember_owner(transport.capture.pid)
         llm = make_llm()
         llm.start_preparation()
         logger.info("Loading local speech models for the conversation")
@@ -833,7 +900,7 @@ async def bot():
             has_audio = has_audio or bool(frame.audio)
         if not has_audio:
             raise RuntimeError('VoxCPM preparation produced no audio')
-        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True)
+        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True, status=status)
     finally:
         try:
             if llm is not None:
@@ -846,11 +913,13 @@ async def bot():
                 await stt.close()
             finally:
                 await transport.close()
+                if on_transport_released is not None:
+                    on_transport_released()
                 if transport.failure:
                     raise RuntimeError(transport.failure)
 
 
-async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False):
+async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -863,6 +932,20 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
     context = LLMContext([])
     aggregators = LLMContextAggregatorPair(context, user_params=user_params)
     assistant = aggregators.assistant()
+    if status is not None:
+        llm.status = status
+
+        @transport.input().event_handler('on_after_process_frame')
+        async def indicator_input_ready(processor, frame):
+            if isinstance(frame, StartFrame):
+                llm.indicator_input_ready()
+
+        @aggregators.user().event_handler('on_before_push_frame')
+        async def indicator_user_turn(processor, frame):
+            if isinstance(frame, UserStartedSpeakingFrame):
+                llm.indicator_user_started()
+            elif isinstance(frame, UserStoppedSpeakingFrame):
+                llm.indicator_user_stopped()
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):
@@ -876,7 +959,14 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
     output = transport.output()
 
     @output.event_handler('on_after_push_frame')
-    async def remember_local_reply(processor, frame):
+    async def on_output_frame(processor, frame):
+        if status is not None:
+            if isinstance(frame, BotStartedSpeakingFrame):
+                llm.indicator_output_started()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                llm.indicator_output_stopped()
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                llm.indicator_reply_finished(frame.indicator_reply_token)
         if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 
@@ -911,6 +1001,10 @@ async def run_voice_service():
     task = asyncio.current_task()
     stopping = False
     echo_failure = None
+    orderly = False
+    transport_released = False
+    status = IndicatorStatus()
+    status.set_state('starting')
 
     def cancel():
         nonlocal stopping
@@ -923,18 +1017,38 @@ async def run_voice_service():
         echo_failure = "Echo removal has stopped. Restart Kestrel."
         stop_kestrel()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, cancel)
+    def transport_closed():
+        nonlocal transport_released
+        transport_released = True
+
+    heartbeat = asyncio.create_task(status.heartbeat())
     try:
-        ECHO_REMOVAL.start(echo_stopped)
-        try:
-            await bot()
-        except asyncio.CancelledError:
-            pass
-    finally:
-        ECHO_REMOVAL.close()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
+            loop.add_signal_handler(sig, cancel)
+        ECHO_REMOVAL.start(echo_stopped)
+        if ECHO_REMOVAL.process is not None:
+            status.remember_owner(ECHO_REMOVAL.process.pid)
+        try:
+            await bot(status=status, on_transport_released=transport_closed)
+        except asyncio.CancelledError:
+            orderly = stopping
+        else:
+            orderly = True
+    finally:
+        try:
+            ECHO_REMOVAL.close()
+            if orderly and echo_failure is None and transport_released:
+                status.mark_released()
+            else:
+                status.set_state('unavailable')
+        except BaseException:
+            status.set_state('unavailable')
+            raise
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
     if echo_failure:
         raise RuntimeError(echo_failure)
 
