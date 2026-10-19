@@ -44,7 +44,7 @@ from voxcpm import VoxCPM
 from desktop.conversation import ConversationFeed
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
-from hermes_worker import HERMES_PYTHON, child_environment
+from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, child_environment
 from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
 ECHO_REMOVAL = EchoRemoval()
@@ -860,9 +860,16 @@ class HermesLLMService(LLMService):
                 self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
                 await self.process.stdin.drain()
                 has_text = False
+                delivery = None
                 while True:
                     event = await self.read_event()
-                    if set(event) == {'text'} and isinstance(event['text'], str) and event['text']:
+                    if (set(event) == {'delivery'} and delivery is None
+                            and isinstance(event['delivery'], str) and event['delivery'] in DELIVERY_LABELS):
+                        delivery = event['delivery']
+                        if self.output is output:
+                            output.put_nowait(event)
+                    elif (set(event) == {'text'} and delivery is not None
+                          and isinstance(event['text'], str) and event['text']):
                         has_text = has_text or bool(event['text'].strip())
                         if self.output is output:
                             output.put_nowait(event)
@@ -954,6 +961,14 @@ class HermesLLMService(LLMService):
                 return
         output = None
         failed = False
+        started = False
+
+        async def push_reply_start(delivery):
+            start = LLMFullResponseStartFrame()
+            start.conversation_reply_token = self._conversation_attempt
+            start.speech_delivery = delivery
+            await self.push_frame(start)
+
         try:
             if self.reader is not None:
                 # Speech cancellation detaches output; native work still reaches a terminal event.
@@ -963,9 +978,6 @@ class HermesLLMService(LLMService):
                 self._conversation_incomplete = False
                 self._conversation_synthesis_failed = False
                 self.conversation.begin_reply(token)
-            start = LLMFullResponseStartFrame()
-            start.conversation_reply_token = self._conversation_attempt
-            await self.push_frame(start)
             await self.start_processing_metrics()
             if self.failure:
                 raise RuntimeError(self.failure)
@@ -973,7 +985,11 @@ class HermesLLMService(LLMService):
             self.output = output
             self.reader = asyncio.create_task(self.exchange(deepcopy(frame.context.get_messages()), output))
             while event := await output.get():
-                await self.push_frame(LLMTextFrame(event['text']))
+                if 'delivery' in event:
+                    await push_reply_start(event['delivery'])
+                    started = True
+                else:
+                    await self.push_frame(LLMTextFrame(event['text']))
             await asyncio.shield(self.reader)
             if self.failure:
                 raise RuntimeError(self.failure)
@@ -981,11 +997,16 @@ class HermesLLMService(LLMService):
             failed = True
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+            if not started:
+                await push_reply_start('neutral')
+                started = True
             await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
         finally:
             if self.output is output:
                 self.output = None
             await self.stop_processing_metrics()
+            if not started:
+                await push_reply_start('neutral')
             await self.push_reply_end(token, failed=failed)
 
 

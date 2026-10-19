@@ -59,6 +59,7 @@ class ConversationAudioContext:
     source_valid: bool = True
     write_failed: bool = False
     output_stopped: bool = False
+    delivery: str = 'neutral'
 
 
 @dataclass
@@ -603,6 +604,7 @@ class SpokenReplyText:
         self.label = None
         self.label_depth = 0
         self.label_closed = False
+        self.label_escaped = False
         self.label_saved = None
         self.label_bytes = 0
         self.destination = 0
@@ -878,6 +880,10 @@ class SpokenReplyText:
         self._resolve_emphasis(char)
         if self.escape:
             self.escape = False
+            if char == '[' and self.label is None:
+                self._lex(char)
+                self.label_escaped = True
+                return
             if not char.isalnum() and not char.isspace():
                 self._emit(char)
                 return
@@ -944,8 +950,11 @@ class SpokenReplyText:
         self.label = None
         self.label_depth = 0
         self.label_closed = False
+        self.label_escaped = False
         old_addresses = self._restore_label_join(saved)
-        if linked:
+        if '[delivery:' in '[' + text:
+            self._omit()
+        elif linked:
             self._emit(text)
             self._omit()
         elif not any(c.isalnum() for c in text) and (self.addresses != old_addresses or self.code):
@@ -962,6 +971,7 @@ class SpokenReplyText:
                 self.label_saved = (self.space, self.last, self.prose, self.join,
                                     self.line_prose, self.addresses)
                 self.label = []
+                self.label_escaped = False
                 self.label_depth = 1
                 self.label_bytes = 1
                 self.space = self.last = ''
@@ -1100,7 +1110,7 @@ class SpokenReplyText:
             self.wrapper = self.candidate = ''
             self.wrapper_omitted = False
         if self.label_closed:
-            if char == '(':
+            if char == '(' and not self.label_escaped:
                 self._release_label(linked=True)
                 self.destination = 1
                 self.destination_title_space = False
@@ -1306,16 +1316,18 @@ class VoxCPMTTS(TTSService):
         self._generation_lock = asyncio.Lock()
         self._spoken_reply = SpokenReplyText()
         self._conversation_reply_token = None
-        self._conversation_context_tokens = {}
+        self._conversation_turns = {}
+        self._conversation_delivery = 'neutral'
         self._conversation_audio_contexts = {}
 
     async def on_turn_context_created(self, context_id: str):
         await super().on_turn_context_created(context_id)
-        self._conversation_context_tokens.clear()
-        self._conversation_context_tokens[context_id] = self._conversation_reply_token
+        self._conversation_turns.clear()
+        self._conversation_turns[context_id] = (self._conversation_reply_token, self._conversation_delivery)
 
     async def create_audio_context(self, context_id: str):
-        self._conversation_audio_contexts[context_id] = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
+        token, delivery = self._conversation_turns.get(context_id, (None, 'neutral'))
+        self._conversation_audio_contexts[context_id] = ConversationAudioContext(token, delivery=delivery)
         await super().create_audio_context(context_id)
 
     async def on_audio_context_completed(self, context_id: str):
@@ -1353,7 +1365,8 @@ class VoxCPMTTS(TTSService):
             if isinstance(frame, TTSStartedFrame):
                 context = self._conversation_audio_contexts.get(context_id)
                 if context is None:
-                    context = ConversationAudioContext(self._conversation_context_tokens.get(context_id))
+                    token, delivery = self._conversation_turns.get(context_id, (None, 'neutral'))
+                    context = ConversationAudioContext(token, delivery=delivery)
                     self._conversation_audio_contexts[context_id] = context
                 frame.conversation_audio_context = context
             else:
@@ -1365,12 +1378,22 @@ class VoxCPMTTS(TTSService):
     async def process_frame(self, frame, direction):
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, (LLMFullResponseStartFrame, TTSSpeakFrame)):
             self._conversation_reply_token = getattr(frame, 'conversation_reply_token', None)
+            self._conversation_delivery = (getattr(frame, 'speech_delivery', 'neutral')
+                                           if isinstance(frame, LLMFullResponseStartFrame) else 'neutral')
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
             self._spoken_reply.reset()
         elif direction == FrameDirection.DOWNSTREAM:
             if isinstance(frame, LLMFullResponseStartFrame):
                 self._spoken_reply.start()
             elif isinstance(frame, SpeechAdvisoryFrame):
+                # Pipecat owns the active turn ID; older queued audio keeps its own delivery.
+                context_id = self._turn_context_id
+                if context_id in self._conversation_turns:
+                    token, _ = self._conversation_turns[context_id]
+                    self._conversation_turns[context_id] = (token, 'neutral')
+                context = self._conversation_audio_contexts.get(context_id)
+                if context is not None:
+                    context.delivery = 'neutral'
                 tail = self._spoken_reply.finish(failed=True)
                 if tail.strip():
                     separator = ' ' if tail.rstrip().endswith(('.', '!', '?')) else '. '
@@ -1383,19 +1406,32 @@ class VoxCPMTTS(TTSService):
                     await super().process_frame(LLMTextFrame(tail), direction)
         await super().process_frame(frame, direction)
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
-            self._conversation_context_tokens.clear()
+            self._conversation_turns.clear()
             self._conversation_audio_contexts.clear()
             self._conversation_reply_token = None
 
     async def run_tts(self, text, context_id):
         context = self._conversation_audio_contexts.get(context_id)
+        delivery = context.delivery if context is not None else 'neutral'
         text_started = False
         try:
+            styles = {
+                'curious': '(Subtly curious and interested, natural conversational delivery)',
+                'gently_pleased': '(Gently pleased, with a subtle smile in the voice)',
+                'reassuring': '(Warm, gentle and reassuring, speaking calmly)',
+            }
+            if delivery == 'neutral':
+                prompt = dict(prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript)
+                synthesis_text = text
+            elif delivery in styles:
+                prompt = {}
+                synthesis_text = styles[delivery] + ' ' + text
+            else:
+                raise RuntimeError('Invalid internal speech delivery')
             # Never overlap model calls, including a chunk still finishing after interruption.
             async with self._generation_lock:
                 chunks = self.model.generate_streaming(
-                    text=text,
-                    prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript,
+                    text=synthesis_text, **prompt,
                     reference_wav_path=str(self.preset.reference),
                     inference_timesteps=10, max_len=400, retry_badcase=False,
                 )

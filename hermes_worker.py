@@ -22,10 +22,55 @@ RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by t
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
+DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
+DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+
+
+class ReplyDeliveryPrefix:
+    def __init__(self):
+        self.prefix = ''
+        self.delivery = None
+        self.has_text = False
+        self.failed = False
+
+    def feed(self, text: str) -> list[dict]:
+        if self.failed:
+            return []
+        if not isinstance(text, str):
+            self.failed = True
+            return []
+        events = []
+        if self.delivery is None:
+            headers = {f'[delivery:{label}]{delimiter}': label
+                       for label in DELIVERY_LABELS for delimiter in (' ', '\n')}
+            for index, char in enumerate(text):
+                self.prefix += char
+                if self.prefix in headers:
+                    self.delivery = headers[self.prefix]
+                    self.prefix = ''
+                    events.append({'delivery': self.delivery})
+                    text = text[index + 1:]
+                    break
+                if not any(header.startswith(self.prefix) for header in headers):
+                    self.failed = True
+                    self.prefix = ''
+                    return []
+            else:
+                return []
+        if text:
+            self.has_text |= bool(text.strip())
+            events.append({'text': text})
+        return events
+
+    def finish(self) -> None:
+        if self.failed or self.delivery is None or not self.has_text:
+            raise RuntimeError(DELIVERY_ERROR)
+
+
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
-    "Use plain spoken text without markdown, lists, or stage directions. "
+    "Use no markdown, lists, acting directions, accent changes or persona changes. "
     "This session is a local conversation. You have no tools, desktop access, web access, "
     "or persistent memory. Be honest about that and never claim to have performed an action. "
     "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
@@ -34,7 +79,38 @@ SYSTEM_PROMPT = (
     "The owner must say one form on its own, as a complete turn, with a whole-number level from zero to one hundred. "
     "A percent or % suffix is required after volume <level> and optional after the set forms; "
     "one please is allowed at either end, never both. "
-    "You cannot invoke that action or any other tool."
+    "You cannot invoke that action or any other tool.\n\n"
+    'Choose the delivery for the meaning of the current reply, using the conversation as context. '
+    'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
+    'practical information and ordinary replies without a clear emotional cue. Curious suits an '
+    'invitation to discover something or genuine interest in an unanswered story. Use gently_pleased '
+    'for good news, an achievement or a success the user is sharing. Reassuring suits current worry, '
+    'distress or a request for comfort. A hard-earned success calls for gently_pleased; do not choose'
+    " reassuring merely because the work was difficult. Do not carry the previous reply's delivery "
+    'into a new subject.\n'
+    '\n'
+    'Format examples, illustrating delivery rather than words to copy:\n'
+    'A factual explanation:\n'
+    '[delivery:neutral]\n'
+    'A triangle has three sides.\n'
+    'An invitation to hear a discovery:\n'
+    '[delivery:curious]\n'
+    'What did you find?\n'
+    'Someone shares that they earned a qualification after working hard:\n'
+    '[delivery:gently_pleased]\n'
+    'Well done, that took real effort.\n'
+    'Someone is worried about an unfamiliar situation:\n'
+    '[delivery:reassuring]\n'
+    'You can take it one step at a time.\n'
+    '\n'
+    'Required output format for every new reply: begin immediately with exactly one of '
+    '[delivery:neutral], [delivery:curious], [delivery:gently_pleased] or [delivery:reassuring], then'
+    ' a newline, then your concise spoken reply. Never omit the header, even for a very short factual'
+    ' answer, a changed subject, or a replacement request after an interruption. Earlier assistant '
+    'messages have their headers removed before entering conversation history; do not imitate their '
+    'header-free format. Emit the header once at the beginning of the reply, not again within its '
+    'text or when continuing the same answer. Nothing comes before the header. After it, output only '
+    'the words to speak, with no delivery explanations or acting directions.'
 )
 
 
@@ -231,12 +307,13 @@ def main(*, base_url=BONSAI_URL):
                             historical['content'] = [{'type': 'text', 'text': message['content']}]
                         history.append(historical)
                     streamed = False
+                    delivery = ReplyDeliveryPrefix()
 
                     def delta(text):
                         nonlocal streamed
-                        if text:
-                            streamed = True
-                            emit({'text': text})
+                        streamed = True
+                        for event in delivery.feed(text):
+                            emit(event)
 
                     try:
                         result = agent.run_conversation(
@@ -257,7 +334,9 @@ def main(*, base_url=BONSAI_URL):
                     if not isinstance(final, str) or not final.strip():
                         raise RuntimeError('Hermes returned an empty reply.')
                     if not streamed:
-                        emit({'text': final})
+                        for event in delivery.feed(final):
+                            emit(event)
+                    delivery.finish()
                     emit({'done': True})
                 except Exception as error:
                     print(f'Hermes turn failed: {error}', file=sys.stderr, flush=True)

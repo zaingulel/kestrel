@@ -1130,6 +1130,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
 
         async def exchange(messages, output):
             requests.append(messages)
+            output.put_nowait({'delivery': 'neutral'})
             output.put_nowait(None)
 
         processing = None
@@ -1836,6 +1837,108 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delivery_events_are_validated_before_text(self):
+        cases = [
+            ([{'delivery': 'curious'}, {'text': 'Hello.'}, {'done': True}], True),
+            ([{'delivery': ['curious']}], False),
+            ([{'delivery': 'unknown'}], False),
+            ([{'delivery': 'neutral', 'text': 'Hidden.'}], False),
+            ([{'text': 'Hidden.'}], False),
+            ([{'delivery': 'curious'}, {'delivery': 'neutral'}], False),
+            ([{'delivery': 'curious'}, {'text': 'Hello.'}, {'delivery': 'neutral'}], False),
+            ([{'delivery': 'neutral'}, {'done': True}], False),
+            ([{'delivery': 'neutral'}, {'text': ' '}, {'done': True}], False),
+            ([{'done': True}], False),
+        ]
+        for events, valid in cases:
+            with self.subTest(events=events):
+                service = bot.HermesLLMService()
+                service.process = Mock(returncode=None)
+                service.process.stdin.drain = AsyncMock()
+                service.process.stdout.readline = AsyncMock(
+                    side_effect=[json.dumps(event).encode() + b'\n' for event in events])
+                service.process.wait = AsyncMock()
+                output = asyncio.Queue()
+                service.output = output
+                await service.exchange([{'role': 'user', 'content': 'Hello.'}], output)
+                observed = []
+                while not output.empty():
+                    observed.append(output.get_nowait())
+                self.assertIsNone(observed.pop())
+                self.assertEqual(service.failure is None, valid)
+                if valid:
+                    self.assertEqual(observed, events[:-1])
+                    service.process.terminate.assert_not_called()
+                else:
+                    self.assertIn('Invalid or incomplete Hermes response', service.failure)
+                    service.process.terminate.assert_called_once()
+                    service.process.wait.assert_awaited_once()
+                    self.assertNotIn({'text': 'Hidden.'}, observed)
+        for events, delivery in [
+            ([{'delivery': 'reassuring'}, {'text': 'Hello.'}, {'done': True}], 'reassuring'),
+            ([{'text': 'Hidden.'}], 'neutral'),
+        ]:
+            service = bot.HermesLLMService()
+            service.process = Mock(returncode=None)
+            service.process.stdin.drain = AsyncMock()
+            service.process.stdout.readline = AsyncMock(
+                side_effect=[json.dumps(event).encode() + b'\n' for event in events])
+            service.process.wait = AsyncMock()
+            service.push_frame = AsyncMock()
+            service.start_processing_metrics = AsyncMock()
+            service.stop_processing_metrics = AsyncMock()
+            await service.process_frame(
+                bot.LLMContextFrame(bot.LLMContext([{'role': 'user', 'content': 'Hello.'}])),
+                FrameDirection.DOWNSTREAM,
+            )
+            frames = [call.args[0] for call in service.push_frame.call_args_list]
+            starts = [f for f in frames if isinstance(f, bot.LLMFullResponseStartFrame)]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0].speech_delivery, delivery)
+            self.assertEqual(sum(isinstance(f, LLMFullResponseEndFrame) for f in frames), 1)
+            self.assertEqual([f.text.strip() for f in frames if isinstance(f, LLMTextFrame)],
+                             ['Hello.'] if delivery == 'reassuring' else
+                             ["I couldn't reach Kestrel's engine. Restart Kestrel and try again."])
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        service = bot.HermesLLMService()
+        service.process = Mock(returncode=None)
+        service.process.stdin.drain = AsyncMock()
+        events = iter([{'delivery': 'curious'}, {'text': 'Old reply.'}, {'done': True}])
+        async def read_response():
+            entered.set()
+            await release.wait()
+            return json.dumps(next(events)).encode() + b'\n'
+        service.process.stdout.readline = read_response
+        service.push_frame = AsyncMock()
+        service.start_processing_metrics = AsyncMock()
+        service.stop_processing_metrics = AsyncMock()
+        pending = asyncio.create_task(service.process_frame(
+            bot.LLMContextFrame(bot.LLMContext([{'role': 'user', 'content': 'Old request.'}])),
+            FrameDirection.DOWNSTREAM,
+        ))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+            release.set()
+            await asyncio.wait_for(service.reader, 5)
+            frames = [call.args[0] for call in service.push_frame.call_args_list]
+            starts = [f for f in frames if isinstance(f, bot.LLMFullResponseStartFrame)]
+            self.assertEqual(len(starts), 1)
+            self.assertEqual(starts[0].speech_delivery, 'neutral')
+            self.assertEqual(sum(isinstance(f, LLMFullResponseEndFrame) for f in frames), 1)
+            self.assertFalse(any(isinstance(f, LLMTextFrame) for f in frames))
+            self.assertIsNone(service.output)
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            if service.reader is not None:
+                await service.reader
+
     def setUp(self):
         home = tempfile.TemporaryDirectory()
         self.addCleanup(home.cleanup)
@@ -2733,10 +2836,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         for release in (release_generation, release_second, release_future):
             self.addCleanup(release.set)
         brain = ScriptedBrain([
-            [({'content': 'Prepared.'}, None), ({}, 'stop')],
-            [({'content': 'Starting chunk. Future chunk.'}, None), ({}, 'stop')],
-            [({'content': 'Empty chunk.'}, None), ({}, 'stop')],
-            [({'content': 'Failed output.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nStarting chunk. Future chunk.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nEmpty chunk.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFailed output.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
 
@@ -2872,7 +2975,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(retirement.stop)
 
         def recreated():
-            yield {'content': 'Spoken first. Failed recreated'}, None
+            yield {'content': '[delivery:neutral]\nSpoken first. Failed recreated'}, None
             loop.call_soon_threadsafe(provider_paused.set)
             if not release_provider.wait(45):
                 raise AssertionError('Synthetic provider context was never released')
@@ -2880,20 +2983,20 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             yield {}, 'stop'
 
         brain = ScriptedBrain([
-            [({'content': 'Prepared.'}, None), ({}, 'stop')],
-            [({'content': 'Spoken first. Unheard second.'}, None), ({}, 'stop')],
-            [({'content': 'Spoken first. Failed before audio.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Failed after audio. B'}, None),
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nSpoken first. Unheard second.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nSpoken first. Failed before audio.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. B'}, None),
              ({'content': 'oundary second.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Failed after audio. U'}, None),
+            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. U'}, None),
              ({'content': 'nheard second.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Failed after audio. U'}, None),
+            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. U'}, None),
              ({'content': 'nheard second.'}, None), ({}, 'stop')],
-            [({'content': 'Spoken first. Failed after stop.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nSpoken first. Failed after stop.'}, None), ({}, 'stop')],
             recreated(),
-            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
-            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
-            [({'content': 'Clean later.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nClean later.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
 
@@ -3119,23 +3222,33 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         blocked, release = threading.Event(), threading.Event()
 
         def partial():
-            yield {'content': 'One fact. Unheard continuation'}, None
+            yield {'content': '[delivery:reassuring]\nOne fact. [deliv'}, None
+            yield {'content': 'ery:unknown] Unheard continuation'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Synthetic partial reply was never released')
             yield {}, 'stop'
 
         brain = ScriptedBrain([
-            [({'content': 'Prepared.'}, None), ({}, 'stop')],
-            [({'content': 'Hello.'}, None), ({}, 'stop')], partial(),
-            [({'content': 'Unheard stop canary.'}, None), ({}, 'stop')],
-            [({'content': 'Unheard cancel canary.'}, None), ({}, 'stop')], 400,
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:gently_pleased]\nHello. [deliv'}, None),
+             ({'content': 'ery:reassuring]'}, None), ({}, 'stop')], partial(),
+            [({'content': '[delivery:neutral]\nUnheard stop canary.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nUnheard cancel canary.'}, None), ({}, 'stop')], 400,
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
         cancel_without_audio = False
+        synthesis = []
 
         def finite_chunks(**kwargs):
+            synthesis.append(kwargs)
+            self.assertEqual(kwargs['reference_wav_path'], '/fixture/british-male.wav')
+            if kwargs['text'].startswith(('(Gently pleased,', '(Warm, gentle')):
+                self.assertNotIn('prompt_wav_path', kwargs)
+                self.assertNotIn('prompt_text', kwargs)
+            else:
+                self.assertEqual(kwargs['prompt_text'], 'British fixture.')
             if not cancel_without_audio:
                 # Whole native chunks, so no tail waits for the stop flush.
                 yield np.zeros(5760, dtype=np.float32)
@@ -3363,7 +3476,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         for failing in (False, True):
             with self.subTest(synthesis='failed' if failing else 'empty'):
-                preparation = ScriptedBrain([[({'content': 'Prepared.'}, None), ({}, 'stop')]])
+                preparation = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
                 self.addCleanup(preparation.close)
                 attempts = []
 
@@ -3457,14 +3570,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         mute_entered, mute_release = asyncio.Event(), asyncio.Event()
 
         def interrupted_reply():
-            yield {'content': 'One fact. Unheard continuation'}, None
+            yield {'content': '[delivery:neutral]\nOne fact. Unheard continuation'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Indicator reply was never released')
             yield {}, 'stop'
 
         brain = ScriptedBrain([
-            [({'content': 'Hello.'}, None), ({}, 'stop')], interrupted_reply(),
+            [({'content': '[delivery:neutral]\nHello.'}, None), ({}, 'stop')], interrupted_reply(),
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
@@ -3654,9 +3767,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_open_app_routes_unknown_without_losing_context(self):
         brain = ScriptedBrain([
-            [({'content': 'Prior reply.'}, None), ({}, 'stop')],
-            [({'content': 'Unknown reply.'}, None), ({}, 'stop')],
-            [({'content': 'Unexpected brain dispatch.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nPrior reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nUnknown reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nUnexpected brain dispatch.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         calls = []
@@ -3712,7 +3825,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_app_attempt_is_owned_and_never_retried(self):
         launch_failure = "I couldn't confirm the app opened. Check the desktop. I won't retry."
         lookup_failure = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
-        brain = ScriptedBrain([[({'content': 'Fresh reply.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         calls = []
 
@@ -3839,7 +3952,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                     following_brain = None
                     if stage == 'lookup':
-                        following_brain = ScriptedBrain([[({'content': 'After cancellation.'}, None), ({}, 'stop')]])
+                        following_brain = ScriptedBrain([[({'content': '[delivery:neutral]\nAfter cancellation.'}, None), ({}, 'stop')]])
                         self.addCleanup(following_brain.close)
                     with patch.object(bot, 'HERMES_PYTHON', NATIVE_PYTHON if stage == 'lookup'
                                       else Path('/nonexistent-kestrel-hermes/python')):
@@ -3895,7 +4008,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         cases = [(word, heard, threading.Event(), threading.Event(), threading.Event())
                  for word in ('stop', 'cancel') for heard in (False, True)]
         def held_reply(heard, blocked, release, finished):
-            yield {'content': 'Heard prefix. Unheard fragment' if heard else 'Unheard fragment'}, None
+            yield {'content': '[delivery:neutral]\n' + ('Heard prefix. Unheard fragment' if heard else 'Unheard fragment')}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Stopped provider reply was never released')
@@ -3906,7 +4019,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         for _, heard, blocked, release, finished in cases:
             self.addCleanup(release.set)
             scripts.extend([held_reply(heard, blocked, release, finished),
-                            [({'content': 'Fresh reply.'}, None), ({}, 'stop')]])
+                            [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')]])
         brain = ScriptedBrain(scripts)
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('Stop/cancel cannot invoke native desktop commands'))
@@ -3996,7 +4109,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                    'Negation remains conversation.', 'Newline remains conversation.')
         ordinary = ('take a screenshot please', 'take a screenshot?', 'do not take a screenshot',
                     'take a\nscreenshot')
-        brain = ScriptedBrain([[({'content': text}, None), ({}, 'stop')] for text in replies])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\n' + text}, None), ({}, 'stop')] for text in replies])
         self.addCleanup(brain.close)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -4091,7 +4204,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_turn_is_local_and_nonmatches_reach_brain(self):
         replies = ('Longer phrase remains conversation.', 'Invalid number remains conversation.',
                    'Command text remains conversation.')
-        brain = ScriptedBrain([[({'content': text}, None), ({}, 'stop')] for text in replies])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\n' + text}, None), ({}, 'stop')] for text in replies])
         self.addCleanup(brain.close)
         status = ('/usr/bin/hyprctl', '-j', 'activeworkspace')
         focus_three = ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "3" })')
@@ -4163,7 +4276,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         pause = ('/usr/bin/omarchy-shell', 'media', 'pause')
         advance = ('/usr/bin/omarchy-shell', 'media', 'next')
         media = LocalDesktopTests.media
-        brain = ScriptedBrain([[({'content': 'Ordinary follow-up.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary follow-up.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=[
             media(hasPlayer=False, playing=False), media(playing=False),
@@ -4303,14 +4416,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
 
         def preparation_reply():
-            yield {'content': 'Preparation nonce 731.'}, None
+            yield {'content': '[delivery:neutral]\nPreparation nonce 731.'}, None
             held.set()
             if not release.wait(45):
                 raise AssertionError('Preparation reply was not released')
             yield {}, 'stop'
 
         brain = ScriptedBrain([
-            preparation_reply(), [({'content': 'Actual caller reply.'}, None), ({}, 'stop')],
+            preparation_reply(), [({'content': '[delivery:neutral]\nActual caller reply.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
@@ -4409,7 +4522,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         for marker, error in [('1', RuntimeError('command failed')), ('1', RuntimeError('command unavailable')),
                               ('invalid', None)]:
             with self.subTest(marker=marker, status_error=error):
-                brain = ScriptedBrain([[({'content': 'Unrelated provider reply.'}, None), ({}, 'stop')]])
+                brain = ScriptedBrain([[({'content': '[delivery:neutral]\nUnrelated provider reply.'}, None), ({}, 'stop')]])
                 self.addCleanup(brain.close)
                 command = AsyncMock(side_effect=[
                     'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
@@ -4468,14 +4581,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
 
         def preparation_reply():
-            yield {'content': 'Preparation nonce 731.'}, None
+            yield {'content': '[delivery:neutral]\nPreparation nonce 731.'}, None
             held.set()
             if not release.wait(45):
                 raise AssertionError('Preparation reply was not released')
             yield {}, 'stop'
 
         brain = ScriptedBrain([
-            preparation_reply(), [({'content': 'Actual caller reply.'}, None), ({}, 'stop')],
+            preparation_reply(), [({'content': '[delivery:neutral]\nActual caller reply.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
@@ -4645,7 +4758,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         expected = ("You can say: mute; set the volume to thirty; pause music; next track; "
                     "workspace three; open followed by an installed app's exact name; take a screenshot. "
                     "None of these tools needs permission first.")
-        brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('Help cannot execute desktop actions'))
         transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
@@ -4687,9 +4800,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeat_preserves_spoken_reply_without_brain_or_history(self):
         brain = ScriptedBrain([
-            [({'content': r'Literal \`tick\` stays with ●, ◐ and ○.'}, None), ({}, 'stop')],
-            [({'content': 'Newer normal reply.'}, None), ({}, 'stop')],
-            [({'content': 'Fresh reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\n' + r'Literal \`tick\` stays with ●, ◐ and ○.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nNewer normal reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=[
@@ -4785,7 +4898,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                          [{'role': 'user', 'content': 'A fresh question.'}])
 
     async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
-        brain = ScriptedBrain([[({'content': 'Ordinary reply.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         completed = asyncio.Event()
         replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
@@ -5062,9 +5175,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_volume_turns_reach_brain_unchanged(self):
         brain = ScriptedBrain([
-            [({'content': 'Invalid level is conversation.'}, None), ({}, 'stop')],
-            [({'content': 'Longer phrase is conversation.'}, None), ({}, 'stop')],
-            [({'content': 'Negated request is conversation.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nInvalid level is conversation.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nLonger phrase is conversation.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nNegated request is conversation.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('An invalid or longer turn cannot act'))
@@ -5136,7 +5249,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(processes[0][0])
 
     async def test_longer_mute_turn_waits_for_completion_and_reaches_brain_unchanged(self):
-        brain = ScriptedBrain([[({'content': 'Ordinary longer reply.'}, None), ({}, 'stop')]])
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary longer reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('A longer turn cannot invoke a local command'))
         transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
@@ -5164,7 +5277,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         finished = threading.Event()
 
         def reply():
-            yield {'content': 'One fact. Obsolete continuation'}, None
+            yield {'content': '[delivery:neutral]\nOne fact. Obsolete continuation'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Scripted interrupted reply was never released')
@@ -5402,7 +5515,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
 
     async def test_partial_native_reply_speaks_failure(self):
-        brain = ScriptedBrain([[({'content': 'Incomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.',
@@ -5414,7 +5527,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         # External process stand-ins cover malformed JSON and wrongly typed terminal events.
         cases = [
             ('malformed JSON', '{"ready":true}', 'not json'),
-            ('wrong done type', '{"ready":true}', '{"text":"Synthetic prefix."}\n{"done":1}'),
+            ('wrong done type', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"done":1}'),
             ('wrong ready type', '{"ready":1}', ''),
         ]
         for name, ready, response in cases:
@@ -5442,14 +5555,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         finished = threading.Event()
 
         def partial_reply():
-            yield {'content': 'One fact. Unheard continuation'}, None
+            yield {'content': '[delivery:neutral]\nOne fact. Unheard continuation'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Scripted partial reply was never released')
             yield {}, 'length'
             finished.set()
 
-        brain = ScriptedBrain([partial_reply()] + [[({'content': 'Unheard tail.'}, None), ({}, 'length')]] * 3)
+        brain = ScriptedBrain([partial_reply()] + [[({'content': '[delivery:neutral]\nUnheard tail.'}, None), ({}, 'length')]] * 3)
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
         transport, spoken, committed, interrupted, processes, _ = await self.open_session(brain)
@@ -5495,7 +5608,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         for interrupt in (False, True):
             with self.subTest(interrupted=interrupt), patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
                 wire = ("import sys; print('{\"ready\":true}', flush=True); sys.stdin.readline(); "
-                        + ("print('{\"text\":\"One fact. Unheard continuation\"}', flush=True); " if interrupt else '')
+                        + ("print('{\"delivery\":\"neutral\"}', flush=True); print('{\"text\":\"One fact. Unheard continuation\"}', flush=True); " if interrupt else '')
                         + 'sys.stdin.read()')
                 transport, spoken, committed, interrupted, processes, close = await asyncio.wait_for(
                     self.open_session(None, wire=wire), 5,
@@ -5524,7 +5637,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         blocked, release, finished = threading.Event(), threading.Event(), threading.Event()
 
         def held_reply():
-            yield {'content': 'One fact. Obsolete continuation `Hidden. More.'}, None
+            yield {'content': '[delivery:neutral]\nOne fact. Obsolete continuation `Hidden. More.'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Scripted cleanup reply was never released')
@@ -5538,8 +5651,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             ('Unclosed turn.', 'Before. `Hidden. More.', 'Before. There is code in this reply.'),
         ]
         brain = ScriptedBrain([
-            *[[({'content': raw}, None), ({}, 'stop')] for _, raw, _ in completed],
-            held_reply(), [({'content': 'Fresh reply.'}, None), ({}, 'stop')],
+            *[[({'content': '[delivery:neutral]\n' + raw}, None), ({}, 'stop')] for _, raw, _ in completed],
+            held_reply(), [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
@@ -5588,7 +5701,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await close()
 
     async def test_unclosed_code_cannot_hide_engine_failure(self):
-        response = '{"text":"```python\\nHidden. More."}\n{"done":1}'
+        response = '{"delivery":"neutral"}\n{"text":"```python\\nHidden. More."}\n{"done":1}'
         wire = ('import sys; print(\'{"ready":true}\', flush=True); sys.stdin.readline(); '
                 f'print({response!r}, flush=True); sys.stdin.read()')
         transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
@@ -5624,8 +5737,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         stream_closed = asyncio.Event()
         self.addCleanup(release.set)
         brain = ScriptedBrain([
-            [({'content': 'Rain forms when water vapour cools.'}, None), ({}, 'stop')],
-            [({'content': 'Blue.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nRain forms when water vapour cools.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nBlue.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         native_tts = bot.VoxCPMTTS
@@ -5712,7 +5825,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         finished = threading.Event()
 
         def second_reply():
-            yield {'content': 'One fact. Obsolete continuation'}, None
+            yield {'content': '[delivery:reassuring]\nOne fact. [deliv'}, None
+            yield {'content': 'ery:unknown] Obsolete continuation'}, None
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Scripted reply was never released')
@@ -5721,13 +5835,27 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             finished.set()
 
         brain = ScriptedBrain([
-            [({'content': 'Hello.'}, None), ({}, 'stop')], second_reply(),
-            [({'content': 'Next step.'}, None), ({}, 'stop')],
-            [({'content': 'Fresh session.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:curious]\nHello.'}, None), ({}, 'stop')], second_reply(),
+            [({'content': '[delivery:neutral]\nNext step.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFresh session.'}, None), ({}, 'stop')],
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
-        transport, spoken, committed, interrupted, processes, close = await self.open_session(brain)
+        synthesis = []
+        def finite_chunks(**kwargs):
+            synthesis.append(kwargs)
+            self.assertEqual(kwargs['reference_wav_path'], '/fixture/british-male.wav')
+            if kwargs['text'].startswith(('(Subtly curious', '(Warm, gentle')):
+                self.assertNotIn('prompt_wav_path', kwargs)
+                self.assertNotIn('prompt_text', kwargs)
+            else:
+                self.assertEqual(kwargs['prompt_wav_path'], '/fixture/british-male.wav')
+                self.assertEqual(kwargs['prompt_text'], 'British fixture.')
+            yield np.zeros(4800, dtype=np.float32)
+
+        transport, spoken, committed, interrupted, processes, close = await self.open_session(
+            brain, synthesis_chunks=finite_chunks)
+
         self.assertTrue(spoken.empty(), 'Kestrel never speaks first')
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'Hello Kestrel.')
@@ -5767,13 +5895,20 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
              ('assistant', 'One fact.'), ('user', 'Stop. What next?')],
         ])
         await close()
-        transport, spoken, committed, _, _, _ = await self.open_session(brain)
+        transport, spoken, committed, _, _, _ = await self.open_session(brain, synthesis_chunks=finite_chunks)
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'A new conversation.')
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh session.')
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh session.')
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'A new conversation.'}])
+        self.assertTrue(all('[delivery:' not in call['text'] for call in synthesis))
+        self.assertEqual([call['text'] for call in synthesis
+                          if not call['text'].endswith(' Obsolete continuation')], [
+            '(Subtly curious and interested, natural conversational delivery) Hello.',
+            '(Warm, gentle and reassuring, speaking calmly) One fact.',
+            'One fact.', 'Next step.', 'Fresh session.',
+        ])
 
 
 if __name__ == '__main__':

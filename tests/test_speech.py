@@ -187,6 +187,137 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delivery_is_context_scoped_and_text_stays_plain(self):
+        for text, expected in [
+            ('Before. [delivery:reassuring] After.', 'Before. After.'),
+            ('Before. [delivery:unknown] After.', 'Before. After.'),
+            ('Before. [delivery:reassuring', 'Before.'),
+            ('Before. [[delivery:reassuring]] After.', 'Before. After.'),
+            (r'Before. \[delivery:reassuring] After.', 'Before. After.'),
+            ('Before. [ordinary prose] After.', 'Before. [ordinary prose] After.'),
+            ('Before. [[ordinary prose]] After.', 'Before. [[ordinary prose]] After.'),
+            (r'Before. \[ordinary prose](plain words) After.',
+             'Before. [ordinary prose](plain words) After.'),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(' '.join(self.cleaned(text).split()), expected)
+
+        started, completed = asyncio.Event(), asyncio.Queue()
+        frames, calls = [], []
+        class Sink(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                frames.append(frame)
+                if isinstance(frame, StartFrame):
+                    started.set()
+                if isinstance(frame, (LLMFullResponseEndFrame, DataFrame)) and type(frame) is not TTSTextFrame:
+                    completed.put_nowait(frame)
+                await self.push_frame(frame, direction)
+
+        def chunks(**kwargs):
+            calls.append(kwargs)
+            yield np.zeros(4800, dtype=np.float32)
+
+        voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
+        worker = PipelineWorker(Pipeline([voice, Sink()]), enable_rtvi=False, idle_timeout_secs=None)
+        runner = WorkerRunner(handle_sigint=False)
+        await runner.add_workers(worker)
+        running = asyncio.create_task(runner.run())
+        prefixes = [
+            ('neutral', 'Hello.'),
+            ('curious', '(Subtly curious and interested, natural conversational delivery) Hello.'),
+            ('gently_pleased', '(Gently pleased, with a subtle smile in the voice) Hello.'),
+            ('reassuring', '(Warm, gentle and reassuring, speaking calmly) Hello.'),
+        ]
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            for label, synthesis in prefixes:
+                start = LLMFullResponseStartFrame()
+                start.speech_delivery = label
+                start.conversation_reply_token = object()
+                await worker.queue_frames([start, LLMTextFrame('Hello.'), LLMFullResponseEndFrame()])
+                while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
+                    pass
+                expected = dict(text=synthesis, reference_wav_path=str(TEST_PRESET.reference),
+                                inference_timesteps=10, max_len=400, retry_badcase=False)
+                if label == 'neutral':
+                    expected.update(prompt_wav_path=str(TEST_PRESET.reference), prompt_text='Fixture voice.')
+                self.assertEqual(calls[-1], expected)
+                text_frame = next(f for f in reversed(frames) if isinstance(f, TTSTextFrame))
+                audio_frame = next(f for f in reversed(frames) if isinstance(f, TTSAudioRawFrame))
+                self.assertEqual(text_frame.text, 'Hello.')
+                self.assertEqual(audio_frame.conversation_text_start, 'Hello.')
+                self.assertEqual(text_frame.conversation_audio_span[0].delivery, label)
+                self.assertIs(text_frame.conversation_audio_span[0].reply_token, start.conversation_reply_token)
+
+            start = LLMFullResponseStartFrame()
+            start.speech_delivery = 'curious'
+            await worker.queue_frames([start, LLMTextFrame('First. Tail '), speech.SpeechAdvisoryFrame(' Restart Kestrel.'),
+                                       LLMFullResponseEndFrame()])
+            while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
+                pass
+            self.assertEqual(calls[-2]['text'],
+                             '(Subtly curious and interested, natural conversational delivery) First.')
+            self.assertEqual(calls[-1]['text'], 'Tail Restart Kestrel.')
+            self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
+
+            await worker.queue_frames([speech.TTSSpeakFrame('Local reply.'), DataFrame()])
+            while type(await asyncio.wait_for(completed.get(), 5)) is not DataFrame:
+                pass
+            self.assertEqual(calls[-1]['text'], 'Local reply.')
+            self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
+
+            await worker.queue_frames([InterruptionFrame(), DataFrame()])
+            while type(await asyncio.wait_for(completed.get(), 5)) is not DataFrame:
+                pass
+            self.assertFalse(voice._conversation_turns)
+            self.assertFalse(voice._conversation_audio_contexts)
+            await worker.queue_frames([LLMFullResponseStartFrame(), LLMTextFrame('Replacement.'),
+                                       LLMFullResponseEndFrame()])
+            while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
+                pass
+            self.assertEqual(calls[-1]['text'], 'Replacement.')
+            self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
+            await worker.queue_frame(EndFrame())
+            await running
+            self.assertFalse(voice._conversation_turns)
+            self.assertFalse(voice._conversation_audio_contexts)
+            [f async for f in voice.run_tts('After end.', 'after-end')]
+            self.assertEqual(calls[-1]['text'], 'After end.')
+        finally:
+            if not running.done():
+                await worker.cancel()
+                await running
+        # Context hooks keep queued metadata independent of a later start frame.
+        queued = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
+        for label in ('curious', 'reassuring'):
+            start = LLMFullResponseStartFrame()
+            start.speech_delivery = label
+            await queued.process_frame(start, speech.FrameDirection.DOWNSTREAM)
+            context_id = queued._turn_context_id
+            await queued.create_audio_context(context_id)
+            if label == 'curious':
+                old_id = context_id
+                old_context = queued._conversation_audio_contexts[old_id]
+                await queued.on_turn_context_completed()
+        self.assertNotEqual(old_id, context_id)
+        self.assertEqual(old_context.delivery, 'curious')
+        self.assertEqual(queued._conversation_audio_contexts[context_id].delivery, 'reassuring')
+        audio = [f async for f in queued.run_tts('Queued.', old_id)]
+        self.assertEqual(calls[-1]['text'],
+                         '(Subtly curious and interested, natural conversational delivery) Queued.')
+        self.assertEqual(audio[0].conversation_text_start, 'Queued.')
+        await queued.process_frame(CancelFrame(), speech.FrameDirection.DOWNSTREAM)
+        self.assertFalse(queued._conversation_turns)
+        self.assertFalse(queued._conversation_audio_contexts)
+        [f async for f in queued.run_tts('Replacement.', 'replacement')]
+        self.assertEqual(calls[-1]['text'], 'Replacement.')
+        self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
+        invalid = speech.ConversationAudioContext(None, delivery='unknown')
+        queued._conversation_audio_contexts['invalid'] = invalid
+        with self.assertRaisesRegex(RuntimeError, 'delivery'):
+            [f async for f in queued.run_tts('Never.', 'invalid')]
+
     async def test_reply_cleanup_marks_code_without_speaking_it(self):
         started, finished = asyncio.Event(), asyncio.Event()
         frames, synthesized = [], []
@@ -471,17 +602,25 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
         first_session = VoxCPMTTS(model, TEST_PRESET)
         second_session = VoxCPMTTS(model, TEST_PRESET)
-        for service, text in [
-            (first_session, "Hello."), (first_session, "How are you?"),
-            (first_session, "Here is another reply."), (second_session, "Welcome back."),
+        first_session._conversation_audio_contexts['expressive'] = speech.ConversationAudioContext(
+            None, delivery='gently_pleased')
+        for service, text, context_id in [
+            (first_session, "Hello.", "expressive"), (first_session, "How are you?", "expressive"),
+            (first_session, "Here is another reply.", "turn"), (second_session, "Welcome back.", "turn"),
         ]:
-            frames = [frame async for frame in service.run_tts(text, "turn")]
+            frames = [frame async for frame in service.run_tts(text, context_id)]
             self.assertEqual(len(frames), 1)
         self.assertEqual(model.generate_streaming.call_count, 4)
-        for call in model.generate_streaming.call_args_list:
+        for index, call in enumerate(model.generate_streaming.call_args_list):
             self.assertEqual(call.kwargs["reference_wav_path"], str(TEST_PRESET.reference))
-            self.assertEqual(call.kwargs["prompt_wav_path"], str(TEST_PRESET.reference))
-            self.assertEqual(call.kwargs["prompt_text"], TEST_PRESET.transcript)
+            if index < 2:
+                self.assertNotIn('prompt_wav_path', call.kwargs)
+                self.assertNotIn('prompt_text', call.kwargs)
+                self.assertTrue(call.kwargs['text'].startswith(
+                    '(Gently pleased, with a subtle smile in the voice) '))
+            else:
+                self.assertEqual(call.kwargs["prompt_wav_path"], str(TEST_PRESET.reference))
+                self.assertEqual(call.kwargs["prompt_text"], TEST_PRESET.transcript)
 
     async def test_two_sentences_finish_before_the_response_ends(self):
         started = asyncio.Event()
@@ -619,6 +758,12 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         events = []
 
         def chunks(text, **kwargs):
+            if text.startswith('(Subtly curious and interested, natural conversational delivery) '):
+                self.assertNotIn('prompt_text', kwargs)
+                text = 'old'
+            else:
+                self.assertEqual(text, 'new')
+                self.assertEqual(kwargs['prompt_text'], 'Fixture voice.')
             events.append((text, "start"))
             try:
                 yield np.zeros(10, dtype=np.float32)
@@ -633,6 +778,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 events.append((text, "closed"))
 
         voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
+        voice._conversation_audio_contexts['old'] = speech.ConversationAudioContext(None, delivery='curious')
         old_frames = []
 
         async def consume(text, frames):
@@ -654,6 +800,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 await old
             await new
             self.assertEqual(len(old_frames), 1)
+            self.assertEqual(old_frames[0].conversation_text_start, 'old')
             self.assertNotIn(("old", "third"), events)
             self.assertLess(events.index(("old", "closed")), events.index(("new", "start")))
             self.assertEqual(len(new_frames), 3)
