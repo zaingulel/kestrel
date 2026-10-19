@@ -15,11 +15,29 @@ Both speech environments use project-local Python 3.12 and CUDA-enabled PyTorch 
 
 Conversation runs through a direct Hermes Agent 0.22.2 child process, started by `bot.py` through `hermes_worker.py`. The checkout owns `.runtime/hermes-0.22.2/source`, its interpreter at `.runtime/hermes-0.22.2/venv/bin/python`, and the interpreter's backing files under `.runtime/hermes-0.22.2/managed`. The source must be at exact release commit `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, with no tracked changes. Before importing the engine, readiness checks that identity and requires `run_agent` to resolve to that source's `run_agent.py`. The release reports package metadata `0.0.0`, which does not identify the reviewed source. These checks establish release identity, not cryptographic attestation of the dependency environment. Kestrel's private conversation-history adaptation is release-specific; upgrades require native compatibility checks. A missing interpreter or refused identity requires reinstalling the pinned source and recreating its environment from the upstream frozen lock with Python 3.14.7 and `HERMES_RUNTIME_DIR` set to the owned `managed` directory, then restarting Kestrel. Keep the interpreter backing in that owned layout, outside disposable temporary folders. Preparing a trial checkout does not upgrade the installed production services.
 
-The history adapter applies the upstream thinking-only and continuation-nudge filters separately to each row on the constructed agent instance. This preserves distinct unanswered user turns without inventing assistant speech or changing the upstream class.
+The history adapter applies the upstream thinking-only and continuation-nudge filters separately to each row on the constructed agent instance. This preserves distinct unanswered user turns without inventing assistant speech or changing the upstream class. Historical unanswered user text also keeps its singleton text-part encoding through request assembly: it protects literal leading and trailing spacing from an earlier upstream pass that trims string content. Later cache redecoration flattens those text parts back to strings; the instance adapter keeps the rows separate.
 
 Hermes connects to the local Bonsai endpoint above. The engine enables no tools, including the terminal, and has no fallback provider. Kestrel handles [local mute](#local-mute), [local volume](#local-volume), [media pause and next track](#media-pause-and-next-track), [numbered workspace focus](#numbered-workspace-focus), [installed-app launching](#open-an-installed-app), [native screenshot saving](#take-a-screenshot), [stop or cancel](#stop-or-cancel), [repeat that](#repeat-that) and [spoken help](#what-can-i-say) before the engine; the brain cannot invoke local actions.
 
 Each service lifetime gets a new temporary Hermes home under ignored `.runtime/`, with isolated configuration. The child does not load the normal Hermes configuration, memories or context files, and does not inherit provider credentials or proxy settings. Conversation history comes from Pipecat's committed context; reusable conversation storage, session snapshots and memory are disabled. Shutdown terminates the child, waits for it to exit and removes only that service's temporary home. Restarting Kestrel starts with empty conversation history.
+
+To install a fresh pinned Hermes runtime, first provide Git, `/usr/bin/python`, network access for the official dependency build, and a real checkout-owned `.runtime` directory. Run this recipe from the intended checkout root. It verifies the release commit before importing upstream Python and builds from the frozen upstream lock. An existing target, including a failed partial installation, stops the recipe for inspection; it is never silently replaced.
+
+```sh
+(
+  set -eu
+  test -d .runtime && test ! -L .runtime
+  kestrel_hermes_runtime="$PWD/.runtime/hermes-0.22.2"
+  mkdir "$kestrel_hermes_runtime"
+  git clone --depth 1 --branch v0.22.2 https://github.com/NousResearch/hermes-agent.git "$kestrel_hermes_runtime/source"
+  test "$(git -C "$kestrel_hermes_runtime/source" rev-parse HEAD)" = d923a5eb487a17c0a68801bba9ef0f56c81040a8
+  mkdir "$kestrel_hermes_runtime/home"
+  cd "$kestrel_hermes_runtime/source"
+  env -i HOME="$kestrel_hermes_runtime/home" PATH=/usr/bin:/bin LANG=C.UTF-8 HERMES_HOME="$kestrel_hermes_runtime/home/.hermes" HERMES_RUNTIME_DIR="$kestrel_hermes_runtime/managed" UV_CACHE_DIR="$kestrel_hermes_runtime/home/.cache/uv" /usr/bin/python -c 'from pathlib import Path; from pm import build_environment; print(build_environment(source=Path.cwd(), out=Path.cwd().parent / "venv", frozen=True, explicit=True, timeout=300))'
+)
+```
+
+The managed Python backing and runtime home stay under this checkout-owned directory. Preparing a trial runtime does not authorise deploying it or restarting production.
 
 Run service installation commands from the stable checkout at `~/Projects/zaingulel/kestrel`. The tracked user units use that path, so do not install them from a trial checkout. They require the existing ignored model assets and environments; the launchers do not download or repair them. Inspect and save any existing installed unit definitions before replacing them. Stop any existing transient Kestrel service and brain before installing these units.
 

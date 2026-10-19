@@ -2973,6 +2973,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await event.wait()
 
             try:
+                await asyncio.wait_for(asyncio.shield(transport.llm.reader), bot.ENGINE_TIMEOUT)
                 await start('Mixed synthesis.')
                 rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
                                         and rows[-1]['state'] in ('complete', 'failed'))
