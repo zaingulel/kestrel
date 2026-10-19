@@ -120,8 +120,6 @@ env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basi
 env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner --help
 ```
 
-Real desktop visual verification uses the real display with appropriate authorization; headless evidence does not establish rendered appearance.
-
 ```sh
 node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes Indicator::test_listening_inflow_motion
 node scripts/run-log.mjs indicator qml -- /usr/lib/qt6/bin/qmllint desktop/Service.qml desktop/Marks.qml
