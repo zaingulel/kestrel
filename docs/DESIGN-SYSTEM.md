@@ -70,7 +70,7 @@ Panel text follows the host's text size. The panel's text scale is the host `Sty
 
 ### The three marks
 
-Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above the bottom of the bar. The indicator's slot is 25 wide and the full bar height. The shape names the state.
+The indicator's slot is 25 wide and the full bar height. Listening uses the Inflow rings and dot in both the indicator and panel header. The other states use three marks, each 3 wide with 3 between them, standing on a common baseline 9 above the bottom of the bar. The shape names the state.
 
 | State | Shape | Motion |
 | --- | --- | --- |
@@ -78,12 +78,27 @@ Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above
 | Starting | Three outlined 3 by 3 squares with 1-pixel strokes, at full bar-text opacity | None |
 | Status unavailable | Three 3 by 3 squares raised left-to-right by 0, 3 and 6, at full bar-text opacity | None |
 | Idle | Three squares, 3 high, at 0.6 opacity | None |
-| Listening | Three bars, 12 high | None |
+| Listening | Inflow: two rings gathering toward a central dot | One linear 1600 ms phase drives the rings and dot pulse |
 | Thinking | Three squares, one raised by 5 | The raised square steps to the next position every 280 ms |
 | Speaking | Three bars of unequal height | Each bar eases between 4 and 12 high, on periods of 420, 520 and 610 ms |
 | Trouble | Two squares and an exclamation mark, a 7 high bar above a square, in bar active | None |
 
-Where the desktop asks for reduced motion, nothing loops: thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
+Inflow occupies the same 25 by 30 slot, centred at (12.5, 13.5), with maximum outer diameter 15. It identifies listening, never measured sound level.
+
+| Listening token | Value |
+| --- | --- |
+| Dot | Diameter 3, opaque inherited ink, circular and scaled about its centre; maximum diameter 3.3 |
+| Rings | Two transparent circles in inherited ink, constant stroke 1.5; path radius `(D - 1.5) / 2` for outer diameter `D` |
+| Driver | Linear phase `p` from 0 to 1, repeating every 1600 ms |
+| Ring phases | `q = p modulo 1` and `q = (p + 0.5) modulo 1` |
+| Incoming, `q <= 0.7` | `D = 15 - 10(q / 0.7)^2`; opacity `(q / 0.7)^2` |
+| Disappearing, `q > 0.7` | `D = 5 - 2((q - 0.7) / 0.3)^2`; opacity `1 - (q - 0.7) / 0.3` |
+| Dot pulse | `u = (1600p) modulo 800` milliseconds; scale `1 + 0.1 sin(pi u / 120)` for `u < 120`, otherwise 1 |
+| Reduced motion | Unscaled dot and first ring diameter 9 at opacity 0.6; second ring hidden; no running listening animation |
+
+Draw the rings with native QtQuick.Shapes `ShapePath` and `PathAngleArc`, using a 360-degree sweep so the 1.5 stroke stays real-valued. Draw the dot as a round Rectangle. Leaving listening stops its loop and resets phase zero; re-entry or re-enabling motion starts from phase zero. Other states retain their geometry and animations.
+
+Where the desktop asks for reduced motion, nothing loops: listening uses the still Inflow form above, thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 
 The status indicator is an accessible button named `Open conversation` or `Close conversation`, followed by the status sentence and any placement advisory. Its 25 by 30 slot is the click target. Its marks are decorative and excluded from assistive technology. Pressing it toggles the panel. Hovering uses the host tooltip to show the state in words:
 
@@ -104,7 +119,7 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 
 - **Placement.** First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and the native border. Later openings retain the actual dragged position within the compositor configuration lifetime. When the monitor or its work area changes, clamp a position only if it would leave the panel off screen. Preserve a deliberately partly off-screen drag when that work area has not changed. Compositor configuration reload resets placement; cross-reload or restart storage is not provided.
 - **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its square `Close conversation` button, at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. The conversation stays in the voice service while it runs.
-- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the three marks for the current state, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text, wrapping within the header width.
+- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the current-state mark, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text, wrapping within the header width.
 - **Header marks.** The same drawing, sizes and motion as the bar, in popups text, with resting states at 0.6 opacity and trouble in bar active. They are decorative: no click, tooltip or keyboard focus, and hidden from assistive technology, because the sentence beside them says the state.
 - **Conversation.** Kestrel's turns sit flush left under a bold `Kestrel` label in accent. The owner's turns are inset by 32 under a bold `You` label in popups text. The reply in progress shows `Thinking` or `Speaking` beside its label. All transcript text is plain text, wraps long words and scrolls vertically. Auto-follow only while already at the bottom; updates never jump away from earlier text being read. This read-only panel has no composer, send control or active links.
 - **Empty and failure copy.** A healthy empty feed says `Say something. Kestrel replies after you.` A stale, malformed or disconnected feed clears the transcript and says `Conversation unavailable. Reopen the panel.` An oversized conversation says `Conversation is too large to display. Restart Kestrel to begin a new conversation.` Interrupted or failed rows end with an accent warning triangle and `Reply interrupted.` or `Reply could not be completed.` These states make no microphone claim.
