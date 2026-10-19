@@ -1,9 +1,7 @@
 // ignore-rules.test.mjs — the ignore rules that keep local runtime assets and credentials out of Git.
 //
-// A job worktree reaches the preserved voice environment through a `.runtime` symlink
-// (docs/TESTING-STRATEGY.md section 6). A directory-only pattern, `.runtime/`, does not match a
-// symlink, so the rule is judged here against a real link in a scratch repository carrying the
-// committed .gitignore.
+// The committed .gitignore also protects legacy `.runtime` symlinks. A directory-only pattern,
+// `.runtime/`, does not match a symlink, so a real link in a scratch repository covers that boundary.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

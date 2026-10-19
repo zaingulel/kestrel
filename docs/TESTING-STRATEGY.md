@@ -200,7 +200,17 @@ node scripts/run-log.mjs quality flags -- node --test --test-name-pattern='^an a
 At convergence, run `npm run lint`, `npm run test:scripts`, `npm run test:speech` and the Ruff command below;
 documentation changes also run `npm run lint:docs`. `npm test` runs both the factory Node tests and the existing Python speech tests. The speech command requires the ignored local voice environment described in [README.md](../README.md). An unavailable environment is unavailable evidence, never a pass.
 
-In a job worktree with no `.runtime`, run `ln -s /home/zain/Projects/zaingulel/kestrel/.runtime .runtime`. This link points to the preserved real models, environments and voice assets; those target assets are not disposable test storage. Closeout removes the verified disposable job-local `.runtime` symlink under [its existing cleanup rules](../.agents/skills/closeout/SKILL.md#closeout). Do not delete the linked assets, follow the link during cleanup, or rebuild the assets for tests.
+In a job worktree, create a fresh real `.runtime` directory with mode `0700` and link only the shared dependencies and assets:
+
+```sh
+mkdir -m 700 .runtime && for asset in bin cache python asr-venv voice-venv models voices tools hermes-0.22.2; do
+  ln -s "/home/zain/Projects/zaingulel/kestrel/.runtime/$asset" ".runtime/$asset" || exit 1
+done
+```
+
+The recipe refuses any existing `.runtime` path, including a dangling symlink, and stops with a nonzero result if an asset link fails. Do not link the whole runtime, `hermes-traces`, logs, samples or temporary Hermes homes. Tracing requires `.runtime` to be a real directory owned by the current user without group or world write access; `.runtime/hermes-traces` must also be a real directory owned by that user with mode `0700`. The worker creates its private trace root when absent and refuses unsafe existing paths without repairing or replacing them.
+
+Under [closeout's existing cleanup rules](../.agents/skills/closeout/SKILL.md#closeout), remove only verified inactive job-created asset links. Never follow the links, delete their shared targets or rebuild those assets for tests. Remove the real `.runtime` directory only with `rmdir` when empty; it is not regenerated disposable storage. Retain a worktree containing `hermes-traces` or other owner data. Trace deletion remains the owner's decision under [README's local conversation trace rules](../README.md#local-conversation-traces).
 
 Ruff requires `uvx` (provided by uv). From the repository root, run:
 
