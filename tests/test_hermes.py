@@ -457,10 +457,7 @@ raise SystemExit(status)
                         return metadata
 
                     def directory_failure():
-                        raise RuntimeError(
-                            'Local conversation tracing could not start. '
-                            'Check runtime permissions and restart Kestrel.'
-                        ) from PermissionError('private path detail')
+                        raise RuntimeError(refusal) from PermissionError('private path detail')
 
                     protocol = StringIO()
                     diagnostic = StringIO()
