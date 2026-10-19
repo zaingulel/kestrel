@@ -96,7 +96,7 @@ Inflow occupies the same 25 by 30 slot, centred at (12.5, 13.5), with maximum ou
 | Dot pulse | `u = (1600p) modulo 800` milliseconds; scale `1 + 0.1 sin(pi u / 120)` for `u < 120`, otherwise 1 |
 | Reduced motion | Unscaled dot and first ring diameter 9 at opacity 0.6; second ring hidden; no running listening animation |
 
-Draw the rings with native QtQuick.Shapes `ShapePath` and `PathAngleArc`, using a 360-degree sweep so the 1.5 stroke stays real-valued. Draw the dot as a round Rectangle. Leaving listening stops its loop and resets phase zero; re-entry or re-enabling motion starts from phase zero. Other states retain their geometry and animations.
+Draw the rings with native QtQuick.Shapes `ShapePath` and `PathAngleArc`, using a 360-degree sweep so the 1.5 stroke stays real-valued. Prefer `Shape.CurveRenderer` for smooth curves and native antialiasing, retaining Qt's native renderer fallback. Draw the dot as a round Rectangle. Leaving listening stops its loop and resets phase zero; re-entry or re-enabling motion starts from phase zero. Other states retain their geometry and animations.
 
 Where the desktop asks for reduced motion, nothing loops: listening uses the still Inflow form above, thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 

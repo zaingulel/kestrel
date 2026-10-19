@@ -61,6 +61,7 @@ Item {
                     : ringPhase <= 0.7 ? 15 - 10 * Math.pow(ringPhase / 0.7, 2)
                     : 5 - 2 * Math.pow((ringPhase - 0.7) / 0.3, 2)
                 objectName: "listeningRing" + index
+                preferredRendererType: Shape.CurveRenderer
                 x: 5; y: 6; width: 15; height: 15
                 visible: root.motionEnabled || index === 0
                 opacity: !root.motionEnabled ? 0.6

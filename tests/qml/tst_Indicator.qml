@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import QtTest
 import "../../desktop" as Desktop
 
@@ -56,6 +57,7 @@ TestCase {
         compare(ring.x, 5)
         compare(ring.y, 6)
         compare(ring.width, 15)
+        compare(ring.preferredRendererType, Shape.CurveRenderer)
         compare(ring.height, 15)
         fuzzyCompare(ring.opacity, opacity, 0.00001)
         const path = findChild(ring, "listeningPath" + index)
