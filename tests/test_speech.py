@@ -487,11 +487,15 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         finished = asyncio.Event()
         frames = []
+        early_starts = []
 
         class Sink(FrameProcessor):
             async def process_frame(self, frame, direction):
                 await super().process_frame(frame, direction)
                 frames.append(frame)
+                if isinstance(frame, TTSAudioRawFrame) and frame.audio:
+                    context = next(f.conversation_audio_context for f in frames if isinstance(f, TTSStartedFrame))
+                    early_starts.append(list(context.pending_text_starts))
                 if isinstance(frame, StartFrame):
                     started.set()
                 if isinstance(frame, LLMFullResponseEndFrame):
@@ -500,6 +504,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
         def chunks(**kwargs):
             if kwargs['text'] != 'No audio.':
+                yield np.zeros(0, dtype=np.float32)
                 yield np.zeros(4800 if kwargs['text'] == 'Hello.' else 1500, dtype=np.float32)
 
         voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
@@ -522,7 +527,12 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(finished.wait(), 5)
             spoken = [f.text for f in frames if isinstance(f, TTSTextFrame)]
             self.assertEqual(spoken, ["Hello.", "I am listening."])
-            self.assertEqual(sum(isinstance(f, TTSAudioRawFrame) for f in frames), 2)
+            audio = [f for f in frames if isinstance(f, TTSAudioRawFrame)]
+            self.assertEqual(len(audio), 4)
+            self.assertEqual([getattr(f, 'conversation_text_start', None) for f in audio],
+                             [None, 'Hello.', None, 'I am listening.'])
+            self.assertIn((0, 'Hello.'), early_starts[0])
+            self.assertIn((9600, 'I am listening.'), early_starts[1])
             self.assertEqual(sum(isinstance(f, TTSStoppedFrame) for f in frames), 1)
             end = next(i for i, f in enumerate(frames) if isinstance(f, LLMFullResponseEndFrame))
             self.assertTrue(all(i < end for i, f in enumerate(frames) if isinstance(f, TTSTextFrame)))
@@ -530,6 +540,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             first, second = [f.conversation_audio_span for f in texts]
             context = first[0]
             self.assertIs(context.reply_token, token)
+            self.assertEqual(context.pending_text_starts, [(0, 'Hello.'), (9600, 'I am listening.')])
             self.assertIs(second[0], context)
             self.assertEqual(first[1:], (0, 9600, True))
             self.assertEqual(second[1:], (9600, 12600, True))
@@ -548,12 +559,17 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 text = next(f for f in frames if isinstance(f, TTSTextFrame))
                 self.assertEqual(text.conversation_audio_span[1:], (0, 0, True))
                 self.assertIsNot(text.conversation_audio_span[0], context)
+                self.assertEqual(text.conversation_audio_span[0].pending_text_starts, [])
+                self.assertEqual(context.pending_text_starts, [(0, 'Hello.'), (9600, 'I am listening.')])
             await voice.set_usable(True)
 
             for audio, rate, channels in ((b'\x01\x00', 44100, 1), (b'\x01\x00', 48000, 2), (b'\x01', 48000, 1)):
                 started_frame = TTSStartedFrame(context_id='malformed')
                 await voice.push_frame(started_frame)
-                await voice.push_frame(TTSAudioRawFrame(audio, rate, channels, context_id='malformed'))
+                frame = TTSAudioRawFrame(audio, rate, channels, context_id='malformed')
+                frame.conversation_text_start = 'Malformed.'
+                await voice.push_frame(frame)
+                self.assertEqual(started_frame.conversation_audio_context.pending_text_starts, [])
                 text = TTSTextFrame('Malformed.', aggregated_by='sentence')
                 text.context_id = 'malformed'
                 await voice.push_frame(text)
@@ -561,6 +577,19 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(text.conversation_audio_span[0], started_frame.conversation_audio_context)
                 await voice.push_frame(TTSStoppedFrame(context_id='malformed'))
                 await voice.on_audio_context_completed('malformed')
+            original = speech.ConversationAudioContext(token)
+            voice._conversation_audio_contexts['replacement'] = original
+            retained = [f async for f in voice.run_tts('Replacement.', 'replacement')]
+            self.assertEqual(original.pending_text_starts, [])
+            replacement = speech.ConversationAudioContext(token)
+            voice._conversation_audio_contexts['replacement'] = replacement
+            tagged = next(f for f in retained if f.audio)
+            voice._record_conversation_source(tagged, 'replacement')
+            voice._record_conversation_source(tagged, 'replacement')
+            self.assertEqual(replacement.pending_text_starts, [(0, 'Replacement.')])
+            self.assertEqual(replacement.source_bytes, 3000)
+            self.assertEqual(original.pending_text_starts, [])
+            self.assertEqual(original.source_bytes, 0)
             await worker.queue_frame(EndFrame())
             await running
         finally:

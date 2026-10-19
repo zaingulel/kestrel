@@ -23,7 +23,7 @@ from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, LLMFullResponseEndFrame, LLMTextFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
-    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStoppedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
@@ -2725,6 +2725,132 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
 
+    async def test_panel_reveals_chunk_on_first_successful_output(self):
+        loop = asyncio.get_running_loop()
+        release_generation = threading.Event()
+        generation_held = asyncio.Event()
+        release_second, release_future = asyncio.Event(), asyncio.Event()
+        for release in (release_generation, release_second, release_future):
+            self.addCleanup(release.set)
+        brain = ScriptedBrain([
+            [({'content': 'Prepared.'}, None), ({}, 'stop')],
+            [({'content': 'Starting chunk. Future chunk.'}, None), ({}, 'stop')],
+            [({'content': 'Empty chunk.'}, None), ({}, 'stop')],
+            [({'content': 'Failed output.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+
+        def chunks(**kwargs):
+            text = kwargs['text']
+            yield np.zeros(0, dtype=np.float32)
+            if text == 'Empty chunk.':
+                return
+            yield np.full(1920, 0.5, dtype=np.float32)
+            if text == 'Starting chunk.':
+                loop.call_soon_threadsafe(generation_held.set)
+                if not release_generation.wait(45):
+                    raise AssertionError('Synthetic chunk generation was never released')
+                yield np.full(1920, 0.5, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            transport, _, _, interrupted, _, close = await self.open_session(
+                brain, through_service=True, synthesis_chunks=chunks,
+            )
+            output = transport.output()
+            write = output.write_audio_frame
+            delivered, second_write, future_write, ended = (asyncio.Event() for _ in range(4))
+            written, texts = [], []
+            current_context = None
+            fail_output = False
+
+            @output.event_handler('on_after_push_frame')
+            async def observe(processor, frame):
+                nonlocal current_context
+                if isinstance(frame, TTSStartedFrame):
+                    current_context = frame.conversation_audio_context
+                elif isinstance(frame, TTSAudioRawFrame) and frame.audio:
+                    delivered.set()
+                elif isinstance(frame, TTSTextFrame):
+                    texts.append(frame.text)
+                elif isinstance(frame, LLMFullResponseEndFrame):
+                    ended.set()
+
+            async def controlled_write(frame):
+                if fail_output:
+                    current_context.write_failed = True
+                    return False
+                if len(written) == 1:
+                    second_write.set()
+                    await release_second.wait()
+                elif len(written) == 2:
+                    future_write.set()
+                    await release_future.wait()
+                success = await write(frame)
+                if success:
+                    written.append(frame.audio)
+                return success
+
+            output.write_audio_frame = controlled_write
+            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+
+            async def snapshot():
+                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+                try:
+                    return json.loads(await asyncio.wait_for(reader.readline(), 1))['turns']
+                finally:
+                    peer = transport.llm.conversation.reader_task
+                    writer.close()
+                    await writer.wait_closed()
+                    if peer is not None:
+                        await asyncio.wait_for(peer, 1)
+
+            async def start(text):
+                interrupted.clear()
+                ended.clear()
+                output.generation_done.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                await self.finish_user_turn(transport, text)
+
+            try:
+                await start('Show chunks as they start.')
+                await asyncio.wait_for(delivered.wait(), 5)
+                await asyncio.wait_for(generation_held.wait(), 5)
+                rows = await snapshot()
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Starting chunk.', 'state': 'speaking'})
+                self.assertEqual(texts, [])
+                self.assertFalse(output.generation_done.is_set())
+                self.assertEqual(written, [b'\xff\x3f' * 1920])
+
+                release_generation.set()
+                await asyncio.wait_for(second_write.wait(), 5)
+                await asyncio.wait_for(output.generation_done.wait(), 5)
+                self.assertEqual((await snapshot())[-1]['text'], 'Starting chunk.')
+                release_second.set()
+                await asyncio.wait_for(future_write.wait(), 5)
+                self.assertEqual((await snapshot())[-1]['text'], 'Starting chunk.')
+                self.assertEqual(written, [b'\xff\x3f' * 1920] * 2)
+                release_future.set()
+                await asyncio.wait_for(ended.wait(), 5)
+                self.assertEqual((await snapshot())[-1], {
+                    'speaker': 'kestrel', 'text': 'Starting chunk. Future chunk.', 'state': 'complete',
+                })
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+
+                for prompt, failed in (('No output.', False), ('Reject output.', True)):
+                    with self.subTest(failed_output=failed):
+                        written.clear()
+                        fail_output = failed
+                        await start(prompt)
+                        await asyncio.wait_for(ended.wait(), 5)
+                        self.assertEqual((await snapshot())[-1], {'speaker': 'kestrel', 'text': '', 'state': 'failed'})
+                        self.assertEqual(written, [])
+            finally:
+                release_generation.set()
+                release_second.set()
+                release_future.set()
+                await close()
+
     async def test_panel_attributes_each_synthesis_to_delivered_audio(self):
         loop = asyncio.get_running_loop()
         release_failure, release_provider = threading.Event(), threading.Event()
@@ -2871,12 +2997,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(final_write.wait(), 5)
                 rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
                                         and rows[-1]['text'].startswith('Boundary first.'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'speaking'})
                 self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
                 release_write.set()
                 rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
                                         and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'failed'})
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio. Boundary second.', 'state': 'failed'})
                 self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 3840 + bytes(840))
 
                 for interrupt in (False, True):
@@ -2891,7 +3017,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(final_write.wait(), 5)
                         rows = await rows_until(lambda rows: rows[-2]['text'] == prompt
                                                 and rows[-1]['text'].startswith('Boundary first.'))
-                        self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
+                        self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'speaking'})
                         self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
                         await asyncio.wait_for(output.generation_done.wait(), 5)
                         if interrupt:
@@ -2899,12 +3025,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                             await asyncio.wait_for(interrupted.wait(), 5)
                             rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
-                            self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first. Failed after audio.')
                             self.assertEqual(len(written), 1)
                         else:
                             release_write.set()
                             rows = await rows_until(lambda rows: rows[-1]['state'] in ('complete', 'failed'))
-                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'failed'})
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'failed'})
                             self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 2340)
 
                 hold_final = False
@@ -2954,7 +3080,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         rows = await rows_until(lambda rows: rows[-2]['text'] in
                                                 ('Interrupted boundary.', 'Completed boundary.')
                                                 and rows[-1]['text'].startswith('Boundary first.'))
-                        self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                        self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
                         self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
                         transport.llm.conversation_output(stale_text)
                         if not interrupt:
@@ -2964,7 +3090,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                             await asyncio.wait_for(interrupted.wait(), 5)
                             rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
-                            self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
                             self.assertEqual(len(written), 1)
                         else:
                             release_write.set()
@@ -2979,7 +3105,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 rows = await rows_until(lambda rows: rows[-2]['text'] == 'A clean later turn.'
                                         and rows[-1]['state'] == 'complete')
                 self.assertEqual(rows[-1]['text'], 'Clean later.')
-                self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'interrupted'})
+                self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'interrupted'})
             finally:
                 release_failure.set()
                 release_provider.set()

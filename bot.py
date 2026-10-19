@@ -726,16 +726,18 @@ class HermesLLMService(LLMService):
             if span is None or span[0] is not context or not span[3] or span[2] <= span[1]:
                 self._conversation_incomplete = True
             else:
-                self._conversation_pending_spans.append((span[2], frame.text))
+                self._conversation_pending_spans.append(span[2])
         elif isinstance(frame, TTSStoppedFrame):
             if getattr(frame, 'conversation_audio_context', None) is not context:
                 return
         else:
             return
         if not context.write_failed:
-            while self._conversation_pending_spans and self._conversation_pending_spans[0][0] <= self._conversation_output_bytes:
-                _, text = self._conversation_pending_spans.pop(0)
+            while context.pending_text_starts and self._conversation_output_bytes > context.pending_text_starts[0][0]:
+                _, text = context.pending_text_starts.pop(0)
                 self.conversation.spoken(context.reply_token, text)
+            while self._conversation_pending_spans and self._conversation_pending_spans[0] <= self._conversation_output_bytes:
+                self._conversation_pending_spans.pop(0)
         if isinstance(frame, TTSStoppedFrame):
             context.output_stopped = True
             self._conversation_incomplete |= bool(self._conversation_pending_spans) or context.write_failed
