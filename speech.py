@@ -7,7 +7,7 @@ import io
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import subprocess
 import threading
 import wave
@@ -55,6 +55,7 @@ class ConversationAudioContext:
     reply_token: object | None
     source_bytes: int = 0
     previous_text_end: int = 0
+    pending_text_starts: list[tuple[int, str]] = field(default_factory=list)
     source_valid: bool = True
     write_failed: bool = False
     output_stopped: bool = False
@@ -1327,8 +1328,11 @@ class VoxCPMTTS(TTSService):
         context = self._conversation_audio_contexts.get(context_id)
         if isinstance(frame, TTSAudioRawFrame):
             if context is not None:
-                context.source_bytes += len(frame.audio)
                 context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
+                text = getattr(frame, 'conversation_text_start', None)
+                if context.source_valid and frame.audio and text is not None:
+                    context.pending_text_starts.append((context.source_bytes, text))
+                context.source_bytes += len(frame.audio)
         elif frame.text.strip():
             frame.conversation_audio_span = ((context, context.previous_text_end, context.source_bytes, context.source_valid)
                                              if context is not None else (None, 0, 0, False))
@@ -1385,6 +1389,7 @@ class VoxCPMTTS(TTSService):
 
     async def run_tts(self, text, context_id):
         context = self._conversation_audio_contexts.get(context_id)
+        text_started = False
         try:
             # Never overlap model calls, including a chunk still finishing after interruption.
             async with self._generation_lock:
@@ -1402,7 +1407,11 @@ class VoxCPMTTS(TTSService):
                         if chunk is None:
                             break
                         pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
-                        yield TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
+                        frame = TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
+                        if pcm and not text_started:
+                            frame.conversation_text_start = text
+                            text_started = True
+                        yield frame
                 finally:
                     # Cancellation stops playback immediately in Pipecat. Finish only the
                     # current GPU chunk before closing its generator and releasing the model.
