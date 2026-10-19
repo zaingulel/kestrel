@@ -182,28 +182,45 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class HermesWorkerTests(unittest.TestCase):
+    def test_delivery_prefix_accepts_observed_space_delimiter(self):
+        import hermes_worker
+
+        reply = '[delivery:neutral] There are 120 minutes in two hours.'
+        for split in (18, 19):
+            with self.subTest(split=split):
+                reader = hermes_worker.ReplyDeliveryPrefix()
+                events = reader.feed(reply[:split]) + reader.feed(reply[split:])
+                self.assertEqual(events, [
+                    {'delivery': 'neutral'}, {'text': 'There are 120 minutes in two hours.'},
+                ])
+                reader.finish()
+
     def test_delivery_prefix_is_bounded_and_fails_closed(self):
         import hermes_worker
 
         for label in ('neutral', 'curious', 'gently_pleased', 'reassuring'):
-            header = '[delivery:' + label + ']\n'
-            for split in range(len(header) + 1):
-                with self.subTest(label=label, split=split):
-                    reader = hermes_worker.ReplyDeliveryPrefix()
-                    events = reader.feed(header[:split]) + reader.feed(header[split:] + 'Hello.')
-                    reader.finish()
-                    self.assertEqual(events, [{'delivery': label}, {'text': 'Hello.'}])
-                    self.assertEqual(reader.feed(' More.'), [{'text': ' More.'}])
-                    self.assertEqual(reader.prefix, '')
-            reader = hermes_worker.ReplyDeliveryPrefix()
-            events = []
-            for char in header + 'Hello.':
-                events.extend(reader.feed(char))
-                self.assertLessEqual(len(reader.prefix), len('[delivery:gently_pleased]\n'))
-            reader.finish()
-            self.assertEqual(events[0], {'delivery': label})
-            self.assertEqual(''.join(e['text'] for e in events[1:]), 'Hello.')
+            for delimiter in (' ', '\n'):
+                header = '[delivery:' + label + ']' + delimiter
+                for split in range(len(header) + 1):
+                    with self.subTest(label=label, delimiter=repr(delimiter), split=split):
+                        reader = hermes_worker.ReplyDeliveryPrefix()
+                        events = reader.feed(header[:split]) + reader.feed(header[split:] + 'Hello.')
+                        reader.finish()
+                        self.assertEqual(events, [{'delivery': label}, {'text': 'Hello.'}])
+                        self.assertEqual(reader.feed(' More.'), [{'text': ' More.'}])
+                        self.assertEqual(reader.prefix, '')
+                reader = hermes_worker.ReplyDeliveryPrefix()
+                events = []
+                for char in header + 'Hello.':
+                    events.extend(reader.feed(char))
+                    self.assertLessEqual(len(reader.prefix), len('[delivery:gently_pleased]\n'))
+                reader.finish()
+                self.assertEqual(events[0], {'delivery': label})
+                self.assertEqual(''.join(e['text'] for e in events[1:]), 'Hello.')
         for raw in ('Hello.', ' [delivery:neutral]\nHello.', '[delivery:unknown]\nHello.',
+                    '[delivery:neutral]\tHello.', '[delivery:neutral]\rHello.',
+                    '[delivery:neutral]\r\nHello.', '[delivery:neutral]\u00a0Hello.',
+                    '[delivery:neutral]Hello.',
                     '[delivery:' + 'x' * 100000, '[delivery:neutral]', '', None, 7, {}, []):
             with self.subTest(raw=repr(raw)[:80]):
                 reader = hermes_worker.ReplyDeliveryPrefix()
@@ -211,7 +228,8 @@ class HermesWorkerTests(unittest.TestCase):
                 self.assertEqual(reader.feed('later prose'), [])
                 with self.assertRaisesRegex(RuntimeError, 'delivery header'):
                     reader.finish()
-        for raw in ('[delivery:neutral]\n', '[delivery:curious]\n  '):
+        for raw in ('[delivery:neutral]\n', '[delivery:neutral] ',
+                    '[delivery:curious]\n  ', '[delivery:curious]   '):
             reader = hermes_worker.ReplyDeliveryPrefix()
             reader.feed(raw)
             with self.assertRaisesRegex(RuntimeError, 'empty reply'):
@@ -1117,7 +1135,7 @@ class NativeHermesTests(unittest.TestCase):
     def test_native_reply_streams_once_and_uses_caller_history(self):
         replies = [[({'content': '[deliv'}, None), ({'content': 'ery:curious]'}, None),
                     ({'content': '\nHello nonce-22.'}, None), ({}, 'stop')],
-                   [({'content': '[delivery:neutral]\nNext nonce-23.'}, None), ({}, 'stop')]]
+                   [({'content': '[delivery:neutral] Next nonce-23.'}, None), ({}, 'stop')]]
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             history = [{'role': 'user', 'content': 'Hello Kestrel.'}]

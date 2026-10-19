@@ -41,7 +41,8 @@ class ReplyDeliveryPrefix:
             return []
         events = []
         if self.delivery is None:
-            headers = {f'[delivery:{label}]\n': label for label in DELIVERY_LABELS}
+            headers = {f'[delivery:{label}]{delimiter}': label
+                       for label in DELIVERY_LABELS for delimiter in (' ', '\n')}
             for index, char in enumerate(text):
                 self.prefix += char
                 if self.prefix in headers:
