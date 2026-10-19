@@ -3010,7 +3010,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         def finite_chunks(**kwargs):
             if not cancel_without_audio:
-                yield np.zeros(4800, dtype=np.float32)
+                # Whole native chunks, so no tail waits for the stop flush.
+                yield np.zeros(5760, dtype=np.float32)
 
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
             transport, spoken, committed, interrupted, _, close = await self.open_session(
@@ -3105,9 +3106,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await self.finish_user_turn(transport, 'cancel')
                 await barrier()
                 output.write_gate.set()
+                written_before = output.audio_written
                 await start()
                 await self.finish_user_turn(transport, 'Tell me more.')
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+                self.assertEqual(output.audio_written, written_before + 3)
+                rows = await turns_until(lambda turns: turns[-1]['state'] == 'speaking')
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'One fact.', 'state': 'speaking'})
                 self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
                 old_token = transport.llm._conversation_attempt
                 await start()
