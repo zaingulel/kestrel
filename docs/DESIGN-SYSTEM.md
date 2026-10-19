@@ -83,7 +83,7 @@ The indicator's slot is 25 wide and the full bar height. Listening uses the Infl
 | Speaking | Three bars of unequal height | Each bar eases between 4 and 12 high, on periods of 420, 520 and 610 ms |
 | Trouble | Two squares and an exclamation mark, a 7 high bar above a square, in bar active | None |
 
-Inflow occupies the same 25 by 30 slot, centred at (12.5, 13.5), with maximum outer diameter 15. It identifies listening, never measured sound level.
+Inflow occupies the same 25 by 30 slot, centred at (12.5, 15), with maximum outer diameter 15. It identifies listening, never measured sound level.
 
 | Listening token | Value |
 | --- | --- |
