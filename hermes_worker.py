@@ -1,13 +1,16 @@
 """Conversation-only Hermes child; its launching parent owns the temporary home."""
 
 from contextlib import redirect_stdout
-from importlib.metadata import version
+import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
-HERMES_PYTHON = Path('/home/zain/.local/share/mise/installs/pipx-hermes-agent/0.19.0/hermes-agent/bin/python')
+HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
+HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
+HERMES_COMMIT = 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
@@ -23,6 +26,29 @@ SYSTEM_PROMPT = (
     "one please is allowed at either end, never both. "
     "You cannot invoke that action or any other tool."
 )
+
+
+def validate_hermes_source() -> None:
+    refusal = ('Hermes source identity could not be verified. '
+               'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
+    try:
+        head = subprocess.run(
+            ['git', '-C', str(HERMES_SOURCE), 'rev-parse', 'HEAD'],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5,
+        ).stdout.strip()
+        if head != HERMES_COMMIT:
+            raise RuntimeError(refusal)
+        subprocess.run(
+            ['git', '-C', str(HERMES_SOURCE), 'diff', '--quiet', '--no-ext-diff',
+             '--no-textconv', 'HEAD', '--'],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        spec = importlib.util.find_spec('run_agent')
+        if (spec is None or spec.origin is None
+                or Path(spec.origin).resolve() != (HERMES_SOURCE / 'run_agent.py').resolve()):
+            raise RuntimeError(refusal)
+    except (OSError, subprocess.SubprocessError, ImportError, ValueError):
+        raise RuntimeError(refusal) from None
 
 
 def child_environment(home):
@@ -54,9 +80,7 @@ def main(*, base_url=BONSAI_URL):
                 'plugins': {'enabled': []}, 'mcp_servers': {},
             }
             (home / 'config.yaml').write_text(json.dumps(config))
-            installed_version = version('hermes-agent')
-            if installed_version != '0.19.0':
-                raise RuntimeError(f'Unsupported Hermes version {installed_version}; expected 0.19.0')
+            validate_hermes_source()
             from run_agent import AIAgent
 
             agent = AIAgent(

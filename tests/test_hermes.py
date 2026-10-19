@@ -13,14 +13,17 @@ import selectors
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
+from hermes_worker import HERMES_PYTHON
+
 ROOT = Path(__file__).resolve().parents[1]
-NATIVE_PYTHON = Path('/home/zain/.local/share/mise/installs/pipx-hermes-agent/0.19.0/hermes-agent/bin/python')
+NATIVE_PYTHON = HERMES_PYTHON
 
 
 class ScriptedBrain:
@@ -174,6 +177,100 @@ def native_worker(replies, *, synthetic_default_home=None):
         brain.close()
 
 
+class HermesSourceIdentityTests(unittest.TestCase):
+    def test_source_identity_checks_git_and_import_origin(self):
+        import hermes_worker
+
+        advice = ('Hermes source identity could not be verified. '
+                  'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
+        with tempfile.TemporaryDirectory(prefix='hermes-identity-') as directory:
+            source = Path(directory)
+            module = source / 'run_agent.py'
+            module.write_text("raise RuntimeError('Identity validation must not import run_agent')\n")
+            for arguments in (['init', '--quiet'], ['add', 'run_agent.py'],
+                              ['-c', 'user.name=Identity fixture', '-c',
+                               'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', 'fixture']):
+                subprocess.run(['git', '-C', str(source), *arguments], check=True,
+                               capture_output=True, text=True, timeout=5)
+            receipt = subprocess.run(['git', '-C', str(source), 'rev-parse', 'HEAD'], check=True,
+                                     capture_output=True, text=True, timeout=5).stdout.strip()
+            with (patch.object(hermes_worker, 'HERMES_SOURCE', source),
+                  patch.object(hermes_worker, 'HERMES_COMMIT', receipt),
+                  patch('sys.path', [str(source), *sys.path])):
+                self.assertIsNone(hermes_worker.validate_hermes_source())
+                with patch.object(hermes_worker, 'HERMES_COMMIT', '0' * 40):
+                    with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                        hermes_worker.validate_hermes_source()
+                with patch.object(hermes_worker, 'HERMES_SOURCE', source / 'missing'):
+                    with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                        hermes_worker.validate_hermes_source()
+                head = source / '.git/HEAD'
+                original_head = head.read_bytes()
+                head.write_text('corrupt identity\n')
+                try:
+                    with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                        hermes_worker.validate_hermes_source()
+                finally:
+                    head.write_bytes(original_head)
+                original_module = module.read_text()
+                module.write_text('changed tracked source\n')
+                try:
+                    with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                        hermes_worker.validate_hermes_source()
+                finally:
+                    module.write_text(original_module)
+                for spec in (None, Mock(origin=None), Mock(origin=str(source / 'foreign.py'))):
+                    with self.subTest(origin=None if spec is None else spec.origin):
+                        with patch('importlib.util.find_spec', return_value=spec):
+                            with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                                hermes_worker.validate_hermes_source()
+                successful = [subprocess.CompletedProcess([], 0, receipt + '\n'),
+                              subprocess.CompletedProcess([], 0)]
+                for step in (0, 1):
+                    for failure in (OSError('command unavailable'),
+                                    subprocess.TimeoutExpired('git', 5),
+                                    subprocess.CalledProcessError(128, 'git')):
+                        with self.subTest(step=step, failure=type(failure).__name__):
+                            with patch('hermes_worker.subprocess.run',
+                                       side_effect=[*successful[:step], failure]) as run:
+                                with self.assertRaisesRegex(RuntimeError, re.escape(advice)):
+                                    hermes_worker.validate_hermes_source()
+                                self.assertTrue(all(call.kwargs['timeout'] == 5
+                                                    for call in run.call_args_list))
+
+    def test_invalid_source_refuses_ready(self):
+        require_native_hermes()
+        from hermes_worker import child_environment
+
+        bootstrap = '''
+import builtins, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import hermes_worker
+home = pathlib.Path(sys.argv[2])
+hermes_worker.HERMES_SOURCE = home / 'missing-source'
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'run_agent':
+        (home / 'run-agent-imported').write_text('unreviewed source was imported')
+        raise RuntimeError('run_agent imported before source validation')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = guarded_import
+hermes_worker.main()
+'''
+        with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory).resolve()
+            result = subprocess.run(
+                [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home)],
+                env=child_environment(home), input='', capture_output=True, text=True, timeout=45,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                'error': 'Hermes source identity could not be verified. '
+                         'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.',
+            })
+            self.assertFalse((home / 'run-agent-imported').exists())
+
+
 class NativeHermesTests(unittest.TestCase):
     def test_conversation_source_confines_literal_endpoints(self):
         endpoints = []
@@ -195,7 +292,7 @@ class NativeHermesTests(unittest.TestCase):
             try:
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent}),
-                      patch.object(hermes_worker, 'version', return_value='0.19.0'),
+                      patch.object(hermes_worker, 'validate_hermes_source'),
                       patch('sys.stdin', TextIOWrapper(BytesIO())),
                       patch('sys.stdout', protocol)):
                     hermes_worker.main()
