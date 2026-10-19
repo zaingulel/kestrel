@@ -200,6 +200,8 @@ import hermes_worker
 home = pathlib.Path(sys.argv[2])
 hermes_worker.TRACE_ROOT = home / 'traces'
 case = sys.argv[3]
+if case == 'runtime home':
+    home.chmod(0o755)
 calls = []
 def flush():
     calls.append('flush')
@@ -207,7 +209,7 @@ def flush():
         raise OSError('synthetic flush failure')
 def shutdown_runtime():
     calls.append('runtime shutdown')
-    if case in ('shutdown', 'prior terminal shutdown', 'provider shutdown'):
+    if case in ('shutdown', 'prior terminal shutdown', 'provider shutdown', 'engine close'):
         raise OSError('synthetic shutdown failure')
 def shutdown_exporter():
     calls.append('exporter shutdown')
@@ -240,9 +242,20 @@ agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_u
 agent.run_conversation.return_value = {'completed': True, 'final_response': 'Synthetic reply.'}
 if case == 'provider shutdown':
     agent.run_conversation.side_effect = RuntimeError('synthetic provider refusal')
-agent.close.side_effect = lambda: calls.append('agent close')
+def close_agent():
+    calls.append('agent close')
+    if case == 'engine close':
+        raise RuntimeError('synthetic engine close failure')
+agent.close.side_effect = close_agent
 run_agent = ModuleType('run_agent')
-run_agent.AIAgent = Mock(return_value=agent)
+if case == 'engine import':
+    def missing_dependency(name):
+        raise ImportError('synthetic missing engine dependency')
+    run_agent.__getattr__ = missing_dependency
+else:
+    run_agent.AIAgent = Mock(return_value=agent)
+    if case == 'engine construction':
+        run_agent.AIAgent.side_effect = RuntimeError('synthetic engine construction failure')
 try:
     with (patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                     'agent.relay_runtime': relay_runtime}),
@@ -256,8 +269,18 @@ raise SystemExit(status)
                          'Check runtime permissions and restart Kestrel.')
         trace_error = ('Local conversation tracing failed. Check free space and runtime '
                        'permissions, then restart Kestrel.')
+        home_error = ('Hermes runtime home is not a private directory owned by this user. '
+                      'Check runtime ownership and permissions, then restart Kestrel.')
+        engine_close_error = 'Hermes engine could not close cleanly. Restart Kestrel.'
+        subsystem_errors = {
+            'engine import': 'synthetic missing engine dependency',
+            'engine construction': 'synthetic engine construction failure',
+            'runtime home': home_error,
+            'engine close': engine_close_error,
+        }
         for case in ('inactive', 'missing runtime', 'creation', 'registration', 'flush',
-                     'shutdown', 'exporter shutdown', 'prior terminal shutdown', 'provider shutdown'):
+                     'shutdown', 'exporter shutdown', 'prior terminal shutdown', 'provider shutdown',
+                     'engine import', 'engine construction', 'runtime home', 'engine close'):
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory(prefix='hermes-lifecycle-') as directory:
                     home = Path(directory)
@@ -271,18 +294,26 @@ raise SystemExit(status)
                     events = [json.loads(line) for line in result.stdout.splitlines()]
                     errors = [event['error'] for event in events if 'error' in event]
                     self.assertEqual(result.returncode, 1, result.stderr)
-                    startup_case = case in ('inactive', 'missing runtime', 'creation', 'registration')
+                    startup_case = case in ('inactive', 'missing runtime', 'creation', 'registration',
+                                            'engine import', 'engine construction', 'runtime home')
                     self.assertNotIn({'done': True}, events)
-                    self.assertEqual(errors, [startup_error] if startup_case else
-                                     ['synthetic provider refusal', 'synthetic provider refusal', trace_error]
-                                     if case == 'provider shutdown' else [trace_error])
+                    if case in subsystem_errors:
+                        self.assertEqual(errors, [subsystem_errors[case]])
+                        self.assertIn(subsystem_errors[case], result.stderr)
+                        self.assertNotIn(startup_error, result.stderr)
+                    else:
+                        self.assertEqual(errors, [startup_error] if startup_case else
+                                         ['synthetic provider refusal', 'synthetic provider refusal', trace_error]
+                                         if case == 'provider shutdown' else [trace_error])
                     self.assertEqual({'ready': True} in events, not startup_case)
                     receipt = next(json.loads(line) for line in result.stderr.splitlines()
                                    if line.startswith('{"cleanup":'))
                     calls = receipt['cleanup']
-                    if case != 'missing runtime':
+                    if case not in ('missing runtime', 'engine import', 'runtime home'):
                         self.assertIn('runtime shutdown', calls)
-                    if case not in ('inactive', 'missing runtime', 'creation'):
+                    if case in ('engine import', 'runtime home'):
+                        self.assertEqual(calls, [])
+                    if case not in ('inactive', 'missing runtime', 'creation', 'engine import', 'runtime home'):
                         self.assertIn('flush', calls)
                         self.assertIn('deregister kestrel-local-trace', calls)
                         self.assertIn('exporter shutdown', calls)
@@ -294,12 +325,17 @@ raise SystemExit(status)
                         self.assertEqual(receipt['turns'], 1)
                     if case in ('shutdown', 'exporter shutdown', 'prior terminal shutdown', 'provider shutdown'):
                         self.assertIn(trace_error, result.stderr)
+                    if case == 'engine close':
+                        self.assertIn(engine_close_error + ': synthetic engine close failure', result.stderr)
+                        self.assertIn(trace_error + ': synthetic shutdown failure', result.stderr)
 
     def test_trace_paths_refuse_unsafe_entries(self):
         import hermes_worker
 
         refusal = ('Local conversation tracing could not start. '
                    'Check runtime permissions and restart Kestrel.')
+        home_refusal = ('Hermes runtime home is not a private directory owned by this user. '
+                        'Check runtime ownership and permissions, then restart Kestrel.')
         original_lstat = Path.lstat
         with tempfile.TemporaryDirectory(prefix='hermes-paths-') as directory:
             base = Path(directory)
@@ -425,7 +461,9 @@ raise SystemExit(status)
                               patch('sys.stdin', TextIOWrapper(BytesIO())),
                               patch('sys.stdout', protocol)):
                             hermes_worker.main()
-                        self.assertEqual(json.loads(protocol.getvalue()), {'error': refusal})
+                        self.assertEqual(json.loads(protocol.getvalue()), {
+                            'error': home_refusal if kind.startswith('home') else refusal,
+                        })
                         if before is not None:
                             self.assertEqual(original_lstat(protected), before)
                         self.assertEqual(sentinel.read_bytes(), b'untouched')

@@ -18,6 +18,9 @@ TRACE_STARTUP_ERROR = ('Local conversation tracing could not start. '
                        'Check runtime permissions and restart Kestrel.')
 TRACE_FAILURE_ERROR = ('Local conversation tracing failed. Check free space and runtime '
                        'permissions, then restart Kestrel.')
+RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by this user. '
+                      'Check runtime ownership and permissions, then restart Kestrel.')
+ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
@@ -137,10 +140,10 @@ def main(*, base_url=BONSAI_URL):
                 metadata = home.lstat()
                 if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
                         or stat.S_IMODE(metadata.st_mode) != 0o700):
-                    raise RuntimeError(TRACE_STARTUP_ERROR)
+                    raise RuntimeError(RUNTIME_HOME_ERROR)
                 home = home.resolve(strict=True)
             except OSError:
-                raise RuntimeError(TRACE_STARTUP_ERROR) from None
+                raise RuntimeError(RUNTIME_HOME_ERROR) from None
             os.chdir(home)
             config = {
                 'model': {'context_length': 64000},
@@ -166,10 +169,13 @@ def main(*, base_url=BONSAI_URL):
                         '[components.config.opentelemetry]\nenabled = false\n'
                     )
                 os.environ['HERMES_NEMO_RELAY_PLUGINS_TOML'] = str(plugins)
-                from run_agent import AIAgent
-                from agent.relay_runtime import get_runtime
-                import nemo_relay
+            except Exception:
+                raise RuntimeError(TRACE_STARTUP_ERROR) from None
+            from run_agent import AIAgent
+            from agent.relay_runtime import get_runtime
+            import nemo_relay
 
+            try:
                 runtime = get_runtime()
                 if runtime is None or not runtime.managed_execution_enabled():
                     raise RuntimeError(TRACE_STARTUP_ERROR)
@@ -184,17 +190,17 @@ def main(*, base_url=BONSAI_URL):
                         or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600):
                     raise RuntimeError(TRACE_STARTUP_ERROR)
                 exporter.register('kestrel-local-trace')
-                agent = AIAgent(
-                    base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
-                    model='bonsai-2-9b', enabled_toolsets=[], disabled_toolsets=['terminal'],
-                    skip_memory=True, skip_context_files=True, load_soul_identity=False,
-                    session_db=None, fallback_model=None, save_trajectories=False,
-                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
-                    reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
-                )
-                agent._drop_thinking_only_and_merge_users = preserve_user_turns
             except Exception:
                 raise RuntimeError(TRACE_STARTUP_ERROR) from None
+            agent = AIAgent(
+                base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
+                model='bonsai-2-9b', enabled_toolsets=[], disabled_toolsets=['terminal'],
+                skip_memory=True, skip_context_files=True, load_soul_identity=False,
+                session_db=None, fallback_model=None, save_trajectories=False,
+                checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+                reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
+            )
+            agent._drop_thinking_only_and_merge_users = preserve_user_turns
             emit({'ready': True})
             while line := sys.stdin.buffer.readline(1024 * 1024 + 1):
                 if len(line) > 1024 * 1024:
@@ -268,20 +274,21 @@ def main(*, base_url=BONSAI_URL):
         finally:
             cleanup = []
             if agent is not None:
-                cleanup.append(agent.close)
+                cleanup.append((agent.close, ENGINE_CLOSE_ERROR))
             if runtime is not None:
-                cleanup.append(runtime.shutdown)
+                cleanup.append((runtime.shutdown, TRACE_FAILURE_ERROR))
             if exporter is not None:
-                cleanup.extend((exporter.force_flush,
-                                lambda: exporter.deregister('kestrel-local-trace'), exporter.shutdown))
-            for close in cleanup:
+                cleanup.extend(((exporter.force_flush, TRACE_FAILURE_ERROR),
+                                (lambda: exporter.deregister('kestrel-local-trace'), TRACE_FAILURE_ERROR),
+                                (exporter.shutdown, TRACE_FAILURE_ERROR)))
+            for close, diagnostic in cleanup:
                 try:
                     close()
-                except Exception:
+                except Exception as error:
                     status = 1
-                    print(TRACE_FAILURE_ERROR, file=sys.stderr, flush=True)
+                    print(f'{diagnostic}: {error}', file=sys.stderr, flush=True)
                     if not terminal_failure_reported:
-                        emit({'error': TRACE_FAILURE_ERROR})
+                        emit({'error': diagnostic})
                         terminal_failure_reported = True
     return status
 
