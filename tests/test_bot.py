@@ -1,12 +1,14 @@
 import asyncio
 from copy import deepcopy
 import io
+import hashlib
 import json
 import struct
 import wave
 from functools import partial
 import os
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -21,7 +23,7 @@ from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, LLMFullResponseEndFrame, LLMTextFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
-    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSTextFrame, VADUserStoppedSpeakingFrame,
+    ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
@@ -2010,7 +2012,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.close_engine = AsyncMock(wraps=service.close_engine)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.reader.done())
 
@@ -2318,7 +2320,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         stt.close.assert_awaited_once()
         self.audio.close.assert_awaited_once()
 
-    async def test_native_startup_and_stop_release_resources_without_listening(self):
+    async def test_native_startup_and_stop_release_resources_without_network_listener(self):
         for phase, echo_failure in (("preparation", False), ("conversation", False), ("conversation", True)):
             with self.subTest(phase=phase, echo_failure=echo_failure):
                 preparing, active, loading = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -2362,12 +2364,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = Forward(output=True)
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertTrue(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
-                        handle_signals=handle_signals, status=status, user_params=bot.LLMUserAggregatorParams(
+                        handle_signals=handle_signals, status=status, conversation=conversation, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
 
@@ -2389,7 +2391,19 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(pid, os.getpid())
                     handlers[sig]()
 
+                bound = []
+                native_bind = socket.socket.bind
+
+                def private_bind(peer, endpoint):
+                    self.assertEqual(peer.family, socket.AF_UNIX, 'Voice must never bind a network listener')
+                    self.assertEqual(endpoint, '\0kestrel.conversation.' + str(os.getuid()) + '.' +
+                                     hashlib.sha256(os.environ['XDG_RUNTIME_DIR'].encode()).hexdigest())
+                    bound.append(endpoint)
+                    return native_bind(peer, endpoint)
+
                 with (
+                    tempfile.TemporaryDirectory() as runtime,
+                    patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
                     patch.object(bot, "make_llm", return_value=service),
                     patch.object(bot, "NemotronSTT", return_value=stt),
                     patch.object(bot, "run_conversation", conversation),
@@ -2398,7 +2412,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(loop, "add_signal_handler", side_effect=register),
                     patch.object(loop, "remove_signal_handler") as remove_signal,
                     patch.object(bot.os, "kill", side_effect=signal_request),
-                    patch("socket.socket.bind", side_effect=AssertionError("A native service must never listen")) as bind,
+                    patch("socket.socket.bind", private_bind),
                     patch.object(bot.torch, "set_num_threads"),
                 ):
                     task = asyncio.create_task(bot.run_voice_service())
@@ -2413,7 +2427,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                             handlers[signal.SIGTERM]()
                             handlers[signal.SIGTERM]()
                             await asyncio.wait_for(task, 5)
-                        bind.assert_not_called()
+                        self.assertEqual(len(bound), 1)
                         self.audio.open.assert_awaited_once()
                         self.audio.close.assert_awaited_once()
                         stt.close.assert_awaited_once()
@@ -2455,9 +2469,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
+        llm = Forward()
+        llm.conversation_output = Mock()
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=llm, transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -2496,10 +2512,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
+        llm = Forward()
+        llm.conversation_output = Mock()
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
-                Forward(), voice, llm=Forward(), transport=transport, user_params=params,
+                Forward(), voice, llm=llm, transport=transport, user_params=params,
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -2520,7 +2538,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None, synthesis_chunks=None):
+    async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None, synthesis_chunks=None, through_service=False):
         if brain is not None:
             require_native_hermes()
         started = asyncio.Event()
@@ -2540,6 +2558,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.write_gate = asyncio.Event()
                 self.write_gate.set()
                 self.generation_done = asyncio.Event()
+                self.audio_written = 0
 
             async def start(self, frame):
                 await super().start(frame)
@@ -2548,6 +2567,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             async def write_audio_frame(self, frame):
                 await self.write_gate.wait()
+                self.audio_written += 1
                 return True
 
             async def process_frame(self, frame, direction):
@@ -2570,6 +2590,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         transport.input.return_value = Input()
         transport.output.return_value = Output()
         transport.processed = processed
+        transport.open = AsyncMock()
+        transport.close = AsyncMock()
+        transport.capture = None
+        transport.failure = None
         preset = speech.VoicePreset(Path('/fixture/british-male.wav'), 'British fixture.', bytes(9600))
 
         def chunks(**kwargs):
@@ -2607,13 +2631,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         supplied_llm = bot.HermesLLMService(local_command=local_command)
         transport.llm = supplied_llm
         session = None
+        handlers = {}
+        service_bindings = []
 
         async def close():
             try:
                 if session is not None:
                     try:
                         if not session.done():
-                            session.cancel()
+                            if through_service:
+                                callback, args = handlers[signal.SIGTERM]
+                                callback(*args)
+                            else:
+                                session.cancel()
                     finally:
                         try:
                             await asyncio.wait_for(session, 5)
@@ -2628,21 +2658,64 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
                 self.assertFalse(home.exists())
+            for binding in reversed(service_bindings):
+                binding.stop()
             spawn_patch.stop()
 
         self.addAsyncCleanup(close)
-        if prepare_engine:
-            supplied_llm.start_preparation()
+        stt = bot.NemotronSTT()
+        if through_service:
+            stt.load = AsyncMock()
+            stt.close = AsyncMock()
+            calls = 0
+
+            def service_chunks(**kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    self.assertEqual(kwargs['text'], 'Hello.')
+                yield from (chunks(**kwargs) if calls == 1 or synthesis_chunks is None
+                            else synthesis_chunks(**kwargs))
+
+            model = Mock(generate_streaming=service_chunks)
+            loop = asyncio.get_running_loop()
+
+            def register(sig, callback, *args):
+                handlers.setdefault(sig, (callback, args))
+
+            for binding in (
+                patch.object(bot, 'NemotronSTT', return_value=stt),
+                patch.object(bot, 'LaptopAudioTransport', return_value=transport),
+                patch.object(bot, 'make_llm', return_value=supplied_llm),
+                patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+                patch.object(bot, 'load_voice_preset', return_value=preset),
+                patch.object(bot, 'UserTurnStrategies', side_effect=lambda **kwargs: ExternalUserTurnStrategies()),
+                patch.object(bot, 'SileroVADAnalyzer', return_value=None),
+                patch.object(bot, 'LocalSmartTurnAnalyzerV3', return_value=object()),
+                patch.object(bot.ECHO_REMOVAL, 'start'),
+                patch.object(bot.ECHO_REMOVAL, 'close'),
+                patch.object(bot.ECHO_REMOVAL, 'process', None),
+                patch.object(bot.torch, 'set_num_threads'),
+                patch.object(loop, 'add_signal_handler', side_effect=register),
+                patch.object(loop, 'remove_signal_handler'),
+            ):
+                binding.start()
+                service_bindings.append(binding)
+                self.addCleanup(binding.stop)
+            session = asyncio.create_task(bot.run_voice_service())
         else:
-            # Unrelated turn/history cases project an already-ready worker, not production startup.
-            await supplied_llm.open_engine()
-        user_params = bot.LLMUserAggregatorParams(
-            user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
-        )
-        session = asyncio.create_task(bot.run_conversation(
-            bot.NemotronSTT(), bot.VoxCPMTTS(Mock(generate_streaming=chunks if synthesis_chunks is None else synthesis_chunks), preset),
-            llm=supplied_llm, transport=transport, user_params=user_params, status=status,
-        ))
+            if prepare_engine:
+                supplied_llm.start_preparation()
+            else:
+                # Unrelated turn/history cases project an already-ready worker, not production startup.
+                await supplied_llm.open_engine()
+            user_params = bot.LLMUserAggregatorParams(
+                user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
+            )
+            session = asyncio.create_task(bot.run_conversation(
+                stt, bot.VoxCPMTTS(Mock(generate_streaming=chunks if synthesis_chunks is None else synthesis_chunks), preset),
+                llm=supplied_llm, transport=transport, user_params=user_params, status=status,
+            ))
         await asyncio.wait_for(started.wait(), 45)
         return transport, spoken, committed, interrupted, processes, close
 
@@ -2651,6 +2724,555 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
         )
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_panel_attributes_each_synthesis_to_delivered_audio(self):
+        loop = asyncio.get_running_loop()
+        release_failure, release_provider = threading.Event(), threading.Event()
+        release_write = asyncio.Event()
+        for release in (release_failure, release_provider, release_write):
+            self.addCleanup(release.set)
+        provider_paused = asyncio.Event()
+        context_started, context_stopped, context_retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        started_contexts, stopped_contexts, retired_contexts = [], [], []
+        native_completed = speech.VoxCPMTTS.on_audio_context_completed
+
+        async def observe_completed(voice, context_id):
+            await native_completed(voice, context_id)
+            retired_contexts.append(context_id)
+            context_retired.set()
+
+        retirement = patch.object(speech.VoxCPMTTS, 'on_audio_context_completed', observe_completed)
+        retirement.start()
+        self.addCleanup(retirement.stop)
+
+        def recreated():
+            yield {'content': 'Spoken first. Failed recreated'}, None
+            loop.call_soon_threadsafe(provider_paused.set)
+            if not release_provider.wait(45):
+                raise AssertionError('Synthetic provider context was never released')
+            yield {'content': ' context.'}, None
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            [({'content': 'Prepared.'}, None), ({}, 'stop')],
+            [({'content': 'Spoken first. Unheard second.'}, None), ({}, 'stop')],
+            [({'content': 'Spoken first. Failed before audio.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. B'}, None),
+             ({'content': 'oundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. U'}, None),
+             ({'content': 'nheard second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Failed after audio. U'}, None),
+             ({'content': 'nheard second.'}, None), ({}, 'stop')],
+            [({'content': 'Spoken first. Failed after stop.'}, None), ({}, 'stop')],
+            recreated(),
+            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Boundary first. Boundary second.'}, None), ({}, 'stop')],
+            [({'content': 'Clean later.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+
+        def finite_chunks(**kwargs):
+            if kwargs['text'] in ('Failed before audio.', 'Failed recreated context.'):
+                raise RuntimeError('Synthetic synthesis failure before audio')
+            if kwargs['text'] == 'Failed after stop.':
+                if not release_failure.wait(45):
+                    raise AssertionError('Synthetic delayed failure was never released')
+                raise RuntimeError('Synthetic synthesis failure after native stop')
+            if kwargs['text'] == 'Failed after audio.':
+                yield np.full(2340, 0.25, dtype=np.float32)
+                raise RuntimeError('Synthetic synthesis failure after partial audio')
+            if kwargs['text'] != 'Unheard second.':
+                value = 0.25 if kwargs['text'] == 'Boundary second.' else 0.5
+                yield np.full(5760 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            transport, _, _, interrupted, _, close = await self.open_session(
+                brain, through_service=True, synthesis_chunks=finite_chunks,
+            )
+            output = transport.output()
+            write = output.write_audio_frame
+            written = []
+            final_write = asyncio.Event()
+            hold_final = False
+            text_frames = []
+            synthesis_failures = []
+
+            @output.event_handler('on_after_push_frame')
+            async def retain_receipt(processor, frame):
+                if isinstance(frame, TTSTextFrame):
+                    text_frames.append(frame)
+                elif isinstance(frame, TTSStartedFrame):
+                    started_contexts.append(frame.context_id)
+                    context_started.set()
+                elif isinstance(frame, TTSStoppedFrame):
+                    stopped_contexts.append(frame.context_id)
+                    context_stopped.set()
+                elif type(frame).__name__ == 'ConversationSynthesisFailedFrame':
+                    synthesis_failures.append(frame)
+
+            async def observe_write(frame):
+                if hold_final and len(written) == 1:
+                    final_write.set()
+                    await release_write.wait()
+                success = await write(frame)
+                if success:
+                    written.append(frame.audio)
+                return success
+
+            output.write_audio_frame = observe_write
+            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+
+            async def rows_until(predicate):
+                async with asyncio.timeout(5):
+                    while True:
+                        snapshot = json.loads(await reader.readline())
+                        if 'turns' in snapshot:
+                            for turn in snapshot['turns']:
+                                if turn['speaker'] == 'kestrel':
+                                    self.assertNotIn('Unheard second.', turn['text'])
+                            if predicate(snapshot['turns']):
+                                return snapshot['turns']
+
+            async def start(text):
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                await self.finish_user_turn(transport, text)
+
+            async def matching_context(event, observed, context_id):
+                async with asyncio.timeout(5):
+                    while context_id not in observed:
+                        event.clear()
+                        await event.wait()
+
+            try:
+                await start('Mixed synthesis.')
+                rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1]['text'], 'Spoken first.')
+                self.assertEqual(rows[-1]['state'], 'failed')
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+                stale_text = text_frames[0]
+
+                written.clear()
+                await start('Failure before synthesis audio.')
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Failure before synthesis audio.'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+                stale_failure = synthesis_failures[-1]
+
+                written.clear()
+                final_write.clear()
+                release_write.clear()
+                hold_final = True
+                await start('Audible segment after synthesis failure.')
+                await asyncio.wait_for(final_write.wait(), 5)
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
+                                        and rows[-1]['text'].startswith('Boundary first.'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
+                self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                release_write.set()
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'failed'})
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 3840 + bytes(840))
+
+                for interrupt in (False, True):
+                    with self.subTest(exception_interrupted=interrupt):
+                        written.clear()
+                        output.generation_done.clear()
+                        final_write.clear()
+                        release_write.clear()
+                        hold_final = True
+                        prompt = 'Interrupted synthesis failure.' if interrupt else 'Partial synthesis failure.'
+                        await start(prompt)
+                        await asyncio.wait_for(final_write.wait(), 5)
+                        rows = await rows_until(lambda rows: rows[-2]['text'] == prompt
+                                                and rows[-1]['text'].startswith('Boundary first.'))
+                        self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'speaking'})
+                        self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                        await asyncio.wait_for(output.generation_done.wait(), 5)
+                        if interrupt:
+                            interrupted.clear()
+                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                            self.assertEqual(len(written), 1)
+                        else:
+                            release_write.set()
+                            rows = await rows_until(lambda rows: rows[-1]['state'] in ('complete', 'failed'))
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'failed'})
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 2340)
+
+                hold_final = False
+                release_write.set()
+                written.clear()
+                started_contexts.clear()
+                stopped_contexts.clear()
+                context_started.clear()
+                context_stopped.clear()
+                await self.finish_user_turn(transport, 'Delayed synthesis failure.')
+                await asyncio.wait_for(context_started.wait(), 5)
+                await matching_context(context_stopped, stopped_contexts, started_contexts[0])
+                release_failure.set()
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Delayed synthesis failure.'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+
+                written.clear()
+                started_contexts.clear()
+                stopped_contexts.clear()
+                retired_contexts.clear()
+                context_started.clear()
+                context_stopped.clear()
+                context_retired.clear()
+                await start('Recreated synthesis context failure.')
+                await asyncio.wait_for(provider_paused.wait(), 5)
+                await asyncio.wait_for(context_started.wait(), 5)
+                first_context = started_contexts[0]
+                await matching_context(context_stopped, stopped_contexts, first_context)
+                await matching_context(context_retired, retired_contexts, first_context)
+                release_provider.set()
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Recreated synthesis context failure.'
+                                        and rows[-1]['state'] in ('complete', 'failed'))
+                self.assertEqual(started_contexts, [first_context, first_context])
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+
+                for interrupt in (False, True):
+                    with self.subTest(interrupt=interrupt):
+                        written.clear()
+                        final_write.clear()
+                        release_write.clear()
+                        hold_final = True
+                        await start('Interrupted boundary.' if interrupt else 'Completed boundary.')
+                        await asyncio.wait_for(final_write.wait(), 5)
+                        rows = await rows_until(lambda rows: rows[-2]['text'] in
+                                                ('Interrupted boundary.', 'Completed boundary.')
+                                                and rows[-1]['text'].startswith('Boundary first.'))
+                        self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                        self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                        transport.llm.conversation_output(stale_text)
+                        if not interrupt:
+                            transport.llm.conversation_output(stale_failure)
+                        if interrupt:
+                            interrupted.clear()
+                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first.')
+                            self.assertEqual(len(written), 1)
+                        else:
+                            release_write.set()
+                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'complete')
+                            self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 1500 + bytes(1680))
+
+                hold_final = False
+                release_write.set()
+                written.clear()
+                await self.finish_user_turn(transport, 'A clean later turn.')
+                rows = await rows_until(lambda rows: rows[-2]['text'] == 'A clean later turn.'
+                                        and rows[-1]['state'] == 'complete')
+                self.assertEqual(rows[-1]['text'], 'Clean later.')
+                self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first.', 'state': 'interrupted'})
+            finally:
+                release_failure.set()
+                release_provider.set()
+                release_write.set()
+                writer.close()
+                await writer.wait_closed()
+                await close()
+
+    async def test_panel_receives_final_turns_and_spoken_prefix(self):
+        blocked, release = threading.Event(), threading.Event()
+
+        def partial():
+            yield {'content': 'One fact. Unheard continuation'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Synthetic partial reply was never released')
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            [({'content': 'Prepared.'}, None), ({}, 'stop')],
+            [({'content': 'Hello.'}, None), ({}, 'stop')], partial(),
+            [({'content': 'Unheard stop canary.'}, None), ({}, 'stop')],
+            [({'content': 'Unheard cancel canary.'}, None), ({}, 'stop')], 400,
+        ])
+        self.addCleanup(brain.close)
+        self.addCleanup(release.set)
+        cancel_without_audio = False
+
+        def finite_chunks(**kwargs):
+            if not cancel_without_audio:
+                # Whole native chunks, so no tail waits for the stop flush.
+                yield np.zeros(5760, dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            transport, spoken, committed, interrupted, _, close = await self.open_session(
+                brain, through_service=True, synthesis_chunks=finite_chunks,
+            )
+            output = transport.output()
+            generated, release_text = asyncio.Event(), asyncio.Event()
+            hold_text = False
+            output_order = []
+            playback_started = asyncio.Event()
+            old_end_output = asyncio.Event()
+
+            @output.event_handler('on_after_push_frame')
+            async def frame_order(processor, frame):
+                if isinstance(frame, BotStartedSpeakingFrame):
+                    playback_started.set()
+                elif isinstance(frame, LLMFullResponseEndFrame):
+                    output_order.append(('end', frame.indicator_reply_token))
+                    if cancel_without_audio:
+                        old_end_output.set()
+                elif isinstance(frame, InterruptionFrame):
+                    output_order.append(('interruption', getattr(frame, 'conversation_reply_token', None)))
+
+            @transport.llm.event_handler('on_before_push_frame')
+            async def generated_text(processor, frame):
+                if cancel_without_audio and isinstance(frame, InterruptionFrame) and frame.conversation_reply_token is not None:
+                    await asyncio.wait_for(old_end_output.wait(), 5)
+                if hold_text and isinstance(frame, LLMTextFrame):
+                    generated.set()
+                    await release_text.wait()
+
+            async def start():
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+
+            async def barrier():
+                frame = DataFrame()
+                await transport.input().queue_frame(frame)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), frame)
+
+            await start()
+            await self.finish_user_turn(transport, 'Hello Kestrel.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Hello.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Hello.')
+            delivered = []
+            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+            reader = writer = None
+            try:
+                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+            except (OSError, TimeoutError):
+                pass
+            else:
+                snapshot = json.loads(await asyncio.wait_for(reader.readline(), 1))
+                delivered = snapshot['turns']
+
+            async def turns_until(predicate):
+                async with asyncio.timeout(5):
+                    while True:
+                        row = json.loads(await reader.readline())
+                        if 'turns' in row and predicate(row['turns']):
+                            return row['turns']
+
+            try:
+                self.assertEqual(delivered, [
+                    {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete'},
+                    {'speaker': 'kestrel', 'text': 'Hello.', 'state': 'complete'},
+                ])
+                for utterance in ('repeat that', 'what can I say?'):
+                    await start()
+                    await self.finish_user_turn(transport, utterance)
+                    expected = ('Hello.' if utterance == 'repeat that' else
+                                "You can say: mute; set the volume to thirty; pause music; next track; "
+                                "workspace three; open followed by an installed app's exact name; take a screenshot. "
+                                "None of these tools needs permission first.")
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                    rows = await turns_until(lambda turns: turns[-2]['text'] == utterance and turns[-1]['state'] == 'complete')
+                    self.assertEqual(rows[-2:], [
+                        {'speaker': 'you', 'text': utterance, 'state': 'complete'},
+                        {'speaker': 'kestrel', 'text': expected, 'state': 'complete'},
+                    ])
+                    self.assertTrue(committed.empty(), 'Local spoken responses never enter engine history')
+                output.write_gate.clear()
+                playback_started.clear()
+                await start()
+                await self.finish_user_turn(transport, 'what can I say?')
+                await asyncio.wait_for(playback_started.wait(), 5)
+                await start()
+                rows = await turns_until(lambda turns: turns[-1]['state'] == 'interrupted')
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': '', 'state': 'interrupted'})
+                self.assertTrue(spoken.empty(), 'Interrupted local help cannot publish its unheard text')
+                await self.finish_user_turn(transport, 'cancel')
+                await barrier()
+                output.write_gate.set()
+                written_before = output.audio_written
+                await start()
+                await self.finish_user_turn(transport, 'Tell me more.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'One fact.')
+                self.assertEqual(output.audio_written, written_before + 3)
+                rows = await turns_until(lambda turns: turns[-1]['state'] == 'speaking')
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'One fact.', 'state': 'speaking'})
+                self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+                old_token = transport.llm._conversation_attempt
+                await start()
+                rows = await turns_until(lambda turns: turns[-1]['state'] == 'interrupted')
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'One fact.', 'state': 'interrupted'})
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
+                release.set()
+                await self.finish_user_turn(transport, 'stop')
+                await barrier()
+                rows = await turns_until(lambda turns: turns[-1]['text'] == 'stop')
+                self.assertEqual(rows[-2]['state'], 'interrupted')
+                self.assertEqual(transport.llm.last_spoken_reply, 'One fact.')
+                pre_audio_tokens = []
+                for stop_word in ('stop', 'cancel'):
+                    hold_text = True
+                    generated.clear()
+                    release_text.clear()
+                    await start()
+                    await self.finish_user_turn(transport, 'Before audio ' + stop_word)
+                    await asyncio.wait_for(generated.wait(), 5)
+                    rows = await turns_until(lambda turns: turns[-1]['state'] == 'thinking')
+                    self.assertEqual(rows[-1]['text'], '')
+                    token = transport.llm._conversation_attempt
+                    pre_audio_tokens.append(token)
+                    old_end_output.clear()
+                    playback_started.clear()
+                    written_before = output.audio_written
+                    cancel_without_audio = True
+                    await start()
+                    await self.finish_user_turn(transport, stop_word)
+                    await barrier()
+                    rows = await turns_until(lambda turns: turns[-1]['text'] == stop_word)
+                    self.assertEqual(rows[-2], {'speaker': 'kestrel', 'text': '', 'state': 'interrupted'})
+                    self.assertEqual(output.audio_written, written_before)
+                    self.assertFalse(playback_started.is_set(), 'No audio starts for this attempted reply')
+                    while not spoken.empty():
+                        self.assertNotIn('canary', spoken.get_nowait(), 'Unheard generated text is never delivered')
+                    self.assertIsNone(transport.llm._conversation_attempt)
+                    # A delayed native end cannot change a terminal row or a newer attempt.
+                    late = LLMFullResponseEndFrame()
+                    late.indicator_reply_token = token
+                    late.conversation_reply_failed = False
+                    await output.push_frame(late)
+                    hold_text = False
+                    cancel_without_audio = False
+                self.assertTrue(any(
+                    ('end', token) in output_order and ('interruption', token) in output_order
+                    and output_order.index(('end', token)) < output_order.index(('interruption', token))
+                    for token in pre_audio_tokens
+                ), output_order)
+                count_before_mute = len(rows)
+                transport.llm.local_command = AsyncMock(side_effect=[
+                    'fixture-output', 'fixture-output', 'Mute: yes',
+                    'fixture-output', 'fixture-output', 'Mute: yes',
+                ])
+                await start()
+                await self.finish_user_turn(transport, 'mute')
+                await barrier()
+                rows = await turns_until(lambda turns: turns[-1]['text'] == 'mute')
+                self.assertEqual(len(rows), count_before_mute + 1, 'A silent tool creates only the finalized user row')
+                self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete'})
+                self.assertTrue(spoken.empty())
+                self.assertEqual(len(brain.requests), 5, 'Silent controls make no engine request')
+                await start()
+                await self.finish_user_turn(transport, 'Brain failure turn')
+                expected_failure = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I couldn't get a complete reply from the brain.")
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Restart Kestrel and try again.')
+                rows = await turns_until(lambda turns: turns[-1]['state'] == 'failed')
+                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': expected_failure, 'state': 'failed'})
+                late = LLMFullResponseEndFrame()
+                late.indicator_reply_token = old_token
+                late.conversation_reply_failed = False
+                await output.push_frame(late)
+                await barrier()
+                self.assertNotIn('Unheard', json.dumps(rows))
+                status = json.loads((Path(runtime) / 'kestrel/indicator.json').read_text())
+                self.assertEqual(set(status), {'version', 'boot_id', 'publisher', 'timestamp_ns', 'state', 'owners'})
+                self.assertNotIn('Hello', json.dumps(status))
+                self.assertNotIn('canary', json.dumps(status))
+                self.assertEqual(len(brain.requests), 6)
+                history = [m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system']
+                self.assertNotIn('what can I say', json.dumps(history))
+                self.assertNotIn('Unheard continuation', json.dumps(history))
+                async with asyncio.timeout(5):
+                    while await committed.get() != expected_failure:
+                        pass
+                local_histories = []
+
+                @transport.llm.event_handler('on_after_process_frame')
+                async def local_history(processor, frame):
+                    if isinstance(frame, LLMContextFrame):
+                        local_histories.append(deepcopy(frame.context.get_messages()))
+
+                expected_help = (
+                    "You can say: mute; set the volume to thirty; pause music; next track; "
+                    "workspace three; open followed by an installed app's exact name; take a screenshot. "
+                    "None of these tools needs permission first."
+                )
+                for local_turn in ('what can I say?', 'repeat that'):
+                    await start()
+                    await self.finish_user_turn(transport, local_turn)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected_help)
+                    await barrier()
+                    rows = await turns_until(lambda turns: turns[-2]['text'] == local_turn
+                                             and turns[-1]['state'] in ('complete', 'failed'))
+                    self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': expected_help, 'state': 'complete'})
+                    self.assertEqual(len(brain.requests), 6, 'Local speech after failure makes no brain request')
+                    self.assertTrue(committed.empty(), 'Local speech after failure adds no assistant context')
+                    self.assertTrue(local_histories)
+                    self.assertNotIn(local_turn, json.dumps(local_histories[-1]))
+                    self.assertNotIn(expected_help, json.dumps(local_histories[-1]))
+            finally:
+                release.set()
+                release_text.set()
+                output.write_gate.set()
+                if writer is not None:
+                    writer.close()
+                    await writer.wait_closed()
+                await close()
+
+        for failing in (False, True):
+            with self.subTest(synthesis='failed' if failing else 'empty'):
+                preparation = ScriptedBrain([[({'content': 'Prepared.'}, None), ({}, 'stop')]])
+                self.addCleanup(preparation.close)
+                attempts = []
+
+                def no_audio(**kwargs):
+                    attempts.append(kwargs['text'])
+                    if failing:
+                        raise RuntimeError('Synthetic synthesis failure')
+                    yield from ()
+
+                with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+                    transport, spoken, committed, interrupted, _, close = await self.open_session(
+                        preparation, through_service=True, synthesis_chunks=no_audio,
+                    )
+                    endpoint = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+                    reader, writer = await asyncio.open_unix_connection(endpoint)
+                    try:
+                        self.assertEqual(json.loads(await asyncio.wait_for(reader.readline(), 1))['turns'], [])
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await asyncio.wait_for(interrupted.wait(), 5)
+                        await self.finish_user_turn(transport, 'what can I say?')
+                        async with asyncio.timeout(5):
+                            while True:
+                                snapshot = json.loads(await reader.readline())
+                                if 'turns' in snapshot and snapshot['turns'] and snapshot['turns'][-1]['state'] == 'failed':
+                                    break
+                        self.assertEqual(snapshot['turns'], [
+                            {'speaker': 'you', 'text': 'what can I say?', 'state': 'complete'},
+                            {'speaker': 'kestrel', 'text': '', 'state': 'failed'},
+                        ])
+                        self.assertEqual(transport.output().audio_written, 0)
+                        self.assertTrue(committed.empty())
+                        self.assertEqual(len(attempts), 1, 'Warmup uses the existing asserted finite audio fixture')
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                        await close()
 
     async def test_indicator_local_speech_without_audio_finishes_turn(self):
         for failing in (False, True):

@@ -1,6 +1,6 @@
 # Design system
 
-The current conversation uses native laptop audio, operated as [README.md](../README.md) describes. It has no browser client. The desktop notification, native indicator and approved future panel patterns live below.
+The current conversation uses native laptop audio, operated as [README.md](../README.md) describes. It has no browser client. The desktop notification, native indicator and conversation panel patterns live below.
 
 This manual owns visual controls, interaction and accessibility. Spoken behaviour and product meaning stay with [AGENTS.md](../AGENTS.md#product) and the operation manual.
 
@@ -61,6 +61,12 @@ Dimensions and type sizes use Qt logical (device-independent) pixels at Omarchy 
 | Control height | 33 |
 | Focus stroke | 2 |
 | Bar height | 30 |
+| Panel width | 448 |
+| Panel height | 640 |
+| Owner turn inset | 32 |
+| Close control minimum side | 33 |
+
+Panel text follows the host's text size. The panel's text scale is the host `Style.fontScale` multiplied by 12/14, so host base size 14 gives exactly the token values above and base size 28 doubles them; a scale that is not a finite positive number falls back to 1. Caption, body and title text, the body line height and the transcript's one-line scroll step are each the token value times the scale, rounded to the nearest pixel and at least 1. The close control stays square, each side the larger of 33 and its glyph's larger rendered extent plus both sides of the focus stroke, and the title row takes the taller of the close control and the title. Panel size, padding, gaps, inset, focus stroke and the marks stay fixed: text wraps within them and the transcript scrolls in the space that remains.
 
 ### The three marks
 
@@ -79,7 +85,7 @@ Three marks, each 3 wide with 3 between them, stand on a common baseline 9 above
 
 Where the desktop asks for reduced motion, nothing loops: thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 
-The status indicator is static text for assistive technology, with its accessible name equal to the status sentence below. Its marks are decorative and excluded from assistive technology. It has no press action. The approved panel integration will add the button, keyboard route and click toggle. Hovering uses the host tooltip to show the state in words:
+The status indicator is an accessible button named `Open conversation` or `Close conversation`, followed by the status sentence and any placement advisory. Its 25 by 30 slot is the click target. Its marks are decorative and excluded from assistive technology. Pressing it toggles the panel. Hovering uses the host tooltip to show the state in words:
 
 | State | Tooltip |
 | --- | --- |
@@ -96,13 +102,14 @@ The status indicator is static text for assistive technology, with its accessibl
 
 A floating window of fixed size, 448 by 640, which the owner moves with `Super` and a left drag.
 
-- **Placement.** It opens with its outer edge inside the bottom right corner of the screen by the desktop's outer gap. It is placed once per opening, so a drag is not undone.
-- **Closing.** The close button, `Escape` or a click on the indicator hides the panel. The conversation is kept for as long as Kestrel runs and is shown again when the panel opens.
-- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the three marks for the current state, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text.
+- **Placement.** First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and the native border. Later openings retain the actual dragged position within the compositor configuration lifetime. When the monitor or its work area changes, clamp a position only if it would leave the panel off screen. Preserve a deliberately partly off-screen drag when that work area has not changed. Compositor configuration reload resets placement; cross-reload or restart storage is not provided.
+- **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its square `Close conversation` button, at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. The conversation stays in the voice service while it runs.
+- **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the three marks for the current state, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text, wrapping within the header width.
 - **Header marks.** The same drawing, sizes and motion as the bar, in popups text, with resting states at 0.6 opacity and trouble in bar active. They are decorative: no click, tooltip or keyboard focus, and hidden from assistive technology, because the sentence beside them says the state.
-- **Conversation.** Kestrel's turns sit flush left under a bold `Kestrel` label in accent. The owner's turns are inset by 32 under a bold `You` label in popups text. The reply in progress shows the state word beside its label. A shared reference is an underlined accent link reading `Reference you shared:` and the host name. An incomplete reply ends with a warning triangle in accent and a sentence naming the problem.
-- **Composer.** The label `Message` above a field 66 high with the placeholder `Type a message`. Beneath the field, `Enter to send` at the left and the `Send` button, 99 by 33, at the right. When sending is blocked, the reason replaces `Enter to send`.
-- **Focus.** The focused control shows a ring of the focus stroke in accent.
+- **Conversation.** Kestrel's turns sit flush left under a bold `Kestrel` label in accent. The owner's turns are inset by 32 under a bold `You` label in popups text. The reply in progress shows `Thinking` or `Speaking` beside its label. All transcript text is plain text, wraps long words and scrolls vertically. Auto-follow only while already at the bottom; updates never jump away from earlier text being read. This read-only panel has no composer, send control or active links.
+- **Empty and failure copy.** A healthy empty feed says `Say something. Kestrel replies after you.` A stale, malformed or disconnected feed clears the transcript and says `Conversation unavailable. Reopen the panel.` An oversized conversation says `Conversation is too large to display. Restart Kestrel to begin a new conversation.` Interrupted or failed rows end with an accent warning triangle and `Reply interrupted.` or `Reply could not be completed.` These states make no microphone claim.
+- **Placement failure.** `Panel position could not be confirmed. Try closing and reopening it.` appears in the panel and the indicator's accessible name and native tooltip. An initial configuration check with errors instead shows `Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel.` The panel stays hidden until placement and clean configuration are confirmed. A new failure actively exposes that tooltip even when the panel is hidden and the pointer is elsewhere; a confirmed opening clears it unless the pointer is still hovering. Cleanup failures preserve the original advisory. Neither message changes microphone status. No native errors or window metadata are shown.
+- **Focus and keys.** Focus uses a 2-pixel accent ring. `Tab` and `Shift + Tab` cycle between close and transcript. `Enter` and `Space` activate close. The transcript accepts arrows, `PageUp`, `PageDown`, `Home` and `End` to scroll; `Escape` hides the panel from either focus target. The transcript has a document role, turns have speaker-named static text roles, and a turn that becomes complete, interrupted or failed while the panel is open is announced politely once, never per token. Opening the panel, reconnecting, a new session and updates while hidden read existing history silently.
 
 | State | Status sentence |
 | --- | --- |
@@ -119,7 +126,7 @@ Every pointer target is at least 24 by 24.
 
 ### Native accessibility and verification
 
-The first approved interface plan must specify native accessible roles, names and actions for controls, keyboard navigation, initial focus, closing and focus restoration. Use [Qt accessibility metadata](https://doc.qt.io/qt-6/accessible-qtquick.html) compatible with the installed Qt version, which the plan must verify. Decorative header marks remain excluded from assistive technology; the adjacent status sentence carries their meaning.
+The panel follows the native roles, keyboard order, initial focus and close behavior above. Use [Qt accessibility metadata](https://doc.qt.io/qt-6/accessible-qtquick.html) compatible with the installed Qt version, which the plan must verify. Decorative header marks remain excluded from assistive technology; the adjacent status sentence carries their meaning.
 
 The indicator queries `hyprctl -j getoption animations:enabled` initially and every five seconds, with at most one outstanding query, a one-second watchdog and a 4096-character output limit. Only a successful, fresh object naming `animations:enabled` with boolean `bool: true` enables loops. False, absent, malformed, failed or ten-second-stale results preserve the still shapes above. The host-injected singleton owns the watcher and preference query across monitors.
 

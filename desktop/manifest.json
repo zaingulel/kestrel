@@ -3,13 +3,22 @@
   "id": "local.kestrel",
   "name": "Kestrel",
   "version": "1.0.0",
-  "description": "Local conversation status",
-  "kinds": ["service", "bar-widget"],
-  "entryPoints": { "service": "Service.qml", "barWidget": "Widget.qml" },
+  "description": "Local conversation status and readable panel",
+  "kinds": [
+    "service",
+    "bar-widget",
+    "panel"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Widget.qml",
+    "panel": "Panel.qml"
+  },
   "barWidget": {
     "displayName": "Kestrel",
     "category": "Status",
     "allowMultiple": false,
     "defaultSection": "center"
-  }
+  },
+  "keepLoaded": true
 }
