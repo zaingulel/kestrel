@@ -54,6 +54,8 @@ FocusScope {
             }
         }
         Qt.callLater(function() {
+            // The panel may unload before this deferred restoration runs.
+            if (!transcript) return
             const end = Math.max(0, transcript.contentHeight - transcript.height)
             transcript.contentY = follow ? end : Math.min(previousY, end)
             transcript.restoring = false
@@ -61,7 +63,11 @@ FocusScope {
     }
     // Deferred so one accepted snapshot's session and turns are observed together.
     onTurnsChanged: Qt.callLater(updateTurns)
-    onConversationSessionChanged: Qt.callLater(updateTurns)
+    // Latched now: a batched unavailable-then-same-session pair coalesces into one deferred update.
+    onConversationSessionChanged: {
+        if (conversationSession === "") baselineRequired = true
+        Qt.callLater(updateTurns)
+    }
     onAnnouncementsEnabledChanged: {
         baselineRequired = true
         Qt.callLater(updateTurns)

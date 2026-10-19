@@ -11,6 +11,17 @@ TestCase {
     when: windowShown
 
     SignalSpy { id: closeSpy; signalName: "closeRequested" }
+    Component { id: serviceComponent; Desktop.Service {} }
+    Loader {
+        id: unloadLoader
+        active: false
+        sourceComponent: Component {
+            Desktop.Conversation {
+                width: 448; height: 640
+                background: "#121212"; ink: "#bebebe"; accentInk: "#e68e0d"; troubleInk: "#D35F5F"
+            }
+        }
+    }
     Component {
         id: announcementComponent
         Desktop.Conversation {
@@ -114,6 +125,38 @@ TestCase {
         content.turns = history.concat([{speaker: "kestrel", text: "After recreation.", state: "complete"}])
         settle()
         compare(JSON.stringify(requests), '["Kestrel: After recreation."]')
+        requests.length = 0
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        content = makeContent()
+        content.turns = Qt.binding(function() { return service.turns })
+        content.conversationSession = Qt.binding(function() { return service.conversationSession })
+        shown(content, true)
+        const wired = [{speaker: "you", text: "Existing turn.", state: "complete"}]
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session", turns: wired}) + "\n"))
+        settle()
+        compare(JSON.stringify(requests), "[]", "accepted history must be a silent baseline")
+        const returned = wired.concat([{speaker: "kestrel", text: "Completed during disconnection.", state: "complete"}])
+        verify(service.acceptConversationChunk(JSON.stringify({unavailable: "Conversation unavailable. Reopen the panel."})
+            + "\n" + JSON.stringify({version: 1, session: "same-session", turns: returned}) + "\n"))
+        settle()
+        compare(JSON.stringify(requests), "[]", "same-session reconnect history must stay silent when records share a chunk")
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session",
+            turns: returned.concat([{speaker: "kestrel", text: "After batched reconnect.", state: "complete"}])}) + "\n"))
+        settle()
+        compare(JSON.stringify(requests), '["Kestrel: After batched reconnect."]')
+    }
+
+    function test_unload_with_pending_scroll_is_quiet() {
+        failOnWarning(/.*TypeError.*contentHeight.*/)
+        unloadLoader.active = true
+        verify(unloadLoader.item !== null)
+        unloadLoader.item.updateTurns()
+        unloadLoader.active = false
+        compare(unloadLoader.item, null)
+        let settled = false
+        Qt.callLater(function() { settled = true })
+        tryVerify(function() { return settled })
     }
 
     function test_plain_text_keyboard_and_scroll() {
