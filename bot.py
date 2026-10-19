@@ -7,6 +7,7 @@ from functools import partial
 from enum import Enum
 import json
 import os
+import pwd
 import re
 import signal
 import tempfile
@@ -37,6 +38,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
+from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import HERMES_PYTHON, child_environment
 from speech import EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
@@ -77,7 +79,15 @@ class DesktopResult:
     message: str | None
 
 
-async def run_local_command(argv):
+@dataclass(frozen=True)
+class AppLaunchResult:
+    accepted: bool
+    attempted: bool
+    reason: str
+    message: str | None
+
+
+async def run_local_command(argv, *, stdin_data: bytes | None = None):
     # Native media status may embed cover art; only that read needs a larger allowance.
     budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
               else 4096)
@@ -101,6 +111,8 @@ async def run_local_command(argv):
     async def reap():
         if process is None:
             return
+        if stdin_data is not None:
+            process.stdin.close()
         # Closing the read pipe prevents buffered output from holding process.wait open.
         process.stdout._transport.close()
         try:
@@ -133,10 +145,15 @@ async def run_local_command(argv):
     try:
         async with asyncio.timeout(LOCAL_COMMAND_TIMEOUT):
             process = await asyncio.create_subprocess_exec(
-                *argv, env=env, stdin=asyncio.subprocess.DEVNULL,
+                *argv, env=env, stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 start_new_session=True,
             )
+            if stdin_data is not None:
+                process.stdin.write(stdin_data)
+                await process.stdin.drain()
+                process.stdin.close()
+                await process.stdin.wait_closed()
             output = bytearray()
             while chunk := await process.stdout.read(budget + 1 - len(output)):
                 output.extend(chunk)
@@ -395,12 +412,68 @@ async def workspace_action(number: int, *, command=run_local_command) -> Desktop
         return DesktopResult(False, attempted, 'command failed', advisory)
 
 
+def app_discovery_environment() -> tuple[str, ...]:
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    data_home = os.environ.get('XDG_DATA_HOME') or os.path.join(home, '.local/share')
+    data_dirs = os.environ.get('XDG_DATA_DIRS') or '/usr/local/share:/usr/share'
+    desktop = os.environ.get('XDG_CURRENT_DESKTOP', '')
+    values = (home, data_home, data_dirs, desktop)
+    if any(not valid_app_text(value, 4096) for value in values):
+        raise ValueError('invalid app discovery environment')
+    if (not os.path.isabs(home) or not os.path.isabs(data_home)
+            or not all(os.path.isabs(path) for path in data_dirs.split(':'))
+            or (desktop and not re.fullmatch(r'[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*', desktop))):
+        raise ValueError('invalid app discovery environment')
+    return tuple(f'{key}={value}' for key, value in zip(
+        ('HOME', 'XDG_DATA_HOME', 'XDG_DATA_DIRS', 'XDG_CURRENT_DESKTOP'), values,
+    ))
+
+
+async def open_app(desktop_id: str, discovery_env: tuple[str, ...], *, command=run_local_command) -> AppLaunchResult:
+    try:
+        # systemd-run expands dollars in service arguments; double them once at this boundary.
+        await command(('/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env',
+                       *(value.replace('$', '$$') for value in discovery_env),
+                       '/usr/bin/gtk-launch', desktop_id.replace('$', '$$')))
+        return AppLaunchResult(True, True, 'launch accepted', None)
+    except (RuntimeError, OSError, TimeoutError):
+        return AppLaunchResult(False, True, 'launch unconfirmed',
+                               "I couldn't confirm the app opened. Check the desktop. I won't retry.")
+
+
+def match_app_name(text: str) -> str | None:
+    match = re.fullmatch(r'open ([^\r\n?!]+?)[.!]?', text.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    tool = LOCAL_TOOLS['open app']
+    if tool.permission is not PermissionTier.FREE:
+        return None
+    name = match[1].strip()
+    if not name or not valid_app_text(name, 1024):
+        return None
+    return name
+
+
+async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool | None:
+    discovery_env = app_discovery_environment()
+    output = await command(('/usr/bin/env', *discovery_env, '/usr/bin/python', '-I',
+                            str(ROOT / 'app_resolver.py')), stdin_data=name.encode('utf-8'))
+    desktop_id = json.loads(output)
+    if desktop_id is None:
+        return None
+    if not valid_desktop_id(desktop_id):
+        raise ValueError('invalid app resolution')
+    tool = LOCAL_TOOLS['open app']
+    return replace(tool, run=partial(tool.run, desktop_id, discovery_env))
+
+
 LOCAL_TOOLS = {
     'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume'),
     'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause'),
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track'),
     'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace'),
+    'open app': LocalTool(PermissionTier.FREE, open_app, 'open app'),
 }
 
 
@@ -483,7 +556,8 @@ class HermesLLMService(LLMService):
     async def run_local_tool(self, tool):
         async with self.local_tool_lock:
             result = await tool.run(command=self.local_command)
-        if not result.confirmed:
+        confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
+        if not confirmed:
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
             if isinstance(result, AudioResult):
                 await notify_audio_failure(tool.subject, command=self.local_command)
@@ -616,13 +690,35 @@ class HermesLLMService(LLMService):
                 ))
                 return
             tool = match_instant_tool(messages[-1]['content'])
+            name = match_app_name(messages[-1]['content']) if tool is None else None
+            if name is not None:
+                lookup_message = messages[-1]
+                lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_command))
+                self.local_tasks.add(lookup)
+                lookup.add_done_callback(self.local_tasks.discard)
+                try:
+                    tool = await lookup
+                except asyncio.CancelledError:
+                    current_messages = frame.context.get_messages()
+                    for index, message in enumerate(current_messages):
+                        if message is lookup_message:
+                            del current_messages[index]
+                            break
+                    raise
+                except (ValueError, RuntimeError, OSError, TimeoutError):
+                    messages.pop()
+                    await self.push_frame(TTSSpeakFrame(
+                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.",
+                        append_to_context=False,
+                    ))
+                    return
             if tool is not None:
                 messages.pop()
                 task = asyncio.create_task(self.run_local_tool(tool))
                 self.local_tasks.add(task)
                 task.add_done_callback(self.local_tasks.discard)
                 result = await asyncio.shield(task)
-                message = (result.message if isinstance(result, DesktopResult) else
+                message = (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
                            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
                            if not result.confirmed else None)
                 if message is not None:
