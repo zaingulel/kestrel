@@ -226,7 +226,9 @@ exporter.force_flush.side_effect = flush
 exporter.deregister.side_effect = lambda name: calls.append('deregister ' + name)
 exporter.shutdown.side_effect = shutdown_exporter
 if case == 'registration':
-    exporter.register.side_effect = OSError('synthetic registration failure')
+    def register_exporter(subscriber_name):
+        raise RuntimeError('relay exporter already registered: kestrel-local-trace') from KeyError('kestrel-local-trace')
+    exporter.register.side_effect = register_exporter
 native = ModuleType('nemo_relay')
 native.AtofExporterConfig = Mock
 native.AtofExporterMode = Mock(Append='append')
@@ -331,7 +333,7 @@ raise SystemExit(status)
                         self.assertIn(trace_error + ': synthetic shutdown failure', result.stderr)
                     if case in ('creation', 'registration'):
                         cause = ('synthetic exporter creation failure' if case == 'creation'
-                                 else 'synthetic registration failure')
+                                 else 'relay exporter already registered: kestrel-local-trace')
                         self.assertEqual(result.stderr.count(cause), 1, result.stderr)
                         self.assertNotIn(cause, result.stdout)
 
@@ -402,7 +404,7 @@ raise SystemExit(status)
                     self.assertFalse(list(base.glob('**/session-*')))
 
         for kind in ('home symlink', 'home mode', 'home owner', 'config file', 'config symlink',
-                     'exported mode', 'exported owner', 'exported symlink', 'exported path'):
+                     'exported mode', 'exported owner', 'exported symlink', 'exported path', 'directory cause'):
             with self.subTest(kind=kind):
                 with tempfile.TemporaryDirectory(prefix='hermes-paths-') as directory:
                     base = Path(directory)
@@ -454,6 +456,12 @@ raise SystemExit(status)
                             return Mock(st_mode=metadata.st_mode, st_uid=os.getuid() + 1)
                         return metadata
 
+                    def directory_failure():
+                        raise RuntimeError(
+                            'Local conversation tracing could not start. '
+                            'Check runtime permissions and restart Kestrel.'
+                        ) from PermissionError('private path detail')
+
                     protocol = StringIO()
                     diagnostic = StringIO()
                     original_cwd = Path.cwd()
@@ -466,18 +474,23 @@ raise SystemExit(status)
                               patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                         'agent.relay_runtime': relay_runtime}),
                               patch.object(hermes_worker, 'validate_hermes_source'),
-                              patch.object(hermes_worker, 'create_trace_directory', return_value=session),
+                              patch.object(hermes_worker, 'create_trace_directory', return_value=session,
+                                           side_effect=directory_failure if kind == 'directory cause' else None),
                               patch.object(Path, 'lstat', unsafe_metadata),
                               patch('sys.stdin', TextIOWrapper(BytesIO())),
                               patch('sys.stdout', protocol),
                               patch('sys.stderr', diagnostic)):
-                            hermes_worker.main()
+                            status = hermes_worker.main()
+                        self.assertEqual(status, 1)
                         self.assertEqual(json.loads(protocol.getvalue()), {
                             'error': home_refusal if kind.startswith('home') else refusal,
                         })
                         if kind == 'config file':
                             self.assertIn(os.strerror(errno.EEXIST), diagnostic.getvalue())
                             self.assertNotIn(os.strerror(errno.EEXIST), protocol.getvalue())
+                        if kind == 'directory cause':
+                            self.assertEqual(diagnostic.getvalue().count('private path detail'), 1)
+                            self.assertNotIn('private path detail', protocol.getvalue())
                         if before is not None:
                             self.assertEqual(original_lstat(protected), before)
                         self.assertEqual(sentinel.read_bytes(), b'untouched')

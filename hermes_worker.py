@@ -191,7 +191,7 @@ def main(*, base_url=BONSAI_URL):
                     raise RuntimeError(TRACE_STARTUP_ERROR)
                 exporter.register('kestrel-local-trace')
             except Exception as error:
-                raise RuntimeError(TRACE_STARTUP_ERROR) from (error.__cause__ or error)
+                raise RuntimeError(TRACE_STARTUP_ERROR) from error
             agent = AIAgent(
                 base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
                 model='bonsai-2-9b', enabled_toolsets=[], disabled_toolsets=['terminal'],
