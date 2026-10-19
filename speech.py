@@ -1386,7 +1386,6 @@ class VoxCPMTTS(TTSService):
             if isinstance(frame, LLMFullResponseStartFrame):
                 self._spoken_reply.start()
             elif isinstance(frame, SpeechAdvisoryFrame):
-                self._conversation_delivery = 'neutral'
                 # Pipecat owns the active turn ID; older queued audio keeps its own delivery.
                 context_id = self._turn_context_id
                 if context_id in self._conversation_turns:
@@ -1406,10 +1405,7 @@ class VoxCPMTTS(TTSService):
                 if tail:
                     await super().process_frame(LLMTextFrame(tail), direction)
         await super().process_frame(frame, direction)
-        if isinstance(frame, LLMFullResponseEndFrame):
-            self._conversation_delivery = 'neutral'
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
-            self._conversation_delivery = 'neutral'
             self._conversation_turns.clear()
             self._conversation_audio_contexts.clear()
             self._conversation_reply_token = None

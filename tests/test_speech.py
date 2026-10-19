@@ -272,7 +272,6 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 pass
             self.assertFalse(voice._conversation_turns)
             self.assertFalse(voice._conversation_audio_contexts)
-            self.assertEqual(voice._conversation_delivery, 'neutral')
             await worker.queue_frames([LLMFullResponseStartFrame(), LLMTextFrame('Replacement.'),
                                        LLMFullResponseEndFrame()])
             while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
@@ -283,7 +282,6 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             await running
             self.assertFalse(voice._conversation_turns)
             self.assertFalse(voice._conversation_audio_contexts)
-            self.assertEqual(voice._conversation_delivery, 'neutral')
             [f async for f in voice.run_tts('After end.', 'after-end')]
             self.assertEqual(calls[-1]['text'], 'After end.')
         finally:
@@ -312,7 +310,6 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         await queued.process_frame(CancelFrame(), speech.FrameDirection.DOWNSTREAM)
         self.assertFalse(queued._conversation_turns)
         self.assertFalse(queued._conversation_audio_contexts)
-        self.assertEqual(queued._conversation_delivery, 'neutral')
         [f async for f in queued.run_tts('Replacement.', 'replacement')]
         self.assertEqual(calls[-1]['text'], 'Replacement.')
         self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')

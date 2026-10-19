@@ -863,7 +863,7 @@ class HermesLLMService(LLMService):
                 delivery = None
                 while True:
                     event = await self.read_event()
-                    if (set(event) == {'delivery'} and delivery is None and not has_text
+                    if (set(event) == {'delivery'} and delivery is None
                             and isinstance(event['delivery'], str) and event['delivery'] in DELIVERY_LABELS):
                         delivery = event['delivery']
                         if self.output is output:
@@ -962,6 +962,13 @@ class HermesLLMService(LLMService):
         output = None
         failed = False
         started = False
+
+        async def push_reply_start(delivery):
+            start = LLMFullResponseStartFrame()
+            start.conversation_reply_token = self._conversation_attempt
+            start.speech_delivery = delivery
+            await self.push_frame(start)
+
         try:
             if self.reader is not None:
                 # Speech cancellation detaches output; native work still reaches a terminal event.
@@ -979,10 +986,7 @@ class HermesLLMService(LLMService):
             self.reader = asyncio.create_task(self.exchange(deepcopy(frame.context.get_messages()), output))
             while event := await output.get():
                 if 'delivery' in event:
-                    start = LLMFullResponseStartFrame()
-                    start.conversation_reply_token = self._conversation_attempt
-                    start.speech_delivery = event['delivery']
-                    await self.push_frame(start)
+                    await push_reply_start(event['delivery'])
                     started = True
                 else:
                     await self.push_frame(LLMTextFrame(event['text']))
@@ -994,10 +998,7 @@ class HermesLLMService(LLMService):
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             if not started:
-                start = LLMFullResponseStartFrame()
-                start.conversation_reply_token = self._conversation_attempt
-                start.speech_delivery = 'neutral'
-                await self.push_frame(start)
+                await push_reply_start('neutral')
                 started = True
             await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
         finally:
@@ -1005,10 +1006,7 @@ class HermesLLMService(LLMService):
                 self.output = None
             await self.stop_processing_metrics()
             if not started:
-                start = LLMFullResponseStartFrame()
-                start.conversation_reply_token = self._conversation_attempt
-                start.speech_delivery = 'neutral'
-                await self.push_frame(start)
+                await push_reply_start('neutral')
             await self.push_reply_end(token, failed=failed)
 
 

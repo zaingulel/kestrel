@@ -5902,6 +5902,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh session.')
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'A new conversation.'}])
+        self.assertTrue(all('[delivery:' not in call['text'] for call in synthesis))
         self.assertEqual([call['text'] for call in synthesis
                           if not call['text'].endswith(' Obsolete continuation')], [
             '(Subtly curious and interested, natural conversational delivery) Hello.',
