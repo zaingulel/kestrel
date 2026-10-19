@@ -113,8 +113,15 @@ live recognition accuracy, physical playback, live Bonsai answers or graphical-l
 
 The native Qt Test cases load the production `desktop/Service.qml` with its real host-injected shell naturally unassigned. They call its actual bounded ingress and trigger its named expiry Timer signals, without starting native children or replacing the shell. The production Loader starts `NativeInputs.qml` only after host injection. The fixed status-byte and observed Hyprland object contracts supply the policy oracle; the [design system](DESIGN-SYSTEM.md#the-three-marks) supplies literal geometry and motion values for the actual `Marks.qml` objects.
 
+Read installed tool documentation first when discovering command options. Even `--help` and `--version` for `qml`, `qmlscene` and `qmltestrunner` initialize graphics. In restricted or headless runs, prefix each command, including help and version checks, with `env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic`; for example:
+
 ```sh
-node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes Indicator::test_listening_inflow_motion
+env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qml --help
+env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner --help
+```
+
+```sh
+node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes Indicator::test_listening_inflow_motion
 node scripts/run-log.mjs indicator qml -- /usr/lib/qt6/bin/qmllint desktop/Service.qml desktop/Marks.qml
 ```
 
