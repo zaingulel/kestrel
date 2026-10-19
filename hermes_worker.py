@@ -51,6 +51,19 @@ def validate_hermes_source() -> None:
         raise RuntimeError(refusal) from None
 
 
+def preserve_user_turns(messages, *, drop_codex_reasoning_items=True, drop_nudge_marker=None):
+    """Keep unanswered turns distinct while retaining the pinned Hermes filters."""
+    from run_agent import AIAgent
+
+    kept = []
+    for message in messages:
+        kept.extend(AIAgent._drop_thinking_only_and_merge_users(
+            [message], drop_codex_reasoning_items=drop_codex_reasoning_items,
+            drop_nudge_marker=drop_nudge_marker,
+        ))
+    return kept
+
+
 def child_environment(home):
     home = Path(home).resolve()
     environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ')
@@ -91,6 +104,7 @@ def main(*, base_url=BONSAI_URL):
                 checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
                 reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
             )
+            agent._drop_thinking_only_and_merge_users = preserve_user_turns
             emit({'ready': True})
             while line := sys.stdin.buffer.readline(1024 * 1024 + 1):
                 if len(line) > 1024 * 1024:
@@ -111,8 +125,6 @@ def main(*, base_url=BONSAI_URL):
                             raise ValueError('Expected text-only user/assistant messages')
                     if messages[-1]['role'] != 'user':
                         raise ValueError('Conversation history must end in user')
-                    # Preserve unanswered user turns without inventing assistant speech:
-                    # native Hermes merges adjacent string content, but keeps text parts distinct.
                     history = []
                     for index, message in enumerate(messages[:-1]):
                         historical = message.copy()

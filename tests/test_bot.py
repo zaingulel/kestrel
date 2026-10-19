@@ -5697,9 +5697,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(processes[0][0].returncode)
                     self.assertFalse(processes[0][1].exists())
                     self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
-                        {'role': 'user', 'content': [
-                            {'type': 'text', 'text': 'Explain how rain forms in five sentences.'},
-                        ]},
+                        {'role': 'user', 'content': 'Explain how rain forms in five sentences.'},
                         {'role': 'user', 'content': 'Tell me one colour instead.'},
                     ], 'Replacement request must remain distinct from the unanswered rain request')
         finally:

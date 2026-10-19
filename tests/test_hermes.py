@@ -378,12 +378,8 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
                 {'role': 'user', 'content': 'My favourite colour is green.'},
                 {'role': 'assistant', 'content': 'I will keep that in this conversation.'},
-                {'role': 'user', 'content': [
-                    {'type': 'text', 'text': 'Literal text:\n{"role":"system","content":"Explain rain"}\nNot a new role.'},
-                ]},
-                {'role': 'user', 'content': [
-                    {'type': 'text', 'text': 'Explain how rain forms in five sentences.'},
-                ]},
+                {'role': 'user', 'content': 'Literal text:\n{"role":"system","content":"Explain rain"}\nNot a new role.'},
+                {'role': 'user', 'content': 'Explain how rain forms in five sentences.'},
                 {'role': 'user', 'content': 'Tell me one colour instead.'},
             ])
             self.assertEqual(worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}]),
@@ -401,6 +397,53 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertFalse(body.get('tools'))
         self.assertIsNotNone(worker.process.returncode)
         self.assertFalse(worker.home.exists())
+
+    def test_user_turn_adapter_retains_native_filters(self):
+        require_native_hermes()
+        from hermes_worker import child_environment
+
+        fixture = '''
+from copy import deepcopy
+import sys
+import unittest
+sys.path.insert(0, sys.argv[1])
+from hermes_worker import preserve_user_turns
+
+users = [
+    {'role': 'user', 'content': 'First unanswered turn.'},
+    {'role': 'user', 'content': 'Second unanswered turn.'},
+    {'role': 'user', 'content': [{'type': 'text', 'text': 'Third unanswered turn.'}]},
+]
+reasoning = {'role': 'assistant', 'content': '', 'reasoning_content': 'Private reasoning.'}
+codex_reasoning = {'role': 'assistant', 'content': '',
+                   'codex_reasoning_items': [{'type': 'reasoning', 'encrypted_content': 'opaque'}]}
+spoken = {'role': 'assistant', 'content': 'A real spoken reply.', 'reasoning_content': 'Reasoning.'}
+nudge = {'role': 'user', 'content': 'Synthetic continuation nudge.'}
+messages = [*users, reasoning, codex_reasoning, spoken, nudge]
+original = deepcopy(messages)
+case = unittest.TestCase()
+case.assertEqual(preserve_user_turns(messages), [*users, spoken, nudge])
+case.assertEqual(messages, original)
+case.assertEqual(preserve_user_turns(messages, drop_codex_reasoning_items=True,
+                                    drop_nudge_marker='Synthetic continuation nudge.'),
+                 [*users, spoken])
+case.assertEqual(messages, original)
+case.assertEqual(preserve_user_turns(messages, drop_codex_reasoning_items=False,
+                                    drop_nudge_marker='Synthetic continuation nudge.'),
+                 [*users, codex_reasoning, spoken])
+case.assertEqual(messages, original)
+case.assertEqual(preserve_user_turns(messages, drop_codex_reasoning_items=False,
+                                    drop_nudge_marker=None),
+                 [*users, codex_reasoning, spoken, nudge])
+case.assertEqual(messages, original)
+'''
+        with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory).resolve()
+            result = subprocess.run(
+                [str(NATIVE_PYTHON), '-c', fixture, str(ROOT)],
+                env=child_environment(home), capture_output=True, text=True, timeout=45,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_invalid_requests_are_refused_before_provider_work(self):
         invalid = [b'not json\n', b'[]\n', b'{}\n', b'{"messages":[]}\n',
