@@ -1330,7 +1330,7 @@ class VoxCPMTTS(TTSService):
             if context is not None:
                 context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
                 text = getattr(frame, 'conversation_text_start', None)
-                if context.source_valid and frame.audio and text is not None:
+                if context.source_valid and text is not None:
                     context.pending_text_starts.append((context.source_bytes, text))
                 context.source_bytes += len(frame.audio)
         elif frame.text.strip():
