@@ -3,6 +3,7 @@
 import ast
 import configparser
 from contextlib import contextmanager
+import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, StringIO, TextIOWrapper
 import json
@@ -328,6 +329,11 @@ raise SystemExit(status)
                     if case == 'engine close':
                         self.assertIn(engine_close_error + ': synthetic engine close failure', result.stderr)
                         self.assertIn(trace_error + ': synthetic shutdown failure', result.stderr)
+                    if case in ('creation', 'registration'):
+                        cause = ('synthetic exporter creation failure' if case == 'creation'
+                                 else 'synthetic registration failure')
+                        self.assertEqual(result.stderr.count(cause), 1, result.stderr)
+                        self.assertNotIn(cause, result.stdout)
 
     def test_trace_paths_refuse_unsafe_entries(self):
         import hermes_worker
@@ -389,6 +395,9 @@ raise SystemExit(status)
                         with self.assertRaises(RuntimeError) as raised:
                             hermes_worker.create_trace_directory()
                         self.assertEqual(str(raised.exception), refusal)
+                        if kind == 'permission':
+                            self.assertIsInstance(raised.exception.__cause__, PermissionError)
+                            self.assertEqual(str(raised.exception.__cause__), 'private path detail')
                     self.assertEqual(original_lstat(target), before)
                     self.assertFalse(list(base.glob('**/session-*')))
 
@@ -446,6 +455,7 @@ raise SystemExit(status)
                         return metadata
 
                     protocol = StringIO()
+                    diagnostic = StringIO()
                     original_cwd = Path.cwd()
                     original_umask = os.umask(0o077)
                     original_environment = os.environ.copy()
@@ -459,11 +469,15 @@ raise SystemExit(status)
                               patch.object(hermes_worker, 'create_trace_directory', return_value=session),
                               patch.object(Path, 'lstat', unsafe_metadata),
                               patch('sys.stdin', TextIOWrapper(BytesIO())),
-                              patch('sys.stdout', protocol)):
+                              patch('sys.stdout', protocol),
+                              patch('sys.stderr', diagnostic)):
                             hermes_worker.main()
                         self.assertEqual(json.loads(protocol.getvalue()), {
                             'error': home_refusal if kind.startswith('home') else refusal,
                         })
+                        if kind == 'config file':
+                            self.assertIn(os.strerror(errno.EEXIST), diagnostic.getvalue())
+                            self.assertNotIn(os.strerror(errno.EEXIST), protocol.getvalue())
                         if before is not None:
                             self.assertEqual(original_lstat(protected), before)
                         self.assertEqual(sentinel.read_bytes(), b'untouched')

@@ -95,8 +95,8 @@ def create_trace_directory() -> Path:
                 or stat.S_IMODE(root.st_mode) != 0o700):
             raise RuntimeError(TRACE_STARTUP_ERROR)
         return Path(tempfile.mkdtemp(prefix='session-', dir=TRACE_ROOT))
-    except OSError:
-        raise RuntimeError(TRACE_STARTUP_ERROR) from None
+    except OSError as error:
+        raise RuntimeError(TRACE_STARTUP_ERROR) from error
 
 
 def preserve_user_turns(messages, *, drop_codex_reasoning_items=True, drop_nudge_marker=None):
@@ -169,8 +169,8 @@ def main(*, base_url=BONSAI_URL):
                         '[components.config.opentelemetry]\nenabled = false\n'
                     )
                 os.environ['HERMES_NEMO_RELAY_PLUGINS_TOML'] = str(plugins)
-            except Exception:
-                raise RuntimeError(TRACE_STARTUP_ERROR) from None
+            except Exception as error:
+                raise RuntimeError(TRACE_STARTUP_ERROR) from (error.__cause__ or error)
             from run_agent import AIAgent
             from agent.relay_runtime import get_runtime
             import nemo_relay
@@ -190,8 +190,8 @@ def main(*, base_url=BONSAI_URL):
                         or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600):
                     raise RuntimeError(TRACE_STARTUP_ERROR)
                 exporter.register('kestrel-local-trace')
-            except Exception:
-                raise RuntimeError(TRACE_STARTUP_ERROR) from None
+            except Exception as error:
+                raise RuntimeError(TRACE_STARTUP_ERROR) from (error.__cause__ or error)
             agent = AIAgent(
                 base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
                 model='bonsai-2-9b', enabled_toolsets=[], disabled_toolsets=['terminal'],
@@ -267,7 +267,10 @@ def main(*, base_url=BONSAI_URL):
                         status = 1
                         break
         except Exception as error:
-            print(f'Hermes engine unavailable: {error}', file=sys.stderr, flush=True)
+            diagnostic = f'Hermes engine unavailable: {error}'
+            if error.__cause__ is not None and str(error.__cause__) != str(error):
+                diagnostic += f': {error.__cause__}'
+            print(diagnostic, file=sys.stderr, flush=True)
             emit({'error': str(error) or type(error).__name__})
             terminal_failure_reported = True
             status = 1
