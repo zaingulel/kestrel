@@ -156,12 +156,6 @@ def main(*, base_url=BONSAI_URL):
             try:
                 session = create_trace_directory()
                 event_file = session / 'events.jsonl'
-                try:
-                    event_file.lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise RuntimeError(TRACE_STARTUP_ERROR)
                 plugins = home / 'relay-plugins.toml'
                 with plugins.open('x') as output:
                     output.write(

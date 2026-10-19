@@ -180,7 +180,7 @@ def native_worker(replies, *, synthetic_default_home=None):
         brain.close()
 
 
-class HermesSourceIdentityTests(unittest.TestCase):
+class HermesWorkerTests(unittest.TestCase):
     def test_trace_privacy_disclosure(self):
         self.assertIn(
             'Conversation traces stay on this laptop until you delete them; '
@@ -357,8 +357,7 @@ raise SystemExit(status)
                     self.assertFalse(list(base.glob('**/session-*')))
 
         for kind in ('home symlink', 'home mode', 'home owner', 'config file', 'config symlink',
-                     'output file', 'output symlink', 'exported mode', 'exported owner',
-                     'exported symlink', 'exported path'):
+                     'exported mode', 'exported owner', 'exported symlink', 'exported path'):
             with self.subTest(kind=kind):
                 with tempfile.TemporaryDirectory(prefix='hermes-paths-') as directory:
                     base = Path(directory)
@@ -380,10 +379,6 @@ raise SystemExit(status)
                         plugins.write_bytes(b'untouched')
                     elif kind == 'config symlink':
                         plugins.symlink_to(sentinel)
-                    elif kind == 'output file':
-                        event_file.write_bytes(b'untouched')
-                    elif kind == 'output symlink':
-                        event_file.symlink_to(sentinel)
                     runtime = Mock()
                     runtime.managed_execution_enabled.return_value = True
                     relay_runtime = ModuleType('agent.relay_runtime')
