@@ -7,7 +7,7 @@ BarWidget {
     moduleName: "local.kestrel"
     readonly property var service: bar?.shell?.serviceFor("local.kestrel") ?? null
     readonly property string currentState: service ? service.state : "unavailable"
-    readonly property bool tooltipHovered: visible && hover.containsMouse
+    readonly property bool tooltipHovered: visible && (hover.containsMouse || placementAdvisory !== "")
     readonly property string statusSentence: service ? service.statusSentence : "Status unavailable. Microphone use unknown."
     readonly property string placementAdvisory: service ? service.placementAdvisory : ""
     readonly property bool panelOpen: bar?.shell?.isPluginOpen("local.kestrel") ?? false
