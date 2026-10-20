@@ -210,9 +210,7 @@ class ConversationFeed:
         await asyncio.gather(*tasks, return_exceptions=True)
         if server is not None:
             await server.wait_closed()
-        self.turns.clear()
-        self.active = self.reply = None
-        self.publish()
+        self.clear()
 
 
 def write_record(record) -> bool:
