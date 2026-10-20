@@ -518,7 +518,8 @@ LOCAL_TOOLS = {
 }
 
 
-BRIDGED_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key, _, _ in DESKTOP_TOOLS.values())
+BRIDGED_TOOL_KEYS = {'mute': 'mute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track', 'focus_workspace': 'workspace'}
+BRIDGED_SUBJECTS = frozenset(LOCAL_TOOLS[BRIDGED_TOOL_KEYS[name]].subject for name in DESKTOP_TOOLS)
 
 NUMBER_BASE_WORDS = (
     'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
@@ -1227,8 +1228,7 @@ class HermesLLMService(LLMService):
 
         if turn.closed:
             return record(brain_result(False, False, 'turn closed'))
-        key, _, bounds = DESKTOP_TOOLS[name]
-        tool = free_tool(key, *(arguments[key] for key in bounds))
+        tool = free_tool(BRIDGED_TOOL_KEYS[name], *(arguments[argument] for argument in DESKTOP_TOOLS[name].bounds))
         if tool is None:
             turn.closed = True
             advise("That needs permission, which isn't available by voice yet, so I didn't do it.")

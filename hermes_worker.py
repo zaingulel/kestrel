@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
@@ -32,19 +33,24 @@ DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
 
 
+class DesktopToolSchema(NamedTuple):
+    description: str
+    bounds: dict[str, tuple[int, int]]
+
+
 DESKTOP_TOOLS = {
-    'mute': ('mute', 'Mute the selected audio output.', {}),
-    'set_volume': ('volume', 'Set the selected audio output volume.', {'percent': (0, 100)}),
-    'pause_media': ('pause music', 'Pause current media.', {}),
-    'next_track': ('next track', 'Advance to the next media track.', {}),
-    'focus_workspace': ('workspace', 'Focus a numbered workspace.', {'number': (1, 2147483647)}),
+    'mute': DesktopToolSchema('Mute the selected audio output.', {}),
+    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (0, 100)}),
+    'pause_media': DesktopToolSchema('Pause current media.', {}),
+    'next_track': DesktopToolSchema('Advance to the next media track.', {}),
+    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (1, 2147483647)}),
 }
 
 
 def valid_desktop_arguments(name: str, arguments: dict) -> bool:
     if not isinstance(name, str) or name not in DESKTOP_TOOLS or not isinstance(arguments, dict):
         return False
-    bounds = DESKTOP_TOOLS[name][2]
+    bounds = DESKTOP_TOOLS[name].bounds
     return set(arguments) == set(bounds) and all(
         type(arguments[key]) is int and low <= arguments[key] <= high
         for key, (low, high) in bounds.items()
@@ -129,7 +135,7 @@ SYSTEM_PROMPT = (
     "you cannot unmute, resume or go back in media, open apps or take screenshots; say so when asked. "
     "Call a desktop tool only for an effect the owner asks for, at most once per reply. "
     "Each desktop result is JSON with confirmed, attempted and reason. "
-    "Say an effect happened only when confirmed is true. Never call a desktop tool again to retry it.\n\n"
+    "Say an effect happened only when confirmed is true, never before its result arrives. Never call a desktop tool again to retry it.\n\n"
     'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
     'practical information and ordinary replies without a clear emotional cue. Curious suits an '
@@ -409,7 +415,7 @@ def main(*, base_url=BONSAI_URL):
                         return 'Kestrel desktop bridge failed'
                 return handle
 
-            for name, (_, description, bounds) in DESKTOP_TOOLS.items():
+            for name, (description, bounds) in DESKTOP_TOOLS.items():
                 registry.register(
                     name=name, toolset='kestrel_desktop', handler=desktop_handler(name),
                     schema={'name': name, 'description': description, 'parameters': {
@@ -540,7 +546,7 @@ def main(*, base_url=BONSAI_URL):
                                 raise ValueError('Invalid desktop tool history')
                             if index == 0 or messages[index - 1]['role'] not in ('user', 'tool'):
                                 raise ValueError('Invalid desktop tool history')
-                            if message['name'] in group_names or len(group_names) >= 5:
+                            if message['name'] in group_names:
                                 raise ValueError('Invalid desktop tool history')
                             group_names.add(message['name'])
                             continue
