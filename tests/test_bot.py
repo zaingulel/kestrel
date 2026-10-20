@@ -3238,8 +3238,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await close()
 
     async def test_invalid_or_permissioned_brain_desktop_calls_execute_nothing(self):
-        permission = "That needs permission, which isn't available by voice yet. I didn't change anything."
-        invalid = "I couldn't use that request, so I didn't change anything."
+        permission = "That needs permission, which isn't available by voice yet, so I didn't do it."
+        invalid = "I couldn't use that request, so I didn't do it."
         cases = [
             ('mute', {}, 'permission required', permission),
             ('set_volume', {'percent': 30.5}, 'invalid arguments', invalid),
@@ -3279,6 +3279,74 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         ('refused', {'confirmed': False, 'attempted': False, 'reason': reason}),
                     ])
                     command.assert_not_awaited()
+        finally:
+            await close()
+
+    async def test_refusal_after_confirmed_brain_effect_disclaims_only_that_call(self):
+        invalid = "I couldn't use that request, so I didn't do it."
+        permission = "That needs permission, which isn't available by voice yet, so I didn't do it."
+        brain = ScriptedBrain([
+            [({'tool_calls': [{'index': 0, 'id': 'mute-first', 'type': 'function', 'function': {
+                'name': 'mute', 'arguments': '{}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'tool_calls': [{'index': 0, 'id': 'volume-refused', 'type': 'function', 'function': {
+                'name': 'set_volume', 'arguments': '{"percent":101}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'content': '[delivery:neutral] Untrue success claim.'}, None), ({}, 'stop')],
+            [({'tool_calls': [{'index': 0, 'id': 'volume-first', 'type': 'function', 'function': {
+                'name': 'set_volume', 'arguments': '{"percent":30}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'tool_calls': [{'index': 0, 'id': 'mute-refused', 'type': 'function', 'function': {
+                'name': 'mute', 'arguments': '{}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'content': '[delivery:neutral] Untrue success claim.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+            'selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
+            '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
+            '{"volume":{"mono":{"value":19660}}}', 'Mute: no',
+        ])
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            self.assertTrue(await asyncio.wait_for(asyncio.shield(transport.llm.session_ready), 5))
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Please quiet things down.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), invalid)
+            heard = []
+            while not spoken.empty():
+                heard.append(spoken.get_nowait())
+            self.assertEqual(' '.join(heard), invalid)
+            self.assertEqual(len(brain.requests), 3)
+            results = [m for m in brain.requests[-1][2]['messages']
+                       if m['role'] == 'tool' and m['tool_call_id'] in ('mute-first', 'volume-refused')]
+            self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
+                ('mute-first', {'confirmed': True, 'attempted': True, 'reason': 'confirmed'}),
+                ('volume-refused', {'confirmed': False, 'attempted': False, 'reason': 'invalid arguments'}),
+            ])
+            self.assertEqual([c for c in command.await_args_list if 'set-sink-mute' in c.args[0]],
+                             [call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'))])
+            with patch.dict(bot.LOCAL_TOOLS, mute=bot.replace(bot.LOCAL_TOOLS['mute'], permission=bot.PermissionTier.ASK)):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'Please make it a little quieter.')
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), permission)
+            heard = []
+            while not spoken.empty():
+                heard.append(spoken.get_nowait())
+            self.assertEqual(' '.join(heard), permission)
+            self.assertEqual(len(brain.requests), 6)
+            results = [m for m in brain.requests[-1][2]['messages']
+                       if m['role'] == 'tool' and m['tool_call_id'] in ('volume-first', 'mute-refused')]
+            self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
+                ('volume-first', {'confirmed': True, 'attempted': True, 'reason': 'confirmed'}),
+                ('mute-refused', {'confirmed': False, 'attempted': False, 'reason': 'permission required'}),
+            ])
+            self.assertEqual([c for c in command.await_args_list if 'set-sink-volume' in c.args[0]],
+                             [call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'))])
+            self.assertEqual([c for c in command.await_args_list if 'set-sink-mute' in c.args[0]],
+                             [call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'))])
+            self.assertEqual(command.await_count, 17)
         finally:
             await close()
 

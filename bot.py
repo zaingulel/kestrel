@@ -1215,7 +1215,7 @@ class HermesLLMService(LLMService):
 
         if not valid_desktop_arguments(name, arguments):
             turn.closed = True
-            advise("I couldn't use that request, so I didn't change anything.")
+            advise("I couldn't use that request, so I didn't do it.")
             return brain_result(False, False, 'invalid arguments')
         if name in turn.names:
             return brain_result(False, False, 'already attempted')
@@ -1231,7 +1231,7 @@ class HermesLLMService(LLMService):
         tool = free_tool(key, *(arguments[key] for key in bounds))
         if tool is None:
             turn.closed = True
-            advise("That needs permission, which isn't available by voice yet. I didn't change anything.")
+            advise("That needs permission, which isn't available by voice yet, so I didn't do it.")
             return record(brain_result(False, False, 'permission required'))
         result = await self.run_shared(
             tool, epoch=turn.epoch, reporter=token,
