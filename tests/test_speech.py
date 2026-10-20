@@ -1689,6 +1689,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.indicator_output_started = Mock()
         llm.start_preparation = Mock()
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
         llm.frame_completed = Mock()
         llm.frame_completions = {}
         llm.owns_request = lambda token: True

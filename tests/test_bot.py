@@ -2015,10 +2015,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation, voice_active=None, request_admitted=None):
+            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation, voice_active=None, request_admitted=None, input_epoch=None):
                 prototype.session_ready = session_ready
                 prototype.voice_active = voice_active or admitted
                 prototype.request_admitted = request_admitted
+                prototype.input_epoch = input_epoch
                 prototype.admitted = admitted
                 prototype.status = status
                 prototype.conversation = conversation
@@ -2690,6 +2691,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm = Forward()
         llm.admitted = lambda: True
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
         llm.frame_completed = Mock()
         llm.owns_request = lambda token: True
         llm._assistant_reply_token = None
@@ -2737,6 +2739,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm = Forward()
         llm.admitted = lambda: True
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
         llm.frame_completed = Mock()
         llm.owns_request = lambda token: True
         llm._assistant_reply_token = None

@@ -874,7 +874,7 @@ class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, status=None, conversation=None, voice_active=None, request_admitted=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, status=None, conversation=None, voice_active=None, request_admitted=None, input_epoch=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -889,7 +889,7 @@ class HermesLLMService(LLMService):
         self.request_admitted = request_admitted
         self.typed_origin = None
         self.spoken_origin = None
-        self.input_epoch = lambda: 0
+        self.input_epoch = input_epoch if input_epoch is not None else lambda: 0
         self.frame_completions = {}
         self._assistant_reply_token = None
         self._last_spoken_token = None
@@ -994,7 +994,24 @@ class HermesLLMService(LLMService):
         if self._conversation_interrupting is token:
             self._conversation_interrupting = None
 
+    def remember_assistant_reply(self, text):
+        token = self._assistant_reply_token
+        if (self.admitted() and isinstance(text, str) and text.strip()
+                and (self.owns_request(token) or (token is not None and token is self._heard_prefix_token
+                     and self._last_spoken_token is not self._indicator_reply))):
+            self.last_spoken_reply = text
+            self._last_spoken_token = token
+
     def conversation_output(self, frame):
+        if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
+            context = getattr(frame, 'conversation_audio_context', None)
+            self._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
+        self._conversation_feed_output(frame)
+        if self.owns_request(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
+            self.last_spoken_reply = frame.text
+            self._last_spoken_token = self._assistant_reply_token
+
+    def _conversation_feed_output(self, frame):
         if not self.admitted() or self.conversation is None:
             return
         if not isinstance(frame, InterruptionFrame) and not self.owns_request(self._conversation_attempt):
@@ -1156,8 +1173,6 @@ class HermesLLMService(LLMService):
                 await self.speak_local_reply(
                     "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
                 )
-                return
-            if not self.valid_origin(frame):
                 return
         if tool is not None:
             if not self.valid_origin(frame):
@@ -1378,8 +1393,7 @@ class VoiceConversations:
                                              reply_admitted=lambda token: self.llm is not None and self.llm.owns_request(token))
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admitted=admitted, session_ready=self.session_ready,
                                     status=self.status, conversation=self.conversation, voice_active=lambda: self.desired_active,
-                                    request_admitted=self.request_admitted)
-        self.llm.input_epoch = lambda: self.input_epoch
+                                    request_admitted=self.request_admitted, input_epoch=lambda: self.input_epoch)
         if self.pending_submit is not None:
             self.llm.accept_request(self.pending_submit[1])
         adapter = self.llm
@@ -1491,8 +1505,6 @@ class VoiceConversations:
                 await self.submission_ack
                 if llm.owns_request(token):
                     self.pending_submit = None
-        except asyncio.CancelledError:
-            raise
         except Exception:
             if llm.owns_request(token):
                 self.fail_submission()
@@ -1633,13 +1645,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
         if isinstance(frame, LLMContextFrame):
             messages = frame.context.get_messages()
             if messages and messages[-1].get('role') == 'assistant':
-                text = messages[-1].get('content')
-                token = llm._assistant_reply_token
-                if (llm.admitted() and isinstance(text, str) and text.strip()
-                        and (llm.owns_request(token) or (token is not None and token is llm._heard_prefix_token
-                             and llm._last_spoken_token is not llm._indicator_reply))):
-                    llm.last_spoken_reply = text
-                    llm._last_spoken_token = token
+                llm.remember_assistant_reply(messages[-1].get('content'))
 
     output = transport.output()
 
@@ -1654,13 +1660,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
                 llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
-        if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
-            context = getattr(frame, 'conversation_audio_context', None)
-            llm._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
         llm.conversation_output(frame)
-        if llm.owns_request(llm._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
-            llm.last_spoken_reply = frame.text
-            llm._last_spoken_token = llm._assistant_reply_token
 
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
