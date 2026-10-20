@@ -104,7 +104,7 @@ async def run_local_command(argv, *, stdin_data: bytes | None = None):
               else 4096)
     uid = os.getuid()
     env = {
-        'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+        'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8',
         'XDG_RUNTIME_DIR': f'/run/user/{uid}',
         'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
         'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus',

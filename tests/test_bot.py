@@ -988,7 +988,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
     async def test_desktop_environment_is_local_and_bounded(self):
         selectors = {'WAYLAND_DISPLAY': 'wayland-1', 'HYPRLAND_INSTANCE_SIGNATURE': 'instance_12.ab-3'}
         uid = os.getuid()
-        baseline = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+        baseline = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8',
                     'XDG_RUNTIME_DIR': f'/run/user/{uid}',
                     'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
                     'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus'}
@@ -1586,7 +1586,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     'HTTP_PROXY': 'http://remote', 'PYTHONPATH': '/poison',
                     'XDG_RUNTIME_DIR': '/poison'}
         uid = os.getuid()
-        env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
+        env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8',
                'XDG_RUNTIME_DIR': f'/run/user/{uid}',
                'PULSE_SERVER': f'unix:/run/user/{uid}/pulse/native',
                'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{uid}/bus'}
@@ -1774,6 +1774,11 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                             pass
                         await process.wait()
 
+
+    async def test_local_command_child_locale_is_utf8_when_parent_is_not(self):
+        # Qt desktop commands print a warning before their JSON unless the locale is UTF-8.
+        with patch.dict(os.environ, {'LC_ALL': 'C', 'LC_CTYPE': 'C', 'LANG': 'C'}):
+            self.assertEqual(await bot.run_local_command(('/usr/bin/locale', 'charmap')), 'UTF-8\n')
 
     async def test_notification_is_fixed_local_and_reports_unavailability(self):
         for subject in ('mute', 'volume'):
