@@ -725,19 +725,41 @@ class HermesRequestChannel:
             self.preparation.cancel()
             await asyncio.gather(self.preparation, return_exceptions=True)
             self.preparation = None
-        if self.reader is not None:
-            self.reader.cancel()
+        errors = []
+        reader = self.reader
+        known_unavailable = (reader is not None and reader.done() and self.failure
+                             and (self.process is None or self.process.returncode is not None))
+        if reader is not None:
+            reader.cancel()
             try:
-                await self.reader
+                await reader
             except asyncio.CancelledError:
                 pass
-        await self._reap()
-        self.process = None
-        self.reader = None
-        self.output = None
-        if self.home is not None:
-            self.home.cleanup()
-            self.home = None
+            except Exception as error:
+                if not known_unavailable:
+                    errors.append(error)
+            finally:
+                if reader.done():
+                    self.reader = None
+        try:
+            await self._reap()
+        except Exception as error:
+            errors.append(error)
+        finally:
+            if self.process is None or self.process.returncode is not None:
+                if self.home is not None:
+                    try:
+                        self.home.cleanup()
+                    except Exception as error:
+                        errors.append(error)
+                    else:
+                        self.home = None
+                if self.home is None:
+                    self.process = None
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise ExceptionGroup('Hermes channel cleanup failed', errors)
 
     async def _exchange(self, request, output, *, admitted):
         advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."

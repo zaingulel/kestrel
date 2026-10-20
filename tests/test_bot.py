@@ -2742,6 +2742,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         sessions, processes, bindings, audio_children = [], [], [], []
         controller = None
         service_task = None
+        completion_observed = False
         handlers = {}
         runtime = os.environ.get('XDG_RUNTIME_DIR', '')
         owned_runtimes = getattr(self, '_service_runtimes', set())
@@ -3008,17 +3009,26 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         service_handle.state = state
 
         async def close():
+            nonlocal completion_observed
             try:
                 if service_task is not None and not service_task.done():
                     callback, arguments = handlers[signal.SIGTERM]
                     callback(*arguments)
-                if service_task is not None:
+                if service_task is not None and not completion_observed:
                     try:
                         await asyncio.wait_for(service_task, 5)
+                    except TimeoutError:
+                        raise
                     except RuntimeError as error:
+                        completion_observed = True
                         if controller.failure is None:
                             raise
                         service_handle.shutdown_error = error
+                    except BaseException:
+                        completion_observed = True
+                        raise
+                    else:
+                        completion_observed = True
             finally:
                 for binding in reversed(bindings):
                     binding.stop()
@@ -5701,6 +5711,59 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(preparation.done())
                 self.assertIsNotNone(processes[0][0].returncode)
                 self.assertFalse(processes[0][1].exists())
+
+        for cleanup_failure in (False, True):
+            with self.subTest(failure='begin', stop='immediate', cleanup_failure=cleanup_failure):
+                notes_home = tempfile.TemporaryDirectory(prefix='kestrel-failed-notes-', dir=ROOT / '.runtime')
+                self.addCleanup(notes_home.cleanup)
+                notes = Path(notes_home.name) / 'notes'
+                notes.mkdir(mode=0o700)
+                note = notes / 'MEMORY.md'
+                corrupt_notes = b'\xffinvalid note nonce-811'
+                note.write_bytes(corrupt_notes)
+                note.chmod(0o600)
+                brain = ScriptedBrain([
+                    [({'content': '[delivery:neutral] Prepared.'}, None), ({}, 'stop')],
+                ])
+                self.addCleanup(brain.close)
+                transport, spoken, committed, _, processes, close = await self.open_session(
+                    brain, prepare_engine=True, through_service=True, memory_root=notes,
+                )
+                service = transport.service
+                manager = service.manager
+                channel = manager.channel
+                readiness = await asyncio.wait_for(asyncio.gather(manager.session_ready, return_exceptions=True), 5)
+                self.assertIsInstance(readiness[0], RuntimeError)
+                self.assertTrue(channel.reader.done())
+                self.assertTrue(channel.failure)
+                process, home = processes[0]
+                self.assertIsNotNone(process.returncode)
+                self.assertTrue(home.exists())
+                self.assertIsNotNone(channel.home)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                if cleanup_failure:
+                    native_reap = channel._reap
+                    cleanup_error = RuntimeError('Injected close-time reap failure after confirmed exit')
+
+                    async def reap():
+                        await native_reap()
+                        self.assertIsNotNone(process.returncode)
+                        raise cleanup_error
+
+                    with patch.object(channel, '_reap', side_effect=reap):
+                        with self.assertRaises(RuntimeError) as raised:
+                            await close()
+                    self.assertIs(raised.exception, cleanup_error)
+                else:
+                    await close()
+                self.assertIsNotNone(process.returncode)
+                self.assertFalse(home.exists())
+                service.recognizer.close.assert_awaited_once()
+                self.assertTrue(service.recognizer.closed)
+                transport.close.assert_awaited_once()
+                self.assertEqual(manager.status._state, 'unavailable' if cleanup_failure else 'released')
+                self.assertEqual(note.read_bytes(), corrupt_notes)
 
     async def test_preparation_timeout_and_shutdown_reap_owned_worker(self):
         wire = (
