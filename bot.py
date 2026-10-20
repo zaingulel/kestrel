@@ -45,7 +45,7 @@ from desktop.conversation import ConversationFeed
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, child_environment
-from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
+from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
@@ -590,22 +590,223 @@ def stop_kestrel():
     os.kill(os.getpid(), signal.SIGTERM)
 
 
+class HermesRequestChannel:
+    def __init__(self):
+        self.process = None
+        self.home = None
+        self.reader = None
+        self.preparation = None
+        self.output = None
+        self.failure = None
+        self.failure_advisory = None
+        self.lock = asyncio.Lock()
+        self.closed = False
+
+    def detach(self, output):
+        if self.output is output:
+            self.output = None
+
+    async def drain(self):
+        if self.reader is not None:
+            task = self.reader
+            await asyncio.shield(task)
+            if task.done():
+                self.reader = None
+
+    async def exchange(self, messages, output, *, admitted):
+        async with self.lock:
+            await self.drain()
+            if not admitted() or self.closed or self.failure:
+                output.put_nowait(None)
+                return
+            self.output = output
+            self.reader = asyncio.create_task(self._exchange(messages, output, admitted=admitted))
+            try:
+                await asyncio.shield(self.reader)
+            finally:
+                self.detach(output)
+
+    async def _open(self):
+        try:
+            managed_brain = os.environ.get('KESTREL_MANAGED_BRAIN', '')
+            if managed_brain not in ('', '1'):
+                raise RuntimeError('Invalid KESTREL_MANAGED_BRAIN setting. Restart Kestrel and try again.')
+            if managed_brain == '1':
+                try:
+                    await run_local_command([
+                        '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
+                    ])
+                except Exception as error:
+                    raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
+            self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
+            async with asyncio.timeout(ENGINE_TIMEOUT):
+                self.process = await asyncio.create_subprocess_exec(
+                    str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
+                    env=child_environment(self.home.name),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024 + 1,
+                )
+                event = await self.read_event()
+                if set(event) != {'ready'} or event['ready'] is not True:
+                    raise RuntimeError(event.get('error') or 'Hermes did not become ready')
+        except Exception as error:
+            self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+            self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
+            logger.error(self.failure)
+            await self._reap()
+
+    async def prepare(self):
+        await self._open()
+        if not self.failure:
+            await self.exchange([{'role': 'user', 'content': 'Hello.'}], asyncio.Queue(), admitted=lambda: True)
+
+    async def read_event(self):
+        line = await self.process.stdout.readline()
+        if not line or len(line) > 1024 * 1024:
+            raise RuntimeError('Hermes exited or returned an oversized response')
+        event = json.loads(line)
+        if not isinstance(event, dict):
+            raise RuntimeError('Invalid Hermes response')
+        return event
+
+    async def _reap(self):
+        if self.process is not None and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 5)
+            except TimeoutError:
+                self.process.kill()
+                await asyncio.wait_for(self.process.wait(), 5)
+
+    async def close(self):
+        self.closed = True
+        self.output = None
+        if self.preparation is not None:
+            self.preparation.cancel()
+            await asyncio.gather(self.preparation, return_exceptions=True)
+            self.preparation = None
+        if self.reader is not None:
+            self.reader.cancel()
+            try:
+                await self.reader
+            except asyncio.CancelledError:
+                pass
+        await self._reap()
+        self.process = None
+        self.reader = None
+        self.output = None
+        if self.home is not None:
+            self.home.cleanup()
+            self.home = None
+
+    async def _exchange(self, messages, output, *, admitted):
+        advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+        try:
+            async with asyncio.timeout(ENGINE_TIMEOUT):
+                if not admitted():
+                    return
+                self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
+                await self.process.stdin.drain()
+                has_text = False
+                delivery = None
+                while True:
+                    event = await self.read_event()
+                    if (set(event) == {'delivery'} and delivery is None
+                            and isinstance(event['delivery'], str) and event['delivery'] in DELIVERY_LABELS):
+                        delivery = event['delivery']
+                        if self.output is output:
+                            output.put_nowait(event)
+                    elif (set(event) == {'text'} and delivery is not None
+                          and isinstance(event['text'], str) and event['text']):
+                        has_text = has_text or bool(event['text'].strip())
+                        if self.output is output:
+                            output.put_nowait(event)
+                    elif set(event) == {'done'} and event['done'] is True and has_text:
+                        break
+                    elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
+                        advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+                        raise RuntimeError(event['error'])
+                    else:
+                        raise RuntimeError('Invalid or incomplete Hermes response')
+        except Exception as error:
+            self.failure_advisory = advisory
+            self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
+            logger.error(self.failure)
+            await self._reap()
+        finally:
+            if self.output is output:
+                output.put_nowait(None)
+
+
+class LocalActions:
+    def __init__(self, *, command=None):
+        self.command = command if command is not None else run_local_command
+        self.lock = asyncio.Lock()
+        self.tasks = set()
+        self.closed = False
+
+    def retain(self, task):
+        self.tasks.add(task)
+        task.add_done_callback(self._completed)
+        return task
+
+    def _completed(self, task):
+        self.tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def run(self, tool, *, admitted):
+        task = self.retain(asyncio.create_task(self._run(tool, admitted=admitted)))
+        # An already-started external effect belongs to the service, not its caller.
+        return await asyncio.shield(task)
+
+    async def _run(self, tool, *, admitted):
+        async with self.lock:
+            if self.closed or not admitted():
+                raise asyncio.CancelledError
+            started = False
+
+            async def command(argv, **kwargs):
+                nonlocal started
+                if not started:
+                    if self.closed or not admitted():
+                        raise asyncio.CancelledError
+                    started = True
+                return await self.command(argv, **kwargs)
+
+            result = await tool.run(command=command)
+        confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
+        if not confirmed:
+            logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
+            if isinstance(result, AudioResult):
+                await notify_audio_failure(tool.subject, command=self.command)
+        return result
+
+    async def drain(self):
+        await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+
+    async def close(self):
+        self.closed = True
+        tasks = tuple(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class HermesLLMService(LLMService):
-    def __init__(self, *, local_command=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, status=None, conversation=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
             filter_incomplete_user_turns=False, user_turn_completion_config=None,
         ))
-        self.process = None
-        self.home = None
-        self.reader = None
         self.output = None
-        self.failure = None
-        self.failure_advisory = None
-        self.local_command = local_command if local_command is not None else run_local_command
-        self.status = None
-        self.conversation = None
+        self.channel = channel
+        self.local_actions = local_actions
+        self.admitted = admitted
+        self.lookup = None
+        self.status = status
+        self.conversation = conversation
         self._conversation_attempt = None
         self._conversation_interrupting = None
         self._conversation_output_context = None
@@ -619,16 +820,14 @@ class HermesLLMService(LLMService):
         self._indicator_pending = False
         self._indicator_reply = object()
         self._indicator_output_reply = None
-        self.local_tasks = set()
-        self.local_tool_lock = asyncio.Lock()
         self.last_spoken_reply: str | None = None
 
     def refresh_indicator(self):
-        if self.status is not None and self._indicator_ready:
+        if self.admitted() and self.status is not None and self._indicator_ready:
             state = ('listening' if self._indicator_user else
                      'speaking' if self._indicator_output else
                      'thinking' if self._indicator_pending else
-                     'trouble' if self.failure else 'idle')
+                     'trouble' if self.channel.failure else 'idle')
             self.status.set_state(state)
 
     def indicator_input_ready(self):
@@ -663,7 +862,7 @@ class HermesLLMService(LLMService):
             self.refresh_indicator()
 
     def finish_conversation_reply(self, token, *, interrupted=False, failed=False):
-        if self.conversation is not None:
+        if self.admitted() and self.conversation is not None:
             self.conversation.finish(token, interrupted=interrupted, failed=failed)
         if self._conversation_attempt is token:
             self._conversation_attempt = None
@@ -676,7 +875,7 @@ class HermesLLMService(LLMService):
             self._conversation_interrupting = None
 
     def conversation_output(self, frame):
-        if self.conversation is None:
+        if not self.admitted() or self.conversation is None:
             return
         if isinstance(frame, ConversationSynthesisFailedFrame):
             token = frame.context.reply_token
@@ -748,6 +947,8 @@ class HermesLLMService(LLMService):
                 self.finish_conversation_reply(context.reply_token, failed=True, interrupted=context.reply_token is self._conversation_interrupting)
 
     async def push_reply_end(self, token, *, failed=False):
+        if not self.admitted():
+            return
         end = LLMFullResponseEndFrame()
         # The output queue, not generation completion, owns the visible reply's end.
         end.indicator_reply_token = token
@@ -755,6 +956,8 @@ class HermesLLMService(LLMService):
         await self.push_frame(end)
 
     async def speak_local_reply(self, message, token):
+        if not self.admitted():
+            return
         if self.conversation is not None:
             self._conversation_attempt = token
             self._conversation_incomplete = False
@@ -765,130 +968,15 @@ class HermesLLMService(LLMService):
         await self.push_frame(frame)
         await self.push_reply_end(token)
 
-    async def run_local_tool(self, tool):
-        async with self.local_tool_lock:
-            result = await tool.run(command=self.local_command)
-        confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
-        if not confirmed:
-            logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
-            if isinstance(result, AudioResult):
-                await notify_audio_failure(tool.subject, command=self.local_command)
-        return result
-
-    async def close_local_tools(self):
-        tasks = tuple(self.local_tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def open_engine(self):
-        try:
-            managed_brain = os.environ.get('KESTREL_MANAGED_BRAIN', '')
-            if managed_brain not in ('', '1'):
-                raise RuntimeError('Invalid KESTREL_MANAGED_BRAIN setting. Restart Kestrel and try again.')
-            if managed_brain == '1':
-                try:
-                    await run_local_command([
-                        '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
-                    ])
-                except Exception as error:
-                    raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
-            self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
-            async with asyncio.timeout(ENGINE_TIMEOUT):
-                self.process = await asyncio.create_subprocess_exec(
-                    str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
-                    env=child_environment(self.home.name),
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    limit=1024 * 1024 + 1,
-                )
-                event = await self.read_event()
-                if set(event) != {'ready'} or event['ready'] is not True:
-                    raise RuntimeError(event.get('error') or 'Hermes did not become ready')
-        except Exception as error:
-            self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
-            self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
-            logger.error(self.failure)
-            self.refresh_indicator()
-            await self.reap_engine()
-
-    def start_preparation(self):
-        self.reader = asyncio.create_task(self.prepare_engine())
-
-    async def prepare_engine(self):
-        await self.open_engine()
-        if not self.failure:
-            await self.exchange([{'role': 'user', 'content': 'Hello.'}], asyncio.Queue())
-
-    async def read_event(self):
-        line = await self.process.stdout.readline()
-        if not line or len(line) > 1024 * 1024:
-            raise RuntimeError('Hermes exited or returned an oversized response')
-        event = json.loads(line)
-        if not isinstance(event, dict):
-            raise RuntimeError('Invalid Hermes response')
-        return event
-
-    async def reap_engine(self):
-        if self.process is not None and self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), 5)
-            except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
-
-    async def close_engine(self):
-        if self.reader is not None:
-            self.reader.cancel()
-            try:
-                await self.reader
-            except asyncio.CancelledError:
-                pass
-        await self.reap_engine()
-        self.process = None
-        self.reader = None
+    def revoke(self):
+        self.channel.detach(self.output)
         self.output = None
         self.last_spoken_reply = None
-        if self.home is not None:
-            self.home.cleanup()
-            self.home = None
+        if self.lookup is not None:
+            self.lookup.cancel()
 
-    async def exchange(self, messages, output):
-        advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
-        try:
-            async with asyncio.timeout(ENGINE_TIMEOUT):
-                self.process.stdin.write(json.dumps({'messages': messages}).encode() + b'\n')
-                await self.process.stdin.drain()
-                has_text = False
-                delivery = None
-                while True:
-                    event = await self.read_event()
-                    if (set(event) == {'delivery'} and delivery is None
-                            and isinstance(event['delivery'], str) and event['delivery'] in DELIVERY_LABELS):
-                        delivery = event['delivery']
-                        if self.output is output:
-                            output.put_nowait(event)
-                    elif (set(event) == {'text'} and delivery is not None
-                          and isinstance(event['text'], str) and event['text']):
-                        has_text = has_text or bool(event['text'].strip())
-                        if self.output is output:
-                            output.put_nowait(event)
-                    elif set(event) == {'done'} and event['done'] is True and has_text:
-                        break
-                    elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
-                        raise RuntimeError(event['error'])
-                    else:
-                        raise RuntimeError('Invalid or incomplete Hermes response')
-        except Exception as error:
-            self.failure_advisory = advisory
-            self.failure = f'Hermes reply failed: {str(error) or type(error).__name__}'
-            logger.error(self.failure)
-            self.refresh_indicator()
-            await self.reap_engine()
-        finally:
-            if self.output is output:
-                output.put_nowait(None)
+    def start_preparation(self):
+        self.channel.preparation = asyncio.create_task(self.channel.prepare())
 
     async def process_frame(self, frame, direction):
         if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
@@ -897,6 +985,9 @@ class HermesLLMService(LLMService):
         await super().process_frame(frame, direction)
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
+            return
+        if not self.admitted():
+            self.revoke()
             return
         token = self._indicator_reply
         self._indicator_user = False
@@ -927,9 +1018,8 @@ class HermesLLMService(LLMService):
             name = match_app_name(messages[-1]['content']) if tool is None else None
             if name is not None:
                 lookup_message = messages[-1]
-                lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_command))
-                self.local_tasks.add(lookup)
-                lookup.add_done_callback(self.local_tasks.discard)
+                lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_actions.command))
+                self.lookup = self.local_actions.retain(lookup)
                 try:
                     tool = await lookup
                 except asyncio.CancelledError:
@@ -947,10 +1037,9 @@ class HermesLLMService(LLMService):
                     return
             if tool is not None:
                 messages.pop()
-                task = asyncio.create_task(self.run_local_tool(tool))
-                self.local_tasks.add(task)
-                task.add_done_callback(self.local_tasks.discard)
-                result = await asyncio.shield(task)
+                result = await self.local_actions.run(tool, admitted=self.admitted)
+                if not self.admitted():
+                    return
                 message = (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
                            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
                            if not result.confirmed else None)
@@ -962,48 +1051,62 @@ class HermesLLMService(LLMService):
         output = None
         failed = False
         started = False
+        request = None
 
         async def push_reply_start(delivery):
+            if not self.admitted():
+                return
             start = LLMFullResponseStartFrame()
             start.conversation_reply_token = self._conversation_attempt
             start.speech_delivery = delivery
             await self.push_frame(start)
 
         try:
-            if self.reader is not None:
-                # Speech cancellation detaches output; native work still reaches a terminal event.
-                await asyncio.shield(self.reader)
+            if self.channel.preparation is not None:
+                await asyncio.shield(self.channel.preparation)
+            await self.channel.drain()
+            if not self.admitted():
+                return
             if self.conversation is not None:
                 self._conversation_attempt = token
                 self._conversation_incomplete = False
                 self._conversation_synthesis_failed = False
                 self.conversation.begin_reply(token)
             await self.start_processing_metrics()
-            if self.failure:
-                raise RuntimeError(self.failure)
+            if self.channel.failure:
+                raise RuntimeError(self.channel.failure)
             output = asyncio.Queue()
             self.output = output
-            self.reader = asyncio.create_task(self.exchange(deepcopy(frame.context.get_messages()), output))
+            request = asyncio.create_task(self.channel.exchange(deepcopy(frame.context.get_messages()), output, admitted=self.admitted))
             while event := await output.get():
+                if not self.admitted():
+                    self.revoke()
+                    return
                 if 'delivery' in event:
                     await push_reply_start(event['delivery'])
                     started = True
                 else:
                     await self.push_frame(LLMTextFrame(event['text']))
-            await asyncio.shield(self.reader)
-            if self.failure:
-                raise RuntimeError(self.failure)
+            await request
+            if self.admitted() and self.channel.failure:
+                raise RuntimeError(self.channel.failure)
         except Exception as error:
             failed = True
             logger.error(f'Hermes session cannot answer: {error}')
-            advisory = self.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+            advisory = self.channel.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             if not started:
                 await push_reply_start('neutral')
                 started = True
-            await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
+            if self.admitted():
+                await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
         finally:
+            self.channel.detach(output)
             if self.output is output:
                 self.output = None
+            if request is not None:
+                if not request.done():
+                    request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
             await self.stop_processing_metrics()
             if not started:
                 await push_reply_start('neutral')
@@ -1011,13 +1114,14 @@ class HermesLLMService(LLMService):
 
 
 def make_llm():
-    return HermesLLMService()
+    return HermesLLMService(HermesRequestChannel(), local_actions=LocalActions(), admitted=lambda: True)
 
 
 async def bot(*, status=None, on_transport_released=None, conversation=None):
     preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
     transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
-    stt = NemotronSTT()
+    recognizer = NemotronRecognizer()
+    stt = NemotronSTT(recognizer, admitted=lambda: True)
     llm = None
     try:
         await transport.open()
@@ -1026,13 +1130,13 @@ async def bot(*, status=None, on_transport_released=None, conversation=None):
         llm = make_llm()
         llm.start_preparation()
         logger.info("Loading local speech models for the conversation")
-        await stt.load(preset.pcm)
+        await recognizer.load(preset.pcm)
         torch.set_num_threads(4)
         model = await asyncio.to_thread(
             VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
             load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
         )
-        voice = VoxCPMTTS(model, preset)
+        voice = VoxCPMTTS(model, preset, generation_lock=asyncio.Lock())
         has_audio = False
         async for frame in voice.run_tts('Hello.', 'warmup'):
             has_audio = has_audio or bool(frame.audio)
@@ -1043,12 +1147,12 @@ async def bot(*, status=None, on_transport_released=None, conversation=None):
         try:
             if llm is not None:
                 try:
-                    await llm.close_local_tools()
+                    await llm.local_actions.close()
                 finally:
-                    await llm.close_engine()
+                    await llm.channel.close()
         finally:
             try:
-                await stt.close()
+                await recognizer.close()
             finally:
                 await transport.close()
                 if on_transport_released is not None:
@@ -1092,7 +1196,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             messages = frame.context.get_messages()
             if messages and messages[-1].get('role') == 'assistant':
                 text = messages[-1].get('content')
-                if isinstance(text, str) and text.strip():
+                if llm.admitted() and isinstance(text, str) and text.strip():
                     llm.last_spoken_reply = text
 
     output = transport.output()
@@ -1107,7 +1211,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
         llm.conversation_output(frame)
-        if isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
+        if llm.admitted() and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 
     pipeline = Pipeline([
