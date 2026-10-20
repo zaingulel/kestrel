@@ -2149,7 +2149,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             await asyncio.wait_for(task, 5)
                         stt.close.assert_awaited_once()
-                        self.audio.close.assert_awaited_once()
+                        if failure == 'model-startup':
+                            self.audio.close.assert_not_awaited()
+                        else:
+                            self.audio.close.assert_awaited_once()
                         if failure == 'publication':
                             conversation.assert_awaited_once()
                             self.assertEqual(errors.getvalue().count('Microphone use unknown.'), 1)
@@ -2219,6 +2222,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         for failure in ('local_model_failure', 'early_shutdown', 'conversation_failure'):
             with self.subTest(failure=failure):
+                self.audio.reset_mock()
                 service = hermes_service()
                 service.channel.prepare = AsyncMock(side_effect=asyncio.Event().wait)
                 service.local_actions.close = AsyncMock(wraps=service.local_actions.close)
@@ -2256,10 +2260,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     service.channel.close.assert_awaited_once()
                     self.assertTrue(readers[0].done())
                     stt.close.assert_awaited_once()
-                    self.audio.close.assert_awaited()
                     if failure == 'conversation_failure':
+                        self.audio.close.assert_awaited()
                         self.assertIs(conversation.await_args.kwargs['llm'], service)
                     else:
+                        self.audio.close.assert_not_awaited()
                         conversation.assert_not_awaited()
 
     async def test_invalid_voice_presets_stop_before_model_loading(self):
@@ -2462,6 +2467,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
         for label in ('late_failure', 'empty'):
             with self.subTest(label=label):
+                self.audio.reset_mock()
                 failed_events = []
 
                 def failed_chunks(**kwargs):
@@ -2491,7 +2497,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     if label == 'late_failure':
                         self.assertEqual(failed_events, ['first_chunk', 'closed'])
                     stt.close.assert_awaited_once()
-                    self.audio.close.assert_awaited()
+                    self.audio.close.assert_not_awaited()
 
     async def test_model_load_failure_closes_recognition_and_audio(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())
@@ -2500,7 +2506,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "load failed"):
                 await self.run_bot()
         stt.close.assert_awaited_once()
-        self.audio.close.assert_awaited_once()
+        self.audio.close.assert_not_awaited()
 
     async def test_native_startup_and_stop_release_resources_without_network_listener(self):
         for phase, echo_failure in (("preparation", False), ("conversation", False), ("conversation", True)):
@@ -2804,13 +2810,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         async def spawn(*command, **kwargs):
             self.assertEqual(command, (str(bot.HERMES_PYTHON), str(ROOT / 'hermes_worker.py')))
             home = Path(kwargs['env']['HERMES_HOME'])
-            if wire is not None:
-                command = (sys.executable, '-c', wire)
-            elif brain is None:
-                raise OSError('No controlled provider')
-            else:
-                command = WorkerProcess.command(home, brain, trace_root=trace_root, memory_root=memory_root)
             try:
+                if wire is not None:
+                    command = (sys.executable, '-c', wire)
+                elif brain is None:
+                    raise OSError('No controlled provider')
+                else:
+                    command = WorkerProcess.command(home, brain, trace_root=trace_root, memory_root=memory_root)
                 process = await native_spawn(*command, **kwargs)
             except OSError:
                 processes.append((None, home))
@@ -2899,7 +2905,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                     async def write_audio_frame(self, frame):
                         await self.write_gate.wait()
-                        return active() and not transport.closed
+                        written = active() and not transport.closed
+                        if written:
+                            self.audio_written += 1
+                        return written
 
                 transport = Mock(capture=None, failure=None, closed=False, admitted=active)
                 transport.input.return_value = Input()
@@ -4265,10 +4274,26 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(transport.output().audio_written, 0)
                         self.assertTrue(committed.empty())
                         self.assertEqual(len(attempts), 1, 'Warmup uses the existing asserted finite audio fixture')
+                        if failing:
+                            service = transport.service
+                            manager = service.manager
+                            self.assertTrue(manager.voice.generation_cleanup_failed)
+                            self.assertEqual(await service.toggle(), 'inactive')
+                            await service.state('trouble')
+                            self.assertEqual(manager.failure, 'Voice generation cleanup failed. Restart Kestrel.')
+                            self.assertTrue(manager.cleanup.done())
+                            self.assertFalse(manager.admission.is_set())
+                            self.assertEqual(await service.toggle(), 'unavailable')
+                            self.assertEqual(len(transport.sessions), 1)
+                            self.assertEqual(len(attempts), 1)
+                            self.assertEqual(transport.output().audio_written, 0)
+                            self.assertTrue(committed.empty())
                     finally:
                         writer.close()
                         await writer.wait_closed()
                         await close()
+                    if failing:
+                        self.assertEqual(str(service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
 
     async def test_indicator_local_speech_without_audio_finishes_turn(self):
         for failing in (False, True):
@@ -5191,6 +5216,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             brain, local_command=command, prepare_engine=True,
         )
         preparation = transport.llm.channel.preparation
+        session_ready = transport.llm.session_ready
         try:
             self.assertTrue(await asyncio.to_thread(held.wait, 5))
             self.assertFalse(preparation.done())
@@ -5225,15 +5251,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             def observe_shield(task):
                 future = native_shield(task)
-                if task is preparation and asyncio.current_task() is not driver:
+                if task is session_ready and asyncio.current_task() is not driver:
                     checkpoint.set()
                 return future
 
             def observe_write(data):
                 nonlocal ordinary_writes, pending_writes
-                ordinary_writes += 1
-                pending_writes += not preparation.done()
-                checkpoint.set()
+                if 'messages' in json.loads(data):
+                    ordinary_writes += 1
+                    pending_writes += not session_ready.done()
+                    checkpoint.set()
                 return native_write(data)
 
             with (
@@ -5243,7 +5270,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, 'Answer the genuine user turn.')
                 await asyncio.wait_for(checkpoint.wait(), 5)
-                self.assertEqual(ordinary_writes, 0, 'Ordinary worker request preceded preparation completion')
+                self.assertEqual(ordinary_writes, 0, 'Ordinary worker request preceded session readiness')
+                self.assertFalse(session_ready.done())
                 self.assertFalse(preparation.done())
                 self.assertFalse(release.is_set())
                 self.assertEqual(len(brain.requests), 1)
@@ -5251,7 +5279,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(committed.empty())
 
                 release.set()
-                await asyncio.wait_for(asyncio.shield(preparation), 5)
+                await asyncio.wait_for(asyncio.shield(session_ready), 5)
                 self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Actual caller reply.')
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Actual caller reply.')
                 self.assertTrue(spoken.empty())
@@ -5985,7 +6013,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertFalse(request.get('tools'))
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory'})
         self.assertIn(
             'Kestrel handles the exact spoken command mute locally. You cannot invoke that action; '
             'for a request to mute, explain that the owner must say mute on its own.',
@@ -6586,8 +6614,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         ]
         for name, ready, response in cases:
             with self.subTest(name=name):
-                wire = (f'import sys; print({ready!r}, flush=True); sys.stdin.readline(); '
-                        f'print({response!r}, flush=True); sys.stdin.read()')
+                wire = f'import json, sys; print({ready!r}, flush=True); '
+                if name != 'wrong ready type':
+                    wire += ("assert json.loads(sys.stdin.readline()) == {'begin': True}; "
+                             "print('{\"session_ready\":true}', flush=True); ")
+                wire += f'sys.stdin.readline(); print({response!r}, flush=True); sys.stdin.read()'
                 transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
                 try:
                     self.assertTrue(spoken.empty(), 'Even corrupt startup must not speak first')
@@ -6661,7 +6692,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_engine_turn_timeout_speaks_failure_and_reaps_worker(self):
         for interrupt in (False, True):
             with self.subTest(interrupted=interrupt), patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
-                wire = ("import sys; print('{\"ready\":true}', flush=True); sys.stdin.readline(); "
+                wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
+                        "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
+                        "print('{\"session_ready\":true}', flush=True); sys.stdin.readline(); "
                         + ("print('{\"delivery\":\"neutral\"}', flush=True); print('{\"text\":\"One fact. Unheard continuation\"}', flush=True); " if interrupt else '')
                         + 'sys.stdin.read()')
                 transport, spoken, committed, interrupted, processes, close = await asyncio.wait_for(
@@ -6756,7 +6789,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unclosed_code_cannot_hide_engine_failure(self):
         response = '{"delivery":"neutral"}\n{"text":"```python\\nHidden. More."}\n{"done":1}'
-        wire = ('import sys; print(\'{"ready":true}\', flush=True); sys.stdin.readline(); '
+        wire = ('import json, sys; print(\'{"ready":true}\', flush=True); '
+                "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
+                "print('{\"session_ready\":true}', flush=True); sys.stdin.readline(); "
                 f'print({response!r}, flush=True); sys.stdin.read()')
         transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
         try:
@@ -6798,15 +6833,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_tts = bot.VoxCPMTTS
         worker_requests = []
 
-        def create_tts(voice, preset):
-            tts = native_tts(voice, preset)
+        def create_tts(voice, preset, *, generation_lock=None, admitted=lambda: True):
+            tts = native_tts(voice, preset, generation_lock=generation_lock, admitted=admitted)
             native_run_tts = tts.run_tts
             first_stream = True
 
             async def gated_tts(text, context_id):
                 nonlocal first_stream
-                hold = first_stream
-                first_stream = False
+                hold = first_stream and context_id != 'warmup'
+                if context_id != 'warmup':
+                    first_stream = False
                 stream = native_run_tts(text, context_id)
                 try:
                     async for frame in stream:
