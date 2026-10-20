@@ -78,7 +78,7 @@ each thing stay in the homes listed under "Where the rules live".
 
 | Layer | What it holds | Who changes it |
 |---|---|---|
-| The factory | The files `.agents/factory-manifest.json` lists: the contract, skills, seat charters, hooks and checks | Nobody in an adopting repository: a sync or a release update replaces them, and each is checked against its fingerprint |
+| The factory | The files `.agents/factory-manifest.json` lists: the contract, skills, seat charters, hooks and checks | Nobody in an adopting repository: a release update replaces them, and each is checked against its fingerprint |
 | What setup chooses | The settings file `.agents/factory-settings.json`, which names the runtimes and records each yes the repository gave, a `crossFamilyReview` yes included, and the documents an install or the `fabraik-setup` skill writes for the repository | The repository: setup writes them once, and a person edits them afterwards |
 | What stays yours | Each person's own home instructions and settings for a runtime | The person: an install never reads, copies or changes them |
 
@@ -94,8 +94,26 @@ prompt. Claude Code's shared allow list includes `Bash(git worktree add .claude/
 receive configuration approval without auto mode's classifier judgment. For plainly written commands, the
 `block-unsafe-git` hook refuses branch resets, force flags, paths that escape the worktrees folder and forms it cannot
 read. The hook reads command text; it does not inspect extra arguments supplied from input by a wrapper such as
-`xargs`. Other commands,
-the Codex command line included, follow Claude Code's runtime mode and permissions, including a person's own settings.
+`xargs`.
+
+Closeout's cleanup-specific automatic approval comes from the active trusted root hook, with no static cleanup
+allowance. Only the plain command forms in [closeout step 5](../.agents/skills/closeout/SKILL.md) qualify after root
+validation; a recognized direct relative call from an untrusted checkout is refused before its helper loads.
+Unsupported forms outside that denial, including an absolute verifier-helper path, receive ordinary runtime review.
+[The enforcement guide](AI-WORKFLOW-enforcement.md#how-it-works) explains the hook's identity checks and assumptions.
+Individual `git worktree remove`, `git branch -d` and `rm` commands keep their existing permissions. The session still
+verifies job identity, target ownership and disposability, and follows delivery and merge approval steps. An issue
+number or path does not establish ownership; the helper checks removal safety and reports any retention.
+
+The job form, `node scripts/closeout-cleanup.mjs <issue>`, accepts optional `--pr` with a canonical
+`https://github.com/<owner>/<repository>/pull/<number>` address. Ordinary branch deletion runs first. With that option,
+the helper can delete the exact verified merged head after Git's not-fully-merged refusal, only when all applicable
+cleanup checks completed and no other target is retained. The [closeout skill](../.agents/skills/closeout/SKILL.md)
+owns the proof and rechecks. Remote branch removal belongs to the existing
+`gh pr merge --auto --squash --delete-branch` delivery command; the helper removes only the local branch. The unusual
+pre-squash backup exception remains a separate procedure in the skill.
+
+Other commands, the Codex command line included, follow Claude Code's runtime mode and permissions, including a person's own settings.
 Codex asks as its sandbox and approval policy decide, a network request included. The operating system may ask as well,
 for example before a program reaches a protected folder. Each prompt is answered where it appears, and the yes recorded
 in the settings file stands apart from push authorisation too.
@@ -104,14 +122,16 @@ in the settings file stands apart from push authorisation too.
 
 - [`AGENTS.md`](../AGENTS.md) under "Runtime notes": which file each runtime reads, and how the vendored skills
   are refreshed.
-- [`.claude/settings.json`](../.claude/settings.json) and [`.codex/hooks.json`](../.codex/hooks.json): which hook
-  runs on which event, and the Windows form of each Codex hook command.
+- [`.claude/settings.json`](../.claude/settings.json) and [`.codex/hooks.json`](../.codex/hooks.json): Claude Code's
+  shared allowances, which hook runs on which event, and the Windows form of each Codex hook command.
+- [The `closeout` skill](../.agents/skills/closeout/SKILL.md): scratch provenance, the checked cleanup command and
+  the exact branch exceptions.
 - [The head of `scripts/lib/codex-hooks-windows.test.mjs`](../scripts/lib/codex-hooks-windows.test.mjs): how each
   Windows form keeps a block a block.
 - [The `resume` skill](../.agents/skills/resume/SKILL.md) under "Before intake": how a session checks that its hooks
   are running, and what the owner does when they are not.
 - [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): which suites run on which platform.
-- [The `sync-job` skill](../.agents/skills/sync-job/SKILL.md): how a repository names its runtimes, and which files
+- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md): how a repository names its runtimes, and which files
   each owns.
 - [The `resume` skill](../.agents/skills/resume/SKILL.md) under "6. Verify and review": how a session reads the
   recorded cross-family authorization, what it asks where none is recorded, and that the authorization answers no
@@ -128,17 +148,22 @@ in the settings file stands apart from push authorisation too.
 - **A runtime has not trusted the hooks.** A hook file a runtime has not trusted does not run. A session checks
   for this when it starts and tells the owner; [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the
   check and the remedy under "Before intake".
-- **A file of a runtime the repository does not run is in the tree.** The contract test refuses it by path. Remove it,
-  or name the runtime in the settings file and sync.
+- **A file of a runtime the repository does not run is in the tree.** The contract test refuses it by path. Remove it;
+  the runtimes are chosen at install, and a release update refuses a change to them.
 - **A session asks about cross-family review though the owner already said yes.** The yes counts only as
   `"crossFamilyReview": true` in `.agents/factory-settings.json` on `main`. A yes given in an earlier job's conversation, a
   home setting or a settings file naming both runtimes without the key records nothing, so the session asks once per
   job until the key is added and merged.
 - **A prompt appears although the owner authorized cross-family review.** The authorization answers no permission
-  prompt. Claude Code's shared rule approves matching job starts under `.claude/worktrees/`; the command-text guard
-  has the limits described above. Other commands follow its runtime mode and permissions, including a person's own
-  settings.
-  Codex and the operating system each ask on their own rules.
+  prompt. Claude Code's shared rules approve matching job starts under `.claude/worktrees/` and the checked cleanup
+  helper; the command-text guard has the limits described above. Other commands follow its runtime mode and permissions,
+  including a person's own settings. Codex and the operating system each ask on their own rules.
+- **Cleanup retains a target despite its allowance.** Configuration approval does not establish ownership or remove a
+  safety check. When the merged-head exception is needed, missing credentials or unavailable merge proof keep the
+  branch; unsupported platforms, unverifiable process use or failed Docker filesystem proof retain affected targets.
+  An untrusted checkout or inactive hooks still needs the
+  runtime trust and hook checks above. A retained target or runtime refusal is reported with its reason; the allowance
+  makes no promise that every platform or target can complete cleanup without intervention.
 
 ## Key files
 

@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { delimiter, dirname, join, parse } from 'node:path';
+import { delimiter, dirname, join, parse, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -21,9 +21,16 @@ import { runCommand } from './closeout-cleanup.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { main } from '../closeout-cleanup.mjs';
 
-const USAGE = 'usage: node scripts/closeout-cleanup.mjs <issue> [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...';
+const USAGE = 'usage: node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...';
 const GIT = { command: 'git', env: { GIT_TERMINAL_PROMPT: '0' } };
 const HEAD = '1'.repeat(40);
+const MERGE = '2'.repeat(40);
+const MAIN = '3'.repeat(40);
+const PR_URL = 'https://github.com/example/workflow/pull/42';
+const NOT_MERGED = "error: the branch 'job/23' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D job/23'\nhint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n";
+const PR_FIELDS = 'state,mergedAt,mergeCommit,headRefName,headRefOid,isCrossRepository,baseRefName,url';
+const mergedPr = () => ({ state: 'MERGED', mergedAt: '2026-10-18T10:00:00Z', mergeCommit: { oid: MERGE },
+  headRefName: 'job/23', headRefOid: HEAD, isCrossRepository: false, baseRefName: 'main', url: PR_URL });
 const reply = (status, stdout = '', stderr = '') => ({ status, stdout, stderr });
 
 const PROOF_HOST = 'unix:///tmp/proof.sock';
@@ -112,7 +119,19 @@ function scenario(t) {
   const answer = (name, args, options) => {
     const key = args.join(' ');
     if (name === 'git') {
-      assert.equal(options.env, GIT.env, `git ran without the seam's environment: ${key}`);
+      if (state.pr && key === 'branch -d job/23') assert.deepEqual(options.env, { ...GIT.env, LC_ALL: 'C' });
+      else assert.equal(options.env, GIT.env, `git ran without the seam's environment: ${key}`);
+      if (state.pr) {
+        if (key === 'remote get-url origin') return state.origin ?? reply(0, 'https://github.com/example/workflow.git\n');
+        if (key === 'rev-parse --verify --quiet refs/remotes/origin/main') return state.main ?? reply(0, `${MAIN}\n`);
+        if (key === `merge-base --is-ancestor ${MERGE} ${MAIN}`) return state.ancestor ?? reply(0);
+        if (key === 'rev-parse --verify refs/heads/job/23') return state.tip?.() ?? reply(0, `${HEAD}\n`);
+        if (key === 'branch -D -- job/23') {
+          if (state.force) return state.force;
+          state.branch = false;
+          return reply(0);
+        }
+      }
       if (key === 'worktree list --porcelain -z') return state.worktreeList ?? reply(0, worktreeListing(state.records));
       if (key === 'rev-parse --verify --quiet refs/heads/job/23') return state.branch ? reply(0, `${HEAD}\n`) : reply(1);
       if (key === `-C ${worktree} status --porcelain -z --untracked-files=normal --ignored=matching`) {
@@ -121,6 +140,7 @@ function scenario(t) {
       }
       if (key === `-C ${worktree} ls-files -v -z`) {
         assert.deepEqual(args, ['-C', worktree, 'ls-files', '-v', '-z']);
+        state.onIndex?.();
         return state.index;
       }
       if (args.length === 7 && args[0] === '--literal-pathspecs' && args[1] === '-C' &&
@@ -136,10 +156,16 @@ function scenario(t) {
         return reply(0);
       }
       if (key === 'branch -d job/23') {
+        if (state.deletion) return state.deletion;
         if (state.branchRefusal) return reply(1, '', state.branchRefusal);
         state.branch = false;
         return reply(0, 'Deleted branch job/23 (was 1111111).\n');
       }
+    }
+    if (name === 'gh' && state.pr) {
+      assert.deepEqual(args, ['pr', 'view', '42', '--repo', 'github.com/example/workflow', '--json', PR_FIELDS]);
+      assert.equal(options.env.GH_PROMPT_DISABLED, '1');
+      return typeof state.pr === 'function' ? state.pr() : state.pr;
     }
     if (name === 'docker') {
       assert.equal(options.env.DOCKER_HOST, undefined);
@@ -647,7 +673,10 @@ test('a modified, an untracked or an unnamed ignored entry retains the worktree'
   for (const [status, listed] of [[' M tracked.txt\0', ' M tracked.txt'], ['?? new.txt\0', '?? new.txt'], ['!! node_modules/\0!! .env\0', '!! .env']]) {
     const s = scenario(t);
     s.state.status = status;
-    if (listed === '!! .env') mkdirSync(join(s.worktree, 'node_modules'));
+    if (listed === '!! .env') {
+      mkdirSync(join(s.worktree, 'node_modules'));
+      placeFile(join(s.worktree, '.env'));
+    }
     assertWorktreeRetained(s, await s.cleanup(['23', '--regenerated', 'node_modules']), `git status lists "${listed}"`);
   }
 });
@@ -688,6 +717,75 @@ test('a named regenerated directory is removed with the worktree, a named ignore
   placeFile(join(file.worktree, '.env'));
   file.state.status = '!! .env\0';
   assertWorktreeRetained(file, await file.cleanup(['23', '--regenerated', '.env']), 'git status lists "!! .env"');
+});
+
+test('ANTI-REGRESSION: unsafe ignored-link observations retain the worktree', { skip: SKIP_POSIX }, async (t) => {
+  for (const name of ['absent', 'dangling', 'looping', 'inside target', 'symlink parent', 'unresolvable other checkout']) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const sentinel = placeFile(join(s.root, 'outside', 'sentinel'));
+      let path = 'link';
+      let reason;
+      if (name === 'absent') reason = 'could not be read: ENOENT';
+      else if (name === 'dangling') {
+        symlinkSync(join(s.root, 'missing'), join(s.worktree, path));
+        reason = 'could not resolve its target: ENOENT';
+      } else if (name === 'looping') {
+        symlinkSync('link', join(s.worktree, path));
+        reason = 'could not resolve its target: ELOOP';
+      } else if (name === 'inside target') {
+        const inside = placeFile(join(s.worktree, 'inside'));
+        symlinkSync(inside, join(s.worktree, path));
+        reason = 'points inside its worktree';
+      } else if (name === 'symlink parent') {
+        symlinkSync(dirname(sentinel), join(s.worktree, 'alias'), 'dir');
+        path = 'alias/link';
+        symlinkSync(sentinel, join(s.worktree, path));
+        reason = 'has a symbolic-link parent';
+      } else {
+        const other = join(s.root, 'other-checkout');
+        symlinkSync('other-checkout', other, 'dir');
+        s.state.records.push({ path: other, detached: '' });
+        symlinkSync(sentinel, join(s.worktree, path));
+        reason = `could not resolve another linked worktree ${other}: ELOOP`;
+      }
+      s.state.status = `!! ${path}\0`;
+      assertWorktreeRetained(s, await s.cleanup(), `ignored entry ${path}: ${reason}`);
+      assertWorktreeNotRemoved(s);
+      assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+      if (name === 'inside target') assert.equal(readFileSync(join(s.worktree, 'inside'), 'utf8'), 'scratch\n');
+    });
+  }
+});
+
+test('ANTI-REGRESSION: changed ignored links retain the worktree', { skip: SKIP_POSIX }, async (t) => {
+  for (const name of ['replaced leaf', 'retargeted intermediate alias']) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      const first = placeFile(join(s.root, 'first', 'sentinel'));
+      const second = placeFile(join(s.root, 'second', 'sentinel'));
+      const alias = join(s.root, 'alias');
+      const link = join(s.worktree, 'link');
+      symlinkSync(dirname(first), alias, 'dir');
+      symlinkSync(join(alias, 'sentinel'), link);
+      s.state.status = '!! link\0';
+      s.state.onIndex = () => {
+        if (name === 'replaced leaf') {
+          rmSync(link);
+          writeFileSync(link, 'replacement\n');
+        } else {
+          rmSync(alias);
+          symlinkSync(dirname(second), alias, 'dir');
+        }
+      };
+      assertWorktreeRetained(s, await s.cleanup(), 'ignored link link: changed during the checks');
+      assertWorktreeNotRemoved(s);
+      assert.equal(readFileSync(first, 'utf8'), 'scratch\n');
+      assert.equal(readFileSync(second, 'utf8'), 'scratch\n');
+      if (name === 'replaced leaf') assert.equal(readFileSync(link, 'utf8'), 'replacement\n');
+      else assert.equal(lstatSync(link).isSymbolicLink(), true);
+    });
+  }
 });
 
 test('ANTI-REGRESSION: regenerated directory descendants preserve the directory-only boundary', { skip: SKIP_POSIX }, async (t) => {
@@ -793,6 +891,131 @@ test('a refused branch delete is reported and never forced', { skip: SKIP_POSIX 
   });
   assert.deepEqual(s.calls.filter(([name, verb]) => name === 'git' && verb === 'branch'), [['git', 'branch', '-d', 'job/23']]);
   assert.deepEqual(s.unexpected, []);
+});
+
+test('ANTI-REGRESSION: merged PR cleanup authorizes the exact job branch', { skip: SKIP_POSIX }, async (t) => {
+  // Released C-locale messages: git/git v2.42.0 and v2.43.0 builtin/branch.c;
+  // v2.44.0 builtin/branch.c + advice.c; v2.50.1 advice.c.
+  const releasedRefusals = [
+    ['Git 2.42 two-line refusal', "error: The branch 'job/23' is not fully merged.\nIf you are sure you want to delete it, run 'git branch -D job/23'.\n"],
+    ['Git 2.43 two-line refusal', "error: the branch 'job/23' is not fully merged.\nIf you are sure you want to delete it, run 'git branch -D job/23'\n"],
+    ['Git 2.44 default advice', "error: the branch 'job/23' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D job/23'\nhint: Disable this message with \"git config advice.forceDeleteBranch false\"\n"],
+    ['modern default advice with config set', NOT_MERGED],
+    ['modern advice explicitly enabled', "error: the branch 'job/23' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D job/23'\n"],
+    ['modern advice disabled', "error: the branch 'job/23' is not fully merged\n"],
+  ];
+  for (const [name, origin, absent, refusal = NOT_MERGED] of [
+    ['HTTPS origin', 'https://github.com/example/workflow.git', false],
+    ['scp SSH origin', 'git@github.com:example/workflow.git', false],
+    ['SSH URL origin', 'ssh://git@github.com/example/workflow', false],
+    ['absent worktree', 'https://github.com/example/workflow', true],
+    ...releasedRefusals.map(([name, refusal]) => [name, 'https://github.com/example/workflow.git', false, refusal]),
+  ]) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      s.state.pr = reply(0, JSON.stringify(mergedPr()));
+      s.state.origin = reply(0, `${origin}\n`);
+      s.state.branchRefusal = refusal;
+      if (absent) s.state.records.pop();
+      const result = await s.cleanup(['23', '--pr', PR_URL]);
+      assert.equal(result.exitCode, 0, JSON.stringify(result));
+      assert.equal(s.state.branch, false);
+      assert.deepEqual(s.calls.filter(([name, command]) => name === 'git' && command === 'branch'), [
+        ['git', 'branch', '-d', 'job/23'], ['git', 'branch', '-D', '--', 'job/23'],
+      ]);
+      assert.match(result.out.join('\n'), /verified merged PR exception/);
+      assert.equal(result.out.at(-1), `closeout-cleanup: ${absent ? 1 : 2} removed, 0 retained`);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test('ANTI-REGRESSION: merged PR cleanup rejects invalid proof', { skip: SKIP_POSIX }, async (t) => {
+  const invalidUrls = [
+    'http://github.com/example/workflow/pull/42', 'https://elsewhere.invalid/example/workflow/pull/42',
+    'https://user@github.com/example/workflow/pull/42', 'https://user:secret@github.com/example/workflow/pull/42',
+    'https://github.com:443/example/workflow/pull/42', `${PR_URL}?x=1`, `${PR_URL}#x`, `${PR_URL}/`,
+    'https://github.com/example/workflow/pull/0', 'https://github.com/example/workflow/pull/042',
+    'https://github.com/example/workflow/issues/42', 'https://github.com/example/../workflow/pull/42',
+    'https://github.com/example/work%66low/pull/42', 'https://GITHUB.COM/example/workflow/pull/42',
+  ];
+  const invalidArgs = [
+    ...invalidUrls.map((url) => ['23', '--pr', url]),
+    ['23', '--pr'], ['23', '--pr', PR_URL, '--pr', PR_URL], ['--check', '/tmp', '--pr', PR_URL],
+  ];
+  for (const [index, args] of invalidArgs.entries()) {
+    await t.test(`invalid PR argument ${index + 1}`, async (t) => {
+      const s = scenario(t);
+      assert.equal((await s.cleanup(args)).exitCode, 2);
+      assert.deepEqual(s.calls, []);
+      assert.equal(s.state.branch, true);
+    });
+  }
+  const metadata = [
+    ['missing URL', { url: undefined }], ['foreign URL', { url: 'https://github.com/other/repo/pull/42' }],
+    ['open PR', { state: 'OPEN' }], ['cross repository', { isCrossRepository: true }],
+    ['missing repository kind', { isCrossRepository: undefined }], ['wrong branch', { headRefName: 'job/24' }],
+    ['wrong base', { baseRefName: 'develop' }], ['wrong head', { headRefOid: MAIN }],
+    ['short head', { headRefOid: '1111111' }], ['nonstring head', { headRefOid: 111 }],
+    ['missing merge commit', { mergeCommit: null }], ['short merge commit', { mergeCommit: { oid: '2222222' } }],
+    ['nonstring merge commit', { mergeCommit: { oid: 222 } }], ['missing timestamp', { mergedAt: null }],
+    ['unparseable timestamp', { mergedAt: 'not a date' }], ['invalid calendar timestamp', { mergedAt: '2026-02-30T10:00:00Z' }],
+    ['nonstring state', { state: { MERGED: true } }], ['nonboolean repository kind', { isCrossRepository: 'false' }],
+  ].map(([name, change]) => [name, (s) => { s.state.pr = reply(0, JSON.stringify({ ...mergedPr(), ...change })); }]);
+  const cases = [
+    ['absent opt-in', (s) => { s.args = ['23']; s.state.pr = null; }],
+    ['wrong origin', (s) => { s.state.origin = reply(0, 'https://github.com/other/workflow.git\n'); }],
+    ['unsupported origin', (s) => { s.state.origin = reply(0, 'file:///tmp/workflow\n'); }],
+    ['blank origin', (s) => { s.state.origin = reply(0, '\n'); }],
+    ['multiple origins', (s) => { s.state.origin = reply(0, 'https://github.com/example/workflow\nhttps://github.com/other/repo\n'); }],
+    ['origin unavailable', (s) => { s.state.origin = reply(1); }],
+    ['origin warning', (s) => { s.state.origin = reply(0, 'https://github.com/example/workflow\n', 'warning\n'); }],
+    ['malformed JSON', (s) => { s.state.pr = reply(0, '{secret'); }],
+    ['array metadata', (s) => { s.state.pr = reply(0, '[]'); }],
+    ['null metadata', (s) => { s.state.pr = reply(0, 'null'); }],
+    ['gh absent', (s) => { s.state.pr = { absent: true }; }],
+    ['gh failure', (s) => { s.state.pr = reply(1, '', 'secret'); }],
+    ['gh warning', (s) => { s.state.pr = reply(0, JSON.stringify(mergedPr()), 'secret'); }],
+    ['missing main', (s) => { s.state.main = reply(1); }],
+    ['malformed main', (s) => { s.state.main = reply(0, 'short\n'); }],
+    ['nonancestor merge', (s) => { s.state.ancestor = reply(1); }],
+    ['ancestry warning', (s) => { s.state.ancestor = reply(0, '', 'warning'); }],
+    ['other deletion refusal', (s) => { s.state.branchRefusal = 'error: permission denied\n'; }],
+    ['invented lowercase advice with final period', (s) => { s.state.branchRefusal = "error: the branch 'job/23' is not fully merged.\nIf you are sure you want to delete it, run 'git branch -D job/23'.\n"; }],
+    ['invented period before hinted advice', (s) => { s.state.branchRefusal = "error: the branch 'job/23' is not fully merged.\nhint: If you are sure you want to delete it, run 'git branch -D job/23'\n"; }],
+    ['extra deletion error', (s) => { s.state.branchRefusal = `${NOT_MERGED}error: another failure\n`; }],
+    ['deletion output', (s) => { s.state.deletion = reply(1, 'unexpected', NOT_MERGED); }],
+    ['initial tip mismatch', (s) => { s.state.tip = () => reply(0, `${MAIN}\n`); }],
+    ['reread tip mismatch', (s) => { let reads = 0; s.state.tip = () => reply(0, `${++reads === 1 ? HEAD : MAIN}\n`); }],
+    ['occupied branch', (s) => { s.state.pr = () => { s.state.records.push({ path: s.root, branch: 'refs/heads/job/23' }); return reply(0, JSON.stringify(mergedPr())); }; }],
+    ['unreadable occupancy', (s) => { s.state.pr = () => { s.state.worktreeList = reply(0, 'unreadable'); return reply(0, JSON.stringify(mergedPr())); }; }],
+    ['Docker proof changed', (s) => { s.state.pr = () => { s.state.native.stat = reply(1); return reply(0, JSON.stringify(mergedPr())); }; }],
+    ['Docker failure', (s) => { s.state.metadata = reply(1); }],
+    ['process retention', (s) => { s.state.processes.push({ pid: 999, ppid: 1, args: `server ${s.worktree}` }); }],
+    ['scratch retention', (s) => { s.args.push('--scratch', s.sentinel); s.state.processes.push({ pid: 999, ppid: 1, args: `tail ${s.sentinel}` }); }],
+    ['worktree retention', (s) => { s.state.removeRefusal = 'error: worktree is locked\n'; }],
+    ['failed force', (s) => { s.state.force = reply(1); }, true],
+    ['absence readback fails', (s) => { s.state.force = reply(0); }, true],
+    ...metadata,
+  ];
+  for (const [name, configure, force = false] of cases) {
+    await t.test(name, async (t) => {
+      const s = scenario(t);
+      s.state.pr = reply(0, JSON.stringify(mergedPr()));
+      s.state.branchRefusal = NOT_MERGED;
+      s.args = ['23', '--pr', PR_URL];
+      s.sentinel = placeFile(join(s.root, 'sentinel'));
+      configure(s);
+      const result = await s.cleanup(s.args);
+      assert.equal(result.exitCode, 4, JSON.stringify(result));
+      assert.match(result.out.join('\n'), /retained branch job\/23: \S/);
+      assert.doesNotMatch(result.out.join('\n'), /secret/);
+      assert.equal(s.calls.filter((call) => call.join(' ') === 'git branch -D -- job/23').length, force ? 1 : 0);
+      assert.equal(s.state.branch, true);
+      assert.equal(readFileSync(s.sentinel, 'utf8'), 'scratch\n');
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
 });
 
 const onlyStepOne = [['git', 'worktree', 'list', '--porcelain', '-z'], ['git', 'rev-parse', '--verify', '--quiet', 'refs/heads/job/23']];
@@ -1338,7 +1561,7 @@ function cliFixture(t, docker, overrides = {}) {
       `[ "$*" = '${args.join(' ')}' ] || exit 96\nprintf '%s' '${PROOF_REPLIES[name].stdout}'\n`])]) {
     writeFileSync(join(bin, name), `#!/bin/sh\n${body}`, { mode: 0o755 });
   }
-  const cleanup = (extraEnv = {}) => spawnSync(process.execPath, [CLI, '23', '--scratch', scratch, '--regenerated', 'node_modules'], {
+  const cleanup = (extraEnv = {}, extraArgs = []) => spawnSync(process.execPath, [CLI, '23', '--scratch', scratch, '--regenerated', 'node_modules', ...extraArgs], {
     cwd: repository,
     encoding: 'utf8',
     env: { ...env, PATH: `${bin}${delimiter}${env.PATH}`, GIT_DIR: join(root, 'decoy', '.git'),
@@ -1347,8 +1570,48 @@ function cliFixture(t, docker, overrides = {}) {
   const branchStatus = () => git(['-C', repository, 'rev-parse', '--verify', '--quiet', 'refs/heads/job/23']).status;
   const registered = () => git(['-C', repository, 'worktree', 'list', '--porcelain']).stdout.includes(`worktree ${worktree}\n`);
   const dockerCalls = () => readFileSync(dockerLog, 'utf8').trim().split('\n');
-  return { worktree, scratch, cleanup, branchStatus, registered, dockerCalls, git };
+  return { repository, worktree, scratch, cleanup, branchStatus, registered, dockerCalls, git, bin };
 }
+
+test('ANTI-REGRESSION: merged PR cleanup crosses the CLI boundary', { skip: process.platform !== 'linux' && 'real Git fixture uses native Linux command fakes' }, async (t) => {
+  for (const mismatch of [false, true]) {
+    await t.test(mismatch ? 'mismatched head retains ref and sentinel' : 'squash head deletes only the authorized ref', (t) => {
+      const f = cliFixture(t, DOCKER_EMPTY);
+      const git = (...args) => {
+        const result = f.git(['-C', f.repository, ...args]);
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout.trim();
+      };
+      git('branch', '-M', 'main');
+      writeFileSync(join(f.worktree, 'kept.txt'), 'delivered squash content\n');
+      git('-C', f.worktree, 'add', '--', 'kept.txt');
+      git('-C', f.worktree, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'job changes');
+      const head = git('rev-parse', 'refs/heads/job/23');
+      git('merge', '--squash', 'job/23');
+      git('-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'squash delivery');
+      const merged = git('rev-parse', 'main');
+      assert.equal(f.git(['-C', f.repository, 'merge-base', '--is-ancestor', head, merged]).status, 1);
+      git('remote', 'add', 'origin', 'https://github.com/example/workflow.git');
+      git('update-ref', 'refs/remotes/origin/main', merged);
+      const ordinary = f.cleanup();
+      assert.equal(ordinary.status, 4, ordinary.stdout + ordinary.stderr);
+      assert.match(ordinary.stdout, /not fully merged/);
+      assert.equal(f.branchStatus(), 0);
+      assert.equal(f.registered(), false);
+      const sentinel = placeFile(join(f.repository, 'sentinel'));
+      // Only GitHub metadata is fake here; branch tips, ancestry and ordinary refusal come from real Git.
+      const proof = { ...mergedPr(), headRefOid: mismatch ? merged : head, mergeCommit: { oid: merged } };
+      writeFileSync(join(f.bin, 'gh'), `#!/bin/sh\n[ "$*" = 'pr view 42 --repo github.com/example/workflow --json ${PR_FIELDS}' ] || exit 97\n[ "$GH_PROMPT_DISABLED" = 1 ] || exit 98\nprintf '%s' '${JSON.stringify(proof)}'\n`, { mode: 0o755 });
+      const result = f.cleanup({ GH_REPO: 'hostile/other', GH_HOST: 'elsewhere.invalid' }, ['--pr', PR_URL]);
+      assert.equal(result.status, mismatch ? 4 : 0, result.stdout + result.stderr);
+      assert.equal(f.branchStatus(), mismatch ? 0 : 1);
+      assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+      if (mismatch) assert.equal(git('rev-parse', 'refs/heads/job/23'), head);
+      else assert.match(result.stdout, /verified merged PR exception/);
+      assert.equal(result.stderr, '');
+    });
+  }
+});
 
 test('the CLI removes an outside scratch file, the worktree with its regenerated directory and the branch through real git', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
   const f = cliFixture(t, DOCKER_EMPTY);
@@ -1365,6 +1628,60 @@ test('the CLI removes an outside scratch file, the worktree with its regenerated
   assert.equal(existsSync(f.scratch), false);
   assert.equal(existsSync(f.worktree), false);
   assert.equal(f.branchStatus(), 1);
+});
+
+test('ANTI-REGRESSION: ignored external links preserve targets during real Git cleanup', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
+  const f = cliFixture(t, DOCKER_EMPTY);
+  const externalFile = placeFile(join(dirname(f.repository), 'external-file'));
+  const externalDirectory = dirname(placeFile(join(dirname(f.repository), 'external-directory', 'sentinel')));
+  const sharedInstall = dirname(placeFile(join(f.repository, 'shared-install', 'sentinel')));
+  rmSync(join(f.worktree, 'node_modules'), { recursive: true });
+  const links = [
+    ['absolute-file', externalFile], ['relative-file', relative(f.worktree, externalFile)],
+    ['absolute-directory', externalDirectory], ['relative-directory', relative(f.worktree, externalDirectory)],
+    ['node_modules', sharedInstall],
+  ];
+  writeFileSync(join(f.repository, '.git', 'info', 'exclude'), links.map(([name]) => name).join('\n') + '\n');
+  for (const [name, destination] of links) symlinkSync(destination, join(f.worktree, name));
+  const status = f.git(['-C', f.worktree, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.deepEqual(status.stdout.split('\0').sort(), ['', ...links.map(([name]) => `!! ${name}`)].sort());
+  const run = f.cleanup();
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.equal(run.stderr, '');
+  assert.equal(existsSync(f.worktree), false);
+  assert.equal(f.registered(), false);
+  assert.equal(f.branchStatus(), 1);
+  for (const sentinel of [externalFile, join(externalDirectory, 'sentinel'), join(sharedInstall, 'sentinel')]) {
+    assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
+  }
+});
+
+test('ANTI-REGRESSION: ignored links into another worktree retain both worktrees', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
+  const f = cliFixture(t, DOCKER_EMPTY);
+  const other = join(dirname(f.repository), 'other-job');
+  const added = f.git(['-C', f.repository, 'worktree', 'add', '-q', '--detach', other]);
+  assert.equal(added.status, 0, added.stderr);
+  const sentinel = placeFile(join(other, 'sentinel'));
+  const alias = join(dirname(f.repository), 'other-alias');
+  symlinkSync(other, alias, 'dir');
+  rmSync(join(f.worktree, 'node_modules'), { recursive: true });
+  symlinkSync(alias, join(f.worktree, 'node_modules'), 'dir');
+  writeFileSync(join(f.repository, '.git', 'info', 'exclude'), 'node_modules\n');
+  const status = f.git(['-C', f.worktree, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching']);
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(status.stdout, '!! node_modules\0');
+  const run = f.cleanup();
+  assert.equal(run.status, 4, run.stdout + run.stderr);
+  assert.equal(run.stderr, '');
+  assert.ok(run.stdout.includes(`ignored entry node_modules: points into another linked worktree ${other}`), run.stdout);
+  assert.equal(f.registered(), true);
+  assert.equal(f.branchStatus(), 0);
+  assert.equal(lstatSync(join(f.worktree, 'node_modules')).isSymbolicLink(), true);
+  const listing = f.git(['-C', f.repository, 'worktree', 'list', '--porcelain']);
+  assert.equal(listing.status, 0, listing.stderr);
+  assert.ok(listing.stdout.includes(`worktree ${other}\n`), listing.stdout);
+  assert.equal(readFileSync(sentinel, 'utf8'), 'scratch\n');
 });
 
 test('ANTI-REGRESSION: the CLI retains ignored sibling prefixes of a regenerated directory', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {

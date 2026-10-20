@@ -160,7 +160,7 @@ esac
       executable(join(bin, 'node'), `#!/bin/sh
 printf 'node\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$*" "$PWD" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_NAMESPACE" "$NODE_TEST_CONTEXT" "$GIT_TRACE_PACKET$GIT_TRACE2_EVENT" >> "$CALLS"
 case "$*" in
-  "--test scripts/lib/*.test.mjs") exit "\${SCRIPT_STATUS:-0}" ;;
+  "--test scripts/lib/*.test.mjs"|"--test --test-concurrency=2 scripts/lib/*.test.mjs") exit "\${SCRIPT_STATUS:-0}" ;;
   *) exit 91 ;;
 esac
 `);
@@ -178,7 +178,7 @@ esac
     }
 
     if (options.eslint !== false) {
-      const eslint = join(repo, 'node_modules', '.bin', 'eslint');
+      const eslint = join(options.eslint === 'ancestor' ? scratch : repo, 'node_modules', '.bin', 'eslint');
       mkdirSync(dirname(eslint), { recursive: true });
       executable(eslint, '#!/bin/sh\nexit 0\n');
     }
@@ -206,7 +206,7 @@ esac
     const recorded = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean);
     // What the hook left behind in its temporary directory.
     const leftovers = () => readdirSync(temporary);
-    fn({ ...repository, leftovers, recorded, root: shellForm(repo), run });
+    fn({ ...repository, leftovers, recorded, nativeRoot: repo, root: shellForm(repo), run });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -223,7 +223,20 @@ test('pre-push invokes installed lint exactly once, then the script suite, from 
     const calls = recorded().map((line) => line.split('\t'));
     assert.deepEqual(calls.map(([tool, args]) => `${tool} ${args}`), [
       'npm run lint --silent',
-      'node --test scripts/lib/*.test.mjs',
+      'node --test --test-concurrency=2 scripts/lib/*.test.mjs',
+    ]);
+    assert.deepEqual(calls.map(([, , cwd]) => cwd), [root, root]);
+  });
+});
+
+test('pre-push accepts ancestor-installed ESLint before the script suite', () => {
+  withFixture({ eslint: 'ancestor' }, ({ recorded, root, run }) => {
+    const result = run();
+    assert.equal(result.status, 0, output(result));
+    const calls = recorded().map((line) => line.split('\t'));
+    assert.deepEqual(calls.map(([tool, args]) => `${tool} ${args}`), [
+      'npm run lint --silent',
+      'node --test --test-concurrency=2 scripts/lib/*.test.mjs',
     ]);
     assert.deepEqual(calls.map(([, , cwd]) => cwd), [root, root]);
   });
@@ -254,13 +267,18 @@ test('pre-push skips lint without npm but still runs the script suite', () => {
   });
 });
 
-test('pre-push skips lint without local ESLint but still runs the script suite', () => {
-  withFixture({ eslint: false }, ({ recorded, run }) => {
-    const result = run();
-    assert.equal(result.status, 0, output(result));
-    assert.match(result.stderr, /eslint not installed.*skipping lint gate/);
-    assert.deepEqual(recorded().map((line) => line.split('\t')[0]), ['node']);
-  });
+test('ANTI-REGRESSION: pre-push names a missing install before running tests', async (t) => {
+  for (const npm of [true, false]) {
+    await t.test(npm ? 'npm available' : 'npm absent', () => {
+      withFixture({ eslint: false, npm }, ({ nativeRoot, recorded, run }) => {
+        const result = run({ RUN_TESTS: '1' });
+        assert.equal(result.status, 1, output(result));
+        assert.equal(result.stderr, `pre-push: eslint is not installed for ${nativeRoot}; run npm install there for a first install without a lockfile, or npm ci with an existing lockfile, before pushing.\n`);
+        assert.equal(result.stdout, '');
+        assert.deepEqual(recorded(), []);
+      });
+    });
+  }
 });
 
 test('pre-push scrubs Git, nested-test, and open-ended trace variables before every gate', () => {
@@ -292,7 +310,7 @@ test('pre-push RUN_TESTS=1 retains the optional full-test invocation', () => {
       return `${tool} ${args}`;
     }), [
       'npm run lint --silent',
-      'node --test scripts/lib/*.test.mjs',
+      'node --test --test-concurrency=2 scripts/lib/*.test.mjs',
       'npm test',
     ]);
   });
@@ -331,7 +349,7 @@ test('pre-push proceeds when the product gate on the remote main admits a push t
     assert.deepEqual(gate, ['gate', `${mainSha} ${pushedSha}`, 'main', pushedTree, toplevel]);
     assert.deepEqual(later.map(([tool, args]) => `${tool} ${args}`), [
       'npm run lint --silent',
-      'node --test scripts/lib/*.test.mjs',
+      'node --test --test-concurrency=2 scripts/lib/*.test.mjs',
     ]);
     // The gate alone is handed the repository's two directories: lint and the suite must see neither.
     for (const [tool, , , gitDir, workTree] of later) assert.deepEqual([gitDir, workTree], ['', ''], tool);

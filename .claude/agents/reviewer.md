@@ -64,8 +64,10 @@ Lenses:
 **Output contract:** one parseable JSON object with `findings` ranked most-severe first (`file`, `line`,
 `verdict` `CONFIRMED`|`PLAUSIBLE`, `lens` `correctness`|`honesty`|`quality`|`canon`|`constraint`|`evidence`|`spec`,
 `summary`, `failure_scenario`) and `dismissed` (each refuted candidate with its reason). A clean review uses
-`"findings": []` and still lists every refuted candidate. If a change widens a surface in the Surfaces
-table's `security review` row, add a `constraint` finding whose summary says `needs security-reviewer`.
+`"findings": []` and still lists every refuted candidate. Add a `constraint` finding whose summary says
+`needs security-reviewer` only when a change widens or loosens a surface in the Surfaces table's `security review`
+row: never for a change that only adds refusals, and never when the dispatch names a security pass as in hand or
+the pull request body records one already run.
 
 Rules:
 - **Scale the search to the diff.** Read what the change touched and what the change can break, judge every

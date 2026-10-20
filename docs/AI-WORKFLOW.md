@@ -5,6 +5,12 @@ whether a finished change may ship. A repository may turn on a third: whether th
 Everything else between those decisions is done by agents, checked by tests and reviews the agents cannot skip, and
 recorded where the owner can read it without reading code.
 
+The workflow is pro-code: what it builds is ordinary source code in a git repository, with its own architecture,
+tests, version history and review, which developers with repository access can read, run and extend. It serves
+owners who are developers and owners who are not. Every decision reaches the owner in plain language, so steering the
+work never depends on reading a diff, and a developer owner can read every diff as well. Plain language changes who
+can steer the work, not how it is engineered: the same plans, standards, tests and reviews apply whoever the owner is.
+
 These pages explain that workflow to someone who has never opened the repository: what the pieces are, how a change
 moves through them, what is enforced by a machine and what is only instructed by a sentence, and which parts transfer to
 another product. This page is the front page: it maps the whole, states the rules that hold everywhere, and routes each
@@ -88,9 +94,93 @@ overstates what was verified. The workflow is built around three answers to that
   how much is unknown, how bad a plausible defect would be, and how strongly tests can catch a weak
   implementation. A bounded builder takes work with no remaining judgment; remaining judgment is resolved in
   the plan or the slice is split, never absorbed by the session editing directly. Cost breaks ties only between
-  equally reliable routes.
+  equally reliable routes. The costliest models are kept to the few seats [`AGENTS.md`](../AGENTS.md) names under
+  "Runtime notes", and the seats that locate code or make mechanical edits run on cheaper models, as
+  [The seats](AI-WORKFLOW-seats.md) shows, so expensive capability is spent where judgment remains. That economy is
+  intended, not measured: the workflow's documents record no measurement of the cost it saves or of equal quality at
+  lower cost.
 - **Treat evidence honestly.** A green check proves only what that check covers. A review with no comments is
   not a completed review. Missing evidence is reported as unavailable, never converted to a pass or a zero.
+
+### From requirements to maintenance
+
+The workflow covers the life of the code, not only one change, and each stage leaves a record the next one reads:
+the spec, the cards and their acceptance criteria, the plan, the commits and the recorded evidence.
+
+- **Requirements.** When an idea needs requirements discovery, the owner can invoke
+  [the `grill-me` skill](../.agents/skills/grill-me/SKILL.md). It asks, round by round, every question that can be
+  answered so far, each with a recommended answer, until the owner confirms a shared understanding. The agent looks
+  facts up itself and leaves every product decision to the owner.
+  [The `to-spec` skill](../.agents/skills/to-spec/SKILL.md) then writes the spec from that conversation without a
+  second interview. Throughout, the owner is asked about outcomes: what the product should do, what should happen
+  when something fails and which trade-offs are acceptable, each through a concrete example with a recommended
+  answer. The agents decide where the tests sit and what the design must change, and record both in the spec, so the
+  owner judges outcomes, never code. The spec is as long as its agreed scope needs, with no target number of user
+  stories: it is complete when it covers every agreed outcome, what should happen when something fails and every
+  real edge case, so a small request makes a short spec, a large one keeps every story it needs, and nothing agreed
+  is left out. [The `to-issues` skill](../.agents/skills/to-issues/SKILL.md) holds these rules under
+  "Specification entry", and cuts the spec into thin vertical slices, each demonstrable on its own and sized to one
+  bounded build; the owner approves the breakdown before any card is filed.
+  A single bug or idea can instead be captured as one card through the same `to-issues` approval.
+  [docs/ISSUE-TRACKER.md](ISSUE-TRACKER.md) says where the spec and its cards are kept.
+- **Delivery.** The owner picks a card at work-pick. The agents plan it, with an architect and an independent plan
+  review where [the `resume` skill](../.agents/skills/resume/SKILL.md) calls for them under "4. Plan", build it in
+  bounded slices, verify it, review the final tree, repair what the review finds, and deliver it on the owner's push
+  authorisation; [The life of one change](AI-WORKFLOW-job.md) follows it stage by stage.
+- **Maintenance.** Each new feature is planned and reviewed against the same standing documents as the last, as the
+  next section explains. When the owner chooses,
+  [the `improve-codebase-architecture` skill](../.agents/skills/improve-codebase-architecture/SKILL.md) looks for
+  structure that makes the code hard to test or to navigate, weighting the areas recent commits keep returning to
+  unless the owner names one. It presents each candidate with the problem, the proposed change, its benefits and how
+  strongly it is recommended, names a top recommendation and asks which to explore, so the owner chooses among
+  explained options without having to design the architecture. Nothing schedules it and no delivery stage requires
+  it; [the `diagnosing-bugs` skill](../.agents/skills/diagnosing-bugs/SKILL.md) recommends it to the owner when a
+  bug has no good place for a test or its cause is architectural.
+
+### How focused work stays coherent
+
+Each working context is kept to one task, so that it holds what that task needs rather than the whole job. The
+mechanisms below hold the narrow pieces together, and each has a cost.
+
+- **Durable records carry continuity.** A seat has a narrow charter, a builder receives one slice, and discovery
+  wider than a couple of files goes to the `explorer` seat so that its conclusion, not its file listings, reaches the
+  session; [`AGENTS.md`](../AGENTS.md) sets this out under "Runtime notes". What a later context needs is kept
+  outside any one context: the card and its acceptance criteria, the spec, the plan, the code and its history in
+  git, and the recorded evidence. Narrow contexts are not lossless. A handoff carries only what its writer put in
+  it: the handoff hook checks that each labelled line is present and filled, not that it is right, and a builder
+  that meets a decision the plan left open stops and asks, as [The seats](AI-WORKFLOW-seats.md) describes. A
+  context compaction can drop detail, which is why [`AGENTS.md`](../AGENTS.md) names under "Compact instructions"
+  what a summary keeps and, under "Owner gates", asks again for an approval whose question is no longer in view.
+  Whether a slice fits one context is a judgment the plan makes, not a measured length limit, and the cost of narrow
+  contexts is more handoffs, each a place where information can be lost.
+- **Persistent standards carry consistency.** [The coding standards](CODING-STANDARDS.md),
+  [the testing strategy](TESTING-STRATEGY.md) and, where the project has a user interface,
+  [the design system](DESIGN-SYSTEM.md) are standing documents that plans, builds and reviews are held to, so
+  naming, structure, evidence and interface patterns carry from one feature to the next without depending on any
+  session remembering earlier work. [`AGENTS.md`](../AGENTS.md) says under "Coding standards and the executed test
+  bar" which seats read them; they enter at planning because a builder cannot change a plan once it arrives. They
+  cost upkeep, and they help only as far as plans and reviews apply them.
+- **Independent review challenges what a writer cannot see.** The writer of a plan or a change is poorly placed to
+  find its plausible mistakes, and a writer's own model family shares its blind spots. A plan-first card's plan gets
+  a read-only review before any build, and at the `code` and `sign-off` tiers the final tree is reviewed by the
+  model family that did not write it. That reviewer derives the claims from the card and the final diff before it
+  reads the evidence the plan selected, as [the testing strategy](TESTING-STRATEGY.md) says under "4. Construction
+  modes", so a detail a handoff lost, or an assumption the writer and the plan shared, can still surface. Where a
+  repository has turned [the external review add-on](#the-external-review-add-on) on, a `sign-off` change also
+  follows that add-on's review route. The `greptile` skill, reached through
+  [the review instructions](../.agents/skills/resume/SKILL.md#6-verify-and-review), defines how to settle a completed
+  review or record an `UNAVAILABLE` outcome. Verified allowance exhaustion can skip the request; a recorded provider
+  failure can leave an attempted review unavailable. Review lowers the chance that such a mistake ships; it does
+  not remove it. A reviewer can miss a defect. When the other family is unavailable, when the owner declines to
+  authorize sending it the code, diff, plan and card, or when the repository runs one runtime, the same review charter
+  runs on the writer's own family and the pull request body declares it, as
+  [the `resume` skill](../.agents/skills/resume/SKILL.md) says under "6. Verify and review". Every review pass costs
+  model usage and time.
+
+These are design intent, recorded with their reasons and costs. They do not guarantee correct or secure code,
+lossless context or lower cost, and the workflow's documents record no measurement of context retention, model
+cost or review yield against another way of working; [The evidence bar](AI-WORKFLOW-evidence.md) explains what a
+passing check can and cannot show.
 
 ## The rules that hold everywhere
 
@@ -117,11 +207,11 @@ fills that table with its own highest-consequence invariants and with its own an
 The workflow itself travels as the files `.agents/factory-manifest.json` lists. A repository carries every one of them
 except those its settings file leaves out: the files of a runtime it does not name, the external review add-on unless it
 turns that on, and the `sweep-scope` check where it turns the documentation sweep off. [`AGENTS.md`](../AGENTS.md) owns
-where they are authored and when a sync card is opened, under "Shared workflow adoption";
-[the `sync-job` skill](../.agents/skills/sync-job/SKILL.md) owns how they are fingerprinted, pinned and kept, how a
-repository overrides a seat's settings, how its settings file leaves files out, what a repository needs before it runs
-the workflow, how a sync job runs and which cards it covers; and
-[the head of `scripts/factory-sync.mjs`](../scripts/factory-sync.mjs) owns its commands and exit codes.
+where they are authored and how they reach another repository, under "Shared workflow adoption";
+[the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) owns how they are fingerprinted, pinned and kept, how
+a repository overrides a seat's settings, how its settings file leaves files out and what a repository needs before it
+runs the workflow; and [the head of `scripts/factory-sync.mjs`](../scripts/factory-sync.mjs) owns its commands and exit
+codes.
 
 Where the answer to a question lives, the board, git or a document, is set out in [`AGENTS.md`](../AGENTS.md) under
 "Sources of truth".
@@ -133,6 +223,7 @@ a claim that work is next is checked against the board.
 | If you want to know | Read |
 |---|---|
 | What the owner decides, and when | [The map](#the-map) above, then [`AGENTS.md`](../AGENTS.md) under "Owner gates" |
+| Whom the workflow serves, and why its parts work together from requirements to maintenance | The opening of this page, then [Why it is shaped this way](#why-it-is-shaped-this-way) above |
 | How Claude Code and Codex share one workflow, what the factory carries, what setup chooses and what stays personal, and what changes on Windows | [Two runtimes, one contract](AI-WORKFLOW-runtimes.md) |
 | Who does what, and how work is handed from one agent to another | [The seats](AI-WORKFLOW-seats.md) |
 | How a card becomes a merged commit | [The life of one change](AI-WORKFLOW-job.md) |
@@ -140,7 +231,7 @@ a claim that work is next is checked against the board.
 | What stops an agent from skipping a check, and what is only a sentence | [Enforced or instructed](AI-WORKFLOW-enforcement.md) |
 | What counts as proof that a change works | [The evidence bar](AI-WORKFLOW-evidence.md) |
 | What a pull request description holds, and what its review line means | [The review line](#the-review-line) below |
-| How the workflow reaches another repository | [`AGENTS.md`](../AGENTS.md) under "Shared workflow adoption", then the [`sync-job`](../.agents/skills/sync-job/SKILL.md) skill |
+| How the workflow reaches another repository | [`AGENTS.md`](../AGENTS.md) under "Shared workflow adoption", then the [`shared-files`](../.agents/skills/shared-files/SKILL.md) skill |
 | What is true of one repository alone: its product, own facts, grounding authorities and conventions | [`.agents/REPOSITORY.md`](../.agents/REPOSITORY.md) |
 | What happens to a file, worktree or branch another job left behind | [Leftover rule](../.agents/skills/closeout/SKILL.md#leftover-rule) in the `closeout` skill; [`AGENTS.md`](../AGENTS.md) under "Owner gates" for the authority to delete one |
 | The exact steps of a job | The [`resume`](../.agents/skills/resume/SKILL.md) and [`closeout`](../.agents/skills/closeout/SKILL.md) skills, and, in a repository that has turned [the external review add-on](#the-external-review-add-on) on, that add-on's own skill |
@@ -175,16 +266,18 @@ add-on](#the-external-review-add-on) says below, and no other repository writes 
 or HTML comments are not review lines, and a body carrying more than one valid line is invalid.
 
 The line sits in the Review section of a body with five sections, which the session writes with the vendored `pr`
-skill. Summary shows the change as a few plain sentences beside a small picture: a diagram, a tree or a diff
-sketch. Evidence shows a before and an after, then the receipts a script wrote. Merge Danger carries the two
-answers the tier was chosen from, each with its reason; for a change whose parts answer the two questions
-differently they are the answers of the part that set the tier, named in each reason, with one sentence on what
-the other parts take. Review carries the line, then the fresh reviewer's verdict, every finding with its
-disposition, and one usage line for each reviewer pass the Usage view cannot show, as the `cross-review` skill
-specifies; raw usage blocks stay out of the body. Not done names anything skipped, deferred or uncertain. The
-skill carries a template of its own, and where it differs from `.github/pull_request_template.md` the
-repository's template wins; [the `resume` skill](../.agents/skills/resume/SKILL.md) owns that rule under
-"7. Push authorisation".
+skill. The body leads with what the owner decides on, and two collapsed sections keep the complete supporting
+evidence in the same body. Summary states the outcome in a few plain sentences, with a picture, a diagram, a tree
+or a diff sketch, only where it shows something the sentences cannot. Not done names anything skipped, deferred or
+uncertain. Merge Danger carries the two answers the tier was chosen from, each with its reason; for a change whose
+parts answer the two questions differently they are the answers of the part that set the tier, named in each
+reason, with one sentence on what the other parts take. Evidence shows a before and an after, the screenshots of
+a visual change among them, then, collapsed, the receipts a script wrote and any record of a carried receipt.
+Review carries the line and any declaration of how a review ran, then, collapsed, the fresh reviewer's verdict,
+every finding with its disposition, and one usage line for each reviewer pass the Usage view cannot show, as the
+`cross-review` skill specifies; raw usage blocks stay out of the body. The skill carries a template of its own,
+and where it differs from `.github/pull_request_template.md` the repository's template wins;
+[the `resume` skill](../.agents/skills/resume/SKILL.md) owns that rule under "7. Push authorisation".
 
 ### The external review add-on
 
@@ -194,11 +287,11 @@ pull request after the cross-family review. A repository with the add-on off car
 requests no external review and waits for none: its `sign-off` tier is the cross-family review alone, and its review
 line is the six fields above.
 
-To turn it on, the owner connects the repository to Greptile in Greptile's own dashboard, which no sync does; the
-repository then adds `"greptile": true` to its settings file and syncs, as
-[the `sync-job` skill](../.agents/skills/sync-job/SKILL.md) says. The sync installs the add-on's files: the `greptile`
-skill, which owns how a review is requested and settled, and the reviewer's configuration, which keeps Greptile to the
-reviews a session requests. [The `resume` skill](../.agents/skills/resume/SKILL.md) owns when the review runs and how a
+The add-on is chosen at install, after the owner connects the repository to Greptile in Greptile's own dashboard,
+which no install does; a release update keeps the setting and refuses a change, so changing it waits on a later release
+that supports it, as [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) says. Where it is on, the
+install writes the add-on's files: the `greptile` skill, which owns how a review is requested and settled, and the
+reviewer's configuration, which keeps Greptile to the reviews a session requests. [The `resume` skill](../.agents/skills/resume/SKILL.md) owns when the review runs and how a
 session reads the setting, under "6. Verify and review".
 
 A repository with the add-on on writes its review line with three more fields, in this order after `deferred`:

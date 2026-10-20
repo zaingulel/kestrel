@@ -8,15 +8,14 @@
 #     missing or not executable there, or that refuses, blocks the push. Other branches never consult it.
 #   * eslint — undefined reference, typo'd name, duplicate key.
 #   * the scripts/lib node:test suite — the guard scripts, board scripts and the pre-commit
-#     hook. Runs unconditionally: editing .claude/agents/ or AGENTS.md alone trips no
-#     staged-path trigger that runs it.
+#     hook. Runs on every push once the dependency prerequisite passes: editing .claude/agents/ or
+#     AGENTS.md alone trips no staged-path trigger that runs it.
 #
-# The two gates fail differently ON PURPOSE. Lint is skipped with a warning when npm or
-# the eslint binary is missing, because a fresh or partial clone must not be hard-blocked
-# and CI still lints. The script suite is invoked through `node --test` directly, NOT
-# `npm run test:scripts`, so a missing npm cannot bypass it, and it fails CLOSED on a
-# missing node: every gate this repo has is a node program, so no-node is a broken
-# checkout, not a contributor to wave through.
+# Install dependencies at the repository root before pushing: npm install for a first install
+# without a lockfile, or npm ci with an existing lockfile. Missing installed ESLint fails
+# before lint or tests. With ESLint available, missing npm skips lint with a warning. The script
+# suite is invoked through `node --test` directly, NOT `npm run test:scripts`, so missing npm cannot
+# bypass it, and it fails CLOSED on a missing node: every gate this repo has is a node program.
 #
 # The repository's `npm test` is NOT forced on every push. Opt in with RUN_TESTS=1:
 #     RUN_TESTS=1 git push
@@ -106,30 +105,31 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   judge_main "$remote_sha" "$local_sha" </dev/null || exit 1
 done
 
+# Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
+# .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
+# main checkout's.
+eslint_bin=""
+dir=$repo_root
+while :; do
+  if [ -x "$dir/node_modules/.bin/eslint" ]; then eslint_bin="$dir/node_modules/.bin/eslint"; break; fi
+  parent=$(dirname "$dir")
+  [ "$parent" = "$dir" ] && break
+  dir=$parent
+done
+if [ -z "$eslint_bin" ]; then
+  printf 'pre-push: eslint is not installed for %s; run npm install there for a first install without a lockfile, or npm ci with an existing lockfile, before pushing.\n' "$repo_root" >&2
+  exit 1
+fi
+
 if ! command -v npm >/dev/null 2>&1; then
   echo "pre-push: npm not found — skipping lint gate." >&2
 else
-  # Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
-  # .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
-  # main checkout's.
-  eslint_bin=""
-  dir=$repo_root
-  while :; do
-    if [ -x "$dir/node_modules/.bin/eslint" ]; then eslint_bin="$dir/node_modules/.bin/eslint"; break; fi
-    parent=$(dirname "$dir")
-    [ "$parent" = "$dir" ] && break
-    dir=$parent
-  done
-  if [ -z "$eslint_bin" ]; then
-    echo "pre-push: eslint not installed (run npm install) — skipping lint gate; CI will still lint." >&2
-  else
-    echo "pre-push: npm run lint…"
-    npm run lint --silent
-  fi
+  echo "pre-push: npm run lint…"
+  npm run lint --silent
 fi
 
 echo "pre-push: node --test scripts/lib/…"
-node --test "scripts/lib/*.test.mjs"
+node --test --test-concurrency=2 "scripts/lib/*.test.mjs"
 
 if [ "${RUN_TESTS:-0}" = "1" ]; then
   echo "pre-push: RUN_TESTS=1 → npm test…"

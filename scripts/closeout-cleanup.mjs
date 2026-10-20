@@ -2,7 +2,7 @@
 // closeout-cleanup.mjs — after a job's merge, removes the job's containers, named scratch, worktree and branch, each
 // only when every check passes; with --check, reads whether anything uses a path and removes nothing. Run the
 // verifier checkout's copy, never the job worktree's:
-//   node scripts/closeout-cleanup.mjs <issue> [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...
+//   node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...
 //   node scripts/closeout-cleanup.mjs --check <absolute path> [--check <absolute path>]...
 // The worktree is the one git registers for job/<issue>. `--regenerated` names an ignored directory in it that a
 // command regenerates, such as node_modules. Prints one line per target removed, retained with its reason, or
@@ -19,7 +19,7 @@ import { gitEnvironment } from './lib/factory-sync.mjs';
 import { gitExecutable } from './lib/posix-shell.mjs';
 
 const USAGE =
-  'usage: node scripts/closeout-cleanup.mjs <issue> [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...';
+  'usage: node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...';
 const CHECK_USAGE = 'usage: node scripts/closeout-cleanup.mjs --check <absolute path> [--check <absolute path>]...';
 
 function resolveGit() {

@@ -104,7 +104,7 @@ node <distribution>/scripts/fabraik.mjs check --target <setup-worktree-root>
 ```
 
 Supply `--from TAG` only when the actual originally installed release is known and the checker needs that baseline.
-A checkout hash, `syncedFrom` or an invented tag cannot establish it. Preserve the command's actual output and exit
+A checkout hash or an invented tag cannot establish it. Preserve the command's actual output and exit
 status; use the installed run-log receipt route for executed evidence. If the distribution or checker cannot be
 accessed, report verification unavailable with the missing path and remedy, never completion as verified.
 

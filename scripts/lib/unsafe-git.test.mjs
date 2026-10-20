@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, resolve, sep } from 'node:path';
-import { blockReason } from './unsafe-git.mjs';
+import { blockReason, cleanupPermission } from './unsafe-git.mjs';
 
 const REASON_CREATE = "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
 const REASON_MERGE = 'gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused';
@@ -1286,4 +1286,64 @@ test('on macOS and Linux a /c/ folder is judged as the real folder it names', ()
   assert.equal(blockReason('cd /c/Users/z/repo && git commit -m "wip"', posixCheckout(root, `${root}/.claude/worktrees/1170`)), rootReason('commit'));
   assert.equal(blockReason('cd /c/Users/z/repo/.claude/worktrees/1170 && git commit -m "wip"', posixCheckout(root, root)), '');
   assert.equal(blockReason('cd /srv/repo && git commit -m "wip"', posixCheckout('/srv/repo', '/srv/repo/.claude/worktrees/1170')), rootReason('commit'));
+});
+
+
+test('cleanup permission grants only the plain trusted-root command', () => {
+  const plain = [
+    'node scripts/closeout-cleanup.mjs',
+    'node scripts/closeout-cleanup.mjs 321 --scratch /tmp/321 --regenerated node_modules',
+    '\t node\tscripts/closeout-cleanup.mjs --pr https://github.com/o/r/pull/321 \t',
+    'node scripts/closeout-cleanup.mjs --check C:/jobs/test --flag=value_1,@+%=-',
+    'node scripts/closeout-cleanup.mjs --unknown',
+    'node scripts/closeout-cleanup.mjs --scratch',
+  ];
+  for (const command of plain) {
+    assert.equal(cleanupPermission(command, true), 'allow', command);
+    for (const untrusted of [false, undefined, null, 1, 'true', {}]) {
+      assert.equal(cleanupPermission(command, untrusted), 'deny', command);
+    }
+  }
+  const directUnsupported = [
+    'node scripts/closeout-cleanup.mjs "quoted path"',
+    "node scripts/closeout-cleanup.mjs 'quoted path'",
+    'node scripts/closeout-cleanup.mjs /tmp/کوردی',
+    'node scripts/closeout-cleanup.mjs $TARGET',
+    'node scripts/closeout-cleanup.mjs $(echo target)',
+    'node scripts/closeout-cleanup.mjs `echo target`',
+    'node scripts/closeout-cleanup.mjs a\\ b',
+    'node scripts/closeout-cleanup.mjs *',
+    'node scripts/closeout-cleanup.mjs > output',
+    'node scripts/closeout-cleanup.mjs 321; echo done',
+    'node scripts/closeout-cleanup.mjs 321 && echo done',
+    'node scripts/closeout-cleanup.mjs 321 | cat',
+    'node scripts/closeout-cleanup.mjs 321\necho done',
+    'node scripts/closeout-cleanup.mjs 321\n',
+    'node scripts/closeout-cleanup.mjs 321\r\n',
+    'node scripts/closeout-cleanup.mjs 321 # comment',
+  ];
+  for (const command of directUnsupported) {
+    assert.equal(cleanupPermission(command, true), undefined, command);
+    assert.equal(cleanupPermission(command, false), 'deny', command);
+  }
+  for (const command of [
+    undefined, null, 321, {}, [],
+    'node /root/scripts/closeout-cleanup.mjs 321',
+    'node ./scripts/closeout-cleanup.mjs 321',
+    'NODE scripts/closeout-cleanup.mjs 321',
+    '/usr/bin/node scripts/closeout-cleanup.mjs 321',
+    'node "scripts/closeout-cleanup.mjs" 321',
+    'FLAG=1 node scripts/closeout-cleanup.mjs 321',
+    'env node scripts/closeout-cleanup.mjs 321',
+    'sh -c "node scripts/closeout-cleanup.mjs 321"',
+    '(node scripts/closeout-cleanup.mjs 321)',
+    'echo $(node scripts/closeout-cleanup.mjs 321)',
+    'cd /root && node scripts/closeout-cleanup.mjs 321',
+    'node scripts/closeout-cleanup.mjs-other 321',
+    'node scripts/closeout-cleanup.mjs; echo done',
+    '\nnode scripts/closeout-cleanup.mjs 321',
+  ]) {
+    assert.equal(cleanupPermission(command, true), undefined, String(command));
+    assert.equal(cleanupPermission(command, false), undefined, String(command));
+  }
 });

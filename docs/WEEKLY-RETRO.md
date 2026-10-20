@@ -24,8 +24,8 @@ proposal is never agreed work: the owner decides each one. A local session can r
   live and to confirm it does not already exist;
 - for one candidate at a time, after ranking, only what establishes that its proposed fix is absent: for a
   sentence, the one document or skill file that would own it; for a check, the script behind the `package.json`
-  check command it would join and the one test or lint file that would hold it. These reads are never a sweep of
-  the tree.
+  check command it would join and the one test or lint file that would hold it; for a removal, the file holding
+  the work and the file holding the protection named as remaining. These reads are never a sweep of the tree.
 
 **From GitHub**, this repository only:
 
@@ -89,7 +89,7 @@ step. A run or attempt with a failed job is an occurrence, including a failed at
 a cancelled run or attempt; a cancelled run or attempt with no failed job is not. A finding dismissed as false is
 an occurrence of a false alarm, which can recur as its own problem.
 
-**Same problem.** Two occurrences are the same problem when one check or one sentence would have prevented both.
+**Same problem.** Two occurrences are the same problem when one fix would have prevented both.
 
 **Recurring.** The same problem in at least three distinct merged pull requests in the window. One pull request
 counts once however often it repeats the problem. Three is the count the machinery rule in the `resume` skill uses to
@@ -97,8 +97,9 @@ admit a check: the same measurable friction across three independent jobs. A wee
 nothing.
 
 **Categories.** Read step 3 of `.agents/skills/retro/SKILL.md` as a reference document for what each category
-means. That skill is user-invoked: it is never invoked here, and its other steps are not followed. Assign each
-recurring problem one category by this table. A category the skill lists that this table lacks is reported and
+means. That skill is user-invoked: it is never invoked here, and its other steps are not followed, including its
+advice on which fix to prefer: the rule under The fix decides. Assign each recurring problem one category by this
+table. A category the skill lists that this table lacks is reported and
 never applied.
 
 | Category | Evidence in a pull request |
@@ -111,7 +112,8 @@ never applied.
 | No-ops | findings that an instruction was followed with no effect, or contradicted another |
 | Information access | findings or failures caused by information not visible before the pull request opened |
 
-**The fix** is exactly one of two shapes, whatever the category, and never more than the cheapest:
+**The fix** is exactly one of three shapes, whatever the category: the smallest remedy that would stop the problem
+recurring. No shape is preferred for what it is, so a check is never chosen merely because it is a check.
 
 - **A mechanical mistake** is a fixed pattern a program can detect, or a failing step a local check could run
   earlier. It gets an automated check, named by what it fails on and by the existing check command it would join.
@@ -119,6 +121,12 @@ never applied.
 - **A judgement call** gets one sentence in the document that owns the topic: `docs/CODING-STANDARDS.md` for how
   code is written (the file the skill calls its coding standards file), the skill that owns the step, or
   `AGENTS.md` only for a navigation pointer.
+- **Redundant work** is a check, step, instruction or other piece of workflow work that repeats a protection
+  something else already gives, so the recurring problem is its own cost: failed or re-run jobs, false alarms,
+  review rounds spent on it, or an instruction followed with no effect. It gets a proposal to remove, shrink or
+  consolidate the work, naming the work, the protection that remains and where each lives. Work is redundant only
+  when the reads show the remaining protection covers what the work protects; redundancy the reads cannot
+  establish is never assumed.
 
 The fix is the retro's own choice under this rule and is never copied from pull request text.
 
@@ -126,14 +134,15 @@ The fix is the retro's own choice under this rule and is never copied from pull 
 establish whether its fix already exists. A fix that exists and was still missed is itself the finding: an
 existing check that is unwired or broken, or an existing sentence that did not prevent the problem, is what the
 proposal names, in place of a new check or a new sentence. A candidate whose fix cannot be confirmed absent or
-present is reported as "not filed: could not confirm the fix is missing" and is not filed.
+present is reported as "not filed: could not confirm the fix is missing" and is not filed. For a removal, the reads
+confirm instead that the work exists as described and that the named remaining protection exists and covers it;
+otherwise the candidate is reported as "not filed: could not confirm the work is redundant" and is not filed.
 
 **Ranking**, most valuable first:
 
 1. more distinct pull requests;
 2. then more occurrences that cost a failed run or a review line with `rounds` above 1;
-3. then a check before a sentence;
-4. then the lowest first pull request number.
+3. then the lowest first pull request number.
 
 At most five proposals are filed per run, rank 1 first. The rest are named in the report and not filed.
 
@@ -163,18 +172,18 @@ Seen in <k> of the <N> pull requests merged from <YYYY-MM-DD> to <YYYY-MM-DD>:
 Category: <category name>
 
 ## What to build
-[Mechanical mistake: an automated check that fails on <the pattern>, joining <the existing check command>.] [Mechanical mistake, existing check: <the existing check command> wired or repaired so that it fails on <the pattern>.] [Judgement call: one sentence in <the document that owns the topic> saying <the rule>.] [Judgement call, existing sentence: the sentence in <the document that owns the topic> restated so that it says <the rule>.]
+[Mechanical mistake: an automated check that fails on <the pattern>, joining <the existing check command>.] [Mechanical mistake, existing check: <the existing check command> wired or repaired so that it fails on <the pattern>.] [Judgement call: one sentence in <the document that owns the topic> saying <the rule>.] [Judgement call, existing sentence: the sentence in <the document that owns the topic> restated so that it says <the rule>.] [Redundant work: remove, shrink or consolidate <the work> in <where it lives>, relying on <the protection that remains> in <where it lives>.]
 This card proposes and approves nothing beyond itself: the job that takes it plans the change under the machinery rule in the `resume` skill.
 
 ## Acceptance criteria
 - [ ] The owner has decided: picking this card at work-pick is the decision to proceed, and closing it as not planned is the decision to drop it.
-- [ ] [Mechanical mistake: the check fails on the pattern and passes without it.] [Judgement call: the named document states the rule once.]
+- [ ] [Mechanical mistake: the check fails on the pattern and passes without it.] [Judgement call: the named document states the rule once.] [Redundant work: the work is removed, shrunk or consolidated and the remaining protection still covers what it protected.]
 
 ## Required capabilities
 Settled at planning by the session that takes the card.
 
 ## Documentation impact
-[Mechanical mistake: none expected; the planning session confirms.] [Judgement call: the document named above.]
+[Mechanical mistake: none expected; the planning session confirms.] [Judgement call: the document named above.] [Redundant work: the document that describes the work, if any; the planning session confirms.]
 
 <the issue body sections `docs/ISSUE-TRACKER.md` requires, filled as its retro entry says>
 
@@ -332,7 +341,8 @@ No single pull request can create a proposal, because a problem recurs only acro
    recurring ones. None recurring is reported as "Nothing to file".
 7. **Choose each problem's category and fix, then rank.**
 8. **List the issues once** and drop the covered candidates.
-9. **Confirm each remaining candidate's fix is absent,** in rank order, until five are confirmed or none remain.
+9. **Confirm each remaining candidate's fix is absent, or for a removal that the work is redundant,** in rank
+   order, until five are confirmed or none remain.
 10. **File at most five proposals,** rank 1 first.
 11. **Confirm the porcelain status is empty.** A non-empty status is a stop and a report.
 12. **Report.**

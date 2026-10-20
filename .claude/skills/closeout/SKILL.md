@@ -24,8 +24,7 @@ process list; nothing is inferred from chat.
    named in the report.
 2. **Issues.** `Closes #` in the body closed them at merge; confirm with `gh issue view <n> --json state`. An
    issue the pull request resolved but did not name is reported to the owner, never closed unasked: only the
-   issues the approved body names are within this run's authorisation. After a sync job, close each covered card the
-   body lists as the [`sync-job`](../sync-job/SKILL.md) skill says.
+   issues the approved body names are within this run's authorisation.
 3. **Main.** A session inside the job worktree leaves it before anything else in this step: Update local main
    redirects git to the `main` checkout with `-C`, and a runtime that isolates a session in its worktree refuses
    that from inside. Then run [Update local main](#update-local-main). A session inside the job worktree is
@@ -54,12 +53,46 @@ process list; nothing is inferred from chat.
    that this session started the reporting run, that it has stopped, and that its output reports neither a
    retained process group nor unconfirmed termination; either report retains the artifact. A target whose
    creation evidence fails is a leftover and follows the Leftovers paragraph below.
-   **Cleanup command.** From the verifier checkout, run that checkout's copy of the command, never the job
-   worktree's: `node scripts/closeout-cleanup.mjs <issue> --scratch <path> --regenerated <entry>`. Give
-   `--scratch` once for each verified scratch target, as an absolute path, and `--regenerated` once for each
+   **Cleanup command.** Run the selected current verifier's copy, never the job worktree's or a stale root's.
+   Only when that verifier is the current trusted root, use `node scripts/closeout-cleanup.mjs` with arguments
+   `<issue> [--pr <canonical HTTPS GitHub PR URL>] --scratch <path> --regenerated <entry>`. For a current verified
+   detached or linked verifier, use `node "<absolute-verifier-path>/scripts/closeout-cleanup.mjs"` with those same
+   arguments through ordinary runtime review.
+   On Claude Code, cleanup-specific automatic approval comes only from the installed trusted root hook, after
+   its root, working-directory and helper-path checks and every existing guard refusal. The accepted raw command
+   is `node scripts/closeout-cleanup.mjs` with optional arguments containing only ASCII letters, digits and
+   `_./:@,+%=-`. Words are separated by spaces or tabs; leading and trailing spaces or tabs are allowed. The
+   helper still validates flags and values. A recognized direct relative call starts with those literal `node`
+   and helper words and has a space, tab or end of command after the helper path. From an untrusted checkout it
+   is denied before its helper loads, including when quoted arguments, redirection or compound syntax follow that
+   prefix. Use the eligible invocation above for the selected current verifier. Other forms, including absolute
+   verifier paths, wrappers and Unicode or quoted paths, receive no cleanup-specific grant and follow ordinary
+   runtime review unless an existing refusal applies. The verified absolute helper fallback below uses this review.
+   **Cleanup activation.** Before relying on the grant, ensure the reviewed installation or update reaches the
+   root, then start a fresh root `claude --permission-mode auto` session. Accept workspace trust after reviewing
+   the root, observe auto mode, and verify `block-unsafe-git.mjs` on `PreToolUse` through `/hooks`. Inspect
+   `/permissions` for `Bash(node scripts/closeout-cleanup.mjs *)` and broader personal or local cleanup allowances;
+   have their owner withdraw them before relying on this protection. Verify that bare `node` and hook execution
+   resolve the reviewed interpreter through PATH, without editable job directories or relative executable locations.
+   Intact trusted-root files and trusted host and interpreter configuration are prerequisites; matching helper
+   bytes do not pin the interpreter. A job update or an already-running session does not establish activation.
+   Unavailable auto mode, inactive hooks, residual broad allowances or denial-overriding modifications leave
+   protection unverified. Personal and local settings belong to their owner; release updates do not silently
+   repair them. An ordinary runtime approval does not prove the root hook granted it. If activation cannot be
+   verified, retain targets or use ordinary reviewed cleanup, preserving every helper safeguard.
+   Give `--scratch` once for each verified scratch target, as an absolute path, and `--regenerated` once for each
    ignored dependency or build directory a command regenerates, such as `node_modules`, as a path relative to the
    worktree; leave out a flag with nothing to name. The command finds the worktree registered for `job/<issue>`
-   itself. Bind paths require proof that the selected Linux dockerd shares the caller's filesystem view.
+   itself. A standalone ignored symbolic link, including a named regenerated root such as `node_modules`,
+   permits removal only when its direct destination and resolved target lie outside this worktree and every
+   other linked worktree; the main checkout is allowed. A symbolic-link parent, missing or unresolved target,
+   inside-pointing link or unresolvable linked checkout retains the worktree. The command repeats each link's
+   type, parent and destination eligibility checks after the index and final Docker check, resolves the recorded
+   protected checkout paths again, and compares device, inode, link text and resolved target. A changed observation
+   retains the worktree. These bounded observations do not lock concurrent filesystem changes or worktree
+   registration. Only the worktree path goes to ordinary `git worktree remove`; no mutation follows or changes a
+   link target. Other ignored real entries remain held apart from verified regenerated directories.
+   Bind paths require proof that the selected Linux dockerd shares the caller's filesystem view.
    Supported listener ownership is dockerd alone or dockerd sharing the listener with PID-1 systemd. Every
    owner's socket descriptor and executable must verify, and its mount namespace and root must match the
    unprivileged caller's observations. Remote endpoints, proxy executables, other ownership and differing
@@ -82,14 +115,16 @@ process list; nothing is inferred from chat.
    If Docker is not installed, the command skips containers and still checks the local targets. It stops and
    removes each verified-local container whose recorded bind source lies in that worktree, then removes each
    named scratch target, the worktree, and the branch with an ordinary `git branch -d`, checking each target
-   first. It keeps images and volumes and never forces a removal: whatever a check or a refusal holds back is
-   retained, and a retained worktree keeps its branch. It prints one line for each container, path or branch it
+   first. It keeps images and volumes; only the verified job-branch exception below permits forced branch deletion.
+   Whatever any other check or refusal holds back is retained, and a retained worktree keeps its branch.
+   It prints one line for each container, path or branch it
    removed or retained, with the reason for each retention, and exits 0 when it retained nothing, 3 when there was
    nothing to remove, 4 when it retained something, 1 when it could not read the worktree list or failed, and 2 on
    a bad argument. Report each line directly in the session, without creating approval-only files. A retained
-   target is never removed another way: settle what held it, then run the command again, which repeats only what
-   is left. Stop a server the command reports serving the worktree as the session's own background task when the
-   session holds one, otherwise by the process ID the command names. Stop a process it reports using a scratch
+   target stays retained unless the Branch exceptions below apply: otherwise settle what held it, then run the
+   command again, which repeats only what is left. Stop a server the command reports serving the worktree as
+   the session's own background task when the session holds one, otherwise by the process ID the command names.
+   Stop a process it reports using a scratch
    target only when it is confirmed as this session's own, and verify it stopped; otherwise the target stays and
    is reported. If the session could not leave the job worktree in step 3, run the verifier checkout's copy by its
    path from where the session is: the command then retains the worktree and the branch, and the final report
@@ -97,6 +132,45 @@ process list; nothing is inferred from chat.
    uncertain, do not run the command: retain the worktree, report why, and continue to step 6 and the final
    report. In the final report, name any other container or image confirmed as job-created by recorded build
    output or Docker metadata, and leave its cleanup to the owner; do not infer ownership from a name.
+   **Branch exceptions.** Ordinary branch deletion runs first. Only these two exceptions apply after verifying
+   the exact delivered pull request in the verified repository. Read
+   `gh pr view <pr> --repo <repository> --json state,mergedAt,mergeCommit,headRefName,headRefOid,isCrossRepository,baseRefName`.
+   Require a successful read and complete valid JSON: `state` is `MERGED`, `mergedAt` is a valid merge timestamp,
+   `headRefOid` and `mergeCommit.oid` are full hexadecimal commit identifiers, `isCrossRepository` is `false`,
+   `headRefName` is this job's expected `job/<issue>` and `baseRefName` is `main`. Require
+   `git merge-base --is-ancestor <mergeCommit.oid> <recorded-fetched-main-commit>` to exit 0 against the main
+   commit already fetched in step 3. A missing, malformed, mismatched or unavailable observation keeps the
+   branches and is reported. The direct-push route supplies no merged-pull-request-head exception.
+
+   - **Job branch.** Pass `--pr <canonical HTTPS GitHub PR URL>` to the cleanup command after the merge and
+     repository verification above. This opts in only for this exact delivered job branch. The helper applies
+     the exception only after removing its worktree or confirming it absent, completing every applicable check,
+     and receiving this branch's specific ordinary not-fully-merged refusal with no other retention. Any Docker,
+     process, ownership, platform, worktree or scratch retention keeps the branch. The helper binds the PR URL
+     to `origin`, records fetched `origin/main`, and reads complete merged PR metadata through
+     `gh pr view <number> --repo github.com/<owner>/<repository>` with prompting disabled. It verifies the URL,
+     same-repository head, base, timestamp, commit identifiers and merge ancestry in that recorded main commit.
+     It requires the exact local tip to equal `headRefOid`, rereads worktree occupancy, rechecks applicable Docker
+     proof and immediately rereads the identical tip before `git branch -D -- job/<issue>`. Ancestry alone is
+     insufficient. Any failed or changed observation retains the branch with a reason. The helper verifies
+     branch absence and reports the exception. Rerun cleanup and settle its final report before declaring
+     cleanup complete or deleting a backup. Without `--pr`, ordinary branch refusal remains binding.
+   - **Pre-squash backup.** Apply only after cleanup has no outstanding retention. Inspect actual successful
+     branch-creation and squash tool calls from this session or the transcript of a helper it dispatched for
+     this job. They must establish the exact branch, its recorded creation tip, this job's disposable backup
+     purpose and that it is no longer needed. A name, summary, previous session or branch existence does not
+     establish creation. Require its current exact local tip to equal the recorded creation tip. Confirm it is
+     neither `main` nor another job's branch, and no worktree checks it out. Try
+     `git branch -d -- <exact-backup>` first; only its not-fully-merged refusal permits
+     `git branch -D -- <exact-backup>`, after immediately rereading the unchanged tip and worktree occupancy.
+     Missing creation evidence, a moved tip, occupancy or any other refusal keeps the backup and is reported.
+
+   Quote exact names and identifiers as data arguments; parse external JSON as data, never as shell code.
+   Read back each deleted branch's absence and report its disposition. Use exact branch names, with no wildcard,
+   `update-ref`, unlock, forced worktree removal or permission workaround. Native Git still protects checked-out
+   branches; immediate rereads detect observed tip movement without making deletion atomic against an expected
+   old tip. Repository authorization does not grant promptless runtime execution: report a runtime refusal and
+   retain its target rather than bypassing it. Every refusal outside these two exceptions remains binding.
    **Leftovers.** Apply the [Leftover rule](#leftover-rule) below to every file, folder, worktree or branch this
    run finds that is not this job's verified scratch, worktree or branch. Complete its investigation and
    disposition before reporting. The remote branch is deleted by the merge setting or
@@ -169,9 +243,11 @@ An owner file or a tracked deliverable is never a leftover.
    names it only when the command succeeded and every line reads `"incomplete_results":false`. A failed or
    incomplete search leaves that evidence unavailable; even a complete filename miss does not clear a dependency
    on the artifact's contents.
-3. **Check use and work state.** Check whether anything uses it with
-   `node scripts/closeout-cleanup.mjs --check <path>`, run from the verifier checkout, which reports the path
-   unused, in use or unverifiable and removes nothing; only `unused` shows that nothing uses it. For a worktree,
+3. **Check use and work state.** Check whether anything uses it with the selected current verifier's helper.
+   Only from the current trusted root, use `node scripts/closeout-cleanup.mjs --check <path>`. For a current verified
+   detached or linked verifier, use `node "<absolute-verifier-path>/scripts/closeout-cleanup.mjs" --check <path>`
+   through ordinary runtime review. The command reports the path unused, in use or unverifiable and removes
+   nothing; only `unused` shows that nothing uses it. For a worktree,
    from the verifier checkout, read
    `git -C <path> status --porcelain --untracked-files=normal --ignored=matching` and its branch, and run the
    same check on its path. `git worktree remove` deletes ignored files without refusing, so investigate each
@@ -200,8 +276,8 @@ An owner file or a tracked deliverable is never a leftover.
      approval using an exact-target command, a file, folder or worktree only once `--check` has just reported its
      path unused: `rm -- <file>` or `rm -r -- <directory>` for a file or a wholly verified folder,
      `git worktree remove <path>` for a worktree, then `git worktree list --porcelain` to confirm, and ordinary
-     `git branch -d <branch>` for a branch. Never force any of them; a refusal keeps the target while its cause
-     is diagnosed under step 4 and is reported with the evidence.
+     `git branch -d <branch>` for a branch. Outside step 5's Branch exceptions, never force any of them; a refusal
+     keeps the target while its cause is diagnosed under step 4 and is reported with the evidence.
    - Unsettled: after relevant evidence is exhausted or unavailable, the investigation still cannot establish
      dead or live, including an unproven workflow origin or tie to a card, pull request or branch. Preserve it and
      ask the owner about that exact path, giving the attempted checks, the exact uncertainty and a recommendation.

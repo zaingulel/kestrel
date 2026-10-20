@@ -21,13 +21,10 @@
 // each seat setting its repository overrides, in the nested form of the settings file's `seats` and naming only
 // seat files the same manifest lists.
 //
-// Only the canonical's manifest holds `adopters`, the repositories that carry a copy. Every reader takes a manifest
-// without it and holds one that is present to an array of "owner/repo" names; nothing is decided by the list.
-//
 // A tree's settings file may name the runtimes it runs, may turn the Greptile add-on on and may turn the documentation
 // sweep off; leftOutCause in runtimes.mjs is the one answer to which entries those settings leave out of the tree, and
-// the check, the sync and the render all ask it, each from the settings file's text. Every manifest keeps every entry,
-// a sync writes only the entries the tree installs, and the path of a left-out entry must hold nothing.
+// the check and the render both ask it, each from the settings file's text. Every manifest keeps every entry, and the
+// path of a left-out entry must hold nothing.
 //
 // verifyManifest reports anything a left-out entry's path holds, whatever its bytes, and nothing where it holds
 // nothing. It holds every other entry to its record, with one exception: a seat the tree's settings file or the
@@ -39,54 +36,8 @@
 // name a seat the manifest does not list. A tree with neither takes the strict path alone, and a missing or changed
 // file of a named runtime, of the add-on where it is on, or of the sweep where it is not off, is refused like any other.
 //
-// syncInto copies the entries from a canonical source checkout into an adopter target. Everything it writes comes
-// from the source's freshly fetched origin main commit, never from the source's working tree, index or disk
-// manifest, and every git call ignores inherited repository-scoped variables such as GIT_DIR and GIT_INDEX_FILE.
-// It validates everything before it writes or removes anything, so every refusal leaves the target untouched: the
-// target's committed manifest, when HEAD's tree lists one, is read and validated like any other, and a HEAD that
-// cannot be listed or a manifest that cannot be read is refused, never taken for a first sync; the canonical
-// comes from the target's committed manifest or, only when there is none, the caller, and the fetched manifest
-// names it too, in any letter case; the source's origin is that canonical and the target's is not; the source's
-// HEAD is the fetched commit; source and target are clean at every shared path, so the source's uncommitted edits
-// are refused loudly rather than silently left out, and the target's are never overwritten; the fetched commit
-// matches its own manifest in kind, mode and content; no existing directory on an entry's path in the target is a
-// symlink, even one pointing inside the target, so every write lands at its manifest path and never through a
-// symlink; each region file, in the commit and as a regular file in the target, carries well-formed region
-// markers; and the target's settings file, read from its working tree as verifyManifest reads it, names only seats
-// the fetched manifest shares, only settings each of those seats carries, and no value that gives a seat a problem
-// its fetched bytes do not have. The agent check and the seat policy that judge that are the ones of the copy
-// running the sync, never the fetched commit's, and no file of the fetched commit is executed or imported, so a
-// default this copy does not know stops nothing and a named value it does not know is refused. It then writes each
-// file the target installs with the commit's bytes and mode, a seat the settings file names with the named values in place of the
-// commit's, and each region between the target's own markers, and records the commit's entries under the target's
-// canonical, plus `syncedFrom`, the fetched commit, and, when the settings file names any, `seatDefaults`, the
-// commit's value of each setting it replaced. It never records the commit's `adopters`, so the target's manifest
-// names the canonical and no other adopter, and a list an earlier sync left there is gone. It never writes or
-// removes the settings file, and a `seatDefaults` in the fetched manifest is never applied or copied. On a target
-// that does not honour file modes the sync stages the file entries it writes, because the index is the only place
-// such a checkout can hold the executable bit.
-//
-// Any installed path or the manifest marked skip-worktree or assume-unchanged in the target's index is refused
-// before any write: git status cannot prove it clean.
-//
-// A retired entry is one the target's committed manifest lists at a path the fetched manifest does not. The target
-// must be clean at every retired path too, and before any write the sync removes each retired file it can prove: a
-// regular file under no symlinked parent whose bytes, on disk and committed at the target's HEAD, are the ones that
-// manifest recorded. A retired path the target's index marks skip-worktree or assume-unchanged is refused by name
-// whatever it holds, even nothing: git status reports no change there, and a commit would not record the removal.
-// Any other retired path holding nothing is left alone; anything else there, a retired region, or a retired path
-// that a case-insensitive or Unicode-normalising disk reads as one the fetched manifest shares, is refused by name.
-// It removes no directory and no other file.
-//
-// An entry the target leaves out, of a runtime its settings file does not name, of the Greptile add-on where that
-// file does not turn it on or of the documentation sweep where that file turns it off, is never written, and the manifest the sync records still lists it. Its path is proven and cleared as a retired path is, against the record of the target's committed
-// manifest where that lists the path and of the fetched manifest otherwise: a file committed with exactly those bytes
-// is removed, a path holding nothing is skipped, and anything else is refused by name before any write, so a
-// left-out seat that still holds overridden values is rendered back or removed first. The sync returns how many
-// entries it left out.
-//
-// renderSettings applies the settings file of a tree to its seats between syncs, leaving the seats and the manifest
-// as a sync would for the settings file as it stands. It reads no commit and needs no network. Every check runs
+// renderSettings applies the settings file of a tree to its seats, recording the values it replaced in the manifest. It
+// reads no commit and needs no network. Every check runs
 // before any write, so every refusal leaves the tree untouched: the manifest is a regular file under no symlinked
 // directory, checked on its own before it is read; the tree's origin is not the manifest's canonical, whose seat
 // lines are the defaults, while a tree with no origin proceeds; the settings file is read as verifyManifest reads
@@ -94,20 +45,12 @@
 // bytes, with its recorded defaults put back, are the bytes its entry records, so a seat changed outside its setting
 // lines is refused by name and never overwritten, and whose named values give it no problem those shared bytes do
 // not have. A recorded default of a seat whose runtime the settings file leaves out is skipped, its file neither
-// read nor written, and dropped from the record. It then writes each seat whose bytes change, keeping its mode, and rewrites the manifest only when its
-// bytes change: every top-level key it held in the order it held them, `syncedFrom` and any `adopters` an earlier
-// sync left among them, which only a sync removes, with `seatDefaults` directly before `entries` and left out when
-// no seat is overridden. It returns the seats it wrote and whether it rewrote the manifest, so a settings file whose
+// read nor written, and dropped from the record. It then writes each seat whose bytes change, keeping its mode, and
+// rewrites the manifest only when its bytes change: every top-level key it held in the order it held them, the
+// `release` record among them, with `seatDefaults` directly before `entries` and left out when no seat is
+// overridden. It returns the seats it wrote and whether it rewrote the manifest, so a settings file whose
 // values equal the shared defaults, which changes the manifest alone, is told from a run that wrote nothing. A second
 // run writes nothing.
-//
-// checkLag compares this repository's manifest on disk with the canonical's manifest on main, never
-// the working-tree files (local file drift is the workflow contract test's job). It ignores `syncedFrom` and
-// `adopters` and compares `canonical` and each entry by path: only on main is "missing here", only here is "no
-// longer shared", and a different kind, hash or executable bit is "changed", one line each, sorted by
-// path. The state is 'in-sync' only when nothing differs, 'drifted' when something does, and 'unknown', with its
-// cause, whenever the answer cannot be known: no or a malformed local manifest, a failed fetch, or a canonical
-// manifest that fails the same validation as a local one. Unknown is never reported as in sync.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -115,7 +58,6 @@ import {
   chmodSync,
   lstatSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmdirSync,
@@ -192,15 +134,9 @@ export function parseManifest(text, label) {
   } catch (error) {
     throw new Error(`${label} is not valid JSON (${error.message})`);
   }
-  const { canonical, adopters, entries } = manifest ?? {};
-  if (
-    !REPOSITORY.test(canonical) ||
-    !Array.isArray(entries) ||
-    (adopters !== undefined && !(Array.isArray(adopters) && adopters.every((adopter) => REPOSITORY.test(adopter))))
-  ) {
-    throw new Error(
-      `malformed ${label}: it must hold canonical "owner/repo" and entries [...], and adopters, where it holds any, as ["owner/repo", ...]`,
-    );
+  const { canonical, entries } = manifest ?? {};
+  if (!REPOSITORY.test(canonical) || !Array.isArray(entries)) {
+    throw new Error(`malformed ${label}: it must hold canonical "owner/repo" and entries [...]`);
   }
   entries.forEach(checkEntry);
   // Keyed by each path folded: files maps the key to its path, directories maps each folded ancestor directory to a
@@ -401,111 +337,6 @@ function git(root, ...args) {
   return run.status === 0 ? run.stdout.trim() : null;
 }
 
-// The bytes of a blob in root's object store.
-function blob(root, object) {
-  const run = spawnSync('git', ['-C', root, 'cat-file', 'blob', object], { env: gitEnvironment() });
-  if (run.status !== 0) throw new Error(`cannot read the object ${object} in ${root}`);
-  return run.stdout;
-}
-
-// The manifest the commit holds, validated; whose names the repository in every error.
-function committedManifest(root, commit, whose) {
-  const label = `${whose} ${MANIFEST_PATH} at ${commit}`;
-  const text = git(root, 'show', `${commit}:${MANIFEST_PATH}`);
-  if (text === null) throw new Error(`cannot read ${label}`);
-  return parseManifest(text, label);
-}
-
-// What the commit's tree holds at each of the paths, keyed by path, as { mode, object }; a path the commit lacks
-// has no key. what names the listing in the error thrown when it fails.
-function committedTree(root, commit, paths, what) {
-  const listing = git(root, '--literal-pathspecs', 'ls-tree', '-z', commit, '--', ...paths);
-  if (listing === null) throw new Error(`cannot list ${what}`);
-  return new Map(
-    listing
-      .split('\0')
-      .filter(Boolean)
-      .map((line) => {
-        const tab = line.indexOf('\t');
-        const [mode, , object] = line.slice(0, tab).split(' ');
-        return [line.slice(tab + 1), { mode, object }];
-      }),
-  );
-}
-
-// Each entry's content in the commit, keyed by path, as { data, mode }: the file bytes or the region text, and the
-// git mode. Refuses, naming every such path, an entry whose committed kind or content differs from
-// its record.
-function committedContents(root, commit, manifest) {
-  const tree = committedTree(root, commit, manifest.entries.map(({ path }) => path), `the shared paths in the source's commit ${commit}`);
-  const contents = new Map();
-  const mismatched = [];
-  for (const entry of manifest.entries) {
-    const { mode, object } = tree.get(entry.path) ?? {};
-    const modes = 'region' in entry ? ['100644', '100755'] : [entry.executable ? '100755' : '100644'];
-    const data = modes.includes(mode) ? blob(root, object) : null;
-    if (data === null || valueOf(entry, data) !== entry.sha256) {
-      mismatched.push(entry.path);
-      continue;
-    }
-    contents.set(entry.path, { data: 'region' in entry ? regionText(data.toString('utf8'), entry.path) : data, mode });
-  }
-  if (mismatched.length > 0) {
-    throw new Error(`the source does not match its own manifest at ${mismatched.join(', ')} in its commit ${commit}`);
-  }
-  return contents;
-}
-
-function uncommitted(root, paths) {
-  const status = git(root, '--literal-pathspecs', 'status', '--porcelain', '--untracked-files=all', '--', ...paths);
-  if (status === null) throw new Error(`cannot read the git status of ${root}`);
-  return status;
-}
-
-// The paths among those given whose index entry is marked skip-worktree or assume-unchanged: git status reports no
-// change at such a path, whatever the disk holds, and a commit does not record its removal. git tags a plain tracked
-// entry `H`; every other tag counts as marked, so one this code does not know refuses. A directory among the paths
-// lists the entries beneath it, which the caller's lookup by exact path never matches.
-function hiddenFromStatus(root, paths) {
-  const listing = git(root, '--literal-pathspecs', 'ls-files', '-v', '-z', '--', ...paths);
-  if (listing === null) throw new Error(`cannot read the index flags of ${root}`);
-  return new Set(
-    listing
-      .split('\0')
-      .filter((line) => line && line[0] !== 'H')
-      .map((line) => line.slice(2)),
-  );
-}
-
-function hiddenPathError(path, cause) {
-  const prefix = cause === undefined ? '' : `${cause}, but `;
-  const removal = cause === undefined ? '' : ' and the next commit would not record its removal';
-  return new Error(`${path}: ${prefix}the target's index marks it skip-worktree or assume-unchanged, which hides it from git status, so the sync cannot prove it clean${removal}; clear both marks with git update-index --no-skip-worktree -- ${path} and git update-index --no-assume-unchanged -- ${path}, commit or restore whatever git status then shows there, then sync`);
-}
-
-// The target's committed manifest, validated, or null when HEAD verifiably holds none: a listing of HEAD's tree
-// settles which, so a manifest that cannot be read is refused, never taken for a first sync.
-function previousManifest(target) {
-  const what = `${MANIFEST_PATH} in the target's HEAD, which the sync reads to know what it last shared there; a target with no commit needs one first`;
-  if (!committedTree(target, 'HEAD', [MANIFEST_PATH], what).has(MANIFEST_PATH)) return null;
-  return committedManifest(target, 'HEAD', "the target's");
-}
-
-function resolveCanonical(previous, requested) {
-  if (previous === null) {
-    if (requested === undefined) {
-      throw new Error(`no canonical repository: the target has no committed ${MANIFEST_PATH}, so name one with --canonical <owner/repo>`);
-    }
-    if (!REPOSITORY.test(requested)) throw new Error(`--canonical ${requested} is not "owner/repo"`);
-    return requested;
-  }
-  const { canonical } = previous;
-  if (requested !== undefined && requested.toLowerCase() !== canonical.toLowerCase()) {
-    throw new Error(`--canonical ${requested} disagrees with ${canonical}, the canonical in the target's committed ${MANIFEST_PATH}`);
-  }
-  return canonical;
-}
-
 // Refuses a path of the tree at root that lies under a symlinked directory or holds anything but a regular file,
 // before any read of it; returns its lstat.
 function checkRegularFile(root, path) {
@@ -513,17 +344,6 @@ function checkRegularFile(root, path) {
   const stat = lstatSync(join(root, path), { throwIfNoEntry: false });
   if (!stat?.isFile()) throw new Error(`${path} is not a regular file (${stat ? kindOf(stat) : 'missing'})`);
   return stat;
-}
-
-function checkReplaceable(full, path) {
-  let stat;
-  try {
-    stat = lstatSync(full);
-  } catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw error;
-  }
-  if (stat.isDirectory() && readdirSync(full).length > 0) throw new Error(`${path}: the target holds a non-empty directory here`);
 }
 
 // Clears whatever is at the path, so the new file never writes through an existing one.
@@ -539,57 +359,7 @@ function clear(full) {
   else unlinkSync(full);
 }
 
-// The paths, sorted, of the retired entries the sync may remove: each holds a regular file, under no symlinked
-// parent, whose bytes on disk and at the target's HEAD are the entry's record. retired holds { entry, cause }, cause
-// being why the target no longer holds the entry, which starts every refusal that turns on it; installed holds the
-// entries the sync writes. An entry the index marks skip-worktree or assume-unchanged is refused whatever its path
-// holds. Any other retired path that holds nothing is skipped, and anything else at one is refused by name. It
-// removes nothing itself, so every entry is proven before any file goes. The disk and HEAD are both checked because
-// the status check sees neither an ignored file nor a byte difference a line-ending conversion hides from it.
-function provenRetired(root, retired, installed, hidden) {
-  // With no path the listing would hold the whole tree.
-  if (retired.length === 0) return [];
-  const paths = retired.map(({ entry }) => entry.path);
-  const tree = committedTree(root, 'HEAD', paths, "the retired paths in the target's HEAD");
-  const twins = new Map(installed.map(({ path }) => [folded(path), path]));
-  const proven = [];
-  for (const { entry, cause } of retired) {
-    const { path } = entry;
-    if ('region' in entry) {
-      throw new Error(`${path}: the manifest no longer shares this file's ${entry.region} region, and the sync never removes text from a file the adopter owns around it; retiring a region needs its own change to the sync`);
-    }
-    if (hidden.has(path)) {
-      throw hiddenPathError(path, cause);
-    }
-    const { value, problem } = entryState(root, entry, null);
-    if (problem === 'missing') continue;
-    const twin = twins.get(folded(path));
-    if (twin !== undefined) {
-      throw new Error(`${path}: the manifest no longer shares it but now shares ${twin}, which names the same file on a case-insensitive or Unicode-normalising disk, so the sync cannot remove one without the other; remove ${path}, commit, then sync`);
-    }
-    checkContained(root, path);
-    if (value !== entry.sha256) {
-      throw new Error(`${path}: ${cause}, and the sync removes only the exact bytes it last recorded there, but this is ${problem ?? 'a file with other bytes'}; remove it or move it to a path of the adopter's own, commit, then sync`);
-    }
-    const { mode, object } = tree.get(path) ?? {};
-    let committed = null;
-    if (['100644', '100755'].includes(mode)) {
-      try {
-        committed = sha256(blob(root, object));
-      } catch (error) {
-        throw new Error(`${path}: ${cause}, but the sync ${error.message}, so it cannot prove the bytes the target's HEAD holds there; repair the repository's object store, then sync`);
-      }
-    }
-    if (committed !== entry.sha256) {
-      throw new Error(`${path}: ${cause}, and the sync removes only a file committed with the exact bytes it last recorded there, but the target's HEAD does not hold those bytes as a regular file at this path; commit the file or remove it, then sync`);
-    }
-    proven.push(path);
-  }
-  return proven.sort();
-}
-
-const UNSHARED_SEAT = `; the manifest the sync fetched does not share that seat, so remove that seat from ${SETTINGS_PATH}, run node scripts/factory-sync.mjs --render, commit, then sync`;
-const NAMED_AFTER_SYNC = 'a value only a newer copy of the shared workflow admits can be named after the sync that installs it';
+const NAMED_AFTER_UPDATE = 'a value only a newer copy of the shared workflow admits can be named after the release update that installs it';
 
 // A seat's shared bytes with the values its settings name in place, as { data, replaced }, replaced holding the
 // values that were there. Refuses values that give the seat a problem its shared bytes do not have: this copy
@@ -598,7 +368,7 @@ export function renderSeat(path, shared, values) {
   const rendered = substituteSeatSettings(path, shared, values);
   const problems = overrideProblems(path, shared, rendered.data);
   if (problems.length > 0) {
-    throw new Error(`${SETTINGS_PATH}: the settings named for ${path} introduce: ${problems.join('; ')}; ${NAMED_AFTER_SYNC}`);
+    throw new Error(`${SETTINGS_PATH}: the settings named for ${path} introduce: ${problems.join('; ')}; ${NAMED_AFTER_UPDATE}`);
   }
   return rendered;
 }
@@ -608,15 +378,6 @@ function writeRegular(full, data, mode) {
   mkdirSync(dirname(full), { recursive: true });
   writeFileSync(full, data);
   chmodSync(full, mode);
-}
-
-// Fetches the source's origin main and returns the fetched commit; throws with git's own cause when it cannot.
-export function fetchMain(source) {
-  const fetch = spawnSync('git', ['-C', source, 'fetch', '--quiet', 'origin', 'main'], { encoding: 'utf8', env: gitEnvironment() });
-  if (fetch.status !== 0) throw new Error(fetch.stderr.trim() || 'git fetch origin main failed');
-  const fetched = git(source, 'rev-parse', 'FETCH_HEAD');
-  if (fetched === null) throw new Error('cannot read FETCH_HEAD after fetching origin main');
-  return fetched;
 }
 
 // Count the complete argv conservatively for Windows quoting, keeping each path or cacheinfo pair together.
@@ -686,113 +447,6 @@ export function recordIndexModes(root, entries) {
   }
 }
 
-// Syncs the source's manifest entries into the target, per the contract at the top of this file. fetchMain, the
-// function above or a stand-in, fetches the source's origin main and returns its commit; it throws when the fetch
-// fails. Returns the counts written, the paths removed, sorted, and the number of entries the target's settings file
-// leaves out, as { files, regions, removed, omitted }.
-export function syncInto({ source, target, canonical: requested, fetchMain }) {
-  const previous = previousManifest(target);
-  const canonical = resolveCanonical(previous, requested);
-
-  const sourceOrigin = git(source, 'remote', 'get-url', 'origin');
-  if (sourceOrigin === null) throw new Error(`the source has no origin remote; it must be a clone of github.com/${canonical}`);
-  if (!isGithubRepository(sourceOrigin, canonical)) {
-    throw new Error(`the source's origin ${sourceOrigin} is not github.com/${canonical}`);
-  }
-  const targetOrigin = git(target, 'remote', 'get-url', 'origin');
-  if (isGithubRepository(targetOrigin, canonical)) {
-    throw new Error(`the target's origin ${targetOrigin} is the canonical github.com/${canonical}: never sync into the canonical`);
-  }
-
-  let fetched;
-  try {
-    fetched = fetchMain(source);
-  } catch (error) {
-    throw new Error(`cannot fetch the source's origin main (${error.message})`);
-  }
-  const head = git(source, 'rev-parse', 'HEAD');
-  if (head !== fetched) {
-    throw new Error(`the source is not on its freshly fetched origin main: HEAD is ${head ?? '(none)'}, origin main is ${fetched}`);
-  }
-
-  const manifest = committedManifest(source, fetched, "the source's");
-  if (manifest.canonical.toLowerCase() !== canonical.toLowerCase()) {
-    throw new Error(`the source's manifest names the canonical ${manifest.canonical}, not ${canonical}`);
-  }
-  const shared = [...manifest.entries.map((entry) => entry.path), MANIFEST_PATH];
-  const retired = previous === null ? [] : previous.entries.filter(({ path }) => !manifest.entries.some((entry) => entry.path === path));
-  const sourceChanges = uncommitted(source, shared);
-  if (sourceChanges) throw new Error(`the source has uncommitted changes at shared paths: ${sourceChanges}`);
-  const contents = committedContents(source, fetched, manifest);
-  const paths = [...shared, ...retired.map(({ path }) => path)];
-  const targetChanges = uncommitted(target, paths);
-  if (targetChanges) throw new Error(`the target has uncommitted changes at shared paths: ${targetChanges}`);
-  const hidden = hiddenFromStatus(target, paths);
-
-  const root = realpathSync(target);
-  const settings = settingsWithSeats(readSettingsFile(root), manifest, UNSHARED_SEAT);
-  const { seats: overrides } = settings;
-  const causes = manifest.entries.map((entry) => ({ entry, cause: leftOutCause(settings, entry.path) }));
-  const installed = causes.filter(({ cause }) => cause === null).map(({ entry }) => entry);
-  const leftOut = causes.filter(({ cause }) => cause !== null);
-  for (const entry of installed) {
-    checkContained(root, entry.path);
-    if (!('region' in entry)) checkReplaceable(join(root, entry.path), entry.path);
-  }
-  checkContained(root, MANIFEST_PATH);
-  checkReplaceable(join(root, MANIFEST_PATH), MANIFEST_PATH);
-  const seats = new Map([...overrides].map(([path, values]) => [path, renderSeat(path, contents.get(path).data, values)]));
-  const removed = provenRetired(
-    root,
-    [
-      ...retired.map((entry) => ({ entry, cause: 'the manifest no longer shares it' })),
-      ...leftOut.map(({ entry, cause }) => ({ entry: previous?.entries.find(({ path }) => path === entry.path) ?? entry, cause })),
-    ],
-    installed,
-    hidden,
-  );
-  for (const path of [...installed.map(({ path }) => path), MANIFEST_PATH]) {
-    if (hidden.has(path)) {
-      throw hiddenPathError(path);
-    }
-  }
-  const regions = new Map(
-    installed
-      .filter((entry) => 'region' in entry)
-      .map(({ path }) => {
-        const label = `target ${path}`;
-        if (!lstatSync(join(root, path), { throwIfNoEntry: false })?.isFile()) {
-          throw new Error(`${label}: malformed region markers: the target has no regular file here`);
-        }
-        return [path, replaceRegion(readFileSync(join(root, path), 'utf8'), contents.get(path).data, label)];
-      }),
-  );
-
-  for (const path of removed) unlinkSync(join(root, path));
-  const written = { files: 0, regions: 0 };
-  for (const entry of installed) {
-    const full = join(root, entry.path);
-    if ('region' in entry) {
-      writeRegular(full, regions.get(entry.path), lstatSync(full).mode & 0o777);
-      written.regions += 1;
-    } else {
-      const { data, mode } = contents.get(entry.path);
-      writeRegular(full, seats.get(entry.path)?.data ?? data, mode === '100755' ? 0o755 : 0o644);
-      written.files += 1;
-    }
-  }
-  const seatDefaults = seatsRecord(new Map([...seats].map(([path, { replaced }]) => [path, replaced])));
-  const record = {
-    canonical,
-    syncedFrom: fetched,
-    ...(seats.size > 0 ? { seatDefaults } : {}),
-    entries: manifest.entries,
-  };
-  writeRegular(join(root, MANIFEST_PATH), `${JSON.stringify(record, null, 2)}\n`, 0o644);
-  recordIndexModes(root, installed);
-  return { ...written, removed, omitted: leftOut.length };
-}
-
 // Applies the settings file of the tree at root to its seats, per the contract at the top of this file. Returns the
 // seat paths whose bytes it changed, sorted, and whether it rewrote the manifest, as { seats, manifest }.
 export function renderSettings(root) {
@@ -816,7 +470,7 @@ export function renderSettings(root) {
     const data = readFileSync(full);
     const restored = substituteSeatSettings(path, data, recorded.get(path) ?? {});
     if (sha256(restored.data) !== manifest.entries.find((entry) => entry.path === path).sha256) {
-      throw new Error(`${path}: its bytes outside its setting lines are not the shared file the manifest records, so no settings can be rendered into it; put the seat file back as the last sync or render left it, then run node scripts/factory-sync.mjs --render`);
+      throw new Error(`${path}: its bytes outside its setting lines are not the shared file the manifest records, so no settings can be rendered into it; put the seat file back as the last update or render left it, then run node scripts/factory-sync.mjs --render`);
     }
     const rendered = renderSeat(path, restored.data, overrides.get(path) ?? {});
     if (overrides.has(path)) defaults.set(path, rendered.replaced);
@@ -834,42 +488,4 @@ export function renderSettings(root) {
   const manifestChanged = text !== readFileSync(join(tree, MANIFEST_PATH), 'utf8');
   if (manifestChanged) writeRegular(join(tree, MANIFEST_PATH), text, 0o644);
   return { seats: [...changed.keys()], manifest: manifestChanged };
-}
-
-const sameEntry = (a, b) => a.sha256 === b.sha256 && a.region === b.region && a.executable === b.executable;
-
-// Compares this repository's manifest with the canonical's manifest on main, per the --check contract at the top
-// of this file. fetchCanonicalManifest(canonical) returns that manifest's raw text and throws when it cannot.
-// Returns { state: 'in-sync' | 'drifted' | 'unknown', differences, cause }.
-export function checkLag({ root, fetchCanonicalManifest }) {
-  const unknown = (cause) => ({ state: 'unknown', differences: [], cause });
-  let local;
-  try {
-    local = readManifest(root);
-  } catch (error) {
-    return unknown(error.cause?.code === 'ENOENT' ? 'no factory manifest here; run the first sync with --from' : error.message);
-  }
-  const label = `${local.canonical} main's ${MANIFEST_PATH}`;
-  let text;
-  try {
-    text = fetchCanonicalManifest(local.canonical);
-  } catch (error) {
-    return unknown(`cannot fetch ${label} (${error.message})`);
-  }
-  let remote;
-  try {
-    remote = parseManifest(text, label);
-  } catch (error) {
-    return unknown(error.message);
-  }
-
-  const differences = [];
-  if (local.canonical !== remote.canonical) differences.push(`canonical: ${local.canonical} here, ${remote.canonical} on main`);
-  const [here, there] = [local, remote].map(({ entries }) => new Map(entries.map((entry) => [entry.path, entry])));
-  for (const path of [...new Set([...here.keys(), ...there.keys()])].sort()) {
-    if (!here.has(path)) differences.push(`${path}: missing here`);
-    else if (!there.has(path)) differences.push(`${path}: no longer shared`);
-    else if (!sameEntry(here.get(path), there.get(path))) differences.push(`${path}: changed`);
-  }
-  return { state: differences.length === 0 ? 'in-sync' : 'drifted', differences, cause: null };
 }

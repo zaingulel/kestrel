@@ -2,12 +2,13 @@
 //
 // Every external call goes through one injected `run`, and each answers only the argument vectors this file
 // builds. Every check fails closed: an absent tool, a failed run, unrecognised output or an unresolved path
-// retains the target it was checking, and nothing is ever forced.
+// retains the target it was checking. Forced deletion is limited to the exact verified merged-PR job branch.
 
 import { spawnSync } from 'node:child_process';
-import { constants, lstatSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, normalize, posix, relative, sep } from 'node:path';
+import { constants, lstatSync, readlinkSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
+import { isGithubRepository } from './factory-sync.mjs';
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
@@ -18,6 +19,19 @@ const LSOF_INCOMPLETE = '      Output information may be incomplete.';
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const WORKTREE_ATTRIBUTES = new Set(['HEAD', 'branch', 'detached', 'bare', 'locked', 'prunable']);
 const NON_BIND_MOUNT_TYPES = new Set(['volume', 'tmpfs', 'npipe', 'cluster', 'image']);
+const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+
+function parsePr(value) {
+  try {
+    const url = new URL(value);
+    const path = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)$/.exec(url.pathname);
+    if (!path || url.origin !== 'https://github.com' || url.username || url.password || url.port ||
+      value !== `https://github.com${url.pathname}`) return null;
+    return { url: value, repository: `${path[1]}/${path[2]}`, number: path[3] };
+  } catch {
+    return null;
+  }
+}
 
 // One external command, no shell and no working directory: { absent: true } when it is not installed,
 // { failed: <code or signal> } when it could not finish, else { status, stdout, stderr }.
@@ -42,7 +56,7 @@ const isCleanRelative = (path) =>
   !isAbsolute(path) && path === normalize(path) && path !== '.' && path !== '..' && !path.startsWith('../') &&
   !CONTROL.test(path);
 
-// { issue, scratch, regenerated } for a job, or { check } for a read-only check of paths, duplicates dropped in order,
+// { issue, scratch, regenerated, pr? } for a job, or { check } for a read-only check of paths, duplicates dropped in order,
 // or { error } for anything else.
 export function parseCleanupArgs(args) {
   let parsed;
@@ -55,6 +69,7 @@ export function parseCleanupArgs(args) {
         scratch: { type: 'string', multiple: true },
         regenerated: { type: 'string', multiple: true },
         check: { type: 'string', multiple: true },
+        pr: { type: 'string', multiple: true },
       },
     });
   } catch (error) {
@@ -62,13 +77,15 @@ export function parseCleanupArgs(args) {
   }
   const { positionals, values } = parsed;
   if (values.check) {
-    if (positionals.length || values.scratch || values.regenerated) return { error: '--check takes no issue number and no other flag' };
+    if (positionals.length || values.scratch || values.regenerated || values.pr) return { error: '--check takes no issue number and no other flag' };
     const check = unique(values.check);
     const badCheck = check.find((path) => !isCleanAbsolute(path));
     if (badCheck !== undefined) return { error: `--check needs a normalized absolute path: ${JSON.stringify(badCheck)}` };
     return { check };
   }
   if (positionals.length !== 1 || !POSITIVE_INTEGER.test(positionals[0])) return { error: 'expected exactly one issue number' };
+  const pr = values.pr?.length === 1 ? parsePr(values.pr[0]) : null;
+  if (values.pr && !pr) return { error: '--pr needs exactly one canonical HTTPS GitHub pull request URL' };
   const scratch = unique(values.scratch ?? []);
   const regenerated = unique(values.regenerated ?? []);
   const badScratch = scratch.find((path) => !isCleanAbsolute(path));
@@ -77,7 +94,7 @@ export function parseCleanupArgs(args) {
   if (badRegenerated !== undefined) {
     return { error: `--regenerated needs a normalized path inside the worktree: ${JSON.stringify(badRegenerated)}` };
   }
-  return { issue: positionals[0], scratch, regenerated };
+  return { issue: positionals[0], scratch, regenerated, ...(pr ? { pr } : {}) };
 }
 
 // The records of `git worktree list --porcelain -z`, the main worktree first, each { path, ...attributes } with an
@@ -138,6 +155,9 @@ function createReport() {
     },
     line(text) {
       lines.push(text);
+    },
+    hasRetentions() {
+      return retained > 0;
     },
     finish() {
       lines.push(removed || retained ? `closeout-cleanup: ${removed} removed, ${retained} retained` : 'closeout-cleanup: nothing to do');
@@ -230,7 +250,7 @@ export function cleanupJob(request, seams) {
     const held = useChecks(worktree.path, [worktree.path, worktree.canonical], true, true, context);
     if (held) retainWorktree(held.reason);
   }
-  if (worktree && !worktree.retained) removeWorktree(git, worktree, request.regenerated, retainWorktree, docker.verify);
+  if (worktree && !worktree.retained) removeWorktree(context, request.regenerated, retainWorktree, docker.verify);
   if (!worktree) report.absent('worktree', job);
   else if (worktree.retained) report.retained('worktree', worktree.path, worktree.retained);
   else report.removed('worktree', worktree.path);
@@ -243,12 +263,82 @@ export function cleanupJob(request, seams) {
     const unverified = docker?.failure ? `docker failed: ${docker.failure}` : docker?.verify();
     if (unverified) report.retained('branch', job, unverified);
     else {
-      const deletion = git('branch', '-d', job);
+      const deletion = request.pr
+        ? seams.run(seams.git.command, ['branch', '-d', job], { env: { ...seams.git.env, LC_ALL: 'C' } })
+        : git('branch', '-d', job);
       if (deletion.status === 0) report.removed('branch', job);
-      else report.retained('branch', job, describe(deletion));
+      else if (request.pr && !report.hasRetentions() && notFullyMerged(deletion, job)) {
+        const reason = removeMergedBranch(request.pr, job, context);
+        if (reason) report.retained('branch', job, reason);
+        else {
+          report.line(`verified merged PR exception for branch ${job}`);
+          report.removed('branch', job);
+        }
+      } else report.retained('branch', job, describe(deletion));
     }
   }
   return report.finish();
+}
+
+function notFullyMerged(result, job) {
+  if (result.status !== 1 || result.stdout !== '') return false;
+  const error = `error: the branch '${job}' is not fully merged`;
+  const advice = `If you are sure you want to delete it, run 'git branch -D ${job}'`;
+  return [
+    `error: The branch '${job}' is not fully merged.\n${advice}.\n`,
+    `${error}.\n${advice}\n`,
+    `${error}\nhint: ${advice}\nhint: Disable this message with "git config advice.forceDeleteBranch false"\n`,
+    `${error}\nhint: ${advice}\nhint: Disable this message with "git config set advice.forceDeleteBranch false"\n`,
+    `${error}\nhint: ${advice}\n`,
+    `${error}\n`,
+  ].includes(result.stderr);
+}
+
+// Only this exact delivered head is disposable; squash ancestry cannot establish head identity.
+function removeMergedBranch(pr, job, { seams, git, docker }) {
+  const observedLine = (result) => completeCommand(result) && completeLine(result.stdout);
+  const origin = git('remote', 'get-url', 'origin');
+  const remote = observedLine(origin);
+  if (!remote || !isGithubRepository(remote, pr.repository)) return 'merged PR exception: origin does not verify the requested repository';
+  const main = observedLine(git('rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'));
+  if (!main || !COMMIT.test(main)) return 'merged PR exception: fetched main commit is unavailable';
+  const metadata = seams.run('gh', ['pr', 'view', pr.number, '--repo', `github.com/${pr.repository}`, '--json',
+    'state,mergedAt,mergeCommit,headRefName,headRefOid,isCrossRepository,baseRefName,url'],
+  { env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+  if (!completeCommand(metadata)) return 'merged PR exception: pull request metadata is unavailable';
+  let proof;
+  try {
+    proof = JSON.parse(metadata.stdout);
+  } catch {
+    return 'merged PR exception: pull request metadata is unreadable';
+  }
+  if (!isObject(proof) || proof.url !== pr.url || proof.state !== 'MERGED' || proof.isCrossRepository !== false ||
+    proof.headRefName !== job || proof.baseRefName !== 'main' || typeof proof.headRefOid !== 'string' ||
+    !COMMIT.test(proof.headRefOid) || !isObject(proof.mergeCommit) || typeof proof.mergeCommit.oid !== 'string' ||
+    !COMMIT.test(proof.mergeCommit.oid) || !validMergeTimestamp(proof.mergedAt)) {
+    return 'merged PR exception: pull request metadata does not verify this merged job';
+  }
+  const ancestry = git('merge-base', '--is-ancestor', proof.mergeCommit.oid, main);
+  if (!completeCommand(ancestry) || ancestry.stdout !== '') return 'merged PR exception: merge commit is not verified in fetched main';
+  const tip = () => observedLine(git('rev-parse', '--verify', `refs/heads/${job}`));
+  if (tip() !== proof.headRefOid) return 'merged PR exception: branch tip does not match the delivered head';
+  const listing = git('worktree', 'list', '--porcelain', '-z');
+  const records = completeCommand(listing) && parseWorktreeList(listing.stdout);
+  if (!records || records.some(({ branch }) => branch === `refs/heads/${job}`)) return 'merged PR exception: branch worktree occupancy is not clear';
+  const unverified = docker?.failure ? `docker failed: ${docker.failure}` : docker?.verify();
+  if (unverified) return unverified;
+  if (tip() !== proof.headRefOid) return 'merged PR exception: branch tip changed before deletion';
+  const deletion = git('branch', '-D', '--', job);
+  if (!completeCommand(deletion)) return 'merged PR exception: exact branch deletion failed';
+  const absent = git('rev-parse', '--verify', '--quiet', `refs/heads/${job}`);
+  if (absent.status !== 1 || absent.stdout !== '' || absent.stderr !== '') return 'merged PR exception: branch absence could not be verified';
+  return null;
+}
+
+function validMergeTimestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === (value.includes('.') ? value : value.replace('Z', '.000Z'));
 }
 
 // Check mode: reads whether anything uses each path and removes nothing, making no call to the version control tool.
@@ -675,9 +765,42 @@ export function parseStatusEntries(stdout) {
   return entries;
 }
 
-// Requires ordinary index flags and only ignored entries within verified regenerated directories: ordinary removal
-// deletes ignored files and edits hidden by skip-worktree or assume-unchanged without refusing.
-function removeWorktree(git, worktree, regenerated, retainWorktree, verify) {
+// A standalone ignored link, or { retained } on an unsafe observation. A null reason leaves an ordinary entry
+// held by the existing status diagnostic.
+function readIgnoredLink(relative, worktree, records) {
+  const path = join(worktree.path, relative);
+  const target = readTarget(path);
+  const retained = (reason) => ({ retained: `ignored entry ${relative}: ${reason}` });
+  if (target.absent) return retained('could not be read: ENOENT');
+  if (target.retained) return retained(target.retained);
+  if (!target.before.isSymbolicLink()) return { retained: null };
+  if (target.canonical !== join(worktree.canonical, relative)) return retained('has a symbolic-link parent');
+  try {
+    const linkText = readlinkSync(path);
+    const destination = resolve(dirname(path), linkText);
+    const resolved = realpathSync(path);
+    if (relates([destination, resolved], [worktree.path, worktree.canonical], ['equal', 'below'])) {
+      return retained('points inside its worktree');
+    }
+    for (const { path: other } of records.slice(1).filter(({ path }) => path !== worktree.path)) {
+      let canonical;
+      try {
+        canonical = realpathSync(other);
+      } catch (error) {
+        return retained(`could not resolve another linked worktree ${other}: ${error.code ?? error.message}`);
+      }
+      if (relates([destination, resolved], [other, canonical], ['equal', 'below'])) {
+        return retained(`points into another linked worktree ${other}`);
+      }
+    }
+    return { before: target.before, linkText, target: resolved };
+  } catch (error) {
+    return retained(`could not resolve its target: ${error.code ?? error.message}`);
+  }
+}
+
+// Ordinary removal deletes ignored entries and edits hidden by index flags without refusing, so verify both.
+function removeWorktree({ git, worktree, records }, regenerated, retainWorktree, verify) {
   const status = git('-C', worktree.path, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching');
   if (status.status !== 0) return retainWorktree(`git status failed: ${describe(status)}`);
   const entries = parseStatusEntries(status.stdout);
@@ -695,13 +818,22 @@ function removeWorktree(git, worktree, regenerated, retainWorktree, verify) {
     }
     directories.push(directory);
   }
-  const held = entries
-    .filter(({ code, path }) => {
-      const relative = path.endsWith('/') ? path.slice(0, -1) : path;
-      return !(code === '!!' && !relative.endsWith('/') && isCleanRelative(relative) &&
-        directories.some((directory) => path.startsWith(directory + '/')));
-    })
-    .map(({ code, path }) => `"${code} ${path}"`);
+  const links = [];
+  const held = [];
+  for (const { code, path } of entries) {
+    const relative = path.endsWith('/') ? path.slice(0, -1) : path;
+    if (code === '!!' && !relative.endsWith('/') && isCleanRelative(relative) &&
+      directories.some((directory) => path.startsWith(directory + '/'))) continue;
+    if (code === '!!' && !path.endsWith('/') && isCleanRelative(path)) {
+      const link = readIgnoredLink(path, worktree, records);
+      if (link.retained) return retainWorktree(link.retained);
+      if (link.before) {
+        links.push({ relative: path, ...link });
+        continue;
+      }
+    }
+    held.push(`"${code} ${path}"`);
+  }
   if (held.length) {
     const more = held.length > 5 ? ` and ${held.length - 5} more` : '';
     return retainWorktree(`git status lists ${held.slice(0, 5).join(', ')}${more}`);
@@ -714,12 +846,20 @@ function removeWorktree(git, worktree, regenerated, retainWorktree, verify) {
   }
   const unverified = verify();
   if (unverified) return retainWorktree(unverified);
+  for (const link of links) {
+    const after = readIgnoredLink(link.relative, worktree, records);
+    if (after.retained) return retainWorktree(after.retained);
+    if (!after.before || after.before.dev !== link.before.dev || after.before.ino !== link.before.ino ||
+      after.linkText !== link.linkText || after.target !== link.target) {
+      return retainWorktree(`ignored link ${link.relative}: changed during the checks`);
+    }
+  }
   const removal = git('worktree', 'remove', worktree.path);
   if (removal.status !== 0) return retainWorktree(describe(removal));
   const listing = git('worktree', 'list', '--porcelain', '-z');
-  const records = listing.status === 0 ? parseWorktreeList(listing.stdout) : null;
-  if (!records) return retainWorktree(`could not confirm its removal: ${listing.status === 0 ? 'an unreadable record' : describe(listing)}`);
-  if (records.some(({ path }) => path === worktree.path)) return retainWorktree('git still registers it after its removal');
+  const remaining = listing.status === 0 ? parseWorktreeList(listing.stdout) : null;
+  if (!remaining) return retainWorktree(`could not confirm its removal: ${listing.status === 0 ? 'an unreadable record' : describe(listing)}`);
+  if (remaining.some(({ path }) => path === worktree.path)) return retainWorktree('git still registers it after its removal');
   return undefined;
 }
 

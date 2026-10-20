@@ -66,7 +66,7 @@ not waive verifier target, cleanliness or ownership checks.
 ## 1. Find where things stand
 
 Once the verifier checkout is settled, issue the intake reads from it together, as parallel or background
-calls: the board intake, the sync check and tooling counts below,
+calls: the board intake,
 `gh pr list --author @me --state open --json number,title,headRefName,isDraft,url`, and the sweep list when it
 applies. Collect every exit status and stderr, and finish the reads before reconciliation writes. The board
 intake is one command, its stdout redirected to a literal path in this session's own scratch directory:
@@ -92,22 +92,6 @@ node scripts/board.mjs --intake > <scratch>/board-intake.txt
 - During intake, from the root checkout, inspect another job's worktree with `git -C <path>`, never by `cd`. On
   Claude Code, `EnterWorktree` records the shell's current folder as the one `ExitWorktree` later returns to, and
   a sibling job's closeout may remove that folder, leaving this session unable to leave its own worktree.
-- Run `node scripts/factory-sync.mjs --check` in the same refreshed checkout and report its result at work-pick in
-  one advisory line: exit 0 is in sync; exit 1 is lag, naming the paths it lists, reported as information: an
-  ordinary shared change opens no sync card, and a sync card is opened only on the owner's decision, when one sync
-  job clears every listed path at once (`AGENTS.md`, Shared workflow adoption, and the
-  [`sync-job`](../sync-job/SKILL.md) skill); exit 2 is lag unknown with its stated cause, never reported as in sync. The
-  result never blocks work-pick.
-- Report in one advisory line, with no threshold, the size of the workflow tooling (scripts, tools and hooks, their
-  tests counted apart) and its time-limit declarations, each a test or suite setting its own time limit on one line,
-  at the recorded `origin/main` commit and at the newest `main` commit at least 30 days old,
-  `git rev-list -1 --before=30.days.ago origin/main` (the machinery rule under "4. Plan"). For each of the two
-  commits `<rev>`, size prints tooling files, tooling lines, test files and test lines:
-  `git grep -c -e '^' <rev> -- scripts tools .claude/hooks .codex/hooks .githooks | awk -F: '{ if ($(NF-1) ~ /\.test\./) { tf++; tl+=$NF } else { f++; l+=$NF } } END { print f+0, l+0, tf+0, tl+0 }'`
-  and the declaration count is
-  `git grep -c -E 'test\.setTimeout\(|test\.slow\(|[Ii]nfo(\(\))?\.(setTimeout|slow)\(|describe\.configure\(\{[^}]*timeout|^[[:space:]]*(test|it|describe)\([^;]*\{[[:space:]]*timeout:' <rev> -- tests scripts tools | awk -F: '{ s+=$NF } END { print s+0 }'`.
-  A directory absent from a tree counts zero. When `rev-list` prints nothing or `git cat-file -e <rev>` fails, that
-  commit's half is reported unavailable, never as zero.
 - A branch with an open draft pull request is unfinished work. Use the summaries to identify relevant unfinished
   jobs, then read only their bodies: the "Not done" section says where to pick up.
 - Planned work comes from the document. Prefer `Ready` work matching the owner's latest objective;
@@ -360,7 +344,17 @@ branch. Two issues may run in parallel only when their files are disjoint.
   added to existing machinery meets the same bar as new machinery. This rule is the one home for how machinery leaves: a
   job that removes a friction another way deletes the machinery that friction admitted, and a card that rewrites a
   testing strategy, a coding standard or the workflow text of `AGENTS.md` lists the machinery it keeps and settles keep,
-  shrink or delete for each.
+  shrink or delete for each. Intake does not measure tooling growth. When the owner asks for a workflow-health
+  assessment, report in one line, with no threshold, the size of the workflow tooling (scripts, tools and hooks, their
+  tests counted apart) and its time-limit declarations, each a test or suite setting its own time limit on one line,
+  at the fetched `origin/main` commit and at the newest `main` commit at least 30 days old,
+  `git rev-list -1 --before=30.days.ago origin/main`. For each of the two commits `<rev>`, size prints tooling files,
+  tooling lines, test files and test lines:
+  `git grep -c -e '^' <rev> -- scripts tools .claude/hooks .codex/hooks .githooks | awk -F: '{ if ($(NF-1) ~ /\.test\./) { tf++; tl+=$NF } else { f++; l+=$NF } } END { print f+0, l+0, tf+0, tl+0 }'`
+  and the declaration count is
+  `git grep -c -E 'test\.setTimeout\(|test\.slow\(|[Ii]nfo(\(\))?\.(setTimeout|slow)\(|describe\.configure\(\{[^}]*timeout|^[[:space:]]*(test|it|describe)\([^;]*\{[[:space:]]*timeout:' <rev> -- tests scripts tools | awk -F: '{ s+=$NF } END { print s+0 }'`.
+  A directory absent from a tree counts zero. When `rev-list` prints nothing or `git cat-file -e <rev>` fails, that
+  commit's half is reported unavailable, never as zero.
 - **Plan approval (optional owner gate).** `AGENTS.md` owns what this gate is and what turns it on, under "Owner
   gates"; these are its steps, taken once the plan is complete and every finding of any plan review is settled.
   - **Read the setting on the fetched `main`,** never from the files of the job, so a job cannot switch its own
@@ -552,21 +546,21 @@ branch. Two issues may run in parallel only when their files are disjoint.
   any other value, or a key spelt nearly like it leaves the setting unknown, which is never off: open no pull request
   for a `sign-off` tier change and tell the owner what the commands printed. A job that changes the setting is delivered
   under the value the fetched `main` held. A job that turns the add-on off therefore still owes the external review
-  where its tier is `sign-off`, though its own sync has removed the add-on's files from its worktree: it reads the
+  where its tier is `sign-off`, though its own change has removed the add-on's files from its worktree: it reads the
   add-on's skill from the fetched `main` with `git show origin/main:.agents/skills/<name>/SKILL.md`, `<name>` being that
   skill's name, `greptile`, and follows what that prints wherever section 8 says to read the skill. A read that fails is
   told to the owner with the draft kept open; it is never `UNAVAILABLE`. Where the add-on is on, the `greptile` skill
   owns every other rule of the review: the pool it is metered from, the allowance read before a request, how each thread
-  is settled, whether a review still stands after a rebase, and when an attempt counts as unavailable. The `sync-job`
+  is settled, whether a review still stands after a rebase, and when an attempt counts as unavailable. The `shared-files`
   skill says how a repository turns the add-on on or off.
 - A guard keeps the heaviest tier in both directions. The rule covers a guard, which is a hook, a permission rule or a
   ruleset that refuses an action, a gate a guard runs, and its classifier, with every surface in the Surfaces table's
   `sign-off` row: a change to any of them is `sign-off` tier whether it loosens or tightens and whatever the two
   answers or the gate's exit give, so a one-line change there is `sign-off` tier. The manifest is in this rule by
   what an entry names: adding or removing the entry of a guard, a gate, a classifier or a hook configuration is a
-  change to that guard, while a hash line `node scripts/factory-sync.mjs --write` re-records for a file the same
-  change edits takes that file's tier. A guard that has no file, a ruleset or other GitHub setting, is changed only
-  with its read-back: before the change the owner signs off the planned state; after it, the commit that records the
+  change to that guard, while a hash line re-recorded for a file the same change edits takes that file's tier;
+  [shared-files](../shared-files/SKILL.md#canonical-recording) owns recording. A guard that has no file, a ruleset or other
+  GitHub setting, is changed only with its read-back: before the change the owner signs off the planned state; after it, the commit that records the
   applied state in the repository's record carries the setting read through `gh api`, bypass list included, and that
   commit is the diff the `sign-off` tier reviews, whatever the gate says of its paths.
 - `security-reviewer` only when a change widens a surface in the Surfaces table's `security review` row.
@@ -592,7 +586,7 @@ The owner still sees that same filled body in chat, with the review line at tier
 route section 8 describes, that shown body becomes the squash commit's message, since there is no pull request
 to hold it. The job's own `Closes #<issue>` line is the only closing word in a pull request body or a
 direct-route commit message: GitHub closes, as completed, any issue whose link follows close, fix or resolve in any
-tense, another repository's `owner/repo#N` included. Every other mention, such as a covered sync card or the
+tense, another repository's `owner/repo#N` included. Every other mention, such as the
 canonical repository's card for a deferred finding, which `to-issues` step 6 says how to file, keeps those words
 from directly before its link. The owner's yes, or any instruction to push, covers every step of section 8: the
 push, the draft pull request, the comments that request the external review where the add-on is on, repairs on the same
@@ -601,11 +595,12 @@ action. Push only after it.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
 the two differ, `.github/pull_request_template.md` wins: it decides which sections and lines the body has, their
-order and their labels, and the skill decides only how the Summary, Evidence and Merge Danger sections are
-written. The body therefore keeps the lines the skill lacks: the review line, the receipts as
-`node scripts/run-log.mjs` wrote them, **Not done** and the `Closes #<issue>` line. It records the two answers of
-section 6 once, as the `Undo:` and `Reach:` lines under `## Merge Danger`, answered by section 6's definitions,
-and never again under the skill's own labels, Door and Blast Radius.
+order, their labels, which of them sit in a collapsed section and when the Summary carries a picture, and the skill
+decides only how the Summary, Evidence and Merge Danger sections are written. The body therefore keeps the lines
+the skill lacks: the review line, the receipts as `node scripts/run-log.mjs` wrote them, **Not done** and the
+`Closes #<issue>` line. It records the two answers of section 6 once, as the `Undo:` and `Reach:` lines under
+`## Merge Danger`, answered by section 6's definitions, and never again under the skill's own labels, Door and
+Blast Radius.
 A pull request a scheduled routine opens is written with the skill under this same rule, with the
 `## Pull request body` section of that routine's manual standing where the template stands.
 
@@ -693,7 +688,7 @@ what the session found, whenever a path the testing strategy does not cover was 
    sign-off tier in section 6, and only where the add-on is on; every other change goes straight to step 3. Move the
    card to `In review`.
 2. For the sign-off tier in a repository that has turned the external review add-on on, read the `greptile` skill and
-   follow it on the open draft; it owns how the review attempt is made and settled. A job whose own sync removed that
+   follow it on the open draft; it owns how the review attempt is made and settled. A job whose own change removed that
    skill reads it from the fetched `main`, as section 6 says under the external review add-on.
 3. Re-read the open draft and require current local evidence, every finding/thread resolved, and a review line
    that matches the rounds actually run and the findings actually raised and settled. For the sign-off tier with the

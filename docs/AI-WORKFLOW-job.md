@@ -60,7 +60,7 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
   code follows. The `resume` skill's instruction-reuse rule avoids rereading content whose Git identity and full
   active context are verified, and proves every path in one command. One board command then reads the board once
   and prints the pick listing, the drift scan and the full details of every card a session may offer or must
-  show, its latest claim included, while the pull-request, sync and tooling reads overlap it; results and
+  show, its latest claim included, while the pull-request read overlaps it; results and
   failures are collected before reconciliation. Its exit status separates a failed board read, drift and a card
   whose details could not be read, and such a card is never offered as startable. Pull-request summaries
   identify which continuation bodies matter, and the captured details serve selection and planning. The skill's
@@ -118,8 +118,10 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
 - **Closeout.** The moment the merge lands, the same session confirms it, moves the card, updates local `main`, and
   removes the branch and worktree. Local `main` advances only by a provably safe fast-forward, and a checkout that is
   dirty, active or uncertain is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
-  its named scratch, its worktree and its branch, retaining with the reason whatever a check or a refusal holds back
-  and never forcing a removal; Docker bind paths require the local filesystem proof the `closeout` skill describes.
+  its named scratch, its worktree and its branch. Failed safety checks retain targets with a reason. The only
+  exception to ordinary not-fully-merged branch refusal is the verified merged-head deletion described by the
+  [closeout skill](../.agents/skills/closeout/SKILL.md).
+  Docker bind paths require the local filesystem proof the `closeout` skill describes.
   The session keeps the judgment of what is its own scratch and stops any server the
   command finds serving the worktree. A leftover the session finds, another job's artifact or one it cannot prove it
   created, is investigated to a conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete

@@ -5,7 +5,7 @@
 // must be able to import this module. For the same reason it is the only place the settings file is read from disk, so
 // the agent check and the manifest check refuse the same linked file or linked parent before any read, and the only
 // home of the file's top-level rules (readSettingsHeader), so no reader takes its runtimes from a file whose top level
-// the sync refuses.
+// this module refuses.
 //
 // The two answers are separate questions, and neither stands in for the other:
 // leftOutCause: why a tree with these settings must hold nothing at a path, or null where the tree installs it. The
@@ -90,7 +90,7 @@ export function needNotResolveCause({ runtimes, docSweep }, path) {
   return sweepOmits(docSweep, path) ? SWEEP_OFF_CAUSE : null;
 }
 
-const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, run the sync that installs that copy, then make the edit again';
+const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
 
 export const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -131,10 +131,10 @@ export function checkContained(root, path) {
       throw error;
     }
     if (stat.isSymbolicLink()) {
-      throw new Error(`${path}: its parent ${dir} is a symlink, so a write there would not land at the manifest path and could land outside the target ${root}; if it is a former shared symlink, remove it first: git rm ${prefix}, commit, then sync`);
+      throw new Error(`${path}: its parent ${dir} is a symlink, so a write there would not land at the manifest path and could land outside the target ${root}; if it is a former shared symlink, remove it first: git rm ${prefix}, commit, then retry`);
     }
     if (!stat.isDirectory()) {
-      throw new Error(`${path}: its parent ${dir} is a file, not a directory, so the entry cannot be written there; if it is a former shared symlink checked out as a file, remove it first: git rm ${prefix}, commit, then sync`);
+      throw new Error(`${path}: its parent ${dir} is a file, not a directory, so the entry cannot be written there; if it is a former shared symlink checked out as a file, remove it first: git rm ${prefix}, commit, then retry`);
     }
   }
 }
@@ -151,7 +151,7 @@ export function readSettingsHeader(text, label) {
     throw new Error(`${label}: is not valid JSON`);
   }
   if (!isRecord(settings)) throw refusal(label, 'file', 'must hold one JSON object', settings);
-  if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the sync (only 1)', settings.version, true);
+  if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the shared workflow (only 1)', settings.version, true);
   for (const key of Object.keys(settings)) {
     if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview', key, true);
   }
