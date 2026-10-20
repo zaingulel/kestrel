@@ -17,6 +17,261 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ControlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_cli_uses_stdin_and_fixed_results(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            payload = b'{"version":1,"text":"private-cli-canary\\nsecond line"}\n'
+            peers, children = [], []
+            received, release = asyncio.Event(), asyncio.Event()
+            requests = []
+            response = b'accepted\n'
+
+            async def serve(reader, writer):
+                try:
+                    requests.append(await asyncio.wait_for(reader.readexactly(len(payload)), 2))
+                    self.assertEqual(await asyncio.wait_for(reader.read(1), 2), b'')
+                    received.set()
+                    await asyncio.wait_for(release.wait(), 2)
+                    writer.write(response)
+                    await writer.drain()
+                finally:
+                    await control.close_writer(writer)
+
+            def connected(reader, writer):
+                peers.append(asyncio.create_task(serve(reader, writer)))
+
+            async def cleanup():
+                release.set()
+                for process in children:
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+                await asyncio.gather(*peers)
+
+            self.addAsyncCleanup(cleanup)
+            server = await asyncio.start_unix_server(connected, path=control.address())
+            try:
+                for response, expected in ((b'accepted\n', (0, b'{"status":"accepted"}\n')),
+                                           (b'busy\n', (1, b'{"status":"busy"}\n'))):
+                    received.clear()
+                    release.clear()
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable, str(ROOT / 'desktop/control.py'), '--submit',
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    children.append(process)
+                    process.stdin.write(payload)
+                    await process.stdin.drain()
+                    process.stdin.close()
+                    await process.stdin.wait_closed()
+                    # An unsupported CLI must fail on its actual status, not a fixture timeout.
+                    stdout = asyncio.create_task(process.stdout.read())
+                    stderr = asyncio.create_task(process.stderr.read())
+                    exited = asyncio.create_task(process.wait())
+                    arrived = asyncio.create_task(received.wait())
+                    try:
+                        await asyncio.wait_for(asyncio.wait((exited, arrived),
+                                                          return_when=asyncio.FIRST_COMPLETED), 3)
+                        if received.is_set():
+                            self.assertNotIn(b'private-cli-canary', Path(f'/proc/{process.pid}/cmdline').read_bytes())
+                            self.assertNotIn(b'private-cli-canary', Path(f'/proc/{process.pid}/environ').read_bytes())
+                        release.set()
+                        await asyncio.wait_for(exited, 3)
+                        output, errors = await asyncio.gather(stdout, stderr)
+                        self.assertEqual((process.returncode, output), expected)
+                        self.assertEqual(errors, b'')
+                    finally:
+                        for task in (stdout, stderr, exited, arrived):
+                            task.cancel()
+                        await asyncio.gather(stdout, stderr, exited, arrived, return_exceptions=True)
+                self.assertEqual(requests, [payload, payload])
+            finally:
+                server.close()
+                await server.wait_closed()
+                await cleanup()
+
+            for malformed in (b'[]\n', b'1\n', b'{"version":true,"text":"private-cli-canary"}\n',
+                              b'{"version":1,"text":""}\n', b'{"version":1,"text":"x"}\nextra'):
+                read_fd, write_fd = os.pipe()
+                with os.fdopen(read_fd, 'rb') as incoming, os.fdopen(write_fd, 'wb') as outgoing:
+                    outgoing.write(malformed)
+                    outgoing.close()
+                    stdin = Mock(buffer=incoming)
+                    output, errors = io.StringIO(), io.StringIO()
+                    with (patch.object(control.sys, 'stdin', stdin), patch.object(control.sys, 'stdout', output),
+                          patch.object(control.sys, 'stderr', errors),
+                          patch.object(control.asyncio, 'open_unix_connection', AsyncMock()) as connect,
+                          patch.object(control, 'notify_failure', AsyncMock()) as notify):
+                        self.assertEqual(await control.main(['--submit']), 1)
+                    self.assertEqual(output.getvalue(), '{"status":"invalid"}\n')
+                    self.assertEqual(errors.getvalue(), '')
+                    connect.assert_not_awaited()
+                    notify.assert_not_awaited()
+
+    async def test_submit_wire_bounds_and_peer_refusal(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            toggles, calls = [], []
+            server = control.ConversationControl(lambda: toggles.append(True) or 'inactive')
+            self.addAsyncCleanup(server.close)
+            await server.start()
+
+            async def wire(payload, *, eof=True):
+                reader, writer = await asyncio.open_unix_connection(control.address())
+                try:
+                    writer.write(payload)
+                    await writer.drain()
+                    if eof:
+                        writer.write_eof()
+                    return await asyncio.wait_for(reader.read(33), 2)
+                finally:
+                    await control.close_writer(writer)
+
+            self.assertEqual(await wire(b'{"version":true,"text":"x"}\n'), b'invalid\n')
+            self.assertEqual(await wire(b'{"version":1,"text":"x"}\n'), b'unavailable\n')
+            await server.close()
+            self.assertFalse(server.tasks)
+
+            outcome = 'accepted'
+
+            def receive(text):
+                calls.append(text)
+                return outcome
+
+            server = control.ConversationControl(lambda: toggles.append(True) or 'inactive', submit=receive)
+            self.addAsyncCleanup(server.close)
+            await server.start()
+
+            def envelope(text):
+                return (json.dumps({'version': 1, 'text': text}, ensure_ascii=True,
+                                   separators=(',', ':')) + '\n').encode('utf-8')
+
+            for text in (' line\tA\r\nB ', 'a' * 4096, '😀' * 2048, '😀' * 2047 + 'aa'):
+                self.assertEqual(await wire(envelope(text)), b'accepted\n')
+            self.assertEqual(calls, [' line\tA\r\nB ', 'a' * 4096, '😀' * 2048, '😀' * 2047 + 'aa'])
+            ordinary = b'{"version":1,"text":"x"}\n'
+            at_limit = b' ' * (32768 - len(ordinary)) + ordinary
+            self.assertEqual(await wire(at_limit), b'accepted\n')
+            for prefix in (b' ', b'\t', b'\r', b'\n'):
+                self.assertEqual(await wire(prefix + ordinary), b'accepted\n')
+            admitted = list(calls)
+            hostile = [
+                envelope('a' * 4097), envelope('😀' * 2048 + 'a'), envelope('\ud800'),
+                envelope('\udfff'), envelope(' \t\r\n'), envelope('x\x00'), envelope('x\x1f'),
+                envelope('x\x7f'), envelope('x\x80'), envelope('x\x9f'),
+                b'{"version":1,"text":"x","text":"y"}\n',
+                b'{"version":1,"version":1,"text":"x"}\n',
+                b'{"version":1,"text":"x","command":"mute"}\n',
+                b'{"version":true,"text":"x"}\n', b'{"version":1.0,"text":"x"}\n',
+                b'{"version":"1","text":"x"}\n', b'{"version":2,"text":"x"}\n',
+                b'{"version":1,"text":null}\n', b'{"version":1,"text":[]}\n',
+                b'{"version":1,"text":3}\n', b'{"text":"x"}\n',
+                b'{"version":1,"text":"\xff"}\n', ordinary + ordinary, ordinary + b'extra',
+                ordinary[:-1], ordinary[:-1] + b' \n', b' ' + at_limit,
+                b'{' + b' ' * 32768, b'\v' + ordinary, b'\f' + ordinary,
+                b'{"version":1,"text":' + b'[' * 1200 + b'0' + b']' * 1200 + b'}\n',
+            ]
+            for index, payload in enumerate(hostile):
+                with self.subTest(hostile=index):
+                    self.assertEqual(await wire(payload), b'invalid\n')
+            self.assertEqual(await wire(ordinary, eof=False), b'invalid\n')
+            for index, payload in enumerate((b'', b'toggle', b'TOGGLE\n', b'toggle\nextra',
+                                             b'toggle\n' * 2, b'x' * 100, b'[]\n', b'1\n',
+                                             b' \t\n\r\v\f', b'\xff', b' ' * 32769)):
+                with self.subTest(legacy=index):
+                    self.assertEqual(await wire(payload), b'unavailable\n')
+            self.assertEqual(calls, admitted)
+            self.assertEqual(toggles, [])
+            self.assertEqual(await wire(b'toggle\n'), b'inactive\n')
+            self.assertEqual(toggles, [True])
+            with patch.object(control, 'same_uid', return_value=False):
+                self.assertEqual(await wire(ordinary), b'unavailable\n')
+                self.assertEqual(await control.submit('x'), 'unavailable')
+            self.assertEqual(calls, admitted)
+            for outcome in ('busy', 'unavailable'):
+                self.assertEqual(await control.submit('x'), outcome)
+            with patch.object(control.asyncio, 'open_unix_connection', AsyncMock()) as connect:
+                for invalid in ('', 'a' * 4097, '\ud800', 'x\x00'):
+                    self.assertEqual(await control.submit(invalid), 'invalid')
+                connect.assert_not_awaited()
+            await server.close()
+            self.assertFalse(server.tasks)
+            self.assertEqual(await control.submit('x'), 'unavailable')
+
+    async def test_submit_receipt_loss_never_replays(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            calls, connections = [], []
+
+            def accept_without_receipt(text):
+                calls.append(text)
+                connections[-1].transport.abort()
+                return 'accepted'
+
+            server = control.ConversationControl(lambda: 'inactive', submit=accept_without_receipt)
+            self.addAsyncCleanup(server.close)
+            native_serve = server.serve
+
+            async def lose_receipt(reader, writer):
+                connections.append(writer)
+                await native_serve(reader, writer)
+
+            with patch.object(server, 'serve', side_effect=lose_receipt):
+                await server.start()
+                self.assertEqual(await control.submit('accepted-once-canary'), 'uncertain')
+                await server.close()
+            self.assertEqual(calls, ['accepted-once-canary'])
+            self.assertEqual(len(connections), 1)
+            self.assertFalse(server.tasks)
+
+            attempts, peers = [], []
+            release, empty_request = asyncio.Event(), asyncio.Event()
+            response, eof = b'', True
+
+            async def answer(reader, writer):
+                try:
+                    attempts.append(await asyncio.wait_for(reader.read(32769), 2))
+                    if not attempts[-1]:
+                        empty_request.set()
+                        return
+                    writer.write(response)
+                    await writer.drain()
+                    if not eof:
+                        await asyncio.wait_for(release.wait(), 2)
+                finally:
+                    await control.close_writer(writer)
+
+            def connected(reader, writer):
+                peers.append(asyncio.create_task(answer(reader, writer)))
+
+            async def cleanup():
+                release.set()
+                await asyncio.gather(*peers)
+
+            self.addAsyncCleanup(cleanup)
+            socket = await asyncio.start_unix_server(connected, path=control.address())
+            try:
+                for response in (b'', b'accepted', b'accepted\nextra', b'accepted\n' * 2,
+                                 b'x' * 33, b'unknown\n', b'\xff\n'):
+                    before = len(attempts)
+                    self.assertEqual(await control.submit('one-write-canary'), 'uncertain')
+                    self.assertEqual(len(attempts), before + 1)
+                    self.assertEqual(attempts[-1], b'{"version":1,"text":"one-write-canary"}\n')
+                response, eof = b'accepted\n', False
+                before = len(attempts)
+                self.assertEqual(await control.submit('one-write-canary'), 'uncertain')
+                self.assertEqual(len(attempts), before + 1)
+                release.set()
+                response, eof = b'accepted\n', True
+                before = len(attempts)
+                with patch.object(control, 'same_uid', return_value=False):
+                    self.assertEqual(await control.submit('must-not-write'), 'unavailable')
+                await asyncio.wait_for(empty_request.wait(), 1)
+                self.assertEqual(attempts[-1], b'')
+                self.assertEqual(len(attempts), before + 1)
+            finally:
+                socket.close()
+                await socket.wait_closed()
+                await cleanup()
+
     async def test_toggle_wire_refusal_and_cleanup(self):
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
             calls = []
