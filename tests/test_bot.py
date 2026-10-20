@@ -3282,27 +3282,63 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             assistant_done, cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
             self.addCleanup(release_cleanup.set)
             original_discard = transport._discard_playback
-            held_frame_ids = []
+            held_frame_ids, handover_order = [], []
+            assistant_continuation_ready = asyncio.Event()
             original_complete = transport.llm.frame_completed
+            original_stt_reset = transport.stt.discard_pending
+            original_user_reset = user.reset
+            original_user_queue = user.queue_frame
+            original_admitted = transport.llm.request_admitted
+            typed_token = None
 
             def completed(role, frame):
                 original_complete(role, frame)
-                if isinstance(frame, InterruptionFrame) and role == 'assistant':
-                    held_frame_ids.append(frame.id)
-                    assistant_done.set()
+                if isinstance(frame, InterruptionFrame):
+                    if role == 'assistant':
+                        held_frame_ids.append(frame.id)
+                        handover_order.append(('assistant_complete', frame.id))
+                        # The matching future has queued its continuation before this FIFO checkpoint.
+                        asyncio.get_running_loop().call_soon(assistant_continuation_ready.set)
+                        assistant_done.set()
+                    elif role == 'output':
+                        handover_order.append(('output_complete', frame.id))
+
+            async def stt_reset():
+                handover_order.append(('stt_reset', old_child.reaped.is_set()))
+                await original_stt_reset()
+
+            async def user_reset():
+                handover_order.append(('user_reset', old_child.reaped.is_set()))
+                await original_user_reset()
+
+            async def user_queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+                if isinstance(frame, bot.LLMMessagesAppendFrame):
+                    handover_order.append(('typed_append', old_child.reaped.is_set()))
+                await original_user_queue(frame, direction, callback)
+
+            def admitted(token):
+                handover_order.append(('typed_admitted', token))
+                original_admitted(token)
 
             async def discard():
                 cleanup_started.set()
                 await release_cleanup.wait()
                 await original_discard()
+                handover_order.append(('playback_reaped', old_child.reaped.is_set()))
 
             old_child = transport.playback
             with patch.object(transport, '_discard_playback', side_effect=discard), \
-                    patch.object(transport.llm, 'frame_completed', side_effect=completed):
+                    patch.object(transport.llm, 'frame_completed', side_effect=completed), \
+                    patch.object(transport.stt, 'discard_pending', side_effect=stt_reset), \
+                    patch.object(user, 'reset', side_effect=user_reset), \
+                    patch.object(user, 'queue_frame', side_effect=user_queue), \
+                    patch.object(transport.llm, 'request_admitted', side_effect=admitted):
                 self.assertEqual(await service.submit('Typed C'), 'accepted')
+                typed_token = manager.pending_submit[1]
                 release_synthesis.set()
                 await asyncio.wait_for(assistant_done.wait(), 5)
                 await asyncio.wait_for(cleanup_started.wait(), 5)
+                await asyncio.wait_for(assistant_continuation_ready.wait(), 5)
                 self.assertIsNotNone(manager.pending_submit)
                 self.assertFalse(manager.speech_admitted())
                 self.assertFalse(old_child.reaped.is_set())
@@ -3315,7 +3351,18 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Reply C.')
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply C.')
                 self.assertTrue(old_child.reaped.is_set())
-                self.assertTrue(held_frame_ids)
+                self.assertEqual(len(held_frame_ids), 1)
+                kinds = [kind for kind, _ in handover_order]
+                output_index = handover_order.index(('output_complete', held_frame_ids[0]))
+                self.assertLess(kinds.index('assistant_complete'), kinds.index('playback_reaped'))
+                self.assertLess(kinds.index('playback_reaped'), output_index)
+                for kind in ('stt_reset', 'user_reset', 'typed_append', 'typed_admitted'):
+                    self.assertIn(kind, kinds)
+                    self.assertTrue(all(index > output_index for index, (actual, _) in enumerate(handover_order)
+                                        if actual == kind), handover_order)
+                self.assertTrue(all(value is True for kind, value in handover_order
+                                    if kind in ('stt_reset', 'user_reset', 'typed_append')), handover_order)
+                self.assertEqual([value for kind, value in handover_order if kind == 'typed_admitted'], [typed_token])
             self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
                 {'role': 'user', 'content': 'Typed A'}, {'role': 'assistant', 'content': 'Reply A.'},
                 {'role': 'user', 'content': 'Spoken B'}, {'role': 'assistant', 'content': 'Heard sentence.'},
