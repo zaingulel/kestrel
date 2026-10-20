@@ -21,6 +21,8 @@ TestCase {
         for (const sample of samples) {
             service.acceptStatusChunk(sample[0])
             compare(service.state, sample[1])
+            if (sample[0] === "B")
+                compare(service.statusSentence, "Kestrel needs attention. Microphone in use.")
         }
         for (const invalid of ["", "X", "I\n", "I\u0000", "é", "I private transcript", "I".repeat(33)]) {
             service.acceptStatusChunk("S")

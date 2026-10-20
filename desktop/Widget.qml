@@ -20,7 +20,7 @@ BarWidget {
         "listening": "Kestrel: listening to you. Microphone in use.",
         "thinking": "Kestrel: thinking about your message. Microphone in use.",
         "speaking": "Kestrel: speaking. Microphone in use.",
-        "trouble": "Kestrel: brain trouble. A reply could not be completed. Microphone in use."
+        "trouble": statusSentence
     })[currentState] + (placementAdvisory ? " " + placementAdvisory : "")
     implicitWidth: 25
     implicitHeight: 30

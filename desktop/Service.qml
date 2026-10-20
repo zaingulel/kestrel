@@ -19,7 +19,7 @@ Item {
         "listening": "Listening. Microphone in use.",
         "thinking": "Thinking. Microphone in use.",
         "speaking": "Speaking. Microphone in use.",
-        "trouble": "Brain trouble. Microphone in use."
+        "trouble": "Kestrel needs attention. Microphone in use."
     })[state]
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
