@@ -21,6 +21,8 @@ TestCase {
         for (const sample of samples) {
             service.acceptStatusChunk(sample[0])
             compare(service.state, sample[1])
+            if (sample[0] === "B")
+                compare(service.statusSentence, "Kestrel needs attention. Microphone in use.")
         }
         for (const invalid of ["", "X", "I\n", "I\u0000", "é", "I private transcript", "I".repeat(33)]) {
             service.acceptStatusChunk("S")
@@ -39,6 +41,39 @@ TestCase {
         verify(expiry.running)
         expiry.triggered()
         compare(service.state, "unavailable")
+    }
+
+    function test_inactive_status_and_empty_conversation() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        const snapshot = JSON.stringify({version: 1, session: "inactive-session", turns: []}) + "\n"
+        verify(service.acceptConversationChunk(snapshot))
+        compare(service.conversationMessage, "Say something. Kestrel replies after you.")
+        verify(service.acceptStatusChunk("D"))
+        compare(service.state, "inactive")
+        compare(service.statusSentence, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(service.conversationAvailable, true)
+        compare(service.turns.length, 0)
+        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        for (const wire of ["A", "I"]) {
+            verify(service.acceptStatusChunk(wire))
+            compare(service.conversationMessage, "Say something. Kestrel replies after you.")
+        }
+        verify(service.acceptStatusChunk("ID"))
+        compare(service.state, "inactive")
+        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        service.conversationExited()
+        compare(service.conversationMessage, "Conversation unavailable. Reopen the panel.")
+        verify(service.acceptConversationChunk(snapshot))
+        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "inactive-session", turns: [
+            {speaker: "you", text: "Existing turn.", state: "complete"}
+        ]}) + "\n"))
+        compare(service.conversationMessage, "")
+        compare(service.turns.length, 1)
+        service.watcherExited()
+        compare(service.state, "unavailable")
+        compare(service.statusSentence, "Status unavailable. Microphone use unknown.")
     }
 
     function test_conversation_rejects_corrupt_and_stale_input() {

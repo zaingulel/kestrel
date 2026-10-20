@@ -38,10 +38,10 @@ TestCase {
             compare(mark.width, 3)
             compare(mark.height, heights[i])
             compare(mark.y, 21 - heights[i] - offsets[i])
-            compare(mark.border.width, kind === "starting" ? 1 : 0)
-            compare(mark.color, kind === "starting" ? Qt.rgba(0, 0, 0, 0)
+            compare(mark.border.width, (kind === "starting" || kind === "inactive") ? 1 : 0)
+            compare(mark.color, (kind === "starting" || kind === "inactive") ? Qt.rgba(0, 0, 0, 0)
                 : kind === "trouble" ? Qt.color("orange") : Qt.color("white"))
-            if (kind === "starting") compare(mark.border.color, Qt.color("white"))
+            if (kind === "starting" || kind === "inactive") compare(mark.border.color, Qt.color("white"))
         }
         const stem = findChild(marks, "troubleStem")
         compare(stem.visible, kind === "trouble")
@@ -102,6 +102,7 @@ TestCase {
         const marks = createTemporaryObject(marksComponent, this)
         verify(marks !== null)
         checkShape(marks, "not-running", [3, 3, 3], [0, 0, 0], 0.6)
+        checkShape(marks, "inactive", [3, 3, 3], [0, 0, 0], 0.6)
         checkShape(marks, "starting", [3, 3, 3], [0, 0, 0], 1)
         checkShape(marks, "unavailable", [3, 3, 3], [0, 3, 6], 1)
         checkShape(marks, "idle", [3, 3, 3], [0, 0, 0], 0.6)
@@ -134,10 +135,17 @@ TestCase {
     function test_reduced_motion_still_shapes() {
         const marks = createTemporaryObject(marksComponent, this)
         verify(marks !== null)
-        for (const kind of ["not-running", "starting", "unavailable", "idle", "listening", "thinking", "speaking", "trouble"]) {
+        for (const kind of ["not-running", "inactive", "starting", "unavailable", "idle", "listening", "thinking", "speaking", "trouble"]) {
             marks.kind = kind
             marks.motionEnabled = true
+            if (kind === "inactive") {
+                checkShape(marks, "inactive", [3, 3, 3], [0, 0, 0], 0.6)
+                compare(findChild(marks, "thinkingStep").running, false)
+                compare(findChild(marks, "listeningLoop").running, false)
+                for (let i = 0; i < 3; i++) compare(animationPart(marks, "speakingLoop", i).running, false)
+            }
             marks.motionEnabled = false
+            if (kind === "inactive") checkShape(marks, "inactive", [3, 3, 3], [0, 0, 0], 0.6)
             const listening = findChild(marks, "listeningMark")
             verify(listening !== null)
             compare(listening.visible, kind === "listening")

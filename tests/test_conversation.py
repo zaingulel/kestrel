@@ -4,14 +4,143 @@ import json
 import os
 from pathlib import Path
 import struct
+import sys
+import hashlib
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from desktop import conversation
+from desktop import conversation, control
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class ControlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_toggle_wire_refusal_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            calls = []
+            server = control.ConversationControl(lambda: calls.append('toggle') or 'starting')
+            self.addAsyncCleanup(server.close)
+            await server.start()
+            self.assertEqual(control.address(), '\0kestrel.control.' + str(os.getuid()) + '.' +
+                             hashlib.sha256(runtime.encode()).hexdigest())
+            with self.assertRaises(OSError):
+                duplicate = control.ConversationControl(lambda: 'inactive')
+                await duplicate.start()
+
+            async def wire(payload, *, eof=True):
+                reader, writer = await asyncio.open_unix_connection(control.address())
+                try:
+                    writer.write(payload)
+                    await writer.drain()
+                    if eof:
+                        writer.write_eof()
+                    return await asyncio.wait_for(reader.read(32), 2)
+                finally:
+                    await control.close_writer(writer)
+
+            self.assertEqual(await wire(b'toggle\n'), b'starting\n')
+            self.assertEqual(calls, ['toggle'])
+            for payload in (b'', b'toggle', b'TOGGLE\n', b'toggle\nextra', b'toggle\n' * 2, b'x' * 100):
+                with self.subTest(request=payload[:20]):
+                    self.assertEqual(await wire(payload), b'unavailable\n')
+            self.assertEqual(await wire(b'toggle\n', eof=False), b'unavailable\n')
+            self.assertEqual(calls, ['toggle'])
+            with patch.object(control, 'same_uid', return_value=False):
+                self.assertEqual(await wire(b'toggle\n'), b'unavailable\n')
+                with self.assertRaises(ValueError):
+                    await control.toggle()
+            self.assertEqual(calls, ['toggle'])
+
+            accepted = asyncio.Queue()
+            native_serve = server.serve
+
+            async def serve(reader, writer):
+                accepted.put_nowait(None)
+                await native_serve(reader, writer)
+
+            clients = []
+            with patch.object(server, 'serve', side_effect=serve):
+                try:
+                    for _ in range(8):
+                        clients.append(await asyncio.open_unix_connection(control.address()))
+                        await asyncio.wait_for(accepted.get(), 1)
+                    self.assertEqual(len(server.tasks), 8)
+                    extra_reader, extra_writer = await asyncio.open_unix_connection(control.address())
+                    clients.append((extra_reader, extra_writer))
+                    self.assertEqual(await asyncio.wait_for(extra_reader.read(1), 1), b'')
+                    await server.close()
+                    self.assertFalse(server.tasks)
+                finally:
+                    for _, writer in clients:
+                        await control.close_writer(writer)
+            await server.start()
+
+            children = []
+
+            async def close_children():
+                for process in children:
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+
+            self.addAsyncCleanup(close_children)
+
+            async def cli(*arguments):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, str(ROOT / 'desktop/control.py'), *arguments,
+                    env={**os.environ, 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/nonexistent-kestrel-test-bus',
+                         'DISPLAY': '', 'WAYLAND_DISPLAY': ''},
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                children.append(process)
+                output, errors = await asyncio.wait_for(process.communicate(), 5)
+                return process.returncode, output, errors
+
+            self.assertEqual(await cli('--toggle'), (0, b'starting\n', b''))
+            before = len(calls)
+            code, output, errors = await cli('--toggle', 'private canary')
+            self.assertEqual(code, 2)
+            self.assertEqual(output, b'')
+            self.assertEqual(errors, b'Usage: control.py --toggle\n')
+            self.assertEqual(len(calls), before)
+            await server.close()
+            attempts, peers = [], []
+
+            async def refuse(reader, writer):
+                attempts.append(await reader.read(8))
+                writer.write(b'unavailable\n')
+                await writer.drain()
+                await control.close_writer(writer)
+
+            def connected(reader, writer):
+                peers.append(asyncio.create_task(refuse(reader, writer)))
+
+            refusing = await asyncio.start_unix_server(connected, path=control.address())
+            try:
+                self.assertEqual(await cli('--toggle'), (1, b'', (control.UNAVAILABLE + '\n').encode()))
+                self.assertEqual(attempts, [b'toggle\n'], 'An ambiguous or refused toggle is never retried')
+            finally:
+                refusing.close()
+                await refusing.wait_closed()
+                await asyncio.gather(*peers)
+
+            writer = Mock()
+            writer.drain = AsyncMock()
+            writer.wait_closed = AsyncMock()
+            reader = Mock()
+            reader.read = AsyncMock(side_effect=[b'inactive\n', b'extra', b''])
+            with (patch.object(control.asyncio, 'open_unix_connection', AsyncMock(return_value=(reader, writer))),
+                  patch.object(control, 'same_uid', return_value=True)):
+                with self.assertRaises(ValueError):
+                    await control.toggle()
+            writer.close.assert_called_once()
+            notify = AsyncMock()
+            with patch.object(control, 'notify_failure', notify), patch.object(control.sys, 'stderr', io.StringIO()):
+                self.assertEqual(await control.main(['--toggle']), 1)
+            notify.assert_awaited_once()
+
 
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):

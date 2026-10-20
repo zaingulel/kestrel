@@ -70,12 +70,12 @@ class ScriptedBrain:
 
 
 class WorkerProcess:
-    def __init__(self, home, brain, *, synthetic_default_home=None, trace_root=None):
+    def __init__(self, home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None):
         import hermes_worker
         self.home = home
         self.stderr = (home / 'worker-stderr.txt').open('w+')
         self.process = subprocess.Popen(
-            self.command(home, brain, synthetic_default_home=synthetic_default_home, trace_root=trace_root),
+            self.command(home, brain, synthetic_default_home=synthetic_default_home, trace_root=trace_root, memory_root=memory_root),
             env=hermes_worker.child_environment(home),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
         )
@@ -84,7 +84,7 @@ class WorkerProcess:
         self.buffer = b''
 
     @staticmethod
-    def command(home, brain, *, synthetic_default_home=None, trace_root=None):
+    def command(home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None):
         # Test-only containment observes even caught attempts, before permitting only this provider.
         bootstrap = '''
 import json, pathlib, sys
@@ -103,11 +103,49 @@ def audit(event, args):
 sys.addaudithook(audit)
 import hermes_worker
 hermes_worker.TRACE_ROOT = pathlib.Path(TRACE_FIXTURE)
+hermes_worker.MEMORY_ROOT = pathlib.Path(MEMORY_FIXTURE)
+original_scaffold = hermes_worker.memory_scaffold_identity
+observing = False
+stream_origin = {}
+original_feed = hermes_worker.ReplyDeliveryPrefix.feed
+def observed_feed(self, text):
+    with (home / 'stream-observations.jsonl').open('a') as output:
+        output.write(json.dumps(dict(stream_origin, callback=text)) + '\\n')
+    return original_feed(self, text)
+hermes_worker.ReplyDeliveryPrefix.feed = observed_feed
+def observed_scaffold(directory):
+    global observing
+    identity = original_scaffold(directory)
+    if not observing:
+        observing = True
+        from run_agent import AIAgent
+        original_review = AIAgent._spawn_background_review
+        def observed_review(self, *args, **kwargs):
+            with (home / 'review-attempts.jsonl').open('a') as output:
+                output.write(json.dumps(kwargs) + '\\n')
+            return original_review(self, *args, **kwargs)
+        AIAgent._spawn_background_review = observed_review
+        import agent.turn_context as turn_context
+        original_tick = turn_context._tick_memory_nudge
+        def observed_tick(agent):
+            result = original_tick(agent)
+            with (home / 'review-threshold.jsonl').open('a') as output:
+                output.write(json.dumps(result) + '\\n')
+            return result
+        turn_context._tick_memory_nudge = observed_tick
+        original_fire = AIAgent._fire_stream_delta
+        def observed_fire(self, text):
+            stream_origin.update(fragment=text, pending=bool(self._stream_needs_break))
+            return original_fire(self, text)
+        AIAgent._fire_stream_delta = observed_fire
+    return identity
+hermes_worker.memory_scaffold_identity = observed_scaffold
 with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
       if len(sys.argv) > 5 else nullcontext()):
     import hermes_worker
     hermes_worker.main(base_url=sys.argv[4])
-'''.replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces')))
+'''.replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
+    'MEMORY_FIXTURE', repr(str(memory_root if memory_root is not None else home / 'notes')))
         command = [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
                    str(brain.server.server_port), brain.url]
         if synthetic_default_home is not None:
@@ -135,6 +173,22 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
             if 'done' in event or 'error' in event:
                 return events
 
+    def prepare(self):
+        self.send(b'{"prepare":true}\n')
+        events = []
+        while True:
+            event = self.event()
+            events.append(event)
+            if 'done' in event or 'error' in event:
+                return events
+
+    def begin(self):
+        self.send(b'{"begin":true}\n')
+        event = self.event()
+        if event != {'session_ready': True}:
+            raise AssertionError(f'Fresh session refused: {event}')
+        return event
+
     def send(self, data):
         self.process.stdin.write(data)
         self.process.stdin.flush()
@@ -161,13 +215,13 @@ def require_native_hermes():
 
 
 @contextmanager
-def native_worker(replies, *, synthetic_default_home=None):
+def native_worker(replies, *, synthetic_default_home=None, memory_root=None):
     require_native_hermes()
     brain = ScriptedBrain(replies)
     try:
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
             home = Path(directory).resolve()
-            worker = WorkerProcess(home, brain, synthetic_default_home=synthetic_default_home)
+            worker = WorkerProcess(home, brain, synthetic_default_home=synthetic_default_home, memory_root=memory_root)
             try:
                 yield worker, brain
             finally:
@@ -182,6 +236,167 @@ def native_worker(replies, *, synthetic_default_home=None):
 
 
 class HermesWorkerTests(unittest.TestCase):
+    def test_memory_storage_refuses_unsafe_notes_without_repair(self):
+        require_native_hermes()
+        bootstrap = r'''import io, json, os, pathlib, stat, sys, tempfile, unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import hermes_worker
+from tools.memory_tool_store import MemoryStore, ENTRY_DELIMITER
+case = unittest.TestCase()
+os.umask(0o077)
+root = pathlib.Path(sys.argv[2])
+notes = root / 'notes'
+with patch.object(hermes_worker, 'MEMORY_ROOT', notes):
+    case.assertEqual(hermes_worker.validate_memory_storage(), notes)
+    case.assertEqual(stat.S_IMODE(notes.stat().st_mode), 0o700)
+    leaf = notes / 'MEMORY.md'
+    # Native UTF-8 BOM and delimiter parsing determine rendered characters, not raw bytes.
+    leaf.write_bytes(('\ufeff  ' + 'a' * 1100 + '\n§\n' + 'b' * 1097 + '  ').encode())
+    leaf.chmod(0o600)
+    case.assertEqual(MemoryStore._parse_entries(leaf.read_text(encoding='utf-8-sig')),
+                     ['a' * 1100, 'b' * 1097])
+    case.assertEqual(len(ENTRY_DELIMITER.join(MemoryStore._parse_entries(
+        leaf.read_text(encoding='utf-8-sig')))), 2200)
+    case.assertEqual(hermes_worker.validate_memory_storage(), notes)
+    leaf.unlink()
+
+for kind in ('invalid utf8', 'byte overflow', 'memory overflow', 'user overflow',
+             'symlink leaf', 'dangling leaf', 'hardlink leaf', 'loose note', 'loose lock',
+             'unreadable note', 'read error', 'wrong note owner', 'symlink root', 'loose root',
+             'wrong root owner', 'loose parent', 'symlink parent', 'directory leaf', 'fifo leaf'):
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        base = pathlib.Path(directory)
+        parent = base / 'runtime'
+        parent.mkdir(mode=0o700)
+        target = parent / 'notes'
+        target.mkdir(mode=0o700)
+        sentinel = base / 'sentinel'
+        sentinel.write_bytes(b'external nonce-928')
+        sentinel.chmod(0o600)
+        name = 'USER.md' if kind == 'user overflow' else 'MEMORY.md.lock' if kind == 'loose lock' else 'MEMORY.md'
+        leaf = target / name
+        data = (b'bad-encoding-731\xff' if kind == 'invalid utf8' else
+                b'x' * 16385 if kind == 'byte overflow' else
+                b'x' * 2201 if kind == 'memory overflow' else
+                b'x' * 1376 if kind == 'user overflow' else b'note nonce-283')
+        if kind in ('symlink leaf', 'dangling leaf'):
+            leaf.symlink_to(sentinel if kind == 'symlink leaf' else base / 'absent')
+        elif kind == 'hardlink leaf':
+            os.link(sentinel, leaf)
+        elif kind == 'directory leaf':
+            leaf.mkdir(mode=0o700)
+        elif kind == 'fifo leaf':
+            os.mkfifo(leaf, mode=0o600)
+        else:
+            leaf.write_bytes(data)
+            leaf.chmod(0o644 if kind in ('loose note', 'loose lock') else 0o600)
+        if kind == 'symlink root':
+            actual = parent / 'actual'
+            target.rename(actual)
+            target.symlink_to(actual, target_is_directory=True)
+        elif kind == 'loose root':
+            target.chmod(0o755)
+        elif kind == 'loose parent':
+            parent.chmod(0o777)
+        elif kind == 'symlink parent':
+            actual = base / 'actual-runtime'
+            parent.rename(actual)
+            parent.symlink_to(actual, target_is_directory=True)
+        if kind == 'unreadable note':
+            leaf.chmod(0o000)
+        before = leaf.lstat()
+        root_before, parent_before = target.lstat(), parent.lstat()
+        sentinel_before = sentinel.stat()
+        readable = kind not in ('dangling leaf', 'directory leaf', 'fifo leaf', 'unreadable note')
+        before_bytes = leaf.read_bytes() if readable else None
+        original_open, original_fstat, original_lstat = os.open, os.fstat, pathlib.Path.lstat
+        def guarded_open(path, *args, **kwargs):
+            if kind == 'read error' and pathlib.Path(path) == leaf:
+                raise PermissionError('private path nonce-991')
+            return original_open(path, *args, **kwargs)
+        def wrong_fstat(descriptor):
+            metadata = original_fstat(descriptor)
+            if kind == 'wrong note owner' and metadata.st_ino == before.st_ino:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_uid=os.getuid() + 1,
+                                       st_nlink=metadata.st_nlink)
+            return metadata
+        def wrong_lstat(path, *args, **kwargs):
+            metadata = original_lstat(path, *args, **kwargs)
+            if kind == 'wrong root owner' and path == target:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_uid=os.getuid() + 1)
+            return metadata
+        # Ownership is a metadata seam; no privileged owner-change fixture is available.
+        with (patch.object(hermes_worker, 'MEMORY_ROOT', target), patch('os.open', guarded_open),
+              patch('os.fstat', wrong_fstat), patch.object(pathlib.Path, 'lstat', wrong_lstat)):
+            with case.assertRaises(RuntimeError) as raised:
+                hermes_worker.validate_memory_storage()
+            case.assertEqual(str(raised.exception), hermes_worker.MEMORY_ERROR, kind)
+            case.assertNotIn('nonce-', str(raised.exception))
+        case.assertEqual(leaf.lstat(), before, kind)
+        case.assertEqual(target.lstat(), root_before, kind)
+        case.assertEqual(parent.lstat(), parent_before, kind)
+        if readable:
+            case.assertEqual(leaf.read_bytes(), before_bytes, kind)
+        case.assertEqual(sentinel.read_bytes(), b'external nonce-928')
+        case.assertEqual(sentinel.stat().st_mode, sentinel_before.st_mode)
+
+for kind in ('changed inode', 'symlink', 'nonempty', 'loose mode', 'failed rmdir'):
+    with tempfile.TemporaryDirectory(dir=root) as directory:
+        home = pathlib.Path(directory)
+        scaffold = home / 'memories'
+        scaffold.mkdir(mode=0o700)
+        identity = hermes_worker.memory_scaffold_identity(home)
+        retained = home / 'retained'
+        if kind == 'changed inode':
+            scaffold.rename(retained)
+            scaffold.mkdir(mode=0o700)
+        elif kind == 'symlink':
+            scaffold.rename(retained)
+            scaffold.symlink_to(retained, target_is_directory=True)
+        elif kind == 'nonempty':
+            (scaffold / 'sentinel').write_bytes(b'untouched nonce-829')
+        elif kind == 'loose mode':
+            scaffold.chmod(0o755)
+        before = scaffold.lstat()
+        original_rmdir = pathlib.Path.rmdir
+        def guarded_rmdir(path, *args, **kwargs):
+            if kind == 'failed rmdir' and path == scaffold:
+                raise PermissionError('busy private path')
+            return original_rmdir(path, *args, **kwargs)
+        with (patch.object(hermes_worker, 'MEMORY_ROOT', notes),
+              patch.object(pathlib.Path, 'rmdir', guarded_rmdir)):
+            with case.assertRaisesRegex(RuntimeError, '^' + hermes_worker.MEMORY_ERROR.replace('.', r'\.') + '$'):
+                hermes_worker.attach_memory_storage(home, scaffold_identity=identity)
+        case.assertEqual(scaffold.lstat(), before)
+        if kind == 'nonempty':
+            case.assertEqual((scaffold / 'sentinel').read_bytes(), b'untouched nonce-829')
+
+# A pre-constructor child, even empty, has no native provenance and must remain untouched.
+with tempfile.TemporaryDirectory(dir=root) as directory:
+    home = pathlib.Path(directory)
+    scaffold = home / 'memories'
+    scaffold.mkdir(mode=0o700)
+    before = scaffold.lstat()
+    output = io.StringIO()
+    with (patch.dict(os.environ, HERMES_HOME=str(home)),
+          patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
+          patch('sys.stdout', output)):
+        case.assertEqual(hermes_worker.main(), 1)
+    case.assertEqual([json.loads(line) for line in output.getvalue().splitlines()],
+                     [{'error': hermes_worker.MEMORY_ERROR}])
+    case.assertEqual(scaffold.lstat(), before)
+print('private storage matrix passed')
+'''
+        with tempfile.TemporaryDirectory(prefix='hermes-storage-', dir=ROOT / '.runtime') as directory:
+            home = Path(directory)
+            from hermes_worker import child_environment
+            result = subprocess.run([str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home)],
+                                    env=child_environment(home), capture_output=True, text=True, timeout=45)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('private storage matrix passed', result.stdout)
+
     def test_delivery_prefix_accepts_observed_space_delimiter(self):
         import hermes_worker
 
@@ -255,6 +470,14 @@ class HermesWorkerTests(unittest.TestCase):
                 event_file.touch(mode=0o600)
                 return Mock(path=str(event_file))
             native.AtofExporter = exporter
+            def construct_agent(**kwargs):
+                (home / 'memories').mkdir(mode=0o700, exist_ok=True)
+                agent.valid_tool_names = {'memory'}
+                agent.tools = [{'function': {'name': 'memory'}}]
+                agent._memory_store = object()
+                agent._memory_manager = None
+                return agent
+            run_agent.AIAgent.side_effect = construct_agent
             request = json.dumps({'messages': [{'role': 'user', 'content': 'Hello.'}]}) + '\n'
             output = StringIO()
             cwd, mask = os.getcwd(), os.umask(0o077)
@@ -263,16 +486,17 @@ class HermesWorkerTests(unittest.TestCase):
                                                 'nemo_relay': native}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
+                      patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'validate_local_configuration'),
-                      patch('sys.stdin', TextIOWrapper(BytesIO((request * 2).encode()))),
+                      patch('sys.stdin', TextIOWrapper(BytesIO(('{"begin":true}\n' + request * 2).encode()))),
                       patch('sys.stdout', output)):
                     self.assertEqual(hermes_worker.main(), 0)
             finally:
                 os.chdir(cwd)
                 os.umask(mask)
             self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()], [
-                {'ready': True}, {'delivery': 'reassuring'}, {'text': 'First.'}, {'done': True},
+                {'ready': True}, {'session_ready': True}, {'delivery': 'reassuring'}, {'text': 'First.'}, {'done': True},
                 {'delivery': 'neutral'}, {'text': 'Second.'}, {'done': True},
             ])
             self.assertEqual(agent.run_conversation.call_count, 2)
@@ -295,6 +519,7 @@ sys.path.insert(0, sys.argv[1])
 import hermes_worker
 home = pathlib.Path(sys.argv[2])
 hermes_worker.TRACE_ROOT = home / 'traces'
+hermes_worker.MEMORY_ROOT = home / 'notes'
 case = sys.argv[3]
 if case == 'runtime home':
     home.chmod(0o755)
@@ -336,7 +561,12 @@ def create_exporter(config):
     exporter.path = str(event_file)
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
-agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users'])
+agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users',
+                   '_fire_stream_delta', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
+agent.valid_tool_names = {'memory'}
+agent.tools = [{'function': {'name': 'memory'}}]
+agent._memory_store = object()
+agent._memory_manager = None
 agent.run_conversation.return_value = {'completed': True, 'final_response': '[delivery:neutral]\\nSynthetic reply.'}
 if case == 'provider shutdown':
     agent.run_conversation.side_effect = RuntimeError('synthetic provider refusal')
@@ -351,7 +581,10 @@ if case == 'engine import':
         raise ImportError('synthetic missing engine dependency')
     run_agent.__getattr__ = missing_dependency
 else:
-    run_agent.AIAgent = Mock(return_value=agent)
+    def construct_agent(**kwargs):
+        (home / 'memories').mkdir(mode=0o700, exist_ok=True)
+        return agent
+    run_agent.AIAgent = Mock(side_effect=construct_agent)
     if case == 'engine construction':
         run_agent.AIAgent.side_effect = RuntimeError('synthetic engine construction failure')
 try:
@@ -386,7 +619,7 @@ raise SystemExit(status)
                     request = json.dumps({'messages': [{'role': 'user', 'content': 'Synthetic prompt.'}]}) + '\n'
                     result = subprocess.run(
                         [sys.executable, '-c', bootstrap, str(ROOT), str(home), case],
-                        env=child_environment(home), input=request * 2 if turn_case else '',
+                        env=child_environment(home), input='{"begin":true}\n' + request * 2 if turn_case else '',
                         capture_output=True, text=True, timeout=45,
                     )
                     events = [json.loads(line) for line in result.stdout.splitlines()]
@@ -754,10 +987,239 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_private_notes_survive_fresh_sessions_and_workers(self):
+        def say(text):
+            return [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]
+
+        def memory(**arguments):
+            return [({'tool_calls': [{'index': 0, 'id': 'remember', 'type': 'function',
+                    'function': {'name': 'memory', 'arguments': json.dumps(arguments)}}]}, None),
+                    ({}, 'tool_calls')]
+
+        expected = 'Maple notebook nonce-431.\n§\nBirch calendar nonce-482.'
+        with tempfile.TemporaryDirectory(prefix='hermes-notes-', dir=ROOT / '.runtime') as directory:
+            root = Path(directory)
+            notes = root / 'notes'
+            ambient = root / 'ambient'
+            (ambient / '.hermes/memories').mkdir(parents=True)
+            (ambient / '.hermes/memories/MEMORY.md').write_text('ambient-home-nonce-902')
+            operations = [
+                {'action': 'add', 'target': 'memory', 'content': 'Cedar notebook nonce-431.'},
+                {'action': 'patch', 'target': 'memory', 'old_text': 'Cedar', 'content': 'Maple'},
+                {'action': 'add', 'target': 'memory', 'content': 'Obsolete schedule nonce-383.'},
+                {'action': 'remove', 'target': 'memory', 'old_text': 'Obsolete schedule nonce-383.'},
+                {'target': 'memory', 'operations': [
+                    {'action': 'add', 'content': 'Temporary calendar nonce-481.'},
+                    {'action': 'patch', 'old_text': 'Temporary calendar nonce-481.',
+                     'content': 'Birch calendar nonce-482.'}]},
+                {'action': 'add', 'target': 'user', 'content': 'User prefers tea nonce-641.'},
+            ]
+            replies = [say('Prepared.')]
+            for operation in operations:
+                replies.extend((memory(**operation), say('Saved.')))
+            replies.extend((say('Fresh snapshot.'), say('Edited snapshot.'), say('Deleted snapshot.')))
+            with native_worker(replies, memory_root=notes, synthetic_default_home=ambient) as (worker, brain):
+                first_home = worker.home
+                self.assertEqual(worker.event(), {'ready': True})
+                scaffold = worker.home / 'memories'
+                self.assertTrue(scaffold.is_dir())
+                self.assertFalse(scaffold.is_symlink())
+                self.assertEqual(list(scaffold.iterdir()), [])
+                self.assertFalse(notes.exists())
+                self.assertEqual(worker.prepare(), [
+                    {'delivery': 'neutral'}, {'text': 'Prepared.'}, {'done': True}])
+                self.assertFalse(notes.exists())
+                self.assertFalse(brain.requests[0][2].get('tools'))
+                worker.begin()
+                self.assertTrue(scaffold.is_symlink())
+                self.assertEqual(os.readlink(scaffold), str(notes))
+                self.assertEqual(len(brain.requests), 1, 'begin performs no inference')
+                (worker.home / 'traces/trace-only.txt').write_text('trace-only-nonce-951')
+                for operation in operations:
+                    events = worker.request([{'role': 'user', 'content': 'Remember caller-nonce-729.'}])
+                    self.assertEqual(events, [
+                        {'delivery': 'neutral'}, {'text': 'Saved.'}, {'done': True}])
+                    result = next(message for message in reversed(brain.requests[-1][2]['messages'])
+                                  if message['role'] == 'tool')
+                    self.assertTrue(json.loads(result['content'])['success'], result)
+                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']},
+                                     {'memory'})
+                self.assertEqual((notes / 'MEMORY.md').read_text(), expected)
+                self.assertEqual((notes / 'USER.md').read_text(), 'User prefers tea nonce-641.')
+                self.assertEqual(stat.S_IMODE(notes.stat().st_mode), 0o700)
+                for name in ('MEMORY.md', 'USER.md', 'MEMORY.md.lock', 'USER.md.lock'):
+                    self.assertEqual(stat.S_IMODE((notes / name).stat().st_mode), 0o600)
+                    self.assertEqual((notes / name).stat().st_nlink, 1)
+                for expected_note, edit in ((expected, None), ('Operator edit nonce-773.', 'edit'),
+                                            ('', 'delete')):
+                    if edit == 'edit':
+                        (notes / 'MEMORY.md').write_text('Operator edit nonce-773.')
+                    elif edit == 'delete':
+                        (notes / 'MEMORY.md').unlink()
+                    worker.begin()
+                    self.assertEqual(worker.request([{'role': 'user', 'content': 'Fresh question.'}])[-1],
+                                     {'done': True})
+                    payload = json.dumps(brain.requests[-1][2]['messages'])
+                    system = brain.requests[-1][2]['messages'][0]['content']
+                    if expected_note:
+                        self.assertIn(expected_note, system)
+                    else:
+                        self.assertNotIn('Operator edit nonce-773.', system)
+                    self.assertIn('User prefers tea nonce-641.', system)
+                    for nonce in ('caller-nonce-729', 'ambient-home-nonce-902', 'trace-only-nonce-951'):
+                        self.assertNotIn(nonce, payload)
+                (notes / 'MEMORY.md').write_text('Restart snapshot nonce-883.')
+                (notes / 'MEMORY.md').chmod(0o600)
+                worker.process.stdin.close()
+                self.assertEqual(worker.process.wait(timeout=5), 0)
+            self.assertFalse(first_home.exists())
+            self.assertTrue(notes.is_dir())
+            with native_worker([say('Reloaded.')], memory_root=notes) as (worker, brain):
+                second_home = worker.home
+                self.assertEqual(worker.event(), {'ready': True})
+                worker.begin()
+                self.assertEqual(worker.request([{'role': 'user', 'content': 'New worker question.'}]),
+                                 [{'delivery': 'neutral'}, {'text': 'Reloaded.'}, {'done': True}])
+                self.assertIn('Restart snapshot nonce-883.', brain.requests[0][2]['messages'][0]['content'])
+                self.assertNotIn('Fresh question.', json.dumps(brain.requests))
+                worker.process.stdin.close()
+                self.assertEqual(worker.process.wait(timeout=5), 0)
+            self.assertFalse(second_home.exists())
+            self.assertEqual((notes / 'MEMORY.md').read_text(), 'Restart snapshot nonce-883.')
+
+    def test_native_tool_separator_preserves_strict_delivery(self):
+        def tool():
+            call = {'index': 0, 'id': 'separator', 'type': 'function', 'function': {
+                'name': 'memory', 'arguments': json.dumps({
+                    'action': 'add', 'target': 'memory', 'content': 'Separator note nonce-662.'})}}
+            return [({'tool_calls': [call]}, None), ({}, 'tool_calls')]
+
+        replies = [tool(), [({'content': '['}, None),
+                            ({'content': 'delivery:neutral] First.\n\nSecond.'}, None), ({}, 'stop')],
+                   [({'content': '[delivery:neutral] Before.'}, None),
+                    *tool()], [({'content': 'After.'}, None), ({}, 'stop')]]
+        invalid = (' [delivery:neutral] No.', '\n[delivery:neutral] No.', '[delivery:unknown] No.')
+        for text in invalid:
+            replies.extend((tool(), [({'content': text}, None), ({}, 'stop')]))
+        replies.append([({'content': '[delivery:neutral] Fresh.'}, None), ({}, 'stop')])
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Split header.'}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'First.\n\nSecond.'}, {'done': True}])
+            events = worker.request([{'role': 'user', 'content': 'Continue after note.'}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Before.'},
+                                      {'text': '\n\nAfter.'}, {'done': True}])
+            from hermes_worker import DELIVERY_ERROR, MEMORY_REPLY_REMINDER
+            for text in invalid:
+                self.assertEqual(worker.request([{'role': 'user', 'content': 'Reject malformed header.'}]),
+                                 [{'error': DELIVERY_ERROR}], repr(text))
+            self.assertEqual(worker.request([{'role': 'user', 'content': 'Fresh turn.'}]),
+                             [{'delivery': 'neutral'}, {'text': 'Fresh.'}, {'done': True}])
+            self.assertTrue(MEMORY_REPLY_REMINDER)
+            system_messages = [message['content'] for _, _, body in brain.requests
+                               for message in body['messages'] if message['role'] == 'system']
+            self.assertTrue(system_messages)
+            for content in system_messages:
+                self.assertTrue(content.endswith('\n\n' + MEMORY_REPLY_REMINDER))
+                self.assertEqual(content.count(MEMORY_REPLY_REMINDER), 1)
+            observations = [json.loads(line) for line in
+                            (worker.home / 'stream-observations.jsonl').read_text().splitlines()]
+            self.assertIn({'fragment': '[', 'pending': False, 'callback': '['}, observations)
+            self.assertIn({'fragment': 'After.', 'pending': True, 'callback': '\n\nAfter.'}, observations)
+            for text in invalid[:2]:
+                self.assertIn({'fragment': text, 'pending': True, 'callback': '\n\n' + text}, observations)
+
+    def test_preparation_and_background_review_have_no_memory_authority(self):
+        from hermes_worker import MEMORY_REPLY_REMINDER
+
+        def say(text):
+            return [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]
+
+        call = {'index': 0, 'id': 'preparation-memory', 'type': 'function', 'function': {
+            'name': 'memory', 'arguments': json.dumps({
+                'action': 'add', 'target': 'memory', 'content': 'Unapproved preparation nonce-843.'})}}
+        replies = [[({'tool_calls': [call]}, None), ({}, 'tool_calls')], say('Prepared.')]
+        replies.extend(say('Ordinary reply.') for _ in range(10))
+        with tempfile.TemporaryDirectory(prefix='hermes-authority-', dir=ROOT / '.runtime') as directory:
+            notes = Path(directory) / 'notes'
+            notes.mkdir(mode=0o700)
+            leaf = notes / 'USER.md'
+            leaf.write_text('User likes green tea nonce-523.')
+            leaf.chmod(0o600)
+            before = leaf.stat()
+            with native_worker(replies, memory_root=notes) as (worker, brain):
+                self.assertEqual(worker.event(), {'ready': True})
+                for invalid in ({'prepare': False}, {'prepare': 1}, {'begin': False}, {'begin': 1},
+                                {'prepare': True, 'text': 'Injected warmup'},
+                                {'begin': True, 'messages': []},
+                                {'messages': [{'role': 'user', 'content': 'Before begin.'}]}):
+                    worker.send(json.dumps(invalid).encode() + b'\n')
+                    self.assertEqual(set(worker.event()), {'error'})
+                self.assertEqual(brain.requests, [])
+                self.assertEqual(worker.prepare(), [
+                    {'delivery': 'neutral'}, {'text': 'Prepared.'}, {'done': True}])
+                self.assertEqual(len(brain.requests), 2)
+                for _, _, payload in brain.requests:
+                    self.assertFalse(payload.get('tools'))
+                    self.assertNotIn(MEMORY_REPLY_REMINDER, payload['messages'][0]['content'])
+                    self.assertNotIn('User likes green tea nonce-523.', json.dumps(payload))
+                self.assertEqual(brain.requests[0][2]['messages'][-1], {'role': 'user', 'content': 'Hello.'})
+                refusal = next(message for message in brain.requests[1][2]['messages'] if message['role'] == 'tool')
+                self.assertIn("Tool 'memory' does not exist", refusal['content'])
+                self.assertFalse((worker.home / 'memories').is_symlink())
+                self.assertEqual(list((worker.home / 'memories').iterdir()), [])
+                self.assertEqual(list(notes.iterdir()), [leaf])
+                self.assertEqual(leaf.read_text(), 'User likes green tea nonce-523.')
+                self.assertEqual((leaf.stat().st_mode, leaf.stat().st_ino, leaf.stat().st_mtime_ns),
+                                 (before.st_mode, before.st_ino, before.st_mtime_ns))
+                self.assertEqual(set(worker.prepare()[-1]), {'error'})
+                self.assertEqual(len(brain.requests), 2)
+                worker.begin()
+                self.assertEqual(len(brain.requests), 2)
+                for index in range(10):
+                    self.assertEqual(worker.request([{'role': 'user', 'content': f'Accepted turn {index}.'}]),
+                                     [{'delivery': 'neutral'}, {'text': 'Ordinary reply.'}, {'done': True}])
+                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']}, {'memory'})
+                self.assertEqual(len(brain.requests), 12)
+                thresholds = [json.loads(line) for line in
+                              (worker.home / 'review-threshold.jsonl').read_text().splitlines()]
+                self.assertIn(True, thresholds, 'Exercise actual native review threshold')
+                self.assertFalse((worker.home / 'review-attempts.jsonl').exists())
+                self.assertEqual(leaf.read_text(), 'User likes green tea nonce-523.')
+                self.assertEqual(set(worker.prepare()[-1]), {'error'})
+                self.assertEqual(len(brain.requests), 12)
+
+    def test_corrupt_memory_refuses_session_before_provider(self):
+        with native_worker([[({'content': '[delivery:neutral] Empty fallback.'}, None),
+                             ({}, 'stop')]]) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            notes = worker.home / 'notes'
+            notes.mkdir(mode=0o700)
+            leaf = notes / 'MEMORY.md'
+            leaf.write_bytes(b'private-corrupt-831\xff')
+            leaf.chmod(0o600)
+            worker.send(b'{"begin":true}\n')
+            event = worker.event()
+            self.assertEqual(set(event), {'error'})
+            self.assertNotIn('private-corrupt', event['error'])
+            self.assertEqual(brain.requests, [])
+            self.assertEqual(leaf.read_bytes(), b'private-corrupt-831\xff')
+            self.assertEqual(stat.S_IMODE(leaf.stat().st_mode), 0o600)
+            leaf.write_text('Valid operator repair nonce-133.')
+            worker.begin()
+            leaf.write_bytes(b'corrupt-before-turn-932\xff')
+            events = worker.request([{'role': 'user', 'content': 'Do not infer from corrupt notes.'}])
+            self.assertEqual(set(events[-1]), {'error'})
+            self.assertNotIn('corrupt-before-turn', events[-1]['error'])
+            self.assertEqual(brain.requests, [])
+            self.assertEqual(leaf.read_bytes(), b'corrupt-before-turn-932\xff')
+
     def test_invalid_delivery_header_is_explicit_failure(self):
         with native_worker([[({'content': '[delivery:unknown]\nDo not speak.'}, None),
                              ({'content': ' Nor this.'}, None), ({}, 'stop')]]) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             events = worker.request([{'role': 'user', 'content': 'Hello.'}])
             self.assertEqual(len(events), 1)
             self.assertEqual(set(events[0]), {'error'})
@@ -793,6 +1255,7 @@ class NativeHermesTests(unittest.TestCase):
         with patch.object(WorkerProcess, 'command', staticmethod(failing_flush_command)):
             with native_worker([[({'content': '[delivery:neutral]\nSynthetic flush reply.'}, None), ({}, 'stop')]]) as (worker, brain):
                 self.assertEqual(worker.event(), {'ready': True})
+                worker.begin()
                 events = worker.request([{'role': 'user', 'content': 'Synthetic flush prompt.'}])
                 self.assertNotIn({'done': True}, events)
                 self.assertEqual(events[-1], {
@@ -880,6 +1343,7 @@ class NativeHermesTests(unittest.TestCase):
                             worker = WorkerProcess(home, brain, trace_root=trace_root)
                         try:
                             self.assertEqual(worker.event(), {'ready': True})
+                            worker.begin()
                             self.assertEqual(worker.request([{'role': 'user', 'content': prompt}]),
                                              [{'delivery': 'neutral'}, {'text': reply}, {'done': True}])
                             traces = sorted(trace_root.glob('session-*/events.jsonl'))
@@ -1078,6 +1542,10 @@ class NativeHermesTests(unittest.TestCase):
         original_umask = os.umask(0o077)
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
             home = Path(directory).resolve()
+            def construct_agent(**kwargs):
+                (home / 'memories').mkdir(mode=0o700)
+                return run_agent.AIAgent.return_value
+            run_agent.AIAgent.side_effect = construct_agent
             try:
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
@@ -1094,14 +1562,16 @@ class NativeHermesTests(unittest.TestCase):
         run_agent.AIAgent.assert_called_once_with(
             base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
             api_mode='chat_completions', model='bonsai-2-9b', enabled_toolsets=[],
-            disabled_toolsets=['terminal'], skip_memory=True, skip_context_files=True,
+            disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=False, session_db=None, fallback_model=None,
-            save_trajectories=False, checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+            ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
+            quiet_mode=True, max_tokens=180,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
             'model': {'context_length': 64000},
-            'memory': {'memory_enabled': False, 'user_profile_enabled': False, 'provider': ''},
+            'memory': {'memory_enabled': True, 'user_profile_enabled': True, 'provider': '',
+                       'memory_char_limit': 2200, 'user_char_limit': 1375, 'write_approval': False},
             'sessions': {'write_json_snapshots': False},
             'compression': {'enabled': False},
             'auxiliary': {'title_generation': {'enabled': False}},
@@ -1138,6 +1608,7 @@ class NativeHermesTests(unittest.TestCase):
                    [({'content': '[delivery:neutral] Next nonce-23.'}, None), ({}, 'stop')]]
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             history = [{'role': 'user', 'content': 'Hello Kestrel.'}]
             self.assertEqual(worker.request(history), [{'delivery': 'curious'},
                                                        {'text': 'Hello nonce-22.'}, {'done': True}])
@@ -1153,7 +1624,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual(body['max_tokens'], 180)
             self.assertEqual(body.get('reasoning_effort'), 'none')
             self.assertEqual(body.get('temperature'), 0.4)
-            self.assertFalse(body.get('tools'))
+            self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory'})
             self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
             connections = [json.loads(line) for line in (worker.home / 'connections.jsonl').read_text().splitlines()]
             self.assertTrue(connections)
@@ -1168,6 +1639,7 @@ class NativeHermesTests(unittest.TestCase):
                    [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')]]
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             history = [
                 {'role': 'user', 'content': 'My favourite colour is green.'},
                 {'role': 'assistant', 'content': 'I will keep that in this conversation.'},
@@ -1196,7 +1668,7 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(len(system), 1)
                 self.assertEqual(body['messages'][0], system[0])
                 self.assertEqual(system[0]['content'].count(SYSTEM_PROMPT), 1)
-                self.assertFalse(body.get('tools'))
+                self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory'})
         self.assertIsNotNone(worker.process.returncode)
         self.assertFalse(worker.home.exists())
 
@@ -1263,6 +1735,7 @@ case.assertEqual(messages, original)
                    b'x' * (1024 * 1024 + 1) + b'\n']
         with native_worker([[({'content': '[delivery:neutral]\nShould not be reached.'}, None), ({}, 'stop')]] * 10) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             for request in invalid:
                 worker.send(request)
                 event = worker.event()
@@ -1273,6 +1746,7 @@ case.assertEqual(messages, original)
     def test_partial_provider_reply_is_explicit_failure(self):
         with native_worker([[({'content': '[delivery:neutral]\nIncomplete nonce-24'}, None), ({}, 'length')]] * 4) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             events = worker.request([{'role': 'user', 'content': 'Answer completely.'}])
             self.assertEqual(events[0], {'delivery': 'neutral'})
             self.assertEqual(events[1], {'text': 'Incomplete nonce-24'})
@@ -1296,18 +1770,29 @@ case.assertEqual(messages, original)
                 {'index': 2, 'id': 'search-call', 'type': 'function',
                  'function': {'name': 'session_search', 'arguments': json.dumps({'query': 'private-nonce'})}},
             ]
+            for index, (name, arguments) in enumerate((
+                ('read_file', {'path': str(file_marker)}),
+                ('delegate_task', {'goal': 'Read private-nonce'}),
+                ('tool_search', {'query': 'file access private-nonce'}),
+            ), start=3):
+                calls.append({'index': index, 'id': f'refused-{index}', 'type': 'function',
+                              'function': {'name': name, 'arguments': json.dumps(arguments)}})
             brain.replies = iter([[({'tool_calls': calls}, None), ({}, 'tool_calls')],
                                   [({'content': '[delivery:neutral]\nConversation only nonce-25.'}, None), ({}, 'stop')],
                                   [({'content': '[delivery:neutral]\nFresh caller nonce-26.'}, None), ({}, 'stop')]])
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             events = worker.request([{'role': 'user', 'content': 'Use tools private-nonce.'}])
             self.assertFalse(terminal_marker.exists())
             self.assertFalse(file_marker.exists())
             refusals = [m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool']
-            self.assertEqual(len(refusals), 3)
-            for message, name in zip(refusals, ('terminal', 'write_file', 'session_search')):
+            self.assertEqual(len(refusals), 6)
+            for message, name in zip(refusals, ('terminal', 'write_file', 'session_search',
+                                                 'read_file', 'delegate_task', 'tool_search')):
                 self.assertIn(f"Tool '{name}' does not exist", message['content'])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Conversation only nonce-25.'}, {'done': True}])
+            self.assertEqual({tool['function']['name'] for tool in brain.requests[0][2]['tools']}, {'memory'})
+            worker.begin()
             events = worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Fresh caller nonce-26.'}, {'done': True}])
             self.assertNotIn('private-nonce', json.dumps(brain.requests[-1][2]))
@@ -1365,6 +1850,7 @@ case.assertEqual(messages, original)
                 with native_worker([[({'content': '[delivery:neutral]\nClean nonce-27.'}, None), ({}, 'stop')]],
                                    synthetic_default_home=normal_home) as (worker, brain):
                     self.assertEqual(worker.event(), {'ready': True})
+                    worker.begin()
                     self.assertFalse(list(normal_hermes.glob('state.db*')))
                     self.assertFalse((normal_home / 'managed-poison').exists())
                     self.assertEqual(worker.request([{'role': 'user', 'content': 'Clean caller.'}]),
@@ -1383,6 +1869,7 @@ case.assertEqual(messages, original)
     def test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home(self):
         with native_worker([400]) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
             events = worker.request([{'role': 'user', 'content': 'failure-private-nonce'}])
             self.assertEqual(set(events[-1]), {'error'})
             self.assertTrue(events[-1]['error'].strip())

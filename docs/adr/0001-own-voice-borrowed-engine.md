@@ -10,4 +10,4 @@ Adopting Herald-OS whole, which bundles Hermes Agent with an Omarchy interface, 
 
 The [specification (#11)](https://github.com/zaingulel/kestrel/issues/11) owns the experiment and its proposed privacy promises; the [current privacy and runtime boundary](../../README.md#privacy-and-runtime-boundary) remains in force.
 
-The first local mute tool ends only the standing no-tools promise. It adds no persistent conversation memory. Changes to this boundary require owner sign-off and security review. Any future persistent-memory boundary requires separate owner sign-off and security review. The engine's general terminal tool stays off.
+The brain can use only the native local memory tool for bounded automatic notes. Exact desktop controls remain outside the brain, and the engine's general terminal tool stays off. Further changes to this boundary require owner sign-off and security review.

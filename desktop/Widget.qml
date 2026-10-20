@@ -13,18 +13,19 @@ BarWidget {
     readonly property bool panelOpen: bar?.shell?.isPluginOpen("local.kestrel") ?? false
     readonly property string tooltipText: ({
         "not-running": "Kestrel is not running. It is not holding the microphone.",
+        "inactive": "Inactive. Microphone in use. Press Super + Shift + K to start.",
         "starting": "Starting. Microphone may be in use.",
         "unavailable": "Status unavailable. Microphone use unknown.",
         "idle": "Kestrel: idle. Microphone in use. Waiting for you to speak.",
         "listening": "Kestrel: listening to you. Microphone in use.",
         "thinking": "Kestrel: thinking about your message. Microphone in use.",
         "speaking": "Kestrel: speaking. Microphone in use.",
-        "trouble": "Kestrel: brain trouble. A reply could not be completed. Microphone in use."
+        "trouble": statusSentence
     })[currentState] + (placementAdvisory ? " " + placementAdvisory : "")
     implicitWidth: 25
     implicitHeight: 30
     Accessible.role: Accessible.Button
-    Accessible.name: (panelOpen ? "Close conversation. " : "Open conversation. ") + statusSentence
+    Accessible.name: (panelOpen ? "Close panel. " : "Open panel. ") + statusSentence
         + (placementAdvisory ? " " + placementAdvisory : "")
     Accessible.onPressAction: togglePanel()
 

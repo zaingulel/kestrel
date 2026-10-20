@@ -12,7 +12,7 @@ Item {
 
     implicitWidth: 25
     implicitHeight: 30
-    opacity: kind === "idle" || kind === "not-running" ? 0.6 : 1
+    opacity: kind === "idle" || kind === "inactive" || kind === "not-running" ? 0.6 : 1
     Accessible.ignored: true
 
     onKindChanged: thinkingIndex = 1
@@ -107,8 +107,8 @@ Item {
                 : root.kind === "thinking" && root.thinkingIndex === index ? 5 : 0)
             width: 3
             height: root.kind === "speaking" ? (root.motionEnabled ? animatedHeight : [6, 12, 8][index]) : 3
-            color: root.kind === "starting" ? "transparent" : root.kind === "trouble" ? root.troubleInk : root.ink
-            border.width: root.kind === "starting" ? 1 : 0
+            color: (root.kind === "starting" || root.kind === "inactive") ? "transparent" : root.kind === "trouble" ? root.troubleInk : root.ink
+            border.width: (root.kind === "starting" || root.kind === "inactive") ? 1 : 0
             border.color: root.ink
 
             SequentialAnimation on animatedHeight {

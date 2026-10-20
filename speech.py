@@ -9,6 +9,7 @@ import os
 import re
 from dataclasses import dataclass, field
 import subprocess
+import sys
 import threading
 import wave
 from pathlib import Path
@@ -20,7 +21,7 @@ from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
-    TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame,
+    TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings, TTSSettings
@@ -234,9 +235,20 @@ class EchoRemoval:
 
 
 class LaptopInput(BaseInputTransport):
-    def __init__(self, params):
+    def __init__(self, params, *, admitted):
         super().__init__(params)
+        self.admitted = admitted
         self.ready = False
+
+    async def process_frame(self, frame, direction):
+        if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
+            return
+        await super().process_frame(frame, direction)
+
+    async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+        if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
+            return
+        await super().push_frame(frame, direction)
 
     async def start(self, frame):
         await super().start(frame)
@@ -312,13 +324,15 @@ class LaptopOutput(BaseOutputTransport):
         try:
             await self.write_gate.wait()
             async with self.write_lock:
-                if self.audio.closed or self.audio.failure or not self.write_gate.is_set():
+                if self.audio.closed or self.audio.failure or not self.audio.admitted() or not self.write_gate.is_set():
                     return False
                 try:
                     if self.audio.playback is None:
                         await self.audio._open_playback()
                     duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
                     deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
+                    if not self.audio.admitted():
+                        return False
                     self.audio.playback.stdin.write(frame.audio)
                     await self.audio.playback.stdin.drain()
                     now = monotonic()
@@ -337,8 +351,9 @@ class LaptopOutput(BaseOutputTransport):
 
 
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped):
+    def __init__(self, echo_removal, *, on_stopped, admitted):
         self.echo_removal = echo_removal
+        self.admitted = admitted
         self.on_stopped = on_stopped
         self.failure: str | None = None
         self.capture = None
@@ -351,7 +366,7 @@ class LaptopAudioTransport:
         self.received_audio = asyncio.Event()
         params = TransportParams(audio_in_enabled=True, audio_out_enabled=True,
                                  audio_in_sample_rate=16000, audio_out_sample_rate=48000)
-        self._input = LaptopInput(params)
+        self._input = LaptopInput(params, admitted=admitted)
         self._output = LaptopOutput(self, params)
 
         @self._output.event_handler("on_error")
@@ -422,7 +437,7 @@ class LaptopAudioTransport:
             while True:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 self.received_audio.set()
-                if self.verified and self._input.ready and not self.closed:
+                if self.verified and self._input.ready and self.admitted() and not self.closed:
                     await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
             self.fail(LAPTOP_CAPTURE_FAILURE)
@@ -452,10 +467,10 @@ class LaptopAudioTransport:
             process.stdout._transport.close()
         if process.returncode is None:
             process.kill()
-        await process.wait()
+        await asyncio.wait_for(process.wait(), 5)
         if process.stdin is not None:
             try:
-                await process.stdin.wait_closed()
+                await asyncio.wait_for(process.stdin.wait_closed(), 1)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -485,54 +500,128 @@ class LaptopAudioTransport:
         if self.reader is not None:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)
-        await self._discard_playback()
+        async with self._output.write_lock:
+            await self._discard_playback()
         await self._reap_audio(self.capture)
 
 
-class NemotronSTT(SegmentedSTTService):
+class NemotronRecognizer:
     def __init__(self):
+        self.process = None
+        self.reader = None
+        self.lock = asyncio.Lock()
+        self.failure = None
+        self.closed = False
+
+    async def load(self, reference_pcm: bytes):
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                str(ROOT / ".runtime/voice-venv/bin/python"), str(ROOT / "asr_worker.py"),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            )
+            response = await asyncio.wait_for(self.process.stdout.readline(), timeout=60)
+            if not response or json.loads(response) != {"ready": True}:
+                raise RuntimeError("Nemotron failed to load; see the service log")
+            pcm = await SOXRAudioResampler().resample(reference_pcm, 48000, 16000)
+            prepared = io.BytesIO()
+            with wave.open(prepared, 'wb') as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(pcm)
+            await self.transcribe(prepared.getvalue(), admitted=lambda: True)
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _reap(self):
+        if self.process is not None and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 5)
+            except TimeoutError:
+                self.process.kill()
+                await asyncio.wait_for(self.process.wait(), 5)
+
+    async def _exchange(self, audio: bytes, *, admitted) -> str | None:
+        try:
+            async with asyncio.timeout(60):
+                if not admitted():
+                    return None
+                self.process.stdin.write(json.dumps({"audio": base64.b64encode(audio).decode()}).encode() + b'\n')
+                await self.process.stdin.drain()
+                response = await self.process.stdout.readline()
+                if not response:
+                    raise RuntimeError("Nemotron worker stopped. Restart Kestrel.")
+                if len(response) > 65536:
+                    raise RuntimeError("Nemotron returned an oversized response. Restart Kestrel.")
+                result = json.loads(response)
+                if not isinstance(result, dict):
+                    raise RuntimeError("Invalid Nemotron response. Restart Kestrel.")
+                if set(result) == {'error'} and isinstance(result['error'], str) and result['error']:
+                    raise RuntimeError(result['error'])
+                if set(result) != {'text'} or not isinstance(result['text'], str):
+                    raise RuntimeError("Invalid Nemotron response. Restart Kestrel.")
+                return result['text']
+        except Exception as error:
+            self.failure = f"Nemotron recognition failed: {str(error) or type(error).__name__}"
+            await self._reap()
+            raise RuntimeError(self.failure) from error
+
+    async def transcribe(self, audio: bytes, *, admitted) -> str | None:
+        async with self.lock:
+            await self.drain()
+            if self.closed or self.failure:
+                raise RuntimeError(self.failure or "Nemotron is closed. Restart Kestrel.")
+            self.reader = asyncio.create_task(self._exchange(audio, admitted=admitted))
+            # The service retains the untagged response when a conversation is cancelled.
+            return await asyncio.shield(self.reader)
+
+    async def drain(self):
+        if self.reader is not None:
+            task = self.reader
+            try:
+                await asyncio.shield(task)
+            finally:
+                if task.done():
+                    self.reader = None
+
+    async def close(self):
+        self.closed = True
+        if self.reader is not None:
+            self.reader.cancel()
+            await asyncio.gather(self.reader, return_exceptions=True)
+            self.reader = None
+        await self._reap()
+
+
+class NemotronSTT(SegmentedSTTService):
+    def __init__(self, recognizer: NemotronRecognizer, *, admitted):
         super().__init__(
             sample_rate=16000,
             settings=STTSettings(model="nemotron-speech-streaming-en-0.6b", language=None),
         )
-        self.process = None
+        self.recognizer = recognizer
+        self.admitted = admitted
 
-    async def load(self, reference_pcm: bytes):
-        self.process = await asyncio.create_subprocess_exec(
-            str(ROOT / ".runtime/asr-venv/bin/python"), str(ROOT / "asr_worker.py"),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        )
-        response = await asyncio.wait_for(self.process.stdout.readline(), timeout=60)
-        if not response or json.loads(response) != {"ready": True}:
-            raise RuntimeError("Nemotron failed to load; see the service log")
-        pcm = await SOXRAudioResampler().resample(reference_pcm, 48000, 16000)
-        prepared = io.BytesIO()
-        with wave.open(prepared, 'wb') as audio:
-            audio.setnchannels(1)
-            audio.setsampwidth(2)
-            audio.setframerate(16000)
-            audio.writeframes(pcm)
-        async with asyncio.timeout(60):
-            async for _ in self.run_stt(prepared.getvalue()):
-                pass
+    async def process_frame(self, frame, direction):
+        if not self.admitted() and isinstance(frame, (
+            DataFrame, InputAudioRawFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+        )):
+            return
+        await super().process_frame(frame, direction)
 
-    async def close(self):
-        if self.process is not None and self.process.returncode is None:
-            self.process.terminate()
-            await self.process.wait()
+    async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+        if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
+            return
+        await super().push_frame(frame, direction)
 
     async def run_stt(self, audio):
-        request = json.dumps({"audio": base64.b64encode(audio).decode()}) + "\n"
-        self.process.stdin.write(request.encode())
-        await self.process.stdin.drain()
-        response = await self.process.stdout.readline()
-        if not response:
-            raise RuntimeError("Nemotron worker stopped. Restart Kestrel.")
-        result = json.loads(response)
-        if "error" in result:
-            raise RuntimeError(result["error"])
-        if result["text"]:
-            yield TranscriptionFrame(result["text"], "", time_now_iso8601(), finalized=True)
+        if not self.admitted():
+            return
+        text = await self.recognizer.transcribe(audio, admitted=self.admitted)
+        if self.admitted() and text:
+            yield TranscriptionFrame(text, "", time_now_iso8601(), finalized=True)
 
 
 class SpokenReplyText:
@@ -1306,14 +1395,16 @@ class SpeechAdvisoryFrame(LLMTextFrame):
 
 
 class VoxCPMTTS(TTSService):
-    def __init__(self, model, preset: VoicePreset):
+    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True):
         super().__init__(
             sample_rate=48000, push_start_frame=True, push_stop_frames=True,
             settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
         )
         self.model = model
+        self.admitted = admitted
         self.preset = preset
-        self._generation_lock = asyncio.Lock()
+        self._generation_lock = generation_lock if generation_lock is not None else asyncio.Lock()
+        self.generation_cleanup_failed = False
         self._spoken_reply = SpokenReplyText()
         self._conversation_reply_token = None
         self._conversation_turns = {}
@@ -1430,6 +1521,10 @@ class VoxCPMTTS(TTSService):
                 raise RuntimeError('Invalid internal speech delivery')
             # Never overlap model calls, including a chunk still finishing after interruption.
             async with self._generation_lock:
+                if self.generation_cleanup_failed:
+                    raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
+                if not self.admitted():
+                    return
                 chunks = self.model.generate_streaming(
                     text=synthesis_text, **prompt,
                     reference_wav_path=str(self.preset.reference),
@@ -1440,7 +1535,7 @@ class VoxCPMTTS(TTSService):
                     while True:
                         pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
                         chunk = await asyncio.shield(pending)
-                        if chunk is None:
+                        if chunk is None or not self.admitted():
                             break
                         pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
                         frame = TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
@@ -1449,11 +1544,40 @@ class VoxCPMTTS(TTSService):
                             text_started = True
                         yield frame
                 finally:
-                    # Cancellation stops playback immediately in Pipecat. Finish only the
-                    # current GPU chunk before closing its generator and releasing the model.
-                    if pending is not None:
-                        await pending
-                    await asyncio.to_thread(chunks.close)
+                    body_error = sys.exception()
+
+                    async def finish_generation() -> None:
+                        next_error = None
+                        try:
+                            try:
+                                if pending is not None:
+                                    await pending
+                            except Exception as error:
+                                next_error = error
+                                raise
+                            finally:
+                                try:
+                                    await asyncio.to_thread(chunks.close)
+                                except Exception as error:
+                                    if next_error is not None:
+                                        raise error from next_error
+                                    raise
+                        except Exception:
+                            self.generation_cleanup_failed = True
+                            raise
+
+                    # Pipecat can cancel again during terminal cleanup. The real GPU work
+                    # and its close operation must finish before this lock can be released.
+                    cleanup = asyncio.create_task(finish_generation())
+                    cancelled = False
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    cleanup.result()
+                    if cancelled and body_error is None:
+                        raise asyncio.CancelledError
         except Exception:
             live_context = self._conversation_audio_contexts.get(context_id)
             if context is not None and live_context is not None and live_context.reply_token is context.reply_token:

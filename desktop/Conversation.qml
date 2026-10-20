@@ -106,7 +106,7 @@ FocusScope {
                 height: width
                 padding: 0
                 Accessible.role: Accessible.Button
-                Accessible.name: "Close conversation"
+                Accessible.name: "Close panel"
                 KeyNavigation.tab: transcript
                 KeyNavigation.backtab: transcript
                 contentItem: Text {

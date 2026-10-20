@@ -11,9 +11,9 @@ import sys
 import time
 
 _PROC_ROOT = Path('/proc')
-_STATES = {'starting', 'idle', 'listening', 'thinking', 'speaking', 'trouble', 'unavailable', 'released'}
+_STATES = {'inactive', 'starting', 'idle', 'listening', 'thinking', 'speaking', 'trouble', 'unavailable', 'released'}
 _WIRE = dict(zip(('starting', 'idle', 'listening', 'thinking', 'speaking', 'trouble',
-                  'not-running', 'unavailable'), 'AILTSBNU'))
+                  'not-running', 'unavailable', 'inactive'), 'AILTSBNUD'))
 _ADVISORY = 'Kestrel indicator status unavailable. Microphone use unknown.'
 
 
@@ -258,7 +258,7 @@ class IndicatorStatus:
         self._state = state
         self._publish()
 
-    def remember_owner(self, pid: int) -> None:
+    def remember_owner(self, pid: int) -> dict | None:
         if self._failed:
             return
         try:
@@ -270,8 +270,18 @@ class IndicatorStatus:
                     raise ValueError('Owner limit')
                 self._owners.append(owner)
             self._publish()
+            return owner.copy()
         except (OSError, ValueError, UnicodeError):
             self._fail()
+            return None
+
+    def retire_owner(self, identity: dict) -> None:
+        if self._failed:
+            return
+        if identity not in self._owners or _live(identity, _PROC_ROOT):
+            raise ValueError('Audio owner has not been reaped')
+        self._owners.remove(identity)
+        self._publish()
 
     def mark_released(self) -> None:
         self._state = 'released'

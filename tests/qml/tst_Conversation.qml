@@ -160,12 +160,18 @@ TestCase {
     }
 
     function test_plain_text_keyboard_and_scroll() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("I"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "panel-session", turns: []}) + "\n"))
         const component = Qt.createComponent(Qt.resolvedUrl("../../desktop/Conversation.qml"))
         compare(component.status, Component.Ready, component.errorString())
         const content = createTemporaryObject(component, this, {
             width: 448, height: 640, background: "#121212", ink: "#bebebe",
             accentInk: "#e68e0d", troubleInk: "#D35F5F",
-            statusSentence: "Idle. Microphone in use.", currentState: "idle"
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            currentState: Qt.binding(function() { return service.state }),
+            conversationMessage: Qt.binding(function() { return service.conversationMessage })
         })
         verify(content !== null)
         closeSpy.target = content
@@ -175,9 +181,18 @@ TestCase {
         verify(close !== null && transcript !== null)
         compare(close.width, 33)
         compare(close.height, 33)
-        compare(close.Accessible.name, "Close conversation")
+        compare(close.Accessible.name, "Close panel")
         compare(close.Accessible.role, Accessible.Button)
         compare(transcript.Accessible.role, Accessible.Document)
+        verify(service.acceptStatusChunk("D"))
+        verify(waitForRendering(content))
+        const inactivePrompt = textWith(content, "Press Super + Shift + K to start a conversation.")
+        const inactiveStatus = textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        verify(inactivePrompt !== null && inactivePrompt.visible)
+        verify(inactiveStatus !== null && inactiveStatus.visible)
+        verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
+        verify(inactivePrompt.contentWidth <= inactivePrompt.width)
+        verify(inactiveStatus.contentWidth <= inactiveStatus.width)
         content.focusClose()
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
@@ -192,6 +207,12 @@ TestCase {
         compare(closeSpy.count, 3)
         keyClick(Qt.Key_Escape)
         compare(closeSpy.count, 4)
+        compare(service.state, "inactive", "panel close actions must not change voice activation")
+        compare(service.conversationAvailable, true)
+        verify(service.acceptStatusChunk("I"))
+        verify(waitForRendering(content))
+        const activePrompt = textWith(content, "Say something. Kestrel replies after you.")
+        verify(activePrompt !== null && activePrompt.visible)
         const literal = '<b>Literal text</b> https://example.invalid ' + "unbroken".repeat(80)
         const turns = [{speaker: "you", text: literal, state: "complete"}]
         for (let i = 0; i < 18; i++) turns.push({speaker: "kestrel", text: "Literal reply " + i + ".", state: "complete"})
