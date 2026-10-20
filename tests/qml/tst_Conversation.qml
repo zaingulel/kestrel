@@ -192,6 +192,22 @@ TestCase {
         }
     }
 
+    function test_composer_text_and_placeholder_start_at_padding() {
+        const service = createTemporaryObject(serviceComponent, test)
+        const content = composerContent(service)
+        const editor = findChild(content, "composer")
+        const scroll = findChild(content, "composerScroll")
+        verify(editor !== null && scroll !== null)
+        verify(waitForRendering(content))
+        compare(editor.text, "")
+        const caret = editor.mapToItem(scroll, editor.cursorRectangle.x, editor.cursorRectangle.y)
+        compare(caret.x + ", " + caret.y, "12, 9")
+        const placeholder = findChild(content, "composerPlaceholder")
+        verify(placeholder !== null)
+        const origin = placeholder.mapToItem(scroll, 0, 0)
+        compare(origin.x + ", " + origin.y, "12, 9")
+    }
+
     function test_only_matching_acceptance_clears_unchanged_draft() {
         const service = createTemporaryObject(serviceComponent, test)
         const content = composerContent(service)
