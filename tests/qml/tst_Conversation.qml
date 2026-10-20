@@ -30,6 +30,181 @@ TestCase {
         }
     }
 
+    Component { id: conversationComponent; Desktop.Conversation {} }
+    Component {
+        id: glyphDouble
+        Item {
+            property string text: ""
+            property real fontSize: 0
+            property color color: "transparent"
+        }
+    }
+
+    property int destroyedTooltips: 0
+    Component {
+        id: tooltipDouble
+        Item {
+            property string text: ""
+            Component.onDestruction: test.destroyedTooltips++
+        }
+    }
+
+    function test_native_glyph_and_tooltip_injection() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("D"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "tooltip-session", turns: []}) + "\n"))
+        const destroyedBefore = destroyedTooltips
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            conversationAvailable: Qt.binding(function() { return service.conversationAvailable })
+        })
+        verify(content !== null)
+        const microphoneTooltip = findChild(content, "microphoneTooltip")
+        const moveTooltip = findChild(content, "headerMoveTooltip")
+        verify(microphoneTooltip !== null && moveTooltip !== null, "native tooltip injection must own both hover targets")
+        const microphone = findChild(content, "microphoneStatus")
+        const header = findChild(content, "conversationHeader")
+        const title = findChild(content, "conversationTitle")
+        const close = findChild(content, "closeConversation")
+        const glyph = findChild(content, "microphoneGlyph")
+        const badge = findChild(content, "microphoneQuestion")
+        compare(microphoneTooltip.item.parent, microphone)
+        compare(moveTooltip.item.parent, header)
+        compare(header.Accessible.description, "Move: Super + left drag")
+        mouseMove(content, 1, 639)
+        tryCompare(microphoneTooltip.item, "visible", false)
+        tryCompare(moveTooltip.item, "visible", false)
+        mouseMove(microphone, 10, microphone.height / 2)
+        tryCompare(microphoneTooltip.item, "visible", true)
+        compare(microphoneTooltip.item.text, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
+        verify(service.acceptStatusChunk("A"))
+        tryCompare(microphoneTooltip.item, "text", "Starting. Microphone may be in use.")
+        compare(glyph.item.text, "󰍬")
+        compare(badge.visible, true)
+        verify(service.acceptStatusChunk("N"))
+        tryCompare(glyph.item, "text", "󰍭")
+        compare(microphoneTooltip.item.text, "Not running. Microphone released by Kestrel.")
+        mouseMove(title, title.width / 2, title.height / 2)
+        tryCompare(moveTooltip.item, "visible", true)
+        compare(moveTooltip.item.text, "Move: Super + left drag")
+        compare(microphoneTooltip.item.visible, false)
+        mouseMove(close, close.width / 2, close.height / 2)
+        tryCompare(moveTooltip.item, "visible", false)
+        compare(microphoneTooltip.item.visible, false)
+        content.focusClose()
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(findChild(content, "transcript").activeFocus, "passive targets introduce no keyboard stop")
+        content.ink = "#4c4f69"
+        content.textScale = 2
+        verify(waitForRendering(content))
+        compare(glyph.item.color, "#4c4f69")
+        compare(glyph.item.fontSize, 28)
+        compare(glyph.item.width, glyph.width)
+        compare(glyph.item.height, glyph.height)
+        compare(glyph.width, 54)
+        compare(badge.width, 32)
+        compare(title.lineHeight, 40)
+        content.width = 320
+        verify(waitForRendering(content))
+        const label = findChild(content, "conversationStatus")
+        for (const item of [title, label, close]) {
+            const left = item.mapToItem(content, 0, 0).x
+            verify(left >= 16 && left + item.width <= 304)
+        }
+        verify(label.contentWidth <= label.width)
+        content.tooltipComponent = null
+        compare(microphoneTooltip.item, null)
+        compare(moveTooltip.item, null)
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 2)
+        content.tooltipComponent = tooltipDouble
+        verify(microphoneTooltip.item !== null && moveTooltip.item !== null)
+        content.destroy()
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 4)
+    }
+
+    function test_microphone_icons_follow_verified_status() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "header-session", turns: []}) + "\n"))
+        verify(service.acceptStatusChunk("D"))
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", motionEnabled: true,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence })
+        })
+        verify(content !== null)
+        verify(waitForRendering(content))
+        compare(textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start."), null,
+            "the passive header must not display the full microphone sentence")
+        content.conversationAvailable = Qt.binding(function() { return service.conversationAvailable })
+        content.glyphComponent = glyphDouble
+        const microphone = findChild(content, "microphoneStatus")
+        const glyph = findChild(content, "microphoneGlyph")
+        const badge = findChild(content, "microphoneQuestion")
+        const label = findChild(content, "conversationStatus")
+        const mark = findChild(content, "headerMark")
+        verify(microphone !== null && glyph !== null && badge !== null && label !== null && mark !== null)
+        const expected = [
+            ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
+            ["D", "Inactive", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
+            ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
+            ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
+            ["I", "Idle", "󰍬", false, "Idle. Microphone in use."],
+            ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
+            ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
+            ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
+            ["B", "Attention", "󰍬", false, "Kestrel needs attention. Microphone in use."]
+        ]
+        for (const row of expected) {
+            verify(service.acceptStatusChunk(row[0]))
+            verify(waitForRendering(content))
+            compare(label.text, row[1])
+            compare(glyph.item.text, row[2])
+            compare(badge.visible, row[3])
+            compare(microphone.Accessible.name, row[4])
+            compare(microphone.Accessible.description, row[4])
+            compare(microphone.Accessible.role, Accessible.StaticText)
+            compare(microphone.Accessible.focusable, false)
+            compare(microphone.activeFocusOnTab, false)
+            compare(glyph.item.Accessible.ignored, true)
+            compare(mark.motionEnabled, false)
+            compare(findChild(mark, "thinkingStep").running, false)
+            compare(findChild(mark, "listeningLoop").running, false)
+            compare(findChild(findChild(mark, "mark0"), "speakingLoop0").running, false)
+            compare(textWith(content, row[4]), null)
+            compare(textWith(content, "Move: Super + left drag"), null)
+        }
+        function unknown() {
+            verify(waitForRendering(content))
+            compare(label.text, "Unavailable")
+            compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
+            compare(badge.visible, true)
+            compare(microphone.Accessible.name, "Status unavailable. Microphone use unknown.")
+        }
+        verify(service.acceptStatusChunk("I"))
+        findChild(service, "statusExpiry").triggered()
+        unknown()
+        verify(service.acceptStatusChunk("I"))
+        service.watcherExited()
+        unknown()
+        verify(service.acceptStatusChunk("I"))
+        compare(service.acceptStatusChunk("I\n"), false)
+        unknown()
+        content.currentState = "unrecognized"
+        unknown()
+        content.turns = [{speaker: "kestrel", text: "", state: "speaking"}]
+        unknown()
+        compare(content.conversationAvailable, true)
+    }
+
     function test_announcements_follow_visible_session_updates() {
         const requests = []
         function makeContent() {
@@ -187,12 +362,12 @@ TestCase {
         verify(service.acceptStatusChunk("D"))
         verify(waitForRendering(content))
         const inactivePrompt = textWith(content, "Press Super + Shift + K to start a conversation.")
-        const inactiveStatus = textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        const inactiveStatus = findChild(content, "microphoneStatus")
         verify(inactivePrompt !== null && inactivePrompt.visible)
         verify(inactiveStatus !== null && inactiveStatus.visible)
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
-        verify(inactiveStatus.contentWidth <= inactiveStatus.width)
+        compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
         content.focusClose()
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
@@ -260,21 +435,22 @@ TestCase {
         verify(transcript.activeFocus)
 
         const title = findChild(content, "conversationTitle")
-        const hint = textWith(content, "Move: Super + left drag")
-        const status = textWith(content, "Idle. Microphone in use.")
-        verify(title !== null && hint !== null && status !== null)
+        const status = findChild(content, "conversationStatus")
+        verify(title !== null && status !== null)
+        compare(textWith(content, "Move: Super + left drag"), null)
+        compare(findChild(content, "conversationHeader").Accessible.description, "Move: Super + left drag")
         function sizes() {
             const notice = findChild(content, "turnNotice20")
-            return [findChild(content, "turnText0").font.pixelSize, title.font.pixelSize, hint.font.pixelSize,
+            return [findChild(content, "turnText0").font.pixelSize, title.font.pixelSize, status.font.pixelSize,
                 status.lineHeight, notice.lineHeight, notice.parent.children[0].font.pixelSize].join()
         }
-        compare(sizes(), "14,16,12,21,21,14", "host base size 14 keeps the token sizes")
+        compare(sizes(), "14,16,12,16,21,14", "host base size 14 keeps the token sizes")
         content.placementAdvisory = "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel."
         content.textScale = 2
         verify(waitForRendering(content))
-        compare(sizes(), "28,32,24,42,42,28", "host base size 28 doubles the token sizes")
+        compare(sizes(), "28,32,24,32,42,28", "host base size 28 doubles the token sizes")
         const advisory = textWith(content, content.placementAdvisory)
-        for (const item of [status, hint, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
+        for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
             const left = item.mapToItem(content, 0, 0).x
             verify(left >= 16 && left + item.width <= 432 && item.contentWidth <= item.width,
                 item.text + " must stay inside the panel: x=" + left + " width=" + item.width + " content=" + item.contentWidth)
@@ -320,7 +496,7 @@ TestCase {
         verify(transcript.activeFocus)
         for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {
             content.textScale = invalid
-            compare(sizes(), "14,16,12,21,21,14", "invalid text scale " + invalid + " falls back to 1")
+            compare(sizes(), "14,16,12,16,21,14", "invalid text scale " + invalid + " falls back to 1")
         }
         closeSpy.target = null
         component.destroy()

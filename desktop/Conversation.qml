@@ -9,6 +9,15 @@ FocusScope {
     required property color troubleInk
     property string currentState: "unavailable"
     property string statusSentence: "Status unavailable. Microphone use unknown."
+    property bool conversationAvailable: false
+    property Component glyphComponent: null
+    property Component tooltipComponent: null
+    property color flatBackground: Qt.rgba(background.r, background.g, background.b, 1)
+    readonly property color bubbleTint: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.10))
+    readonly property color bubbleWash: Qt.tint(flatBackground, Qt.rgba(accentInk.r, accentInk.g, accentInk.b, 0.20))
+    readonly property color edgeRule: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.20))
+    readonly property string microphoneAppearance: currentState === "not-running" ? "off"
+        : ["inactive", "idle", "listening", "thinking", "speaking", "trouble"].indexOf(currentState) !== -1 ? "on" : "unknown"
     property bool motionEnabled: false
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
@@ -24,6 +33,8 @@ FocusScope {
     readonly property int captionPixelSize: Math.max(1, Math.round(12 * effectiveTextScale))
     readonly property int bodyPixelSize: Math.max(1, Math.round(14 * effectiveTextScale))
     readonly property int titlePixelSize: Math.max(1, Math.round(16 * effectiveTextScale))
+    readonly property int captionLineHeight: Math.max(1, Math.round(16 * effectiveTextScale))
+    readonly property int titleLineHeight: Math.max(1, Math.round(20 * effectiveTextScale))
     readonly property int bodyLineHeight: Math.max(1, Math.round(21 * effectiveTextScale))
     signal closeRequested()
     implicitWidth: 448
@@ -78,23 +89,127 @@ FocusScope {
     Column {
         id: header
         x: 16
-        y: 16
+        y: 14
         width: parent.width - 32
         spacing: 9
         Item {
+            id: headerRow
+            objectName: "conversationHeader"
             width: parent.width
-            height: Math.max(closeButton.height, titleText.implicitHeight)
-            Text {
-                id: titleText
-                objectName: "conversationTitle"
+            height: Math.max(30, titleColumn.height, closeButton.height)
+            Accessible.description: "Move: Super + left drag"
+            HoverHandler { id: headerHover }
+            Loader {
+                objectName: "headerMoveTooltip"
+                sourceComponent: root.tooltipComponent
+                onLoaded: {
+                    item.parent = headerRow
+                    item.text = Qt.binding(function() { return headerRow.Accessible.description })
+                    item.visible = Qt.binding(function() { return headerHover.hovered && !microphoneHover.hovered && !closeButton.hovered })
+                }
+            }
+            Loader {
+                objectName: "microphoneTooltip"
+                sourceComponent: root.tooltipComponent
+                onLoaded: {
+                    item.parent = microphoneStatus
+                    item.text = Qt.binding(function() { return root.statusSentence })
+                    item.visible = Qt.binding(function() { return microphoneHover.hovered })
+                }
+            }
+            Marks {
+                objectName: "headerMark"
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Kestrel"
-                textFormat: Text.PlainText
-                color: root.ink
-                font.family: "monospace"
-                font.pixelSize: root.titlePixelSize
-                font.bold: true
+                width: 25
+                height: 30
+                kind: root.currentState
+                ink: root.ink
+                troubleInk: root.troubleInk
+                motionEnabled: false
+            }
+            Column {
+                id: titleColumn
+                x: 34
+                width: parent.width - x - 9 - closeButton.width
+                anchors.verticalCenter: parent.verticalCenter
+                Text {
+                    id: titleText
+                    objectName: "conversationTitle"
+                    width: parent.width
+                    text: "Kestrel"
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.titlePixelSize
+                    font.bold: true
+                    lineHeight: root.titleLineHeight
+                    lineHeightMode: Text.FixedHeight
+                }
+                Row {
+                    id: microphoneStatus
+                    objectName: "microphoneStatus"
+                    width: parent.width
+                    spacing: 5
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: root.statusSentence
+                    Accessible.description: root.statusSentence
+                    Accessible.focusable: false
+                    HoverHandler { id: microphoneHover }
+                    Item {
+                        id: microphoneSlot
+                        width: Math.max(24, root.bodyLineHeight + root.captionPixelSize / 2)
+                        height: width
+                        Loader {
+                            objectName: "microphoneGlyph"
+                            anchors.fill: parent
+                            sourceComponent: root.glyphComponent
+                            onLoaded: {
+                                item.anchors.fill = item.parent
+                                item.text = Qt.binding(function() { return root.microphoneAppearance === "off" ? "󰍭" : "󰍬" })
+                                item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
+                                item.color = Qt.binding(function() { return root.ink })
+                                item.Accessible.ignored = true
+                            }
+                        }
+                        Rectangle {
+                            objectName: "microphoneQuestion"
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            width: root.captionLineHeight
+                            height: width
+                            radius: width / 2
+                            color: root.flatBackground
+                            visible: root.microphoneAppearance === "unknown"
+                            Accessible.ignored: true
+                            Text {
+                                anchors.centerIn: parent
+                                text: "?"
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: "monospace"
+                                font.pixelSize: root.captionPixelSize
+                            }
+                        }
+                    }
+                    Text {
+                        objectName: "conversationStatus"
+                        width: parent.width - microphoneSlot.width - parent.spacing
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: ({"not-running": "Not running", "inactive": "Inactive", "starting": "Starting",
+                            "unavailable": "Unavailable", "idle": "Idle", "listening": "Listening", "thinking": "Thinking",
+                            "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        color: root.ink
+                        font.family: "monospace"
+                        font.pixelSize: root.captionPixelSize
+                        lineHeight: root.captionLineHeight
+                        lineHeightMode: Text.FixedHeight
+                        Accessible.ignored: true
+                    }
+                }
             }
             Button {
                 id: closeButton
@@ -105,6 +220,7 @@ FocusScope {
                 width: Math.max(33, Math.ceil(Math.max(closeGlyph.implicitWidth, closeGlyph.implicitHeight)) + 4)
                 height: width
                 padding: 0
+                hoverEnabled: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close panel"
                 KeyNavigation.tab: transcript
@@ -122,44 +238,22 @@ FocusScope {
                 }
                 background: Rectangle {
                     color: "transparent"
-                    border.width: closeButton.activeFocus ? 2 : 0
-                    border.color: root.accentInk
+                    radius: 8
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        radius: 12
+                        color: "transparent"
+                        border.width: 2
+                        border.color: root.accentInk
+                        visible: closeButton.activeFocus
+                        Accessible.ignored: true
+                    }
                 }
                 onClicked: root.closeRequested()
                 Keys.onReturnPressed: root.closeRequested()
                 Keys.onEnterPressed: root.closeRequested()
             }
-        }
-        Row {
-            width: parent.width
-            spacing: 5
-            Marks {
-                kind: root.currentState
-                ink: root.ink
-                troubleInk: root.troubleInk
-                motionEnabled: root.motionEnabled
-            }
-            Text {
-                width: parent.width - 30
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.statusSentence
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                color: root.ink
-                font.family: "monospace"
-                font.pixelSize: root.bodyPixelSize
-                lineHeight: root.bodyLineHeight
-                lineHeightMode: Text.FixedHeight
-            }
-        }
-        Text {
-            width: parent.width
-            text: "Move: Super + left drag"
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: root.ink
-            font.family: "monospace"
-            font.pixelSize: root.captionPixelSize
         }
         Text {
             width: parent.width
@@ -178,7 +272,7 @@ FocusScope {
         id: transcript
         objectName: "transcript"
         x: 16
-        y: header.y + header.height + 16
+        y: header.y + header.height + 12
         width: parent.width - 32
         height: Math.max(0, parent.height - y - 16)
         contentWidth: width

@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
+import qs.Ui
 import qs.Commons
 
 Item {
@@ -335,6 +336,8 @@ Item {
         onExited: function(exitCode, exitStatus) { root.commandFinished(exitCode === 0 && exitStatus === 0) }
     }
     Timer { id: watchdog; interval: 1000; onTriggered: root.failPlacement() }
+    Component { id: nativeGlyph; OpticalGlyph {} }
+    Component { id: nativeTooltip; PanelToolTip {} }
     FloatingWindow {
         id: window
         title: "Kestrel conversation"
@@ -355,6 +358,13 @@ Item {
             id: content
             anchors.fill: parent
             background: Color.popups.background
+            flatBackground: {
+                const flat = Color.flatColor(Color.pick("popups.background", Color.background), Color.background)
+                return Qt.rgba(flat.r, flat.g, flat.b, 1)
+            }
+            glyphComponent: nativeGlyph
+            tooltipComponent: nativeTooltip
+            conversationAvailable: root.service ? root.service.conversationAvailable : false
             ink: Color.flatColor(Color.pick("popups.text", Color.foreground), Color.foreground)
             accentInk: Color.accent
             troubleInk: Color.flatColor(Color.pick("bar.active", Color.urgent), Color.urgent)
