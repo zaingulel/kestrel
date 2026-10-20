@@ -1596,11 +1596,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         stt.close = AsyncMock()
         llm = Forward()
         llm.admitted = lambda: True
+        llm.refresh_indicator = Mock()
+        llm.indicator_input_ready = Mock()
+        llm.indicator_output_started = Mock()
         llm.start_preparation = Mock()
         llm.conversation_output = Mock()
         llm.revoke = Mock()
         llm.local_actions = Mock(close=AsyncMock(), drain=AsyncMock())
-        llm.channel = Mock(prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), failure=None, preparation=None)
+        llm.channel = Mock(begin_conversation=AsyncMock(return_value=True), prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), failure=None, preparation=None)
         stt.drain = AsyncMock()
         stt.failure = None
 
