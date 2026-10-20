@@ -53,8 +53,6 @@ class ConversationControl:
                             request.extend(data)
                 except TimeoutError:
                     pass
-            if reply not in ('starting', 'inactive', 'unavailable'):
-                reply = 'unavailable'
             writer.write(reply.encode('ascii') + b'\n')
             await asyncio.wait_for(writer.drain(), 1)
         except (OSError, ValueError, TimeoutError):
