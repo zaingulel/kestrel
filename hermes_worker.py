@@ -120,6 +120,13 @@ SYSTEM_PROMPT = (
 )
 
 
+MEMORY_REPLY_REMINDER = (
+    'Example confirmation after a successful memory save:\n'
+    '[delivery:neutral]\n'
+    'Done. Saved.'
+)
+
+
 def validate_hermes_source() -> None:
     refusal = ('Hermes source identity could not be verified. '
                'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
@@ -359,6 +366,7 @@ def main(*, base_url=BONSAI_URL):
                     session_db=None, fallback_model=None, save_trajectories=False,
                     checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
                     reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
+                    ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
                 if memory and (built.valid_tool_names != {'memory'}

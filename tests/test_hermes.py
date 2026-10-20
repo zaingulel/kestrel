@@ -1110,12 +1110,19 @@ class NativeHermesTests(unittest.TestCase):
             events = worker.request([{'role': 'user', 'content': 'Continue after note.'}])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Before.'},
                                       {'text': '\n\nAfter.'}, {'done': True}])
-            from hermes_worker import DELIVERY_ERROR
+            from hermes_worker import DELIVERY_ERROR, MEMORY_REPLY_REMINDER
             for text in invalid:
                 self.assertEqual(worker.request([{'role': 'user', 'content': 'Reject malformed header.'}]),
                                  [{'error': DELIVERY_ERROR}], repr(text))
             self.assertEqual(worker.request([{'role': 'user', 'content': 'Fresh turn.'}]),
                              [{'delivery': 'neutral'}, {'text': 'Fresh.'}, {'done': True}])
+            self.assertTrue(MEMORY_REPLY_REMINDER)
+            system_messages = [message['content'] for _, _, body in brain.requests
+                               for message in body['messages'] if message['role'] == 'system']
+            self.assertTrue(system_messages)
+            for content in system_messages:
+                self.assertTrue(content.endswith('\n\n' + MEMORY_REPLY_REMINDER))
+                self.assertEqual(content.count(MEMORY_REPLY_REMINDER), 1)
             observations = [json.loads(line) for line in
                             (worker.home / 'stream-observations.jsonl').read_text().splitlines()]
             self.assertIn({'fragment': '[', 'pending': False, 'callback': '['}, observations)
