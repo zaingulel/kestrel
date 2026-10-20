@@ -238,7 +238,7 @@ Product discovery and drilling with the owner must precede any further product i
 - Preserve microphone and model assets in ignored `.runtime/`.
 - Never commit recordings, credentials or model weights.
 - Keep the approved voice service behaviour unchanged during factory adoption.
-- Modify shared bytes only in the canonical repository and carry them here through the canonical sync.
+- Modify shared bytes only in the canonical repository and receive them here through named Fabraik release installs or updates.
 
 ## Architecture seams
 
@@ -258,10 +258,10 @@ Product discovery and drilling with the owner must precede any further product i
 
 | Surface | Kestrel |
 |---|---|
-| plan-first | Product implementation after owner discovery and drilling; conversation orchestration, speech adapters, the recognition process boundary and service startup; the workflow trust perimeter and sync contract. |
+| plan-first | Product implementation after owner discovery and drilling; conversation orchestration, speech adapters, the recognition process boundary and service startup; the workflow trust perimeter and shared workflow contract. |
 | owner-directed | Product direction and changes to the approved voice service behaviour; workflow owner gates and review tiers. |
 | sign-off | Changes to microphone access, audio or transcript handling, the localhost brain service boundary, or the workflow trust perimeter. |
-| security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, local brain service exposure; runtime hooks, permission settings, workflow triggers and token permissions, and sync integrity. |
+| security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, local brain service exposure; runtime hooks, permission settings, workflow triggers and token permissions, and shared workflow integrity. |
 | hard to undo | Recordings, transcripts or credentials exposed through commits, logs or publication; loss or replacement of local microphone and model assets; repository hosting settings and rulesets. |
 | wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
 
@@ -270,4 +270,4 @@ Standing security guarantees:
 1. Microphone recognition and voice generation stay on the laptop; the Bonsai brain, conversation transcripts and system context stay on the laptop. The enabled voice service starts inactive at graphical login and can use the microphone during startup and inactivity through echo removal. Prepared inactivity also uses temporary verified capture for the isolated local wake detector; waiting audio never enters ordinary recognition, transcripts, brain requests, notes or local actions. Typed requests suppress waiting capture through matching output completion. Waiting capture is reaped before activation; uncertain cleanup refuses activation. [README.md](README.md#wake-phrase-assets) owns private wake provisioning and optional-failure advice, with the shortcut retained after safe cleanup. Ordinary microphone recognition and spoken caller transcripts require active voice; explicit accepted typed requests can use the shared conversation, local exact commands and spoken replies while voice stays inactive. Same-account processes can submit bounded typed text through the existing local control endpoint. Starting voice creates a fresh conversation, including after typed-only use; dismissal revokes new work while already-accepted work drains.
 2. Bonsai listens on unauthenticated loopback at `127.0.0.1:8080`; other local processes can reach it. Kestrel's desktop tools are local mute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, saving a native screenshot, and launching a uniquely matched visible installed app by name. Launched apps keep their normal permissions and behaviour, including any network access or side effects. Kestrel does not read, copy or send screenshot content. The brain can invoke only native local memory, including automatic note changes and removal, without per-write approval; it cannot invoke desktop tools. Kestrel has no reusable conversation archive and cannot delete desktop files, send messages, publish or run arbitrary commands through Kestrel.
 3. Runtime model weights, reference audio, logs, private automatic notes and local conversation traces remain ignored and are never published. Notes persist across fresh conversations and restarts in the bounded private store; already-accepted writes can finish during dismissal. Traces never become later conversation memory or note inputs. Transcript text and memory tool payloads may appear in local diagnostics; [README.md](README.md#automatic-local-notes) owns notes and operator controls, and its [trace rules](README.md#local-conversation-traces) own diagnostic retention, deletion and limits.
-4. Shared workflow bytes retain canonical integrity through sync; the repository administrator bypass remains owner-only and no write deploy key is allowed.
+4. Shared workflow bytes retain canonical integrity through named release installs and updates; the repository administrator bypass remains owner-only and no write deploy key is allowed.
