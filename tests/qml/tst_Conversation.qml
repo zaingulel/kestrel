@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import QtQuick.Window
 import QtTest
 import "../../desktop" as Desktop
 
@@ -28,6 +30,561 @@ TestCase {
             signal announcementRequested(string text)
             function announceTurn(text) { announcementRequested(text) }
         }
+    }
+
+    Component { id: conversationComponent; Desktop.Conversation {} }
+    Component {
+        id: glyphDouble
+        Item {
+            property string text: ""
+            property real fontSize: 0
+            property color color: "transparent"
+        }
+    }
+
+    property int destroyedTooltips: 0
+    property int tooltipPixelSize: 12
+    Component { id: tooltipWindow; Window { visible: true; height: 640 } }
+    Component {
+        id: tooltipDouble
+        ToolTip {
+            id: tooltip
+            delay: 400
+            padding: 0
+            contentItem: Text {
+                text: tooltip.text
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
+                font.family: "monospace"
+                font.pixelSize: test.tooltipPixelSize
+                leftPadding: 10
+                rightPadding: 10
+                topPadding: 6
+                bottomPadding: 6
+            }
+            Component.onDestruction: test.destroyedTooltips++
+        }
+    }
+
+    function test_windhover_bubbles_and_scaling() {
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", conversationMessage: "",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            conversationAvailable: true, currentState: "idle", motionEnabled: true, announcementsEnabled: true
+        })
+        verify(content !== null)
+        const literal = '<b>Literal</b>\n' + "unbroken".repeat(80)
+        const turns = [{speaker: "you", text: "A", state: "complete"},
+            {speaker: "you", text: literal, state: "complete"},
+            {speaker: "kestrel", text: "B", state: "complete"},
+            {speaker: "kestrel", text: literal, state: "complete"}]
+        content.turns = turns
+        tryVerify(function() { return findChild(content, "turnText3") !== null })
+        const transcript = findChild(content, "transcript")
+        const first = findChild(content, "turnText0")
+        compare(first.width, 20, "the shortest spoken bubble is 44 wide with 12 padding on each side")
+        const topRule = findChild(content, "transcriptTopRule")
+        const bottomRule = findChild(content, "transcriptBottomRule")
+        verify(topRule !== null && bottomRule !== null)
+        function channels(color, expected) {
+            fuzzyCompare(color.r, expected[0] / 255, 0.005)
+            fuzzyCompare(color.g, expected[1] / 255, 0.005)
+            fuzzyCompare(color.b, expected[2] / 255, 0.005)
+            compare(color.a, 1)
+        }
+        function geometry(width, scale) {
+            content.width = width
+            content.textScale = scale
+            verify(waitForRendering(content))
+            let previous = null
+            for (let i = 0; i < 4; i++) {
+                const row = findChild(content, "turnRow" + i)
+                const bubble = findChild(content, "turnBubble" + i)
+                const body = findChild(content, "turnText" + i)
+                verify(row !== null && bubble !== null && body !== null)
+                compare(row.width, width - 32)
+                const point = bubble.mapToItem(transcript.contentItem, 0, 0)
+                compare(point.x, i < 2 ? width - 32 - bubble.width : 0)
+                verify(bubble.width >= 44 && bubble.width <= width - 88)
+                compare(bubble.width, i % 2 === 0 ? (i === 0 && scale === 2 ? 56 : 44) : width - 88)
+                compare(body.width, bubble.width - 24)
+                compare(body.x, 12)
+                compare(body.y, 8)
+                compare(body.text, turns[i].text)
+                compare(body.textFormat, Text.PlainText)
+                compare(body.wrapMode, Text.Wrap)
+                compare(body.font.pixelSize, 14 * scale)
+                compare(body.lineHeight, 21 * scale)
+                verify(body.contentWidth <= body.width)
+                if (i % 2 === 1) verify(body.lineCount > 2, "newlines and long words wrap literally")
+                compare(bubble.opacity, 1)
+                compare(body.opacity, 1)
+                if (previous !== null) compare(point.y - previous.bottom, i === 2 ? 14 : 4)
+                previous = {bottom: point.y + bubble.height}
+                compare(bubble.topLeftRadius, i === 3 ? 4 : 14)
+                compare(bubble.topRightRadius, i === 1 ? 4 : 14)
+                compare(bubble.bottomLeftRadius, i >= 2 ? 4 : 14)
+                compare(bubble.bottomRightRadius, i < 2 ? 4 : 14)
+                const provenance = findChild(content, "turnProvenance" + i)
+                compare(provenance.visible, i < 2)
+                if (i < 2) {
+                    compare(provenance.item.text, "󰍬")
+                    compare(provenance.item.fontSize, 12 * scale)
+                    compare(findChild(content, "turnProvenanceTooltip" + i).item.text, "Spoken message")
+                    compare(row.Accessible.description, "Spoken message")
+                    compare(bubble.height, body.implicitHeight + 16 + 16 * scale + 4)
+                } else compare(bubble.height, body.implicitHeight + 16)
+                compare(row.Accessible.name, (i < 2 ? "You: " : "Kestrel: ") + turns[i].text)
+                compare(row.Accessible.role, Accessible.StaticText)
+            }
+            compare(findChild(content, "headerMark").motionEnabled, false)
+            compare(textWith(content, "You"), null)
+            compare(textWith(content, "Kestrel").objectName, "conversationTitle")
+            compare(topRule.height, 1)
+            compare(bottomRule.height, 1)
+            transcript.forceActiveFocus()
+            keyClick(Qt.Key_End)
+            compare(bottomRule.visible, false)
+            compare(topRule.visible, true)
+            keyClick(Qt.Key_Home)
+            compare(topRule.visible, false)
+            compare(bottomRule.visible, true)
+        }
+        geometry(448, 1)
+        channels(findChild(content, "turnBubble0").color, [45.2, 54, 79.8])
+        channels(findChild(content, "turnBubble2").color, [40.3, 42, 55.6])
+        channels(topRule.color, [54.6, 57, 73.2])
+        geometry(320, 1)
+        geometry(448, 2)
+        geometry(320, 2)
+        content.background = "#eff1f5"
+        content.ink = "#4c4f69"
+        content.accentInk = "#1e66f5"
+        channels(findChild(content, "turnBubble0").color, [197.2, 213.2, 245])
+        channels(findChild(content, "turnBubble2").color, [222.7, 224.8, 231])
+        for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {
+            content.textScale = invalid
+            compare(first.font.pixelSize, 14)
+            compare(first.lineHeight, 21)
+        }
+        content.width = 448
+        content.turns = [turns[0], turns[2]]
+        tryVerify(function() { return findChild(content, "turnText2") === null })
+        verify(waitForRendering(content))
+        compare(transcript.contentHeight, transcript.height)
+        const last = findChild(content, "turnBubble1")
+        compare(last.mapToItem(transcript, 0, 0).y + last.height, transcript.height)
+        compare(topRule.visible, false)
+        compare(bottomRule.visible, false)
+    }
+
+    function test_live_edge_and_invalid_feed() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            announcementsEnabled: true, motionEnabled: true,
+            turns: Qt.binding(function() { return service.turns }),
+            conversationAvailable: Qt.binding(function() { return service.conversationAvailable }),
+            conversationSession: Qt.binding(function() { return service.conversationSession }),
+            conversationMessage: Qt.binding(function() { return service.conversationMessage }),
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence })
+        })
+        verify(content !== null)
+        let tail = null
+        let marks = null
+        let bubble = null
+        function accept(turns) {
+            verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "live-session", turns: turns}) + "\n"))
+            tryCompare(content, "displayedTurns", service.turns)
+            verify(waitForRendering(content))
+            tail = findChild(content, "turnTail1")
+            marks = findChild(content, "turnLiveMarks1")
+            bubble = findChild(content, "turnBubble1")
+        }
+        const earlier = {speaker: "kestrel", text: "Earlier", state: "thinking"}
+        verify(service.acceptStatusChunk("T"))
+        accept([earlier, {speaker: "kestrel", text: "", state: "thinking"}])
+        compare(findChild(content, "turnText1").parent.visible, false,
+            "an empty active reply has only its live tail, never a placeholder bubble")
+        const transcript = findChild(content, "transcript")
+        verify(tail !== null && marks !== null)
+        compare(findChild(content, "turnTail0").visible, false, "only the final accepted reply is active")
+        compare(tail.visible, true)
+        compare(tail.width, 40)
+        compare(tail.height, 26)
+        compare(tail.topLeftRadius, 10)
+        compare(tail.topRightRadius, 10)
+        compare(tail.bottomRightRadius, 10)
+        compare(tail.bottomLeftRadius, 4)
+        compare(tail.color, content.bubbleTint)
+        compare(marks.feed, true)
+        compare(marks.kind, "thinking")
+        compare(findChild(marks, "thinkingStep").running, true)
+        const literal = '<b>Heard prefix</b>\nonly accepted text'
+        accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
+        compare(bubble.visible, true)
+        compare(bubble.bottomLeftRadius, 0)
+        compare(tail.y, bubble.y + bubble.height)
+        compare(tail.x, bubble.x)
+        compare(tail.topLeftRadius, 0)
+        compare(tail.topRightRadius, 0)
+        compare(findChild(content, "turnText1").text, literal)
+        compare(findChild(content, "turnText1").textFormat, Text.PlainText)
+        compare(marks.kind, "speaking")
+        function loops(running) {
+            for (let i = 0; i < 3; i++)
+                compare(findChild(findChild(marks, "mark" + i), "speakingLoop" + i).running, running)
+        }
+        loops(true)
+        content.motionEnabled = false
+        loops(false)
+        content.motionEnabled = true
+        loops(true)
+        content.announcementsEnabled = false
+        content.visible = false
+        loops(false)
+        content.visible = true
+        content.announcementsEnabled = true
+        loops(true)
+        const ghost = findChild(content, "listeningGhost")
+        const inflow = findChild(content, "listeningGhostMark")
+        verify(ghost !== null && inflow !== null)
+        verify(service.acceptStatusChunk("L"))
+        verify(waitForRendering(content))
+        compare(ghost.visible, true)
+        compare(ghost.width, 40)
+        compare(ghost.height, 26)
+        compare(ghost.mapToItem(transcript.contentItem, 0, 0).x, transcript.width - 40)
+        compare(ghost.Accessible.name, "Listening")
+        compare(ghost.Accessible.role, Accessible.StaticText)
+        compare(inflow.feed, false)
+        compare(findChild(inflow, "listeningLoop").running, true)
+        const path = findChild(content, "listeningGhostPath")
+        compare(path.strokeWidth, 1.5)
+        compare(path.strokeColor, content.ink)
+        compare(path.fillColor.a, 0)
+        fuzzyCompare(path.dashPattern[0], 4 / 1.5, 0.0001)
+        fuzzyCompare(path.dashPattern[1], 3 / 1.5, 0.0001)
+        const outline = findChild(content, "listeningGhostOutline")
+        compare(outline.x, 0.75)
+        compare(outline.y, 0.75)
+        compare(outline.width, 38.5)
+        compare(outline.height, 24.5)
+        compare(outline.topLeftRadius, 9.25)
+        compare(outline.bottomRightRadius, 3.25)
+        compare(findChild(content, "microphoneGlyph").item.text, "󰍬")
+        verify(service.acceptStatusChunk("D"))
+        compare(ghost.visible, false)
+        compare(tail.visible, true, "microphone activity is independent of accepted reply activity")
+        compare(findChild(content, "microphoneQuestion").visible, false)
+        service.watcherExited()
+        compare(tail.visible, true)
+        compare(findChild(content, "microphoneGlyph").item.text, "󰍬", "missing status must never claim release")
+        compare(findChild(content, "microphoneQuestion").visible, true)
+        for (const state of ["interrupted", "failed", "complete"]) {
+            accept([earlier, {speaker: "kestrel", text: state === "complete" ? "Finished." : "", state: state}])
+            compare(tail.visible, false)
+            loops(false)
+            const notice = findChild(content, "turnNotice1")
+            const failure = findChild(content, "turnFailure1")
+            if (state !== "complete") {
+                verify(findChild(content, "turnRow1").height > 0)
+                compare(notice.visible, true)
+                compare(notice.text, state === "interrupted" ? "Reply interrupted." : "Reply could not be completed.")
+                compare(notice.font.pixelSize, 12)
+                compare(notice.lineHeight, 16)
+                compare(notice.parent.y, bubble.y + bubble.height + 4)
+                compare(notice.parent.x, 2)
+                compare(failure.visible, state === "failed")
+                compare(failure.kind, "trouble")
+                compare(failure.troubleInk, content.troubleInk)
+                compare(failure.motionEnabled, false)
+                verify(findChild(content, "turnRow1").Accessible.name.indexOf(notice.text) !== -1)
+            } else compare(notice.visible, false)
+        }
+        verify(service.acceptStatusChunk("L"))
+        accept([])
+        compare(ghost.visible, true)
+        compare(textWith(content, "Say something. Kestrel replies after you."), null)
+        content.motionEnabled = false
+        compare(findChild(inflow, "listeningLoop").running, false)
+        content.motionEnabled = true
+        content.announcementsEnabled = false
+        compare(findChild(inflow, "listeningLoop").running, false)
+        content.announcementsEnabled = true
+        function unavailable(message) {
+            tryCompare(content, "displayedTurns", service.turns)
+            verify(waitForRendering(content))
+            compare(service.conversationAvailable, false)
+            compare(content.displayedTurns.length, 0)
+            compare(findChild(content, "turnBubble0"), null)
+            compare(ghost.visible, false)
+            compare(findChild(inflow, "listeningLoop").running, false)
+            const advisory = textWith(content, message)
+            verify(advisory !== null && advisory.visible)
+            compare(advisory.horizontalAlignment, Text.AlignHCenter)
+        }
+        accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
+        findChild(service, "conversationExpiry").triggered()
+        unavailable("Conversation unavailable. Reopen the panel.")
+        accept([earlier])
+        compare(service.acceptConversationChunk("{invalid}\n"), false)
+        unavailable("Conversation unavailable. Reopen the panel.")
+        accept([earlier])
+        verify(service.acceptConversationChunk(JSON.stringify({unavailable:
+            "Conversation is too large to display. Restart Kestrel to begin a new conversation."}) + "\n"))
+        unavailable("Conversation is too large to display. Restart Kestrel to begin a new conversation.")
+    }
+
+    function test_native_tooltip_text_fits_window_data() {
+        return [
+            {tag: "448-12", panelWidth: 448, pixelSize: 12},
+            {tag: "320-12", panelWidth: 320, pixelSize: 12},
+            {tag: "448-24", panelWidth: 448, pixelSize: 24},
+            {tag: "320-24", panelWidth: 320, pixelSize: 24}
+        ]
+    }
+
+    function test_native_tooltip_text_fits_window(data) {
+        const window = createTemporaryObject(tooltipWindow, test, {width: data.panelWidth})
+        verify(window !== null)
+        window.requestActivate()
+        tryCompare(window, "active", true)
+        tooltipPixelSize = data.pixelSize
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("D"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session", turns: []}) + "\n"))
+        const content = createTemporaryObject(conversationComponent, window.contentItem, {
+            width: Qt.binding(function() { return window.width }),
+            height: Qt.binding(function() { return window.height }),
+            background: "#1a1b26", ink: "#a9b1d6", accentInk: "#7aa2f7", troubleInk: "#D35F5F",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            turns: Qt.binding(function() { return service.turns }),
+            conversationSession: Qt.binding(function() { return service.conversationSession }),
+            conversationAvailable: Qt.binding(function() { return service.conversationAvailable })
+        })
+        verify(content !== null)
+        verify(waitForRendering(content))
+        const microphone = findChild(content, "microphoneStatus")
+        const microphoneTooltip = findChild(content, "microphoneTooltip").item
+        const moveTooltip = findChild(content, "headerMoveTooltip").item
+        const title = findChild(content, "conversationTitle")
+        const close = findChild(content, "closeConversation")
+        function readable(popup, literal, multiline) {
+            tryCompare(popup, "opened", true)
+            compare(popup.text, literal)
+            const text = popup.contentItem
+            compare(text.text, literal)
+            compare(text.truncated, false)
+            if (multiline) verify(text.lineCount > 1, "long native text must wrap")
+            verify(text.paintedWidth <= text.width - text.leftPadding - text.rightPadding + 0.5,
+                "painted text must fit inside native horizontal padding")
+            verify(text.paintedHeight <= text.height - text.topPadding - text.bottomPadding + 0.5,
+                "painted text must fit inside native vertical padding")
+            const background = popup.background
+            const topLeft = background.mapToItem(window.contentItem, 0, 0)
+            const bottomRight = background.mapToItem(window.contentItem, background.width, background.height)
+            verify(topLeft.x >= 15.5 && topLeft.y >= 15.5, "native background must clear top and left window edges")
+            verify(bottomRight.x <= window.width - 15.5 && bottomRight.y <= window.height - 15.5,
+                "native background must clear bottom and right window edges")
+            compare(popup.delay, 400)
+        }
+        const inactive = "Inactive. Microphone in use. Press Super + Shift + K to start."
+        verify(service.acceptStatusChunk("D"))
+        mouseMove(content, 1, content.height - 1)
+        mouseMove(microphone, 10, microphone.height / 2)
+        readable(microphoneTooltip, inactive, data.panelWidth === 320 || data.pixelSize === 24)
+        content.focusClose()
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(findChild(content, "transcript").activeFocus, "native tooltips add no focus stop")
+        if (data.tag === "448-12") {
+            window.width = 320
+            tooltipPixelSize = 24
+            verify(waitForRendering(content))
+            readable(microphoneTooltip, inactive, true)
+        }
+        mouseMove(content, 1, content.height / 2)
+        tryCompare(microphoneTooltip, "visible", false)
+        tryCompare(moveTooltip, "visible", false)
+        mouseMove(title, title.width / 2, title.height / 2)
+        readable(moveTooltip, "Move: Super + left drag", false)
+        compare(microphoneTooltip.visible, false)
+        mouseMove(close, close.width / 2, close.height / 2)
+        tryCompare(moveTooltip, "visible", false)
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session",
+            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete"}]}) + "\n"))
+        tryVerify(function() { return findChild(content, "turnProvenance0") !== null })
+        const provenance = findChild(content, "turnProvenance0")
+        verify(waitForRendering(provenance))
+        mouseMove(provenance, provenance.width / 2, provenance.height / 2)
+        readable(findChild(content, "turnProvenanceTooltip0").item, "Spoken message", false)
+        window.destroy()
+        tooltipPixelSize = 12
+    }
+
+    function test_native_glyph_and_tooltip_injection() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("D"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "tooltip-session", turns: []}) + "\n"))
+        const destroyedBefore = destroyedTooltips
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            conversationAvailable: Qt.binding(function() { return service.conversationAvailable })
+        })
+        verify(content !== null)
+        const microphoneTooltip = findChild(content, "microphoneTooltip")
+        const moveTooltip = findChild(content, "headerMoveTooltip")
+        verify(microphoneTooltip !== null && moveTooltip !== null, "native tooltip injection must own both hover targets")
+        const microphone = findChild(content, "microphoneStatus")
+        const header = findChild(content, "conversationHeader")
+        const title = findChild(content, "conversationTitle")
+        const close = findChild(content, "closeConversation")
+        const glyph = findChild(content, "microphoneGlyph")
+        const badge = findChild(content, "microphoneQuestion")
+        compare(microphoneTooltip.item.parent, microphone)
+        compare(moveTooltip.item.parent, header)
+        compare(header.Accessible.description, "Move: Super + left drag")
+        mouseMove(content, 1, 639)
+        tryCompare(microphoneTooltip.item, "visible", false)
+        tryCompare(moveTooltip.item, "visible", false)
+        mouseMove(microphone, 10, microphone.height / 2)
+        tryCompare(microphoneTooltip.item, "opened", true)
+        compare(microphoneTooltip.item.text, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
+        verify(service.acceptStatusChunk("A"))
+        tryCompare(microphoneTooltip.item, "text", "Starting. Microphone may be in use.")
+        compare(glyph.item.text, "󰍬")
+        compare(badge.visible, true)
+        verify(service.acceptStatusChunk("N"))
+        tryCompare(glyph.item, "text", "󰍭")
+        compare(microphoneTooltip.item.text, "Not running. Microphone released by Kestrel.")
+        mouseMove(title, title.width / 2, title.height / 2)
+        tryCompare(moveTooltip.item, "opened", true)
+        compare(moveTooltip.item.text, "Move: Super + left drag")
+        compare(microphoneTooltip.item.visible, false)
+        mouseMove(close, close.width / 2, close.height / 2)
+        tryCompare(moveTooltip.item, "visible", false)
+        compare(microphoneTooltip.item.visible, false)
+        content.focusClose()
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(findChild(content, "transcript").activeFocus, "passive targets introduce no keyboard stop")
+        content.ink = "#4c4f69"
+        content.textScale = 2
+        verify(waitForRendering(content))
+        compare(glyph.item.color, "#4c4f69")
+        compare(glyph.item.fontSize, 28)
+        compare(glyph.item.width, glyph.width)
+        compare(glyph.item.height, glyph.height)
+        compare(glyph.width, 54)
+        compare(badge.width, 32)
+        compare(title.lineHeight, 40)
+        content.width = 320
+        verify(waitForRendering(content))
+        const label = findChild(content, "conversationStatus")
+        for (const item of [title, label, close]) {
+            const left = item.mapToItem(content, 0, 0).x
+            verify(left >= 16 && left + item.width <= 304)
+        }
+        verify(label.contentWidth <= label.width)
+        content.tooltipComponent = null
+        compare(microphoneTooltip.item, null)
+        compare(moveTooltip.item, null)
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 2)
+        content.tooltipComponent = tooltipDouble
+        verify(microphoneTooltip.item !== null && moveTooltip.item !== null)
+        content.destroy()
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 4)
+    }
+
+    function test_microphone_icons_follow_verified_status() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "header-session", turns: []}) + "\n"))
+        verify(service.acceptStatusChunk("D"))
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", motionEnabled: true,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence })
+        })
+        verify(content !== null)
+        verify(waitForRendering(content))
+        compare(textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start."), null,
+            "the passive header must not display the full microphone sentence")
+        content.conversationAvailable = Qt.binding(function() { return service.conversationAvailable })
+        content.glyphComponent = glyphDouble
+        const microphone = findChild(content, "microphoneStatus")
+        const glyph = findChild(content, "microphoneGlyph")
+        const badge = findChild(content, "microphoneQuestion")
+        const label = findChild(content, "conversationStatus")
+        const mark = findChild(content, "headerMark")
+        verify(microphone !== null && glyph !== null && badge !== null && label !== null && mark !== null)
+        const expected = [
+            ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
+            ["D", "Inactive", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
+            ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
+            ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
+            ["I", "Idle", "󰍬", false, "Idle. Microphone in use."],
+            ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
+            ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
+            ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
+            ["B", "Attention", "󰍬", false, "Kestrel needs attention. Microphone in use."]
+        ]
+        for (const row of expected) {
+            verify(service.acceptStatusChunk(row[0]))
+            verify(waitForRendering(content))
+            compare(label.text, row[1])
+            compare(glyph.item.text, row[2])
+            compare(badge.visible, row[3])
+            compare(microphone.Accessible.name, row[4])
+            compare(microphone.Accessible.description, row[4])
+            compare(microphone.Accessible.role, Accessible.StaticText)
+            compare(microphone.Accessible.focusable, false)
+            compare(microphone.activeFocusOnTab, false)
+            compare(glyph.item.Accessible.ignored, true)
+            compare(mark.motionEnabled, false)
+            compare(findChild(mark, "thinkingStep").running, false)
+            compare(findChild(mark, "listeningLoop").running, false)
+            compare(findChild(findChild(mark, "mark0"), "speakingLoop0").running, false)
+            compare(textWith(content, row[4]), null)
+            compare(textWith(content, "Move: Super + left drag"), null)
+        }
+        function unknown() {
+            verify(waitForRendering(content))
+            compare(label.text, "Unavailable")
+            compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
+            compare(badge.visible, true)
+            compare(microphone.Accessible.name, "Status unavailable. Microphone use unknown.")
+        }
+        verify(service.acceptStatusChunk("I"))
+        findChild(service, "statusExpiry").triggered()
+        unknown()
+        verify(service.acceptStatusChunk("I"))
+        service.watcherExited()
+        unknown()
+        verify(service.acceptStatusChunk("I"))
+        compare(service.acceptStatusChunk("I\n"), false)
+        unknown()
+        content.currentState = "unrecognized"
+        unknown()
+        content.turns = [{speaker: "kestrel", text: "", state: "speaking"}]
+        unknown()
+        compare(content.conversationAvailable, true)
     }
 
     function test_announcements_follow_visible_session_updates() {
@@ -187,12 +744,12 @@ TestCase {
         verify(service.acceptStatusChunk("D"))
         verify(waitForRendering(content))
         const inactivePrompt = textWith(content, "Press Super + Shift + K to start a conversation.")
-        const inactiveStatus = textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        const inactiveStatus = findChild(content, "microphoneStatus")
         verify(inactivePrompt !== null && inactivePrompt.visible)
         verify(inactiveStatus !== null && inactiveStatus.visible)
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
-        verify(inactiveStatus.contentWidth <= inactiveStatus.width)
+        compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
         content.focusClose()
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
@@ -226,8 +783,9 @@ TestCase {
         verify(body.lineCount > 1)
         compare(body.font.pixelSize, 14)
         compare(body.lineHeight, 21)
-        compare(body.parent.x, 32)
-        compare(body.parent.Accessible.name, "You: " + literal)
+        compare(body.parent.x + body.parent.width, transcript.width)
+        compare(body.parent.width, transcript.width - 56)
+        compare(body.parent.parent.Accessible.name, "You: " + literal)
         tryVerify(function() { return transcript.atYEnd })
         transcript.forceActiveFocus()
         keyClick(Qt.Key_Home)
@@ -260,21 +818,22 @@ TestCase {
         verify(transcript.activeFocus)
 
         const title = findChild(content, "conversationTitle")
-        const hint = textWith(content, "Move: Super + left drag")
-        const status = textWith(content, "Idle. Microphone in use.")
-        verify(title !== null && hint !== null && status !== null)
+        const status = findChild(content, "conversationStatus")
+        verify(title !== null && status !== null)
+        compare(textWith(content, "Move: Super + left drag"), null)
+        compare(findChild(content, "conversationHeader").Accessible.description, "Move: Super + left drag")
         function sizes() {
             const notice = findChild(content, "turnNotice20")
-            return [findChild(content, "turnText0").font.pixelSize, title.font.pixelSize, hint.font.pixelSize,
-                status.lineHeight, notice.lineHeight, notice.parent.children[0].font.pixelSize].join()
+            return [findChild(content, "turnText0").font.pixelSize, title.font.pixelSize, status.font.pixelSize,
+                status.lineHeight, notice.lineHeight, notice.font.pixelSize].join()
         }
-        compare(sizes(), "14,16,12,21,21,14", "host base size 14 keeps the token sizes")
+        compare(sizes(), "14,16,12,16,16,12", "host base size 14 keeps the token sizes")
         content.placementAdvisory = "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel."
         content.textScale = 2
         verify(waitForRendering(content))
-        compare(sizes(), "28,32,24,42,42,28", "host base size 28 doubles the token sizes")
+        compare(sizes(), "28,32,24,32,32,24", "host base size 28 doubles the token sizes")
         const advisory = textWith(content, content.placementAdvisory)
-        for (const item of [status, hint, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
+        for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
             const left = item.mapToItem(content, 0, 0).x
             verify(left >= 16 && left + item.width <= 432 && item.contentWidth <= item.width,
                 item.text + " must stay inside the panel: x=" + left + " width=" + item.width + " content=" + item.contentWidth)
@@ -320,7 +879,7 @@ TestCase {
         verify(transcript.activeFocus)
         for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {
             content.textScale = invalid
-            compare(sizes(), "14,16,12,21,21,14", "invalid text scale " + invalid + " falls back to 1")
+            compare(sizes(), "14,16,12,16,16,12", "invalid text scale " + invalid + " falls back to 1")
         }
         closeSpy.target = null
         component.destroy()

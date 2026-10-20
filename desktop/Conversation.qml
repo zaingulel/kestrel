@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Shapes
 
 FocusScope {
     id: root
@@ -9,6 +10,15 @@ FocusScope {
     required property color troubleInk
     property string currentState: "unavailable"
     property string statusSentence: "Status unavailable. Microphone use unknown."
+    property bool conversationAvailable: false
+    property Component glyphComponent: null
+    property Component tooltipComponent: null
+    property color flatBackground: Qt.rgba(background.r, background.g, background.b, 1)
+    readonly property color bubbleTint: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.10))
+    readonly property color bubbleWash: Qt.tint(flatBackground, Qt.rgba(accentInk.r, accentInk.g, accentInk.b, 0.20))
+    readonly property color edgeRule: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.20))
+    readonly property string microphoneAppearance: currentState === "not-running" ? "off"
+        : ["inactive", "idle", "listening", "thinking", "speaking", "trouble"].indexOf(currentState) !== -1 ? "on" : "unknown"
     property bool motionEnabled: false
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
@@ -24,6 +34,9 @@ FocusScope {
     readonly property int captionPixelSize: Math.max(1, Math.round(12 * effectiveTextScale))
     readonly property int bodyPixelSize: Math.max(1, Math.round(14 * effectiveTextScale))
     readonly property int titlePixelSize: Math.max(1, Math.round(16 * effectiveTextScale))
+    readonly property int captionLineHeight: Math.max(1, Math.round(16 * effectiveTextScale))
+    readonly property int titleLineHeight: Math.max(1, Math.round(20 * effectiveTextScale))
+    readonly property bool listeningFeed: conversationAvailable && currentState === "listening"
     readonly property int bodyLineHeight: Math.max(1, Math.round(21 * effectiveTextScale))
     signal closeRequested()
     implicitWidth: 448
@@ -31,6 +44,13 @@ FocusScope {
 
     function focusClose() { closeButton.forceActiveFocus() }
     function announceTurn(text) { root.Accessible.announce(text, Accessible.Polite) }
+
+    function fitTooltip(tooltip) {
+        tooltip.popupType = Popup.Item
+        tooltip.margins = 16
+        tooltip.contentItem.wrapMode = Text.Wrap
+        tooltip.width = Qt.binding(function() { return Math.min(tooltip.implicitWidth, root.width - 32) })
+    }
 
     function updateTurns() {
         const follow = transcript.followBottom
@@ -78,23 +98,129 @@ FocusScope {
     Column {
         id: header
         x: 16
-        y: 16
+        y: 14
         width: parent.width - 32
         spacing: 9
         Item {
+            id: headerRow
+            objectName: "conversationHeader"
             width: parent.width
-            height: Math.max(closeButton.height, titleText.implicitHeight)
-            Text {
-                id: titleText
-                objectName: "conversationTitle"
+            height: Math.max(30, titleColumn.height, closeButton.height)
+            Accessible.description: "Move: Super + left drag"
+            HoverHandler { id: headerHover }
+            Loader {
+                objectName: "headerMoveTooltip"
+                sourceComponent: root.tooltipComponent
+                onLoaded: {
+                    item.parent = headerRow
+                    item.text = Qt.binding(function() { return headerRow.Accessible.description })
+                    root.fitTooltip(item)
+                    item.visible = Qt.binding(function() { return headerHover.hovered && !microphoneHover.hovered && !closeButton.hovered })
+                }
+            }
+            Loader {
+                objectName: "microphoneTooltip"
+                sourceComponent: root.tooltipComponent
+                onLoaded: {
+                    item.parent = microphoneStatus
+                    item.text = Qt.binding(function() { return root.statusSentence })
+                    root.fitTooltip(item)
+                    item.visible = Qt.binding(function() { return microphoneHover.hovered })
+                }
+            }
+            Marks {
+                objectName: "headerMark"
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Kestrel"
-                textFormat: Text.PlainText
-                color: root.ink
-                font.family: "monospace"
-                font.pixelSize: root.titlePixelSize
-                font.bold: true
+                width: 25
+                height: 30
+                kind: root.currentState
+                ink: root.ink
+                troubleInk: root.troubleInk
+                motionEnabled: false
+            }
+            Column {
+                id: titleColumn
+                x: 34
+                width: parent.width - x - 9 - closeButton.width
+                anchors.verticalCenter: parent.verticalCenter
+                Text {
+                    id: titleText
+                    objectName: "conversationTitle"
+                    width: parent.width
+                    text: "Kestrel"
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.titlePixelSize
+                    font.bold: true
+                    lineHeight: root.titleLineHeight
+                    lineHeightMode: Text.FixedHeight
+                }
+                Row {
+                    id: microphoneStatus
+                    objectName: "microphoneStatus"
+                    width: parent.width
+                    spacing: 5
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: root.statusSentence
+                    Accessible.description: root.statusSentence
+                    Accessible.focusable: false
+                    HoverHandler { id: microphoneHover }
+                    Item {
+                        id: microphoneSlot
+                        width: Math.max(24, root.bodyLineHeight + root.captionPixelSize / 2)
+                        height: width
+                        Loader {
+                            objectName: "microphoneGlyph"
+                            anchors.fill: parent
+                            sourceComponent: root.glyphComponent
+                            onLoaded: {
+                                item.anchors.fill = item.parent
+                                item.text = Qt.binding(function() { return root.microphoneAppearance === "off" ? "󰍭" : "󰍬" })
+                                item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
+                                item.color = Qt.binding(function() { return root.ink })
+                                item.Accessible.ignored = true
+                            }
+                        }
+                        Rectangle {
+                            objectName: "microphoneQuestion"
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            width: root.captionLineHeight
+                            height: width
+                            radius: width / 2
+                            color: root.flatBackground
+                            visible: root.microphoneAppearance === "unknown"
+                            Accessible.ignored: true
+                            Text {
+                                anchors.centerIn: parent
+                                text: "?"
+                                textFormat: Text.PlainText
+                                color: root.ink
+                                font.family: "monospace"
+                                font.pixelSize: root.captionPixelSize
+                            }
+                        }
+                    }
+                    Text {
+                        objectName: "conversationStatus"
+                        width: parent.width - microphoneSlot.width - parent.spacing
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: ({"not-running": "Not running", "inactive": "Inactive", "starting": "Starting",
+                            "unavailable": "Unavailable", "idle": "Idle", "listening": "Listening", "thinking": "Thinking",
+                            "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                        color: root.ink
+                        font.family: "monospace"
+                        font.pixelSize: root.captionPixelSize
+                        lineHeight: root.captionLineHeight
+                        lineHeightMode: Text.FixedHeight
+                        Accessible.ignored: true
+                    }
+                }
             }
             Button {
                 id: closeButton
@@ -105,6 +231,7 @@ FocusScope {
                 width: Math.max(33, Math.ceil(Math.max(closeGlyph.implicitWidth, closeGlyph.implicitHeight)) + 4)
                 height: width
                 padding: 0
+                hoverEnabled: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close panel"
                 KeyNavigation.tab: transcript
@@ -122,44 +249,22 @@ FocusScope {
                 }
                 background: Rectangle {
                     color: "transparent"
-                    border.width: closeButton.activeFocus ? 2 : 0
-                    border.color: root.accentInk
+                    radius: 8
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: -4
+                        radius: 12
+                        color: "transparent"
+                        border.width: 2
+                        border.color: root.accentInk
+                        visible: closeButton.activeFocus
+                        Accessible.ignored: true
+                    }
                 }
                 onClicked: root.closeRequested()
                 Keys.onReturnPressed: root.closeRequested()
                 Keys.onEnterPressed: root.closeRequested()
             }
-        }
-        Row {
-            width: parent.width
-            spacing: 5
-            Marks {
-                kind: root.currentState
-                ink: root.ink
-                troubleInk: root.troubleInk
-                motionEnabled: root.motionEnabled
-            }
-            Text {
-                width: parent.width - 30
-                anchors.verticalCenter: parent.verticalCenter
-                text: root.statusSentence
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                color: root.ink
-                font.family: "monospace"
-                font.pixelSize: root.bodyPixelSize
-                lineHeight: root.bodyLineHeight
-                lineHeightMode: Text.FixedHeight
-            }
-        }
-        Text {
-            width: parent.width
-            text: "Move: Super + left drag"
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: root.ink
-            font.family: "monospace"
-            font.pixelSize: root.captionPixelSize
         }
         Text {
             width: parent.width
@@ -178,11 +283,11 @@ FocusScope {
         id: transcript
         objectName: "transcript"
         x: 16
-        y: header.y + header.height + 16
+        y: header.y + header.height + 12
         width: parent.width - 32
         height: Math.max(0, parent.height - y - 16)
         contentWidth: width
-        contentHeight: turnColumn.height
+        contentHeight: Math.max(height, turnColumn.height)
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         activeFocusOnTab: true
@@ -235,13 +340,14 @@ FocusScope {
         Column {
             id: turnColumn
             width: transcript.width
-            spacing: 16
+            y: Math.max(0, transcript.height - height)
             Text {
                 width: parent.width
                 visible: text.length > 0
-                text: root.conversationMessage
+                text: root.listeningFeed ? "" : root.conversationMessage
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
+                horizontalAlignment: Text.AlignHCenter
                 color: root.ink
                 font.family: "monospace"
                 font.pixelSize: root.bodyPixelSize
@@ -250,68 +356,50 @@ FocusScope {
             }
             Repeater {
                 model: root.displayedTurns
-                delegate: Column {
+                delegate: Item {
                     id: turnItem
                     required property var modelData
                     required property int index
-                    x: modelData.speaker === "you" ? 32 : 0
-                    width: turnColumn.width - x
-                    spacing: 5
+                    objectName: "turnRow" + index
+                    width: turnColumn.width
+                    height: groupGap + bubble.height + (activeReply ? 26 : 0) + (notice.length ? 4 + noticeRow.height : 0)
+                    readonly property bool owner: modelData.speaker === "you"
+                    readonly property bool activeReply: root.conversationAvailable && !owner
+                        && index === root.displayedTurns.length - 1
+                        && (modelData.state === "thinking" || modelData.state === "speaking")
+                    readonly property bool spoken: owner && modelData.state === "complete"
+                    readonly property int groupGap: index === 0 ? 0
+                        : root.displayedTurns[index - 1].speaker === modelData.speaker ? 4 : 14
+                    readonly property bool continuesSpeaker: index > 0
+                        && root.displayedTurns[index - 1].speaker === modelData.speaker
                     readonly property string notice: modelData.state === "interrupted" ? "Reply interrupted."
                         : modelData.state === "failed" ? "Reply could not be completed." : ""
                     Accessible.role: Accessible.StaticText
-                    Accessible.name: (modelData.speaker === "you" ? "You: " : "Kestrel: ")
+                    Accessible.name: (owner ? "You: " : "Kestrel: ")
                         + modelData.text + (notice ? " " + notice : "")
-                    Row {
-                        spacing: 5
+                    Accessible.description: spoken ? "Spoken message" : ""
+                    Rectangle {
+                        id: bubble
+                        objectName: "turnBubble" + turnItem.index
+                        x: turnItem.owner ? parent.width - width : 0
+                        y: turnItem.groupGap
+                        width: Math.min(parent.width - 56, Math.max(44, body.implicitWidth + 24,
+                            turnItem.spoken ? provenance.width + 24 : 0))
+                        visible: !turnItem.activeReply || turnItem.modelData.text.length > 0
+                        height: visible ? body.implicitHeight + 16 + (turnItem.spoken ? root.captionLineHeight + 4 : 0) : 0
+                        color: turnItem.owner ? root.bubbleWash : root.bubbleTint
+                        topLeftRadius: !turnItem.owner && turnItem.continuesSpeaker ? 4 : 14
+                        topRightRadius: turnItem.owner && turnItem.continuesSpeaker ? 4 : 14
+                        bottomLeftRadius: turnItem.activeReply ? 0 : turnItem.owner ? 14 : 4
+                        bottomRightRadius: turnItem.owner ? 4 : 14
                         Accessible.ignored: true
                         Text {
-                            text: turnItem.modelData.speaker === "you" ? "You" : "Kestrel"
-                            textFormat: Text.PlainText
-                            color: turnItem.modelData.speaker === "you" ? root.ink : root.accentInk
-                            font.family: "monospace"
-                            font.pixelSize: root.bodyPixelSize
-                            font.bold: true
-                        }
-                        Text {
-                            text: turnItem.modelData.state === "thinking" ? "Thinking"
-                                : turnItem.modelData.state === "speaking" ? "Speaking" : ""
-                            textFormat: Text.PlainText
-                            color: root.ink
-                            font.family: "monospace"
-                            font.pixelSize: root.captionPixelSize
-                        }
-                    }
-                    Text {
-                        objectName: "turnText" + turnItem.index
-                        width: parent.width
-                        text: turnItem.modelData.text
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        color: root.ink
-                        font.family: "monospace"
-                        font.pixelSize: root.bodyPixelSize
-                        lineHeight: root.bodyLineHeight
-                        lineHeightMode: Text.FixedHeight
-                        Accessible.ignored: true
-                    }
-                    Row {
-                        visible: turnItem.notice.length > 0
-                        width: parent.width
-                        spacing: 5
-                        Accessible.ignored: true
-                        Text {
-                            id: warningIcon
-                            text: "⚠"
-                            textFormat: Text.PlainText
-                            color: root.accentInk
-                            font.family: "monospace"
-                            font.pixelSize: root.bodyPixelSize
-                        }
-                        Text {
-                            objectName: "turnNotice" + turnItem.index
-                            width: parent.width - warningIcon.width - parent.spacing
-                            text: turnItem.notice
+                            id: body
+                            objectName: "turnText" + turnItem.index
+                            x: 12
+                            y: 8
+                            width: parent.width - 24
+                            text: turnItem.modelData.text
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             color: root.ink
@@ -319,10 +407,159 @@ FocusScope {
                             font.pixelSize: root.bodyPixelSize
                             lineHeight: root.bodyLineHeight
                             lineHeightMode: Text.FixedHeight
+                            Accessible.ignored: true
+                        }
+                        Loader {
+                            id: provenance
+                            objectName: "turnProvenance" + turnItem.index
+                            x: parent.width - 12 - width
+                            y: 8 + body.implicitHeight + 4
+                            width: root.captionLineHeight
+                            height: root.captionLineHeight
+                            visible: turnItem.spoken
+                            sourceComponent: root.glyphComponent
+                            onLoaded: {
+                                item.anchors.fill = item.parent
+                                item.text = "󰍬"
+                                item.fontSize = Qt.binding(function() { return root.captionPixelSize })
+                                item.color = Qt.binding(function() { return root.ink })
+                                item.Accessible.ignored = true
+                            }
+                            HoverHandler { id: provenanceHover }
+                            Loader {
+                                objectName: "turnProvenanceTooltip" + turnItem.index
+                                sourceComponent: root.tooltipComponent
+                                onLoaded: {
+                                    item.parent = provenance
+                                    item.text = "Spoken message"
+                                    root.fitTooltip(item)
+                                    item.visible = Qt.binding(function() { return provenance.visible && provenanceHover.hovered })
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        id: tail
+                        objectName: "turnTail" + turnItem.index
+                        x: bubble.x
+                        y: bubble.y + bubble.height
+                        width: 40
+                        height: 26
+                        visible: turnItem.activeReply
+                        color: root.bubbleTint
+                        topLeftRadius: bubble.visible ? 0 : 10
+                        topRightRadius: bubble.visible ? 0 : 10
+                        bottomRightRadius: 10
+                        bottomLeftRadius: 4
+                        Accessible.ignored: true
+                        Marks {
+                            objectName: "turnLiveMarks" + turnItem.index
+                            anchors.centerIn: parent
+                            feed: true
+                            kind: turnItem.modelData.state
+                            ink: root.ink
+                            troubleInk: root.troubleInk
+                            motionEnabled: root.motionEnabled && root.announcementsEnabled && turnItem.activeReply
+                        }
+                    }
+                    Row {
+                        id: noticeRow
+                        y: bubble.y + bubble.height + 4
+                        x: 2
+                        visible: turnItem.notice.length > 0
+                        width: parent.width - 4
+                        spacing: 5
+                        Accessible.ignored: true
+                        Marks {
+                            id: warningIcon
+                            objectName: "turnFailure" + turnItem.index
+                            visible: turnItem.modelData.state === "failed"
+                            width: 25
+                            height: 30
+                            kind: "trouble"
+                            ink: root.ink
+                            troubleInk: root.troubleInk
+                            motionEnabled: false
+                        }
+                        Text {
+                            objectName: "turnNotice" + turnItem.index
+                            width: parent.width - (warningIcon.visible ? warningIcon.width + parent.spacing : 0)
+                            text: turnItem.notice
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            color: root.ink
+                            font.family: "monospace"
+                            font.pixelSize: root.captionPixelSize
+                            lineHeight: root.captionLineHeight
+                            lineHeightMode: Text.FixedHeight
                         }
                     }
                 }
             }
+            Item {
+                width: parent.width
+                height: 14 + 26
+                visible: root.listeningFeed
+                Shape {
+                    id: listeningGhost
+                    objectName: "listeningGhost"
+                    x: parent.width - width
+                    y: 14
+                    width: 40
+                    height: 26
+                    preferredRendererType: Shape.CurveRenderer
+                    Accessible.role: Accessible.StaticText
+                    Accessible.name: "Listening"
+                    ShapePath {
+                        objectName: "listeningGhostPath"
+                        strokeColor: root.ink
+                        strokeWidth: 1.5
+                        strokeStyle: ShapePath.DashLine
+                        capStyle: ShapePath.FlatCap
+                        dashPattern: [4 / 1.5, 3 / 1.5]
+                        fillColor: "transparent"
+                        PathRectangle {
+                            objectName: "listeningGhostOutline"
+                            x: 0.75
+                            y: 0.75
+                            width: 38.5
+                            height: 24.5
+                            topLeftRadius: 9.25
+                            topRightRadius: 9.25
+                            bottomRightRadius: 3.25
+                            bottomLeftRadius: 9.25
+                        }
+                    }
+                    Marks {
+                        objectName: "listeningGhostMark"
+                        anchors.centerIn: parent
+                        kind: "listening"
+                        ink: root.ink
+                        troubleInk: root.troubleInk
+                        motionEnabled: root.motionEnabled && root.announcementsEnabled && root.listeningFeed
+                    }
+                }
+            }
         }
+    }
+    Rectangle {
+        objectName: "transcriptTopRule"
+        x: transcript.x
+        y: transcript.y
+        width: transcript.width
+        height: 1
+        color: root.edgeRule
+        visible: transcript.contentY > 0
+        Accessible.ignored: true
+    }
+    Rectangle {
+        objectName: "transcriptBottomRule"
+        x: transcript.x
+        y: transcript.y + transcript.height - height
+        width: transcript.width
+        height: 1
+        color: root.edgeRule
+        visible: transcript.contentY + transcript.height < transcript.contentHeight
+        Accessible.ignored: true
     }
 }
