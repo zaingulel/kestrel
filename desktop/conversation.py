@@ -52,14 +52,17 @@ def validate_record(line: bytes, session: str | None = None) -> dict:
     if set(record) == {'alive'} and session is not None and record['alive'] == session:
         return record
     if (set(record) != {'version', 'session', 'turns'} or type(record['version']) is not int
-            or record['version'] != 1 or not isinstance(record['session'], str)
+            or record['version'] != 2 or not isinstance(record['session'], str)
             or not 1 <= len(record['session']) <= 256
             or (session is not None and record['session'] != session)
             or not isinstance(record['turns'], list)):
         raise ValueError(UNAVAILABLE)
     for turn in record['turns']:
-        if (not isinstance(turn, dict) or set(turn) != {'speaker', 'text', 'state'}
+        if (not isinstance(turn, dict)
+                or set(turn) != ({'speaker', 'text', 'state', 'source'} if turn.get('speaker') == 'you'
+                                 else {'speaker', 'text', 'state'})
                 or turn['speaker'] not in ('you', 'kestrel') or not isinstance(turn['text'], str)
+                or (turn['speaker'] == 'you' and turn['source'] not in ('spoken', 'typed'))
                 or turn['state'] not in ('complete', 'thinking', 'speaking', 'interrupted', 'failed')):
             raise ValueError(UNAVAILABLE)
     return record
@@ -146,7 +149,7 @@ class ConversationFeed:
             await asyncio.wait_for(writer.drain(), 1)
 
     def publish(self):
-        self.payload = encode({'version': 1, 'session': self.session, 'turns': self.turns})
+        self.payload = encode({'version': 2, 'session': self.session, 'turns': self.turns})
         self.oversized = len(self.payload) > MAX_SNAPSHOT
         if self.oversized:
             self.payload = encode({'unavailable': TOO_LARGE})
@@ -169,8 +172,10 @@ class ConversationFeed:
         self.active = self.reply = None
         self.publish()
 
-    def user(self, text: str):
-        self.turns.append({'speaker': 'you', 'text': text, 'state': 'complete'})
+    def user(self, text: str, *, source: str):
+        if source not in ('spoken', 'typed'):
+            raise ValueError(UNAVAILABLE)
+        self.turns.append({'speaker': 'you', 'text': text, 'state': 'complete', 'source': source})
         self.publish()
 
     def begin_reply(self, token: object):

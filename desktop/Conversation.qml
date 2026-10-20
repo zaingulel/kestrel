@@ -11,6 +11,7 @@ FocusScope {
     property string currentState: "unavailable"
     property string statusSentence: "Status unavailable. Microphone use unknown."
     property bool conversationAvailable: false
+    property var service: null
     property Component glyphComponent: null
     property Component tooltipComponent: null
     property color flatBackground: Qt.rgba(background.r, background.g, background.b, 1)
@@ -38,12 +39,52 @@ FocusScope {
     readonly property int titleLineHeight: Math.max(1, Math.round(20 * effectiveTextScale))
     readonly property bool listeningFeed: conversationAvailable && currentState === "listening"
     readonly property int bodyLineHeight: Math.max(1, Math.round(21 * effectiveTextScale))
+    property int editRevision: 0
+    property int submittedRevision: 0
+    property int pendingAttempt: 0
+    property string submissionOutcome: ""
+    readonly property bool replyInProgress: conversationAvailable && turns.length > 0
+        && turns[turns.length - 1].speaker === "kestrel"
+        && ["thinking", "speaking"].indexOf(turns[turns.length - 1].state) !== -1
+    readonly property string submissionNotice: pendingAttempt !== 0 ? "Sending…"
+        : submissionOutcome || (/\S/.test(composer.text) && replyInProgress
+            ? "Sending stops the current reply." : "")
     signal closeRequested()
     implicitWidth: 448
     implicitHeight: 640
 
-    function focusClose() { closeButton.forceActiveFocus() }
+    function focusComposer() {
+        composer.forceActiveFocus()
+        composer.cursorPosition = composer.length
+    }
+    function sendDraft() {
+        if (!service || !service.validSubmissionText(composer.text) || service.submitPending
+                || composer.inputMethodComposing) return
+        if (sendButton.activeFocus) composer.forceActiveFocus()
+        submittedRevision = editRevision
+        pendingAttempt = service.submit(composer.text)
+        submissionOutcome = ""
+    }
+    Connections {
+        target: root.service
+        function onSubmitCompleted(attemptId, status) {
+            if (attemptId !== root.pendingAttempt) return
+            if (status === "accepted" && root.editRevision === root.submittedRevision
+                    && !composer.inputMethodComposing) composer.clear()
+            root.submissionOutcome = ({
+                accepted: "",
+                invalid: "Message not sent. Shorten it or remove unsupported control characters.",
+                busy: "Message not accepted. Kestrel is finishing a change. Try Send again.",
+                unavailable: "Message not sent. Kestrel is unavailable. Check the service, then try Send.",
+                uncertain: "Delivery could not be confirmed. Check the conversation before sending again; an action may already have run."
+            })[status]
+            root.pendingAttempt = 0
+        }
+    }
     function announceTurn(text) { root.Accessible.announce(text, Accessible.Polite) }
+    onSubmissionNoticeChanged: {
+        if (root.visible && root.announcementsEnabled && root.submissionNotice.length) root.announceTurn(root.submissionNotice)
+    }
 
     function fitTooltip(tooltip) {
         tooltip.popupType = Popup.Item
@@ -235,7 +276,7 @@ FocusScope {
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close panel"
                 KeyNavigation.tab: transcript
-                KeyNavigation.backtab: transcript
+                KeyNavigation.backtab: sendButton.enabled ? sendButton : composer
                 contentItem: Text {
                     id: closeGlyph
                     text: "×"
@@ -285,7 +326,7 @@ FocusScope {
         x: 16
         y: header.y + header.height + 12
         width: parent.width - 32
-        height: Math.max(0, parent.height - y - 16)
+        height: Math.max(0, footer.y - y)
         contentWidth: width
         contentHeight: Math.max(height, turnColumn.height)
         clip: true
@@ -306,7 +347,7 @@ FocusScope {
         Accessible.name: "Conversation"
         Accessible.readOnly: true
         Accessible.focusable: true
-        KeyNavigation.tab: closeButton
+        KeyNavigation.tab: composer
         KeyNavigation.backtab: closeButton
 
         function scrollBy(amount) {
@@ -367,7 +408,7 @@ FocusScope {
                     readonly property bool activeReply: root.conversationAvailable && !owner
                         && index === root.displayedTurns.length - 1
                         && (modelData.state === "thinking" || modelData.state === "speaking")
-                    readonly property bool spoken: owner && modelData.state === "complete"
+                    readonly property bool spoken: owner && modelData.source === "spoken" && modelData.state === "complete"
                     readonly property int groupGap: index === 0 ? 0
                         : root.displayedTurns[index - 1].speaker === modelData.speaker ? 4 : 14
                     readonly property bool continuesSpeaker: index > 0
@@ -377,7 +418,7 @@ FocusScope {
                     Accessible.role: Accessible.StaticText
                     Accessible.name: (owner ? "You: " : "Kestrel: ")
                         + modelData.text + (notice ? " " + notice : "")
-                    Accessible.description: spoken ? "Spoken message" : ""
+                    Accessible.description: spoken ? "Spoken message" : owner && modelData.source === "typed" ? "Typed message" : ""
                     Rectangle {
                         id: bubble
                         objectName: "turnBubble" + turnItem.index
@@ -412,6 +453,7 @@ FocusScope {
                         Loader {
                             id: provenance
                             objectName: "turnProvenance" + turnItem.index
+                            active: turnItem.spoken
                             x: parent.width - 12 - width
                             y: 8 + body.implicitHeight + 4
                             width: root.captionLineHeight
@@ -428,6 +470,7 @@ FocusScope {
                             HoverHandler { id: provenanceHover }
                             Loader {
                                 objectName: "turnProvenanceTooltip" + turnItem.index
+                                active: turnItem.spoken
                                 sourceComponent: root.tooltipComponent
                                 onLoaded: {
                                     item.parent = provenance
@@ -561,5 +604,146 @@ FocusScope {
         color: root.edgeRule
         visible: transcript.contentY + transcript.height < transcript.contentHeight
         Accessible.ignored: true
+    }
+    Item {
+        id: footer
+        objectName: "composerFooter"
+        x: 16
+        y: root.height - height
+        width: root.width - 32
+        height: composerScroll.height + 10 + 12 + (submissionNotice.visible ? submissionNotice.height + 6 : 0)
+        Text {
+            id: submissionNotice
+            objectName: "submissionNotice"
+            y: 10
+            width: parent.width
+            visible: text.length > 0
+            text: root.submissionNotice
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.ink
+            font.family: "monospace"
+            font.pixelSize: root.captionPixelSize
+            lineHeight: root.captionLineHeight
+            lineHeightMode: Text.FixedHeight
+        }
+        ScrollView {
+            id: composerScroll
+            objectName: "composerScroll"
+            x: 0
+            y: 10 + (submissionNotice.visible ? submissionNotice.height + 6 : 0)
+            width: parent.width - sendButton.width - 9
+            height: composer.contentHeight > 0 && composer.lineCount > 0
+                ? Math.max(40, Math.min(composer.contentHeight,
+                    composer.contentHeight / composer.lineCount * 5) + 18) : 40
+            clip: true
+            padding: 0
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            background: Rectangle {
+                color: root.bubbleTint
+                radius: 10
+                border.width: composer.activeFocus ? 2 : 0
+                border.color: root.accentInk
+            }
+            Flickable {
+                contentWidth: width
+                boundsBehavior: Flickable.StopAtBounds
+                TextArea.flickable: TextArea {
+                    id: composer
+                    objectName: "composer"
+                    color: root.ink
+                    selectionColor: root.accentInk
+                    selectedTextColor: root.flatBackground
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.Wrap
+                    font.family: "monospace"
+                    font.pixelSize: root.bodyPixelSize
+                    topPadding: 9
+                    bottomPadding: 9
+                    leftPadding: 12
+                    rightPadding: 12
+                    background: null
+                    Accessible.name: "Message Kestrel"
+                    Accessible.multiLine: true
+                    KeyNavigation.priority: KeyNavigation.BeforeItem
+                    KeyNavigation.tab: sendButton.enabled ? sendButton : closeButton
+                    KeyNavigation.backtab: transcript
+                    onTextChanged: {
+                        root.editRevision++
+                        root.submissionOutcome = ""
+                    }
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                            if (inputMethodComposing) return
+                            if (event.modifiers & Qt.ShiftModifier) return
+                            event.accepted = true
+                            if (!event.isAutoRepeat) root.sendDraft()
+                        } else if (event.key === Qt.Key_PageUp || event.key === Qt.Key_PageDown) {
+                            transcript.scrollBy(event.key === Qt.Key_PageUp ? -transcript.height : transcript.height)
+                            event.accepted = true
+                        }
+                    }
+                }
+            }
+            Text {
+                x: 12
+                y: 9
+                width: composerScroll.width - 24
+                text: "Message Kestrel"
+                textFormat: Text.PlainText
+                color: root.ink
+                font.family: "monospace"
+                font.pixelSize: root.bodyPixelSize
+                font.italic: true
+                visible: composer.length === 0 && !composer.inputMethodComposing
+                Accessible.ignored: true
+            }
+        }
+        Button {
+            id: sendButton
+            objectName: "sendMessage"
+            anchors.right: parent.right
+            y: composerScroll.y + composerScroll.height - height
+            width: Math.max(40, sendGlyph.implicitWidth + 24)
+            height: Math.max(40, sendGlyph.implicitHeight + 18)
+            padding: 0
+            enabled: root.service !== null && root.service.validSubmissionText(composer.text)
+                && !root.service.submitPending && !composer.inputMethodComposing
+            Accessible.name: "Send message"
+            onEnabledChanged: if (!enabled && focus && root.activeFocus) composer.forceActiveFocus()
+            KeyNavigation.tab: closeButton
+            KeyNavigation.backtab: composer
+            onClicked: root.sendDraft()
+            Keys.onReturnPressed: function(event) { if (!event.isAutoRepeat) root.sendDraft() }
+            Keys.onEnterPressed: function(event) { if (!event.isAutoRepeat) root.sendDraft() }
+            contentItem: Loader {
+                id: sendGlyph
+                sourceComponent: root.glyphComponent
+                onLoaded: {
+                    item.anchors.fill = item.parent
+                    item.text = "󰁝"
+                    item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
+                    item.color = Qt.binding(function() { return sendButton.enabled ? root.flatBackground
+                        : Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.6) })
+                    item.Accessible.ignored = true
+                }
+            }
+            background: Rectangle {
+                radius: 10
+                color: sendButton.enabled ? root.accentInk : "transparent"
+                border.width: sendButton.enabled ? 0 : 1.5
+                border.color: root.edgeRule
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    radius: 14
+                    color: "transparent"
+                    border.width: 2
+                    border.color: root.accentInk
+                    visible: sendButton.activeFocus
+                    Accessible.ignored: true
+                }
+            }
+        }
     }
 }

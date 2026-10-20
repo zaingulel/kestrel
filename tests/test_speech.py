@@ -18,7 +18,7 @@ import numpy as np
 from loguru import logger
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
-    StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame,
+    StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -106,6 +106,48 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
         service.recognizer.process.wait = AsyncMock()
         service.recognizer.process.stdout.readline = AsyncMock(return_value=response)
         return service
+
+    async def test_discard_pending_rejects_late_and_queued_segments(self):
+        service = self.service(b'')
+        epoch = 0
+        service.input_epoch = lambda: epoch
+        responses = asyncio.Queue()
+        submitted = asyncio.Queue()
+        service.recognizer.process.stdout.readline.side_effect = responses.get
+        service.recognizer.process.stdin.write.side_effect = submitted.put_nowait
+        worker, observed = await LaptopAudioTests.pipeline(self, service)
+        self.addAsyncCleanup(service.recognizer.close)
+        await service._segment_queue.put(b'old active segment')
+        await asyncio.wait_for(submitted.get(), 5)
+        await service._segment_queue.put(b'old queued segment')
+        service._audio_buffer.extend(b'old partial buffer')
+        old_worker = service._segment_task
+        epoch += 1
+        await service.discard_pending()
+        self.assertTrue(old_worker.done())
+        self.assertEqual(service._audio_buffer, b'')
+        self.assertFalse(service._user_speaking)
+        self.assertTrue(service._segment_queue.empty())
+        responses.put_nowait(b'{"text":"old late mute"}\n')
+        await service.recognizer.drain()
+        await service.process_audio_frame(InputAudioRawFrame(b'trailing tail', 16000, 1), speech.FrameDirection.DOWNSTREAM)
+        await service.process_frame(VADUserStoppedSpeakingFrame(), speech.FrameDirection.DOWNSTREAM)
+        self.assertEqual(service._audio_buffer, b'')
+        self.assertTrue(service._segment_queue.empty())
+        self.assertTrue(submitted.empty())
+        stale = TranscriptionFrame('old already finalized', '', '', finalized=True)
+        stale.input_epoch = epoch - 1
+        await service.push_frame(stale)
+        await service.process_frame(VADUserStartedSpeakingFrame(), speech.FrameDirection.DOWNSTREAM)
+        self.assertFalse(service.awaiting_fresh_vad)
+        await service.process_audio_frame(InputAudioRawFrame(bytes(640), 16000, 1), speech.FrameDirection.DOWNSTREAM)
+        await service.process_frame(VADUserStoppedSpeakingFrame(), speech.FrameDirection.DOWNSTREAM)
+        await asyncio.wait_for(submitted.get(), 5)
+        responses.put_nowait(b'{"text":"fresh speech"}\n')
+        frame = await LaptopAudioTests.next_frame(self, observed, TranscriptionFrame)
+        self.assertEqual((frame.text, frame.input_epoch), ('fresh speech', epoch))
+        self.assertTrue(submitted.empty(), 'Only fresh VAD audio creates another native request')
+        await worker.cancel()
 
     async def test_cancelled_adapter_drains_native_response_before_reuse(self):
         old = self.service(b'')
@@ -1233,6 +1275,48 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, kind):
                     return frame
 
+    async def test_output_only_and_reply_token_gate(self):
+        current = object()
+        old = current
+        opened, release = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release.set)
+        playback = self.child(3300)
+        echo = Mock()
+        transport = speech.LaptopAudioTransport(echo, on_stopped=Mock(), admitted=lambda: True,
+                                               capture_enabled=False, input_admitted=lambda: False,
+                                               reply_admitted=lambda token: token is current)
+        self.addAsyncCleanup(transport.close)
+
+        async def spawn(*argv, **kwargs):
+            self.assertIn('--playback', argv)
+            opened.set()
+            await release.wait()
+            return playback
+
+        with patch.object(transport, '_spawn', side_effect=spawn) as spawning:
+            await transport.open()
+            spawning.assert_not_called()
+            echo.microphone_serial.assert_not_called()
+            self.assertIsNone(transport.capture)
+            output = transport.output()
+            output.conversation_audio_context = speech.ConversationAudioContext(old)
+            write = asyncio.create_task(output.write_audio_frame(TTSAudioRawFrame(bytes(640), 48000, 1)))
+            await asyncio.wait_for(opened.wait(), 5)
+            current = object()
+            release.set()
+            self.assertFalse(await asyncio.wait_for(write, 5))
+            playback.stdin.write.assert_not_called()
+            self.assertTrue(output.conversation_audio_context.write_failed)
+            self.assertFalse(await output.write_audio_frame(TTSAudioRawFrame(bytes(640), 48000, 1)))
+            output.conversation_audio_context = None
+            self.assertFalse(await output.write_audio_frame(TTSAudioRawFrame(bytes(640), 48000, 1)))
+            output.conversation_audio_context = speech.ConversationAudioContext(current)
+            with patch.object(speech, 'sleep', AsyncMock()):
+                self.assertTrue(await output.write_audio_frame(TTSAudioRawFrame(b'fresh PCM', 48000, 1)))
+            playback.stdin.write.assert_called_once_with(b'fresh PCM')
+        await transport.close()
+        self.assertIsNotNone(playback.returncode)
+
     async def test_capture_discards_audio_until_verified_and_ready(self):
         capture = self.child(3200)
         spawned = asyncio.Event()
@@ -1605,6 +1689,11 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.indicator_output_started = Mock()
         llm.start_preparation = Mock()
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
+        llm.frame_completed = Mock()
+        llm.frame_completions = {}
+        llm.owns_request = lambda token: True
+        llm._assistant_reply_token = None
         llm.revoke = Mock()
         llm.local_actions = Mock(close=AsyncMock(), drain=AsyncMock())
         llm.channel = Mock(begin_conversation=AsyncMock(return_value=True), prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), known_unavailable=Mock(return_value=False), failure=None, preparation=None)
@@ -1622,9 +1711,9 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
         native_conversation = bot.run_conversation
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
             from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
-            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, user_params=bot.LLMUserAggregatorParams(
+            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
                 user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
             ))
 

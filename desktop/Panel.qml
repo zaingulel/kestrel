@@ -279,7 +279,7 @@ Item {
                 operation = "await-open"
                 opened = true
                 window.visible = true
-                Qt.callLater(function() { if (root.requestedOpen) content.focusClose() })
+                Qt.callLater(function() { if (root.requestedOpen) content.focusComposer() })
             } else {
                 if (stage === "verify-open-errors" && requestedOpen) {
                     opened = true
@@ -356,6 +356,7 @@ Item {
         }
         Conversation {
             id: content
+            service: root.service
             anchors.fill: parent
             background: Color.popups.background
             flatBackground: {

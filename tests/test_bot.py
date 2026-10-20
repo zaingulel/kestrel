@@ -173,6 +173,15 @@ def hermes_service(*, local_command=None):
     )
 
 
+def request_frame(service, context, *, speculation=None):
+    frame = LLMContextFrame(context, speculation=speculation)
+    messages = context.get_messages()
+    if messages and messages[-1].get('role') == 'user':
+        message = messages[-1]
+        frame.request_origin = (service._indicator_reply, 'spoken', message, message.get('content'), service.input_epoch())
+    return frame
+
+
 class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def volume(left, right=None):
@@ -320,7 +329,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 service = hermes_service(local_command=command)
                 service.channel.failure = 'This direct processor fixture has no engine'
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 command.assert_not_awaited()
                 self.assertEqual(context.get_messages(), messages)
 
@@ -339,7 +348,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
         service = hermes_service(local_command=command)
         service.channel.failure = 'This direct processor fixture has no engine'
         context = bot.LLMContext([{'role': 'user', 'content': 'volume thirty percent'}])
-        frame = LLMContextFrame(context)
+        frame = request_frame(service, context)
         processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
         try:
             await asyncio.wait_for(started.wait(), 5)
@@ -649,7 +658,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             service.channel.failure = 'No engine in this direct fixture'
             service.push_frame = AsyncMock()
             context = bot.LLMContext([{'role': 'user', 'content': phrase}])
-            frame = LLMContextFrame(context)
+            frame = request_frame(service, context)
             processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -679,7 +688,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 service.channel.failure = 'No engine in this direct fixture'
                 service.push_frame = AsyncMock()
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 command.assert_not_awaited()
                 self.assertEqual(context.get_messages(), messages)
         with self.assertRaises(ValueError):
@@ -728,7 +737,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 service.last_spoken_reply = 'Known spoken reply.'
                 service.push_frame = AsyncMock()
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 self.assertEqual(context.get_messages(), messages[:-1] if consumes else messages,
                                  'An exact completed stop/cancel must be consumed locally')
                 if consumes:
@@ -757,14 +766,14 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             held_reader = asyncio.create_task(asyncio.Event().wait())
             service.channel.reader = held_reader
             context = bot.LLMContext([{'role': 'user', 'content': 'pause music'}])
-            action = asyncio.create_task(service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM))
+            action = asyncio.create_task(service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM))
             try:
                 await asyncio.wait_for(started.wait(), 5)
                 self.assertTrue(service.local_actions.lock.locked())
                 self.assertEqual(len(service.local_actions.tasks), 1)
                 local_task = next(iter(service.local_actions.tasks))
                 stopping = bot.LLMContext([{'role': 'user', 'content': word}])
-                await asyncio.wait_for(service.process_frame(LLMContextFrame(stopping), FrameDirection.DOWNSTREAM), 5)
+                await asyncio.wait_for(service.process_frame(request_frame(service, stopping), FrameDirection.DOWNSTREAM), 5)
                 self.assertEqual(stopping.get_messages(), [])
                 self.assertIs(service.channel.reader, held_reader)
                 self.assertFalse(held_reader.done(), 'Stop does not cancel native engine drainage')
@@ -1147,7 +1156,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             with (patch.object(bot, 'resolve_app_tool', resolve_at_checkpoint),
                   patch.object(bot.asyncio, 'shield', shield_at_checkpoint),
                   patch.object(service.channel, 'exchange', exchange)):
-                processing = asyncio.create_task(service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM))
+                processing = asyncio.create_task(service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM))
                 await asyncio.wait_for(checkpoint.wait(), 5)
                 processing.cancel()
                 with self.assertRaises(asyncio.CancelledError):
@@ -1156,7 +1165,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                                 'Interrupted ordinary user message must remain in context')
                 context.get_messages().append({'role': 'user', 'content': 'Following ordinary request.'})
                 service.channel.reader = None
-                await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+                await service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM)
                 self.assertEqual(requests, [[
                     {'role': 'user', 'content': 'Ordinary interrupted request.'},
                     {'role': 'user', 'content': 'Following ordinary request.'},
@@ -1205,7 +1214,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 service.channel.failure = 'This direct processor fixture has no engine'
                 service.push_frame = AsyncMock()
                 context = bot.LLMContext(deepcopy(prior + messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 self.assertEqual(context.get_messages(), prior if consumes else prior + messages)
                 replies = [args.args[0] for args in service.push_frame.await_args_list
                            if isinstance(args.args[0], bot.TTSSpeakFrame)]
@@ -1281,7 +1290,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 service.last_spoken_reply = 'Known last reply.'
                 service.push_frame = AsyncMock()
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 self.assertEqual(context.get_messages(), [] if consumes else messages)
                 replay = [args.args[0] for args in service.push_frame.await_args_list
                           if isinstance(args.args[0], bot.TTSSpeakFrame)]
@@ -1308,7 +1317,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 service = hermes_service(local_command=command)
                 service.channel.failure = 'This direct processor fixture has no engine'
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(LLMContextFrame(context, speculation=speculative), direction)
+                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
                 command.assert_not_awaited()
                 self.assertEqual(context.get_messages(), messages)
 
@@ -1328,7 +1337,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         service = hermes_service(local_command=command)
         service.channel.failure = 'This direct processor fixture has no engine'
         context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
-        frame = LLMContextFrame(context)
+        frame = request_frame(service, context)
         processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
         try:
             await asyncio.wait_for(started.wait(), 5)
@@ -1800,7 +1809,8 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
                     await bot.run_conversation(None, None, llm=object(), transport=object())
             self.assertEqual(len(captured), 1)
             strategies = captured[0]
-            self.assertEqual(len(strategies.stop), 1)
+            self.assertEqual([type(strategy) for strategy in strategies.stop],
+                             [TurnAnalyzerUserTurnStopStrategy, bot.TypedTurnStopStrategy])
             self.assertIsInstance(strategies.stop[0], TurnAnalyzerUserTurnStopStrategy)
             self.assertEqual(
                 [type(strategy) for strategy in strategies.start],
@@ -1897,7 +1907,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             service.start_processing_metrics = AsyncMock()
             service.stop_processing_metrics = AsyncMock()
             await service.process_frame(
-                bot.LLMContextFrame(bot.LLMContext([{'role': 'user', 'content': 'Hello.'}])),
+                request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'Hello.'}])),
                 FrameDirection.DOWNSTREAM,
             )
             frames = [call.args[0] for call in service.push_frame.call_args_list]
@@ -1923,7 +1933,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.start_processing_metrics = AsyncMock()
         service.stop_processing_metrics = AsyncMock()
         pending = asyncio.create_task(service.process_frame(
-            bot.LLMContextFrame(bot.LLMContext([{'role': 'user', 'content': 'Old request.'}])),
+            request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'Old request.'}])),
             FrameDirection.DOWNSTREAM,
         ))
         try:
@@ -2005,16 +2015,25 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation):
+            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation, voice_active=None, request_admitted=None, input_epoch=None):
                 prototype.session_ready = session_ready
+                prototype.voice_active = voice_active or admitted
+                prototype.request_admitted = request_admitted
+                prototype.input_epoch = input_epoch
                 prototype.admitted = admitted
                 prototype.status = status
                 prototype.conversation = conversation
+                if isinstance(prototype, Mock):
+                    prototype.frame_completions = {}
+                    prototype.typed_origin = None
+                    prototype._indicator_reply = object()
+                    prototype.owns_request = lambda token: token is prototype._indicator_reply and prototype.admitted()
                 return prototype
 
-            async def activate_fixture():
+            async def activate_fixture(*, capture_enabled=True):
+                manager.lifecycle_changed = False
                 with patch.object(bot, 'HermesLLMService', side_effect=adapter):
-                    await activate()
+                    await activate(capture_enabled=capture_enabled)
 
             manager.activate = activate_fixture
 
@@ -2043,6 +2062,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             await command.start()
             await manager.prepare()
             self.assertEqual(await control.toggle(), 'starting')
+            manager.lifecycle_changed = False
             await manager.activate()
             if manager.pipeline is not None:
                 await manager.pipeline
@@ -2190,7 +2210,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.channel.close = AsyncMock(wraps=service.channel.close)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.channel.preparation.done())
 
@@ -2363,6 +2383,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
                     self.assertEqual(self.voice.generate_streaming.call_count, 1)
                     os.environ['KESTREL_VOICE'] = 'unknown'
+                    voice._conversation_reply_token = kwargs['llm']._indicator_reply
+                    await voice.on_turn_context_created('reply')
+                    await voice.create_audio_context('reply')
                     for sentence in ('First reply.', 'Second reply.'):
                         frames = [frame async for frame in voice.run_tts(sentence, 'reply')]
                         self.assertEqual(len(frames), 1)
@@ -2553,12 +2576,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = Forward(output=True)
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertFalse(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
-                        handle_signals=handle_signals, status=status, conversation=conversation, user_params=bot.LLMUserAggregatorParams(
+                        handle_signals=handle_signals, status=status, conversation=conversation,
+                        on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
 
@@ -2667,6 +2691,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm = Forward()
         llm.admitted = lambda: True
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
+        llm.frame_completed = Mock()
+        llm.owns_request = lambda token: True
+        llm._assistant_reply_token = None
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,
@@ -2711,6 +2739,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm = Forward()
         llm.admitted = lambda: True
         llm.conversation_output = Mock()
+        llm.remember_assistant_reply = Mock()
+        llm.frame_completed = Mock()
+        llm.owns_request = lambda token: True
+        llm._assistant_reply_token = None
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
@@ -2737,7 +2769,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
-                           admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None):
+                           admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
+                           production_turn_strategies=False):
         if brain is not None:
             require_native_hermes()
         from desktop import control, status as status_module
@@ -2801,8 +2834,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         model = Mock(generate_streaming=chunks)
         native_stt = speech.NemotronSTT
 
-        def new_stt(recognizer, *, admitted):
-            adapter = native_stt(recognizer, admitted=admitted)
+        def new_stt(recognizer, *, admitted, input_epoch=None):
+            adapter = native_stt(recognizer, admitted=admitted, **({"input_epoch": input_epoch} if input_epoch else {}))
             sessions[-1].stt = adapter
             return adapter
 
@@ -2868,12 +2901,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             audio_children.append(process)
             return process
 
-        def new_transport(echo, *, on_stopped, admitted):
+        def new_transport(echo, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None):
             active = admitted
             if admitted_override is not None:
                 active = lambda: admitted() and admitted_override()
             if native_audio:
-                transport = native_transport(echo, on_stopped=on_stopped, admitted=active)
+                transport = native_transport(echo, on_stopped=on_stopped, admitted=active,
+                                             **({"input_admitted": input_admitted, "capture_enabled": capture_enabled,
+                                                 "reply_admitted": reply_admitted} if input_admitted else {}))
 
                 async def spawn_audio(*argv, **kwargs):
                     return child(capture='--record' in argv)
@@ -2889,7 +2924,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             else:
                 class Input(FrameProcessor):
                     async def process_frame(self, frame, direction):
-                        if isinstance(frame, DataFrame) and not active():
+                        if isinstance(frame, DataFrame) and not (input_admitted or active)():
                             return
                         await super().process_frame(frame, direction)
                         await self.push_frame(frame, direction)
@@ -2899,6 +2934,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         super().__init__(TransportParams(audio_out_enabled=True, audio_out_sample_rate=48000))
                         self.write_gate = asyncio.Event()
                         self.write_gate.set()
+                        self.conversation_audio_context = None
+
+                    async def write_transport_frame(self, frame):
+                        if isinstance(frame, TTSStartedFrame):
+                            self.conversation_audio_context = getattr(frame, "conversation_audio_context", None)
+                        await super().write_transport_frame(frame)
 
                     async def start(self, frame):
                         await super().start(frame)
@@ -2906,7 +2947,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                     async def write_audio_frame(self, frame):
                         await self.write_gate.wait()
-                        written = active() and not transport.closed
+                        context = self.conversation_audio_context if hasattr(self, 'conversation_audio_context') else None
+                        written = active() and not transport.closed and (reply_admitted is None or
+                                  (context is not None and reply_admitted(context.reply_token)))
                         if written:
                             self.audio_written += 1
                         return written
@@ -3012,6 +3055,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await control.close_writer(writer)
 
+        async def submit(text, *, lose_receipt=False):
+            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(control.address()), 1)
+            try:
+                writer.write((json.dumps({'version': 1, 'text': text}) + '\n').encode())
+                await writer.drain()
+                writer.write_eof()
+                if lose_receipt:
+                    return
+                return (await asyncio.wait_for(reader.read(), 1)).decode().strip()
+            finally:
+                await control.close_writer(writer)
+
+        service_handle.submit = submit
         service_handle.toggle = toggle
 
         async def state(expected):
@@ -3080,9 +3136,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(supplied_channel, 'prepare', side_effect=prepare),
             patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
             patch.object(bot, 'load_voice_preset', return_value=preset),
-            patch.object(bot, 'UserTurnStrategies', side_effect=lambda **kwargs: ExternalUserTurnStrategies()),
+            *([] if production_turn_strategies else [patch.object(bot, 'UserTurnStrategies', side_effect=lambda **kwargs: ExternalUserTurnStrategies())]),
             patch.object(bot, 'SileroVADAnalyzer', return_value=None),
-            patch.object(bot, 'LocalSmartTurnAnalyzerV3', return_value=object()),
+            *([] if production_turn_strategies else [patch.object(bot, 'LocalSmartTurnAnalyzerV3', return_value=object())]),
             patch.object(bot.ECHO_REMOVAL, 'start'), patch.object(bot.ECHO_REMOVAL, 'close'),
             patch.object(bot.ECHO_REMOVAL, 'process', Mock(pid=70001)),
             patch.object(bot.ECHO_REMOVAL, 'microphone_serial', return_value=900),
@@ -3105,11 +3161,687 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             transport = SimpleNamespace(service=service_handle, sessions=sessions, audio_children=audio_children)
         return transport, spoken, committed, interrupted, processes, close
 
+    def transcription(self, transport, text, user_id='', timestamp='2026-01-01T00:00:00Z', *, finalized=True):
+        frame = TranscriptionFrame(text, user_id, timestamp, finalized=finalized)
+        frame.input_epoch = transport.service.manager.input_epoch
+        return frame
+
     async def finish_user_turn(self, transport, text):
-        await transport.input().queue_frame(
-            TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
-        )
+        frame = TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
+        frame.input_epoch = getattr(transport.service.manager, 'input_epoch', 0)
+        await transport.input().queue_frame(frame)
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_typed_inactive_preserves_voice_and_context(self):
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFirst.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nSecond.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFresh.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+        )
+        service = handle.service
+        self.assertEqual(await service.submit('Typed A'), 'accepted')
+        transport = await asyncio.wait_for(service.started.get(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
+        self.assertIsNone(transport.capture)
+        self.assertFalse(service.manager.desired_active)
+        self.assertEqual(service.manager.status._state, 'inactive')
+        self.assertEqual(await service.submit('Typed B'), 'accepted')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        self.assertEqual(len(service.sessions), 1)
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+            {'role': 'user', 'content': 'Typed A'}, {'role': 'assistant', 'content': 'First.'},
+            {'role': 'user', 'content': 'Typed B'},
+        ])
+        self.assertEqual([t['source'] for t in service.manager.conversation.turns if t['speaker'] == 'you'],
+                         ['typed', 'typed'])
+        self.assertTrue(all(child.stdin is not None for child in service.audio_children))
+        self.assertTrue(any(child.writes for child in service.audio_children))
+        self.assertEqual(await service.toggle(), 'starting')
+        fresh = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNotNone(fresh.capture)
+        self.assertEqual(service.manager.conversation.turns, [])
+        self.assertIsNone(fresh.llm.last_spoken_reply)
+        await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(fresh, 'Spoken fresh')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh.')
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'Spoken fresh'}])
+        await close()
+
+    async def test_typed_interrupt_discards_partial_speech_and_old_output(self):
+        blocked, release_provider = threading.Event(), threading.Event()
+        self.addCleanup(release_provider.set)
+        synthesis_blocked, release_synthesis = threading.Event(), threading.Event()
+        self.addCleanup(release_synthesis.set)
+        timer_entered, release_timer = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_timer.set)
+
+        def chunks(**kwargs):
+            if 'Unheard obsolete continuation' in kwargs['text']:
+                synthesis_blocked.set()
+                if not release_synthesis.wait(45):
+                    raise AssertionError('Obsolete synthesis was not released')
+                yield np.ones(4800, dtype=np.float32)
+            else:
+                yield np.zeros(4800, dtype=np.float32)
+
+        def old_reply():
+            yield {'content': '[delivery:neutral]\nHeard sentence. [deliv'}, None
+            yield {'content': 'ery:unknown] Unheard obsolete continuation. Pending'}, None
+            blocked.set()
+            if not release_provider.wait(45):
+                raise AssertionError('Old provider was not released')
+            yield {'content': ' obsolete tail.'}, None
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nReply A.'}, None), ({}, 'stop')], old_reply(),
+            [({'content': '[delivery:neutral]\nReply C.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFresh speech.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        strategies = []
+        native_strategy = bot.TurnAnalyzerUserTurnStopStrategy
+
+        def capture_strategy(**kwargs):
+            strategy = native_strategy(**kwargs)
+            strategies.append(strategy)
+            return strategy
+
+        with patch.object(bot, 'TurnAnalyzerUserTurnStopStrategy', side_effect=capture_strategy):
+            transport, spoken, committed, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, production_turn_strategies=True, synthesis_chunks=chunks,
+            )
+        service, manager = transport.service, transport.service.manager
+        _, user, context = manager.ingress
+        analyzer = strategies[0]._turn_analyzer
+
+        async def process(processor, frame):
+            done = asyncio.Event()
+
+            @processor.event_handler('on_after_process_frame')
+            async def observed(item, actual):
+                if actual is frame:
+                    done.set()
+
+            await processor.queue_frame(frame)
+            await asyncio.wait_for(done.wait(), 5)
+
+        async def transcript(text):
+            frame = TranscriptionFrame(text, '', '', finalized=True)
+            frame.input_epoch = manager.input_epoch
+            await process(user, frame)
+
+        with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 1, 'probability': 1.0}):
+            self.assertEqual(await service.submit('Typed A'), 'accepted')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Reply A.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply A.')
+            transport.capture.stdout.feed_data(bytes(640))
+            await process(user, VADUserStartedSpeakingFrame())
+            await process(user, InputAudioRawFrame(bytes(640), 16000, 1))
+            await transcript('Spoken B')
+            await process(user, VADUserStoppedSpeakingFrame())
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Heard sentence.')
+            self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+            self.assertTrue(await asyncio.to_thread(synthesis_blocked.wait, 5))
+            assistant_done, cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            self.addCleanup(release_cleanup.set)
+            original_discard = transport._discard_playback
+            held_frame_ids, handover_order = [], []
+            assistant_continuation_ready = asyncio.Event()
+            original_complete = transport.llm.frame_completed
+            original_stt_reset = transport.stt.discard_pending
+            original_user_reset = user.reset
+            original_user_queue = user.queue_frame
+            original_admitted = transport.llm.request_admitted
+            typed_token = None
+
+            def completed(role, frame):
+                original_complete(role, frame)
+                if isinstance(frame, InterruptionFrame):
+                    if role == 'assistant':
+                        held_frame_ids.append(frame.id)
+                        handover_order.append(('assistant_complete', frame.id))
+                        # The matching future has queued its continuation before this FIFO checkpoint.
+                        asyncio.get_running_loop().call_soon(assistant_continuation_ready.set)
+                        assistant_done.set()
+                    elif role == 'output':
+                        handover_order.append(('output_complete', frame.id))
+
+            async def stt_reset():
+                handover_order.append(('stt_reset', old_child.reaped.is_set()))
+                await original_stt_reset()
+
+            async def user_reset():
+                handover_order.append(('user_reset', old_child.reaped.is_set()))
+                await original_user_reset()
+
+            async def user_queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+                if isinstance(frame, bot.LLMMessagesAppendFrame):
+                    handover_order.append(('typed_append', old_child.reaped.is_set()))
+                await original_user_queue(frame, direction, callback)
+
+            def admitted(token):
+                handover_order.append(('typed_admitted', token))
+                original_admitted(token)
+
+            async def discard():
+                cleanup_started.set()
+                await release_cleanup.wait()
+                await original_discard()
+                handover_order.append(('playback_reaped', old_child.reaped.is_set()))
+
+            old_child = transport.playback
+            with patch.object(transport, '_discard_playback', side_effect=discard), \
+                    patch.object(transport.llm, 'frame_completed', side_effect=completed), \
+                    patch.object(transport.stt, 'discard_pending', side_effect=stt_reset), \
+                    patch.object(user, 'reset', side_effect=user_reset), \
+                    patch.object(user, 'queue_frame', side_effect=user_queue), \
+                    patch.object(transport.llm, 'request_admitted', side_effect=admitted):
+                self.assertEqual(await service.submit('Typed C'), 'accepted')
+                typed_token = manager.pending_submit[1]
+                release_synthesis.set()
+                await asyncio.wait_for(assistant_done.wait(), 5)
+                await asyncio.wait_for(cleanup_started.wait(), 5)
+                await asyncio.wait_for(assistant_continuation_ready.wait(), 5)
+                self.assertIsNotNone(manager.pending_submit)
+                self.assertFalse(manager.speech_admitted())
+                self.assertFalse(old_child.reaped.is_set())
+                self.assertFalse(any(m.get('content') == 'Typed C' for m in context.get_messages()))
+                self.assertEqual(len(brain.requests), 3)
+                self.assertIn({'role': 'assistant', 'content': 'Heard sentence.'}, context.get_messages())
+                release_provider.set()
+                release_cleanup.set()
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Heard sentence.')
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Reply C.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply C.')
+                self.assertTrue(old_child.reaped.is_set())
+                self.assertEqual(len(held_frame_ids), 1)
+                kinds = [kind for kind, _ in handover_order]
+                output_index = handover_order.index(('output_complete', held_frame_ids[0]))
+                self.assertLess(kinds.index('assistant_complete'), kinds.index('playback_reaped'))
+                self.assertLess(kinds.index('playback_reaped'), output_index)
+                for kind in ('stt_reset', 'user_reset', 'typed_append', 'typed_admitted'):
+                    self.assertIn(kind, kinds)
+                    self.assertTrue(all(index > output_index for index, (actual, _) in enumerate(handover_order)
+                                        if actual == kind), handover_order)
+                self.assertTrue(all(value is True for kind, value in handover_order
+                                    if kind in ('stt_reset', 'user_reset', 'typed_append')), handover_order)
+                self.assertEqual([value for kind, value in handover_order if kind == 'typed_admitted'], [typed_token])
+            self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Typed A'}, {'role': 'assistant', 'content': 'Reply A.'},
+                {'role': 'user', 'content': 'Spoken B'}, {'role': 'assistant', 'content': 'Heard sentence.'},
+                {'role': 'user', 'content': 'Typed C'},
+            ])
+            self.assertEqual([t['source'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                             ['typed', 'spoken', 'typed'])
+        transport.capture.stdout.feed_data(bytes(640))
+        queued_vad = VADUserStartedSpeakingFrame()
+        vad_held, release_vad, vad_processed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_vad.set)
+        native_user_process = user.process_frame
+        native_admitted = manager.llm.request_admitted
+        typed_acknowledgements = asyncio.Queue()
+        admission_tokens, settled_before_admission = [], []
+
+        async def hold_queued_vad(frame, direction):
+            if frame is queued_vad:
+                vad_held.set()
+                await release_vad.wait()
+            await native_user_process(frame, direction)
+
+        @user.event_handler('on_after_process_frame')
+        async def queued_vad_completed(processor, frame):
+            if frame is queued_vad:
+                vad_processed.set()
+
+        def acknowledge_queued_handover(token):
+            admission_tokens.append(token)
+            settled_before_admission.append(vad_processed.is_set())
+            native_admitted(token)
+            typed_acknowledgements.put_nowait(token)
+
+        spoken_origin = manager.llm.spoken_origin
+        before_handover = list(manager.conversation.turns)
+        with patch.object(user, 'process_frame', side_effect=hold_queued_vad), \
+                patch.object(manager.llm, 'request_admitted', side_effect=acknowledge_queued_handover):
+            await user.queue_frame(queued_vad)
+            await asyncio.wait_for(vad_held.wait(), 5)
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            accepted_token = manager.pending_submit[1]
+            repeat_finished = asyncio.Event()
+
+            @transport.output().event_handler('on_after_push_frame')
+            async def repeat_output_completed(processor, frame):
+                if isinstance(frame, LLMFullResponseEndFrame) and frame.indicator_reply_token is accepted_token:
+                    repeat_finished.set()
+
+            self.assertTrue(manager.llm.owns_request(accepted_token))
+            self.assertFalse(transport.stt.admitted())
+            release_vad.set()
+            await asyncio.wait_for(vad_processed.wait(), 5)
+            self.assertTrue(manager.llm.owns_request(accepted_token),
+                            'Already-queued speech cannot replace the accepted typed owner')
+            self.assertIs(manager.llm.spoken_origin, spoken_origin)
+            self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), accepted_token)
+            if manager.submission_task is not None:
+                await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+            self.assertIsNone(manager.pending_submit)
+            self.assertTrue(transport.stt.admitted())
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply C.')
+            await asyncio.wait_for(repeat_finished.wait(), 5)
+            self.assertTrue(committed.empty(), 'Typed repeat does not duplicate the native assistant history')
+            self.assertEqual(manager.conversation.turns[len(before_handover):], [
+                {'speaker': 'you', 'text': 'repeat that', 'source': 'typed', 'state': 'complete'},
+                {'speaker': 'kestrel', 'text': 'Reply C.', 'state': 'complete'},
+            ])
+            self.assertEqual(admission_tokens, [accepted_token])
+            self.assertTrue(typed_acknowledgements.empty())
+            self.assertEqual(await service.submit('stop'), 'accepted')
+            next_token = manager.pending_submit[1]
+            self.assertIsNot(next_token, accepted_token)
+            self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), next_token)
+            if manager.submission_task is not None:
+                await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+            self.assertIsNone(manager.pending_submit)
+            self.assertEqual(admission_tokens, [accepted_token, next_token])
+            self.assertEqual(settled_before_admission, [True, True],
+                             'Native queued speech must settle before typed admission reopens input')
+            self.assertTrue(typed_acknowledgements.empty())
+            self.assertEqual(len(brain.requests), 4)
+            self.assertTrue(spoken.empty())
+        native = Mock(returncode=None)
+        native.stdin.drain = AsyncMock()
+        native.wait = AsyncMock()
+        native.stdout = asyncio.StreamReader()
+        request_written = asyncio.Event()
+        native.stdin.write.side_effect = lambda data: request_written.set()
+        service.recognizer.process = native
+        self.addCleanup(lambda: native.stdout.feed_data(b'{"text":"cleanup"}\n'))
+        native_sleep = asyncio.sleep
+
+        async def hold_native_timer(delay, result=None):
+            if asyncio.current_task() is strategies[0]._timeout_task:
+                timer_entered.set()
+                await release_timer.wait()
+                return result
+            return await native_sleep(delay, result=result)
+
+        with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 0, 'probability': 0.0}), \
+                patch.object(asyncio, 'sleep', side_effect=hold_native_timer):
+            await process(transport.stt, VADUserStartedSpeakingFrame())
+            await process(transport.stt, InputAudioRawFrame(bytes(640), 16000, 1))
+            await transcript('abandoned mute')
+            await process(transport.stt, VADUserStoppedSpeakingFrame())
+            await asyncio.wait_for(timer_entered.wait(), 5)
+            await asyncio.wait_for(request_written.wait(), 5)
+            await transport.stt._segment_queue.put(b'queued old segment')
+            timer = strategies[0]._timeout_task
+            self.assertIsNotNone(timer)
+            self.assertFalse(timer.done())
+            self.assertTrue(analyzer._audio_buffer)
+            self.assertEqual(await service.submit('stop'), 'accepted')
+            # A barrier at the public LLM admission callback observes the forced stop/reset first.
+            admitted = asyncio.Event()
+            original_admitted = manager.llm.request_admitted
+
+            def acknowledge(token):
+                original_admitted(token)
+                admitted.set()
+
+            with patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+                await asyncio.wait_for(admitted.wait(), 5)
+            self.assertTrue(timer.done())
+            self.assertGreater(timer.cancelling(), 0)
+            self.assertIsNone(strategies[0]._timeout_task)
+            self.assertEqual(analyzer._audio_buffer, [])
+            self.assertTrue(transport.stt.awaiting_fresh_vad)
+            native.stdout.feed_data(b'{"text":"late old mute"}\n')
+            await service.recognizer.drain()
+            self.assertEqual(native.stdin.write.call_count, 1)
+            self.assertFalse(any(m.get('content') == 'abandoned mute' for m in context.get_messages()))
+            self.assertFalse(any(t['text'] in ('abandoned mute', 'late old mute') for t in manager.conversation.turns))
+        with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 1, 'probability': 1.0}):
+            await process(transport.stt, VADUserStartedSpeakingFrame())
+            self.assertFalse(transport.stt.awaiting_fresh_vad)
+            await process(user, InputAudioRawFrame(bytes(640), 16000, 1))
+            await transcript('Fresh spoken turn')
+            await process(user, VADUserStoppedSpeakingFrame())
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh speech.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh speech.')
+        self.assertEqual(manager.llm.last_spoken_reply, 'Fresh speech.')
+        self.assertTrue(all(not any(chunk) for child in service.audio_children for chunk in child.writes),
+                        'Obsolete nonzero synthesis PCM must never reach a playback child')
+        self.assertTrue(spoken.empty())
+        await close()
+
+    async def test_typed_latest_owner_preserves_accepted_actions_without_replay(self):
+        first_started, release_first, second_queued = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_first.set)
+        calls, effects = [], []
+        level, muted = 32768, False
+
+        async def command(argv):
+            nonlocal level, muted
+            calls.append(tuple(argv))
+            if argv[:2] == ('/usr/bin/pactl', 'get-default-sink'):
+                return 'selected'
+            if argv[0] == '/usr/bin/omarchy-audio-output-sink':
+                return 'physical'
+            if 'get-sink-volume' in argv:
+                return LocalVolumeTests.volume(level)
+            if 'get-sink-mute' in argv:
+                return 'Mute: yes' if muted else 'Mute: no'
+            if 'set-sink-volume' in argv:
+                first_started.set()
+                await release_first.wait()
+                level = 19660
+                effects.append('volume')
+                return ''
+            if 'set-sink-mute' in argv:
+                muted = True
+                effects.append('mute')
+                return ''
+            raise AssertionError(f'Unexpected native command: {argv}')
+
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        transport, spoken, committed, interrupted, _, close = await self.open_session(
+            brain, through_service=True, local_command=command,
+        )
+        service, manager = transport.service, transport.service.manager
+        await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+        original_run = manager.local_actions._run
+
+        async def retained(tool, *, admitted):
+            if tool.subject == 'mute':
+                second_queued.set()
+            return await original_run(tool, admitted=admitted)
+
+        with patch.object(manager.local_actions, '_run', side_effect=retained):
+            self.assertEqual(await service.submit('volume thirty percent'), 'accepted')
+            await asyncio.wait_for(first_started.wait(), 5)
+            self.assertEqual(await service.submit('mute'), 'accepted')
+            await asyncio.wait_for(second_queued.wait(), 5)
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+            release_first.set()
+            await asyncio.wait_for(manager.local_actions.drain(), 5)
+        self.assertEqual(effects, ['volume', 'mute'])
+        self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')), 1)
+        self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
+        self.assertEqual(manager.llm.last_spoken_reply, "I haven't said anything to repeat yet.")
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
+        old_frozen, release_old, old_rejected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        interruption_held, release_interruption = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_old.set)
+        self.addCleanup(release_interruption.set)
+        native_process, native_queue = manager.llm.process_frame, manager.llm.queue_frame
+        origins, acknowledgements = [], []
+        hold_interruption = False
+
+        async def process(frame, direction):
+            if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
+                origin = getattr(frame, 'request_origin', None)
+                if origin is not None and origin[1] == 'spoken':
+                    origins.append(origin)
+                    old_frozen.set()
+                    await release_old.wait()
+                    await native_process(frame, direction)
+                    old_rejected.set()
+                    return
+            await native_process(frame, direction)
+
+        async def queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+            if hold_interruption and isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
+                interruption_held.set()
+                await release_interruption.wait()
+            await native_queue(frame, direction, callback)
+
+        original_ack = manager.llm.request_admitted
+
+        def acknowledge(token):
+            acknowledgements.append(token)
+            original_ack(token)
+
+        with patch.object(manager.llm, 'process_frame', side_effect=process), \
+                patch.object(manager.llm, 'queue_frame', side_effect=queue), \
+                patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+            interrupted.clear()
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await asyncio.wait_for(interrupted.wait(), 5)
+            await self.finish_user_turn(transport, 'mute')
+            await asyncio.wait_for(old_frozen.wait(), 5)
+            before = list(manager.conversation.turns)
+            hold_interruption = True
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            new_token = manager.pending_submit[1]
+            self.assertIsNot(origins[0][0], new_token)
+            await asyncio.wait_for(interruption_held.wait(), 5)
+            release_old.set()
+            await asyncio.wait_for(old_rejected.wait(), 5)
+            self.assertEqual(manager.conversation.turns, before)
+            self.assertEqual(acknowledgements, [])
+            self.assertEqual(effects, ['volume', 'mute'])
+            release_interruption.set()
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+            self.assertEqual(acknowledgements, [new_token])
+        self.assertEqual(effects, ['volume', 'mute'])
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([t['text'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                         ['volume thirty percent', 'mute', 'repeat that', 'repeat that'])
+        self.assertTrue(spoken.empty())
+        await close()
+
+    async def test_typed_admission_is_owned_across_readiness_and_dismissal(self):
+        require_native_hermes()
+        from desktop import control
+        prepare_entered, release_prepare = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_prepare.set)
+        native_prepare = bot.VoiceConversations.prepare
+        notes_home = tempfile.TemporaryDirectory(prefix='kestrel-typed-notes-')
+        self.addCleanup(notes_home.cleanup)
+        notes = Path(notes_home.name) / 'notes'
+
+        async def prepare(manager):
+            prepare_entered.set()
+            await release_prepare.wait()
+            await native_prepare(manager)
+
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        with patch.object(bot.VoiceConversations, 'prepare', new=prepare):
+            opening = asyncio.create_task(self.open_session(brain, through_service=True, activate=False, memory_root=notes))
+            await asyncio.wait_for(prepare_entered.wait(), 5)
+            self.assertEqual(await control.submit('Before model preparation'), 'unavailable')
+            release_prepare.set()
+            handle, spoken, committed, _, _, close = await asyncio.wait_for(opening, 5)
+        service, manager = handle.service, handle.service.manager
+        await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+        initializing, release_initialization, initialization_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_initialization.set)
+        native_reset = manager.conversation.begin_session
+
+        async def reset():
+            await native_reset()
+            initializing.set()
+            await release_initialization.wait()
+            initialization_finished.set()
+
+        with patch.object(manager.conversation, 'begin_session', side_effect=reset):
+            self.assertEqual(await service.submit('Revoked during initialization'), 'accepted')
+            await asyncio.wait_for(initializing.wait(), 5)
+            self.assertEqual(await service.submit('Ingress is busy'), 'busy')
+            self.assertEqual(await service.toggle(), 'starting')
+            self.assertEqual(await service.toggle(), 'inactive')
+            release_initialization.set()
+            await asyncio.wait_for(initialization_finished.wait(), 5)
+            await service.state('inactive')
+        self.assertEqual(service.sessions, [])
+        self.assertEqual(manager.conversation.turns, [])
+        beginning, release_begin = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_begin.set)
+        native_read = service.channel.read_event
+
+        async def read_event():
+            event = await native_read()
+            if event.get('session_ready') is True:
+                beginning.set()
+                await release_begin.wait()
+            return event
+
+        with patch.object(service.channel, 'read_event', side_effect=read_event):
+            self.assertEqual(await service.toggle(), 'starting')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            await asyncio.wait_for(beginning.wait(), 5)
+            receipts = asyncio.Queue()
+            native_ack = manager.llm.request_admitted
+
+            def acknowledge(token):
+                native_ack(token)
+                receipts.put_nowait(token)
+
+            with patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+                self.assertEqual(await service.submit('Ordinary waiting for begin'), 'accepted')
+                first = await asyncio.wait_for(receipts.get(), 5)
+                if manager.submission_task is not None:
+                    await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+                self.assertEqual(len(brain.requests), 1)
+                self.assertFalse(manager.session_ready.done())
+                self.assertEqual([t['text'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                                 ['Ordinary waiting for begin'])
+                await service.submit('repeat that', lose_receipt=True)
+                second = await asyncio.wait_for(receipts.get(), 5)
+                self.assertIsNot(first, second)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                self.assertFalse(manager.session_ready.done(), 'Local commands do not wait for native begin')
+                self.assertTrue(receipts.empty(), 'Receipt loss never causes another service admission')
+                self.assertEqual([t['text'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                                 ['Ordinary waiting for begin', 'repeat that'])
+                self.assertEqual(await service.submit('Ordinary dismissed'), 'accepted')
+                await asyncio.wait_for(receipts.get(), 5)
+                self.assertEqual(await service.toggle(), 'inactive')
+                release_begin.set()
+                cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+                await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertEqual(manager.status._state, 'inactive')
+        self.assertFalse(transport.admitted())
+        self.assertEqual(len(brain.requests), 1)
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
+        self.assertIsNone(manager.submission_task)
+        self.assertEqual(await service.toggle(), 'starting')
+        handover_session = await asyncio.wait_for(service.started.get(), 5)
+        stop_entered, stop_finished, release_stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_stop.set)
+        user = manager.ingress[1]
+
+        @user.event_handler('on_before_process_frame')
+        async def hold_stop(processor, frame):
+            if isinstance(frame, ProposedUserStoppedSpeakingFrame):
+                stop_entered.set()
+                try:
+                    await release_stop.wait()
+                finally:
+                    stop_finished.set()
+
+        self.assertEqual(await service.submit('Cancelled before user completion'), 'accepted')
+        await asyncio.wait_for(stop_entered.wait(), 5)
+        cancelled_submission = manager.submission_task
+        prepared_model = manager.model
+        native_process = service.channel.process
+        self.assertFalse(cancelled_submission.done())
+        self.assertEqual(await service.toggle(), 'inactive')
+        await asyncio.wait_for(stop_finished.wait(), 5)
+        cleanup = await asyncio.wait_for(asyncio.shield(handover_session.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertTrue(cancelled_submission.cancelled())
+        self.assertFalse(manager.closed, 'Dismissing a handover must retain the running service')
+        self.assertIsNone(manager.failure)
+        self.assertEqual(manager.status._state, 'inactive')
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertIsNone(manager.pending_submit)
+        self.assertIsNone(manager.submission_task)
+        self.assertIs(manager.model, prepared_model)
+        self.assertIsNone(native_process.returncode)
+        service.recognizer.close.assert_not_awaited()
+        bot.ECHO_REMOVAL.close.assert_not_called()
+        self.assertEqual(await control.toggle(), 'starting')
+        fresh_session = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNone(fresh_session.llm.last_spoken_reply)
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertEqual(await service.toggle(), 'inactive')
+        cleanup = await asyncio.wait_for(asyncio.shield(fresh_session.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
+        corrupt = notes / 'MEMORY.md'
+        corrupt.write_bytes(b'isolated invalid notes\xff')
+        corrupt.chmod(0o600)
+        self.assertEqual(await service.submit('Accepted with unavailable notes'), 'accepted')
+        failed_session = await asyncio.wait_for(service.started.get(), 5)
+        heard = [await asyncio.wait_for(spoken.get(), 5), await asyncio.wait_for(spoken.get(), 5)]
+        self.assertEqual(' '.join(heard), bot.MEMORY_ERROR)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), bot.MEMORY_ERROR)
+        barrier = DataFrame()
+        await failed_session.output().queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(failed_session.processed.get(), 5), barrier)
+        self.assertEqual([t['text'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                         ['Accepted with unavailable notes'])
+        self.assertEqual(manager.conversation.turns[-1]['state'], 'failed')
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(corrupt.read_bytes(), b'isolated invalid notes\xff')
+        if manager.submission_task is not None:
+            await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+        handover_waiting, release_handover = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_handover.set)
+        deadlines = asyncio.Queue()
+        native_timeout = asyncio.timeout
+        user = manager.ingress[1]
+        native_queue = user.queue_frame
+
+        def timeout(seconds):
+            deadline = native_timeout(seconds)
+            if seconds == 5 and asyncio.current_task() is manager.submission_task:
+                deadlines.put_nowait(deadline)
+            return deadline
+
+        async def queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+            if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
+                handover_waiting.set()
+                await release_handover.wait()
+            await native_queue(frame, direction, callback)
+
+        with patch.object(bot.asyncio, 'timeout', side_effect=timeout), \
+                patch.object(user, 'queue_frame', side_effect=queue):
+            self.assertEqual(await service.submit('Handover cannot finish'), 'accepted')
+            deadline = await asyncio.wait_for(deadlines.get(), 5)
+            await asyncio.wait_for(handover_waiting.wait(), 5)
+            deadline.reschedule(asyncio.get_running_loop().time())
+            await service.state('trouble')
+            self.assertEqual(manager.conversation.turns[-2], {
+                'speaker': 'you', 'text': 'Handover cannot finish', 'state': 'complete', 'source': 'typed',
+            })
+            self.assertEqual(manager.conversation.turns[-1]['state'], 'failed')
+            self.assertEqual(manager.conversation.turns[-1]['text'], '',
+                             'The failed-state caption is visible without inventing unheard speech')
+            self.assertEqual(await service.submit('No automatic retry'), 'unavailable')
+            self.assertEqual(await service.toggle(), 'unavailable')
+            release_handover.set()
+        self.assertEqual(len(brain.requests), 1)
+        await close()
 
     async def test_inactive_capture_never_reaches_recognition_or_actions(self):
         command = AsyncMock(side_effect=AssertionError('Inactive input cannot execute local commands'))
@@ -4093,6 +4825,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             @transport.llm.event_handler('on_before_push_frame')
             async def generated_text(processor, frame):
                 if cancel_without_audio and isinstance(frame, InterruptionFrame) and frame.conversation_reply_token is not None:
+                    # Revoked producers suppress their end frame; inject its delayed transport arrival explicitly.
+                    late = LLMFullResponseEndFrame()
+                    late.indicator_reply_token = frame.conversation_reply_token
+                    late.conversation_reply_failed = False
+                    await output.push_frame(late)
                     await asyncio.wait_for(old_end_output.wait(), 5)
                 if hold_text and isinstance(frame, LLMTextFrame):
                     generated.set()
@@ -4132,7 +4869,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             try:
                 self.assertEqual(delivered, [
-                    {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete'},
+                    {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete', 'source': 'spoken'},
                     {'speaker': 'kestrel', 'text': 'Hello.', 'state': 'complete'},
                 ])
                 for utterance in ('repeat that', 'what can I say?'):
@@ -4145,7 +4882,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
                     rows = await turns_until(lambda turns: turns[-2]['text'] == utterance and turns[-1]['state'] == 'complete')
                     self.assertEqual(rows[-2:], [
-                        {'speaker': 'you', 'text': utterance, 'state': 'complete'},
+                        {'speaker': 'you', 'text': utterance, 'state': 'complete', 'source': 'spoken'},
                         {'speaker': 'kestrel', 'text': expected, 'state': 'complete'},
                     ])
                     self.assertTrue(committed.empty(), 'Local spoken responses never enter engine history')
@@ -4228,7 +4965,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await barrier()
                 rows = await turns_until(lambda turns: turns[-1]['text'] == 'mute')
                 self.assertEqual(len(rows), count_before_mute + 1, 'A silent tool creates only the finalized user row')
-                self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete'})
+                self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete', 'source': 'spoken'})
                 self.assertTrue(spoken.empty())
                 self.assertEqual(len(brain.requests), 5, 'Silent controls make no engine request')
                 await start()
@@ -4318,7 +5055,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 if 'turns' in snapshot and snapshot['turns'] and snapshot['turns'][-1]['state'] == 'failed':
                                     break
                         self.assertEqual(snapshot['turns'], [
-                            {'speaker': 'you', 'text': 'what can I say?', 'state': 'complete'},
+                            {'speaker': 'you', 'text': 'what can I say?', 'state': 'complete', 'source': 'spoken'},
                             {'speaker': 'kestrel', 'text': '', 'state': 'failed'},
                         ])
                         self.assertEqual(transport.output().audio_written, 0)
@@ -5006,7 +5743,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 if index == 0:
                     await transport.input().queue_frame(
-                        TranscriptionFrame('take a screenshot', '', '2026-01-01T00:00:00Z', finalized=True))
+                        self.transcription(transport, 'take a screenshot', '', '2026-01-01T00:00:00Z', finalized=True))
                     barrier = DataFrame()
                     await transport.input().queue_frame(barrier)
                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
@@ -5097,7 +5834,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 if index == 0:
                     await transport.input().queue_frame(
-                        TranscriptionFrame('workspace three', '', '2026-01-01T00:00:00Z', finalized=True))
+                        self.transcription(transport, 'workspace three', '', '2026-01-01T00:00:00Z', finalized=True))
                     barrier = DataFrame()
                     await transport.input().queue_frame(barrier)
                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
@@ -6024,7 +6761,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(committed.empty())
 
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-        await transport.input().queue_frame(TranscriptionFrame('repeat that', '', '2026-01-01T00:00:00Z', finalized=True))
+        await transport.input().queue_frame(self.transcription(transport, 'repeat that', '', '2026-01-01T00:00:00Z', finalized=True))
         barrier = DataFrame()
         await transport.input().queue_frame(barrier)
         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
@@ -6363,7 +7100,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         ):
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await transport.input().queue_frame(
-                TranscriptionFrame(segment, '', '2026-01-01T00:00:00Z', finalized=True),
+                self.transcription(transport, segment, '', '2026-01-01T00:00:00Z', finalized=True),
             )
             barrier = DataFrame()
             await transport.input().queue_frame(barrier)
@@ -6427,7 +7164,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await transport.input().queue_frame(
-            TranscriptionFrame('mute', '', '2026-01-01T00:00:00Z', finalized=True),
+            self.transcription(transport, 'mute', '', '2026-01-01T00:00:00Z', finalized=True),
         )
         barrier = DataFrame()
         await transport.input().queue_frame(barrier)
@@ -6923,8 +7660,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_tts = bot.VoxCPMTTS
         worker_requests = []
 
-        def create_tts(voice, preset, *, generation_lock=None, admitted=lambda: True):
-            tts = native_tts(voice, preset, generation_lock=generation_lock, admitted=admitted)
+        def create_tts(voice, preset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+            tts = native_tts(voice, preset, generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
             native_run_tts = tts.run_tts
             first_stream = True
 

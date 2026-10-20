@@ -297,6 +297,20 @@ class LaptopOutput(BaseOutputTransport):
         else:
             await super().process_frame(frame, direction)
 
+    async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
+        if direction == FrameDirection.DOWNSTREAM and self.audio.reply_admitted is not None:
+            context = getattr(frame, 'conversation_audio_context', None)
+            if isinstance(frame, TTSTextFrame):
+                span = getattr(frame, 'conversation_audio_span', None)
+                context = span[0] if span is not None else self.conversation_audio_context
+            context = context or self.conversation_audio_context
+            token = (getattr(frame, 'indicator_reply_token', None) if isinstance(frame, LLMFullResponseEndFrame)
+                     else context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None))
+            if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
+                                  LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.audio.reply_admitted(token):
+                return
+        await super().push_frame(frame, direction)
+
     async def write_transport_frame(self, frame):
         if isinstance(frame, TTSStartedFrame):
             self.conversation_audio_context = getattr(frame, 'conversation_audio_context', None)
@@ -321,17 +335,22 @@ class LaptopOutput(BaseOutputTransport):
     async def write_audio_frame(self, frame) -> bool:
         context = self.conversation_audio_context
         success = False
+
+        def allowed():
+            return self.audio.admitted() and (self.audio.reply_admitted is None or
+                   (context is not None and self.audio.reply_admitted(context.reply_token)))
+
         try:
             await self.write_gate.wait()
             async with self.write_lock:
-                if self.audio.closed or self.audio.failure or not self.audio.admitted() or not self.write_gate.is_set():
+                if self.audio.closed or self.audio.failure or not allowed() or not self.write_gate.is_set():
                     return False
                 try:
                     if self.audio.playback is None:
                         await self.audio._open_playback()
                     duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
                     deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
-                    if not self.audio.admitted():
+                    if not allowed():
                         return False
                     self.audio.playback.stdin.write(frame.audio)
                     await self.audio.playback.stdin.drain()
@@ -351,9 +370,12 @@ class LaptopOutput(BaseOutputTransport):
 
 
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped, admitted):
+    def __init__(self, echo_removal, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None):
         self.echo_removal = echo_removal
         self.admitted = admitted
+        self.input_admitted = input_admitted or admitted
+        self.capture_enabled = capture_enabled
+        self.reply_admitted = reply_admitted
         self.on_stopped = on_stopped
         self.failure: str | None = None
         self.capture = None
@@ -364,9 +386,9 @@ class LaptopAudioTransport:
         self.close_task = None
         self.verified = False
         self.received_audio = asyncio.Event()
-        params = TransportParams(audio_in_enabled=True, audio_out_enabled=True,
+        params = TransportParams(audio_in_enabled=capture_enabled, audio_out_enabled=True,
                                  audio_in_sample_rate=16000, audio_out_sample_rate=48000)
-        self._input = LaptopInput(params, admitted=admitted)
+        self._input = LaptopInput(params, admitted=self.input_admitted)
         self._output = LaptopOutput(self, params)
 
         @self._output.event_handler("on_error")
@@ -406,6 +428,8 @@ class LaptopAudioTransport:
         )
 
     async def open(self):
+        if not self.capture_enabled:
+            return
         try:
             async with asyncio.timeout(LAPTOP_AUDIO_START_TIMEOUT):
                 serial = await self._source()
@@ -437,7 +461,7 @@ class LaptopAudioTransport:
             while True:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 self.received_audio.set()
-                if self.verified and self._input.ready and self.admitted() and not self.closed:
+                if self.verified and self._input.ready and self.input_admitted() and not self.closed:
                     await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
             self.fail(LAPTOP_CAPTURE_FAILURE)
@@ -596,32 +620,61 @@ class NemotronRecognizer:
 
 
 class NemotronSTT(SegmentedSTTService):
-    def __init__(self, recognizer: NemotronRecognizer, *, admitted):
+    def __init__(self, recognizer: NemotronRecognizer, *, admitted, input_epoch=None):
         super().__init__(
             sample_rate=16000,
             settings=STTSettings(model="nemotron-speech-streaming-en-0.6b", language=None),
         )
         self.recognizer = recognizer
         self.admitted = admitted
+        self.input_epoch = input_epoch or (lambda: 0)
+        self.awaiting_fresh_vad = False
+
+    async def discard_pending(self):
+        # Pipecat 1.12 segmented STT has no public buffer/queue reset. Keep this
+        # adapter aligned with its worker ownership when upgrading the pin.
+        self.awaiting_fresh_vad = True
+        await self._cancel_segment_task()
+        self._audio_buffer.clear()
+        self._user_speaking = False
+        while True:
+            try:
+                self._segment_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._segment_task = self.create_task(self._segment_task_handler())
+
+    async def process_audio_frame(self, frame, direction):
+        if not self.awaiting_fresh_vad:
+            await super().process_audio_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
         if not self.admitted() and isinstance(frame, (
             DataFrame, InputAudioRawFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
         )):
             return
+        if isinstance(frame, VADUserStartedSpeakingFrame):
+            self.awaiting_fresh_vad = False
+        elif isinstance(frame, VADUserStoppedSpeakingFrame) and self.awaiting_fresh_vad:
+            return
         await super().process_frame(frame, direction)
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
+            return
+        if isinstance(frame, TranscriptionFrame) and getattr(frame, 'input_epoch', None) != self.input_epoch():
             return
         await super().push_frame(frame, direction)
 
     async def run_stt(self, audio):
         if not self.admitted():
             return
-        text = await self.recognizer.transcribe(audio, admitted=self.admitted)
-        if self.admitted() and text:
-            yield TranscriptionFrame(text, "", time_now_iso8601(), finalized=True)
+        epoch = self.input_epoch()
+        text = await self.recognizer.transcribe(audio, admitted=lambda: self.admitted() and epoch == self.input_epoch())
+        if self.admitted() and epoch == self.input_epoch() and text:
+            frame = TranscriptionFrame(text, "", time_now_iso8601(), finalized=True)
+            frame.input_epoch = epoch
+            yield frame
 
 
 class SpokenReplyText:
@@ -1395,13 +1448,14 @@ class SpeechAdvisoryFrame(LLMTextFrame):
 
 
 class VoxCPMTTS(TTSService):
-    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True):
+    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
         super().__init__(
             sample_rate=48000, push_start_frame=True, push_stop_frames=True,
             settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
         )
         self.model = model
         self.admitted = admitted
+        self.reply_admitted = reply_admitted
         self.preset = preset
         self._generation_lock = generation_lock if generation_lock is not None else asyncio.Lock()
         self.generation_cleanup_failed = False
@@ -1464,6 +1518,12 @@ class VoxCPMTTS(TTSService):
                 self._record_conversation_source(frame, context_id)
                 if isinstance(frame, TTSStoppedFrame):
                     frame.conversation_audio_context = self._conversation_audio_contexts.get(context_id)
+        if self.reply_admitted is not None and direction == FrameDirection.DOWNSTREAM:
+            context = self._conversation_audio_contexts.get(getattr(frame, 'context_id', None))
+            token = context.reply_token if context is not None else getattr(frame, 'indicator_reply_token', self._conversation_reply_token)
+            if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
+                                  LLMTextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.reply_admitted(token):
+                return
         await super().push_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
@@ -1504,6 +1564,11 @@ class VoxCPMTTS(TTSService):
     async def run_tts(self, text, context_id):
         context = self._conversation_audio_contexts.get(context_id)
         delivery = context.delivery if context is not None else 'neutral'
+
+        def allowed():
+            return self.admitted() and (self.reply_admitted is None or
+                   (context is not None and self.reply_admitted(context.reply_token)))
+
         text_started = False
         try:
             styles = {
@@ -1523,7 +1588,7 @@ class VoxCPMTTS(TTSService):
             async with self._generation_lock:
                 if self.generation_cleanup_failed:
                     raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
-                if not self.admitted():
+                if not allowed():
                     return
                 chunks = self.model.generate_streaming(
                     text=synthesis_text, **prompt,
@@ -1535,7 +1600,7 @@ class VoxCPMTTS(TTSService):
                     while True:
                         pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
                         chunk = await asyncio.shield(pending)
-                        if chunk is None or not self.admitted():
+                        if chunk is None or not allowed():
                             break
                         pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
                         frame = TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)

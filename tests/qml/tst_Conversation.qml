@@ -66,6 +66,329 @@ TestCase {
         }
     }
 
+    function composerContent(service, component) {
+        const content = createTemporaryObject(component || conversationComponent, test, {
+            width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", service: service,
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            conversationMessage: "", announcementsEnabled: true
+        })
+        verify(content !== null)
+        return content
+    }
+
+    function test_composer_keys_focus_and_multiline() {
+        const service = createTemporaryObject(serviceComponent, test)
+        const content = composerContent(service)
+        const editor = findChild(content, "composer")
+        const send = findChild(content, "sendMessage")
+        const close = findChild(content, "closeConversation")
+        const transcript = findChild(content, "transcript")
+        verify(editor !== null && send !== null)
+        const requests = []
+        service.submitRequested.connect(function(id, payload) { requests.push(JSON.parse(payload)) })
+        content.focusComposer()
+        verify(editor.activeFocus)
+        compare(editor.Accessible.name, "Message Kestrel")
+        compare(editor.Accessible.multiLine, true)
+        compare(send.Accessible.name, "Send message")
+        compare(editor.textFormat, TextEdit.PlainText)
+        compare(editor.font.italic, false)
+        compare(send.enabled, false)
+        keyClick(Qt.Key_Return)
+        compare(requests.length, 0)
+        keyClick(Qt.Key_Tab)
+        verify(close.activeFocus, "disabled Send is skipped")
+        keyClick(Qt.Key_Tab)
+        verify(transcript.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(editor.activeFocus)
+        keyClick(Qt.Key_A)
+        keyClick(Qt.Key_Return, Qt.ShiftModifier)
+        keyClick(Qt.Key_B)
+        compare(editor.text, "a\nb")
+        verify(send.enabled)
+        keyClick(Qt.Key_Tab)
+        verify(send.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(send.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(editor.activeFocus)
+        compare(editor.text, "a\nb", "Tab never inserts a tab")
+        keyClick(Qt.Key_Return)
+        compare(requests.length, 1)
+        compare(requests[0].text, "a\nb")
+        compare(send.enabled, false)
+        keyClick(Qt.Key_Enter)
+        compare(requests.length, 1, "pending cannot send twice")
+        closeSpy.target = content
+        closeSpy.clear()
+        for (const target of [editor, close, transcript]) {
+            target.forceActiveFocus()
+            keyClick(Qt.Key_Escape)
+        }
+        compare(closeSpy.count, 3)
+        service.finishSubmit(service.submitAttemptId, "busy")
+        send.forceActiveFocus()
+        verify(send.activeFocus)
+        keyClick(Qt.Key_Escape)
+        compare(closeSpy.count, 4)
+        editor.forceActiveFocus()
+        editor.clear()
+        keyClick(Qt.Key_Space)
+        keyClick(Qt.Key_Return)
+        compare(requests.length, 1, "whitespace is not sent")
+    }
+
+    function test_composer_native_five_line_scroll_and_scaling() {
+        const service = createTemporaryObject(serviceComponent, test)
+        const content = composerContent(service)
+        const editor = findChild(content, "composer")
+        const scroll = findChild(content, "composerScroll")
+        const send = findChild(content, "sendMessage")
+        const transcript = findChild(content, "transcript")
+        content.focusComposer()
+        for (const scale of [1, 2]) {
+            content.textScale = scale
+            for (const width of [448, 320]) {
+                content.width = width
+                editor.text = "one"
+                editor.cursorPosition = editor.length
+                tryCompare(editor, "lineCount", 1)
+                tryCompare(scroll, "height", scale === 1 ? 40 : 55)
+                editor.text = "one\ntwo\nthree\nfour\nfive"
+                editor.cursorPosition = editor.length
+                tryCompare(editor, "lineCount", 5)
+                tryCompare(scroll, "height", scale === 1 ? 113 : 203)
+                verify(editor.contentHeight <= scroll.height - 18)
+                const fiveHeight = scroll.height
+                verify(waitForRendering(content))
+                keyClick(Qt.Key_Return, Qt.ShiftModifier)
+                keyClick(Qt.Key_S)
+                keyClick(Qt.Key_I)
+                keyClick(Qt.Key_X)
+                tryCompare(editor, "lineCount", 6)
+                compare(scroll.height, fiveHeight, "sixth line scrolls without growing the field")
+                tryVerify(function() { return scroll.contentItem.contentY > 0 })
+                function cursorVisible() {
+                    const point = editor.mapToItem(scroll, editor.cursorRectangle.x, editor.cursorRectangle.y)
+                    return point.y >= 0 && point.y + editor.cursorRectangle.height <= scroll.height
+                }
+                tryVerify(cursorVisible, 5000, "native cursor scrolls into the viewport")
+                editor.text = "W".repeat(320)
+                editor.cursorPosition = editor.length
+                tryVerify(function() { return editor.lineCount > 5 })
+                compare(scroll.height, fiveHeight, "wrapped visual lines also obey the cap")
+                tryVerify(cursorVisible)
+                verify(scroll.x + scroll.width + 9 <= send.x)
+                compare(send.y + send.height, scroll.y + scroll.height)
+                verify(send.x + send.width <= content.width - 32)
+                verify(transcript.y + transcript.height <= findChild(content, "composerFooter").y)
+                verify(scroll.height + scroll.y + 12 <= findChild(content, "composerFooter").height)
+                compare(editor.font.pixelSize, scale * 14)
+            }
+        }
+    }
+
+    function test_only_matching_acceptance_clears_unchanged_draft() {
+        const service = createTemporaryObject(serviceComponent, test)
+        const content = composerContent(service)
+        const editor = findChild(content, "composer")
+        const send = findChild(content, "sendMessage")
+        const transcript = findChild(content, "transcript")
+        function begin(text) {
+            editor.text = text
+            content.focusComposer()
+            mouseClick(send)
+            verify(service.submitPending)
+            verify(editor.activeFocus, "disabled focused Send returns synchronously to editing")
+            compare(editor.text, text, "starting an attempt cannot erase the draft")
+            return service.submitAttemptId
+        }
+        let id = begin("accepted unchanged")
+        service.finishSubmit(id, "accepted")
+        compare(editor.text, "", "only confirmed acceptance clears")
+        id = begin("pending original")
+        keyClick(Qt.Key_X)
+        const changed = editor.text
+        service.finishSubmit(id, "accepted")
+        compare(editor.text, changed, "pending edits survive acceptance")
+        id = begin("away and back")
+        keyClick(Qt.Key_X)
+        keyClick(Qt.Key_Backspace)
+        compare(editor.text, "away and back")
+        service.finishSubmit(id, "accepted")
+        compare(editor.text, "away and back", "text equality is insufficient after an edit")
+        const guidance = {
+            invalid: "Message not sent. Shorten it or remove unsupported control characters.",
+            busy: "Message not accepted. Kestrel is finishing a change. Try Send again.",
+            unavailable: "Message not sent. Kestrel is unavailable. Check the service, then try Send.",
+            uncertain: "Delivery could not be confirmed. Check the conversation before sending again; an action may already have run."
+        }
+        for (const status of Object.keys(guidance)) {
+            id = begin("retain " + status)
+            service.finishSubmit(id, status)
+            compare(editor.text, "retain " + status)
+            compare(findChild(content, "submissionNotice").text, guidance[status])
+        }
+        const old = id
+        id = begin("current attempt")
+        service.submitCompleted(old, "accepted")
+        compare(editor.text, "current attempt", "obsolete acknowledgement cannot clear")
+        compare(findChild(content, "submissionNotice").text, "Sending…")
+        transcript.forceActiveFocus()
+        service.finishSubmit(id, "accepted")
+        compare(editor.text, "")
+        verify(transcript.activeFocus, "completion does not steal transcript focus")
+        id = begin("close focus")
+        findChild(content, "closeConversation").forceActiveFocus()
+        service.finishSubmit(id, "accepted")
+        verify(findChild(content, "closeConversation").activeFocus)
+        editor.text = "invalid" + String.fromCharCode(0)
+        compare(send.enabled, false)
+        editor.text = "x".repeat(4097)
+        compare(send.enabled, false)
+        editor.text = "valid"
+        send.forceActiveFocus()
+        service.submit("external attempt")
+        verify(editor.activeFocus, "a pending transition cannot strand focus on disabled Send")
+        service.finishSubmit(service.submitAttemptId, "busy")
+    }
+
+    function test_composer_hide_notice_and_reload_lifetime() {
+        const service = createTemporaryObject(serviceComponent, test)
+        const content = composerContent(service, announcementComponent)
+        const editor = findChild(content, "composer")
+        const send = findChild(content, "sendMessage")
+        const notice = findChild(content, "submissionNotice")
+        const announcements = []
+        const requests = []
+        content.announcementRequested.connect(function(text) { announcements.push(text) })
+        service.submitRequested.connect(function(id) { requests.push(id) })
+        content.conversationAvailable = true
+        content.currentState = "thinking"
+        editor.text = "draft"
+        compare(notice.text, "", "microphone state alone is not an accepted reply")
+        content.turns = [{speaker: "kestrel", text: "", state: "thinking"}]
+        content.currentState = "inactive"
+        compare(notice.text, "Sending stops the current reply.")
+        compare(announcements.join("|"), "Sending stops the current reply.")
+        announcements.length = 0
+        content.focusComposer()
+        mouseClick(send)
+        compare(notice.text, "Sending…")
+        compare(announcements.join("|"), "Sending…")
+        compare(requests.length, 1)
+        editor.text = "changed while pending\nsecond\nthird\nfourth\nfifth\nsixth"
+        verify(waitForRendering(content))
+        keyClick(Qt.Key_End, Qt.ControlModifier)
+        editor.select(editor.length - 6, editor.length - 1)
+        const selection = editor.selectedText
+        const scroll = findChild(content, "composerScroll").contentItem
+        const scrollY = scroll.contentY
+        verify(scrollY > 0, "hide must preserve an actually scrolled editor")
+        const pendingDraft = editor.text
+        content.visible = false
+        content.announcementsEnabled = false
+        service.finishSubmit(requests[0], "uncertain")
+        compare(editor.text, pendingDraft)
+        compare(editor.selectedText, selection)
+        compare(scroll.contentY, scrollY)
+        compare(announcements.join("|"), "Sending…", "hidden completion is silent")
+        const uncertain = "Delivery could not be confirmed. Check the conversation before sending again; an action may already have run."
+        compare(notice.text, uncertain)
+        content.visible = true
+        content.announcementsEnabled = true
+        content.focusComposer()
+        compare(editor.cursorPosition, editor.length)
+        compare(requests.length, 1, "reopen must never resubmit")
+        compare(announcements.join("|"), "Sending…", "reopen must not announce backlog")
+        content.turns = [{speaker: "kestrel", text: "", state: "speaking"}]
+        compare(notice.text, uncertain, "outcome owns the caption until an edit or send")
+        keyClick(Qt.Key_X)
+        compare(notice.text, "Sending stops the current reply.")
+        announcements.length = 0
+        mouseClick(send)
+        service.finishSubmit(requests[1], "busy")
+        compare(announcements.length, 2, "one pending and one result, without transient hint")
+        compare(announcements[0], "Sending…")
+        compare(announcements[1], "Message not accepted. Kestrel is finishing a change. Try Send again.")
+        service.submitCompleted(requests[1], "busy")
+        compare(announcements.length, 2, "a repeated completion is silent")
+        unloadLoader.active = true
+        verify(unloadLoader.item !== null)
+        unloadLoader.item.service = service
+        const doomed = findChild(unloadLoader.item, "composer")
+        doomed.text = "unsaved draft"
+        unloadLoader.item.focusComposer()
+        mouseClick(findChild(unloadLoader.item, "sendMessage"))
+        compare(requests.length, 3)
+        verify(service.submitPending)
+        unloadLoader.active = false
+        compare(unloadLoader.item, null)
+        unloadLoader.active = true
+        verify(unloadLoader.item !== null)
+        unloadLoader.item.service = service
+        compare(findChild(unloadLoader.item, "composer").text, "")
+        compare(requests.length, 3, "destruction and recreation never resend")
+        service.finishSubmit(requests[2], "accepted")
+        compare(findChild(unloadLoader.item, "composer").text, "")
+        unloadLoader.active = false
+    }
+
+    function test_typed_and_spoken_provenance() {
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 320, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", conversationMessage: "",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            conversationAvailable: true, currentState: "idle", textScale: 2
+        })
+        verify(content !== null)
+        content.turns = [{speaker: "you", text: "A", state: "complete", source: "typed"}]
+        tryVerify(function() { return findChild(content, "turnBubble0") !== null })
+        const transcript = findChild(content, "transcript")
+        mouseClick(transcript, 2, 2)
+        compare(findChild(content, "turnProvenance0").visible, false,
+            "typed messages must not claim microphone provenance")
+        compare(findChild(content, "turnRow0").Accessible.description, "Typed message")
+        compare(findChild(content, "turnProvenance0").item, null)
+        compare(findChild(content, "turnProvenanceTooltip0").item, null)
+        compare(findChild(content, "turnBubble0").width, 44,
+            "a typed bubble must not reserve the wider doubled caption")
+        compare(findChild(content, "turnBubble0").height,
+            findChild(content, "turnText0").implicitHeight + 16)
+        content.turns = [{speaker: "you", text: "A", state: "complete", source: "spoken"}]
+        tryVerify(function() {
+            const glyph = findChild(content, "turnProvenance0")
+            return glyph !== null && glyph.visible
+        })
+        const provenance = findChild(content, "turnProvenance0")
+        compare(provenance.item.text, "󰍬")
+        compare(findChild(content, "turnRow0").Accessible.description, "Spoken message")
+        compare(findChild(content, "turnBubble0").width, 56)
+        compare(findChild(content, "turnBubble0").height,
+            findChild(content, "turnText0").implicitHeight + 16 + 32 + 4)
+        compare(findChild(content, "turnProvenanceTooltip0").item.text, "Spoken message")
+        const literal = "<b>Typed & literal</b>\nSecond line"
+        content.turns = [{speaker: "you", text: literal, state: "complete", source: "typed"},
+            {speaker: "kestrel", text: literal, state: "complete"},
+            {speaker: "you", text: "Unfinished", state: "thinking", source: "spoken"}]
+        tryVerify(function() { return findChild(content, "turnText2") !== null })
+        for (let i = 0; i < 3; i++) {
+            compare(findChild(content, "turnProvenance" + i).visible, false)
+            compare(findChild(content, "turnBubble" + i).height,
+                findChild(content, "turnText" + i).implicitHeight + 16)
+        }
+        compare(findChild(content, "turnProvenanceTooltip0").item, null)
+        compare(findChild(content, "turnRow0").Accessible.name, "You: " + literal)
+        compare(findChild(content, "turnRow1").Accessible.name, "Kestrel: " + literal)
+        compare(findChild(content, "turnRow1").Accessible.description, "")
+        compare(findChild(content, "turnText0").text, literal)
+        compare(findChild(content, "turnText0").textFormat, Text.PlainText)
+    }
+
     function test_windhover_bubbles_and_scaling() {
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -75,8 +398,8 @@ TestCase {
         })
         verify(content !== null)
         const literal = '<b>Literal</b>\n' + "unbroken".repeat(80)
-        const turns = [{speaker: "you", text: "A", state: "complete"},
-            {speaker: "you", text: literal, state: "complete"},
+        const turns = [{speaker: "you", text: "A", state: "complete", source: "spoken"},
+            {speaker: "you", text: literal, state: "complete", source: "spoken"},
             {speaker: "kestrel", text: "B", state: "complete"},
             {speaker: "kestrel", text: literal, state: "complete"}]
         content.turns = turns
@@ -199,7 +522,7 @@ TestCase {
         let marks = null
         let bubble = null
         function accept(turns) {
-            verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "live-session", turns: turns}) + "\n"))
+            verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "live-session", turns: turns}) + "\n"))
             tryCompare(content, "displayedTurns", service.turns)
             verify(waitForRendering(content))
             tail = findChild(content, "turnTail1")
@@ -310,7 +633,7 @@ TestCase {
         verify(service.acceptStatusChunk("L"))
         accept([])
         compare(ghost.visible, true)
-        compare(textWith(content, "Say something. Kestrel replies after you."), null)
+        compare(textWith(content, "Say something, or type below. Kestrel replies out loud."), null)
         content.motionEnabled = false
         compare(findChild(inflow, "listeningLoop").running, false)
         content.motionEnabled = true
@@ -359,7 +682,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         verify(service.acceptStatusChunk("D"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "fit-session", turns: []}) + "\n"))
         const content = createTemporaryObject(conversationComponent, window.contentItem, {
             width: Qt.binding(function() { return window.width }),
             height: Qt.binding(function() { return window.height }),
@@ -402,7 +725,9 @@ TestCase {
         mouseMove(content, 1, content.height - 1)
         mouseMove(microphone, 10, microphone.height / 2)
         readable(microphoneTooltip, inactive, data.panelWidth === 320 || data.pixelSize === 24)
-        content.focusClose()
+        content.focusComposer()
+        verify(findChild(content, "composer").activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
         verify(findChild(content, "transcript").activeFocus, "native tooltips add no focus stop")
@@ -420,8 +745,8 @@ TestCase {
         compare(microphoneTooltip.visible, false)
         mouseMove(close, close.width / 2, close.height / 2)
         tryCompare(moveTooltip, "visible", false)
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session",
-            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete"}]}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "fit-session",
+            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete", source: "spoken"}]}) + "\n"))
         tryVerify(function() { return findChild(content, "turnProvenance0") !== null })
         const provenance = findChild(content, "turnProvenance0")
         verify(waitForRendering(provenance))
@@ -435,7 +760,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         verify(service.acceptStatusChunk("D"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "tooltip-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "tooltip-session", turns: []}) + "\n"))
         const destroyedBefore = destroyedTooltips
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -479,7 +804,9 @@ TestCase {
         mouseMove(close, close.width / 2, close.height / 2)
         tryCompare(moveTooltip.item, "visible", false)
         compare(microphoneTooltip.item.visible, false)
-        content.focusClose()
+        content.focusComposer()
+        verify(findChild(content, "composer").activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
         verify(findChild(content, "transcript").activeFocus, "passive targets introduce no keyboard stop")
@@ -514,7 +841,7 @@ TestCase {
     function test_microphone_icons_follow_verified_status() {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "header-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "header-session", turns: []}) + "\n"))
         verify(service.acceptStatusChunk("D"))
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -613,7 +940,7 @@ TestCase {
         }
         let content = makeContent()
         shown(content, true)
-        const history = [{speaker: "you", text: "Existing owner turn.", state: "complete"},
+        const history = [{speaker: "you", text: "Existing owner turn.", state: "complete", source: "spoken"},
             {speaker: "kestrel", text: "Existing reply.", state: "complete"}]
         session(content, "session-a")
         content.turns = history
@@ -667,7 +994,7 @@ TestCase {
         content.turns = history
         settle()
         compare(JSON.stringify(requests), "[]", "new session history must be silent")
-        content.turns = history.concat([{speaker: "you", text: "New live turn.", state: "complete"}])
+        content.turns = history.concat([{speaker: "you", text: "New live turn.", state: "complete", source: "spoken"}])
         settle()
         compare(JSON.stringify(requests), '["You: New live turn."]')
         requests.length = 0
@@ -689,16 +1016,16 @@ TestCase {
         content.turns = Qt.binding(function() { return service.turns })
         content.conversationSession = Qt.binding(function() { return service.conversationSession })
         shown(content, true)
-        const wired = [{speaker: "you", text: "Existing turn.", state: "complete"}]
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session", turns: wired}) + "\n"))
+        const wired = [{speaker: "you", text: "Existing turn.", state: "complete", source: "spoken"}]
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "same-session", turns: wired}) + "\n"))
         settle()
         compare(JSON.stringify(requests), "[]", "accepted history must be a silent baseline")
         const returned = wired.concat([{speaker: "kestrel", text: "Completed during disconnection.", state: "complete"}])
         verify(service.acceptConversationChunk(JSON.stringify({unavailable: "Conversation unavailable. Reopen the panel."})
-            + "\n" + JSON.stringify({version: 1, session: "same-session", turns: returned}) + "\n"))
+            + "\n" + JSON.stringify({version: 2, session: "same-session", turns: returned}) + "\n"))
         settle()
         compare(JSON.stringify(requests), "[]", "same-session reconnect history must stay silent when records share a chunk")
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session",
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "same-session",
             turns: returned.concat([{speaker: "kestrel", text: "After batched reconnect.", state: "complete"}])}) + "\n"))
         settle()
         compare(JSON.stringify(requests), '["Kestrel: After batched reconnect."]')
@@ -720,7 +1047,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)
         verify(service.acceptStatusChunk("I"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "panel-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "panel-session", turns: []}) + "\n"))
         const component = Qt.createComponent(Qt.resolvedUrl("../../desktop/Conversation.qml"))
         compare(component.status, Component.Ready, component.errorString())
         const content = createTemporaryObject(component, this, {
@@ -743,14 +1070,16 @@ TestCase {
         compare(transcript.Accessible.role, Accessible.Document)
         verify(service.acceptStatusChunk("D"))
         verify(waitForRendering(content))
-        const inactivePrompt = textWith(content, "Press Super + Shift + K to start a conversation.")
+        const inactivePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
         const inactiveStatus = findChild(content, "microphoneStatus")
         verify(inactivePrompt !== null && inactivePrompt.visible)
         verify(inactiveStatus !== null && inactiveStatus.visible)
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
         compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
-        content.focusClose()
+        content.focusComposer()
+        verify(findChild(content, "composer").activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
         keyClick(Qt.Key_Tab)
         verify(transcript.activeFocus)
@@ -768,10 +1097,10 @@ TestCase {
         compare(service.conversationAvailable, true)
         verify(service.acceptStatusChunk("I"))
         verify(waitForRendering(content))
-        const activePrompt = textWith(content, "Say something. Kestrel replies after you.")
+        const activePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
         verify(activePrompt !== null && activePrompt.visible)
         const literal = '<b>Literal text</b> https://example.invalid ' + "unbroken".repeat(80)
-        const turns = [{speaker: "you", text: literal, state: "complete"}]
+        const turns = [{speaker: "you", text: literal, state: "complete", source: "spoken"}]
         for (let i = 0; i < 18; i++) turns.push({speaker: "kestrel", text: "Literal reply " + i + ".", state: "complete"})
         content.turns = turns
         tryVerify(function() { return transcript.contentHeight > transcript.height })
@@ -803,7 +1132,28 @@ TestCase {
         verify(waitForRendering(content))
         tryVerify(function() { return findChild(content, "turnText19") !== null })
         compare(transcript.contentY, 0, "reading older turns must not jump on new content")
+        const editor = findChild(content, "composer")
+        editor.text = "one\ntwo\nthree\nfour\nfive\nsix"
+        verify(waitForRendering(content))
+        compare(transcript.contentY, 0, "composer growth preserves earlier reading position")
+        editor.forceActiveFocus()
+        const draft = editor.text
+        keyClick(Qt.Key_PageDown)
+        verify(transcript.contentY > 0)
+        keyClick(Qt.Key_PageUp)
+        compare(transcript.contentY, 0)
+        compare(editor.text, draft, "editor Page keys scroll transcript without editing")
+        verify(editor.activeFocus)
+        transcript.forceActiveFocus()
         keyClick(Qt.Key_End)
+        editor.clear()
+        verify(waitForRendering(content))
+        tryVerify(function() { return transcript.atYEnd }, 5000, "composer shrink follows the live edge")
+        editor.text = "one\ntwo\nthree\nfour\nfive\nsix"
+        verify(waitForRendering(content))
+        tryVerify(function() { return transcript.atYEnd }, 5000, "composer growth follows only from the live edge")
+        editor.clear()
+        verify(waitForRendering(content))
         verify(transcript.atYEnd, "End: y=" + transcript.contentY + " height=" + transcript.contentHeight + " viewport=" + transcript.height + " focus=" + transcript.activeFocus)
         content.turns = more.concat([{speaker: "kestrel", text: "Final terminal reply.", state: "failed"}])
         verify(waitForRendering(content))
@@ -813,7 +1163,11 @@ TestCase {
         keyClick(Qt.Key_Escape)
         compare(closeSpy.count, 5)
         keyClick(Qt.Key_Tab)
+        verify(findChild(content, "composer").activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(findChild(content, "composer").activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(transcript.activeFocus)
 
@@ -868,6 +1222,8 @@ TestCase {
         const noticeBottom = notice.mapToItem(transcript, 0, 0).y + notice.height
         verify(noticeBottom > 0 && noticeBottom <= transcript.height, "final notice bottom " + noticeBottom)
         keyClick(Qt.Key_Tab)
+        verify(editor.activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
         keyClick(Qt.Key_Return)
         compare(closeSpy.count, 6)
@@ -875,6 +1231,8 @@ TestCase {
         compare(closeSpy.count, 7)
         keyClick(Qt.Key_Escape)
         compare(closeSpy.count, 8)
+        keyClick(Qt.Key_Backtab)
+        verify(editor.activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(transcript.activeFocus)
         for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {

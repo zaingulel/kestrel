@@ -14,6 +14,77 @@ Item {
     property bool motionPending: false
     property bool motionFailed: false
     property string motionOutput: ""
+    property bool senderPending: false
+    property bool senderStopping: false
+    property int senderAttempt: 0
+    property string senderPayload: ""
+
+    function startSubmit(attemptId, payload) {
+        if (!active || senderPending) return
+        senderPending = true
+        senderStopping = false
+        senderAttempt = attemptId
+        senderPayload = payload
+        sender.stdinEnabled = true
+        sender.running = true
+    }
+
+    function stopSubmit(attemptId) {
+        if (!senderPending || attemptId !== senderAttempt || senderStopping) return
+        senderStopping = true
+        senderPayload = ""
+        sender.running = false
+        if (!sender.running) {
+            finishSubmit(-1, 1)
+            return
+        }
+        senderKill.restart()
+    }
+
+    function finishSubmit(exitCode, exitStatus) {
+        if (!senderPending) return
+        senderKill.stop()
+        const attempt = senderAttempt
+        senderPending = false
+        senderAttempt = 0
+        senderPayload = ""
+        owner.submitExited(attempt, exitCode, exitStatus)
+    }
+
+    Connections {
+        target: root.owner
+        function onSubmitRequested(attemptId, payload) { root.startSubmit(attemptId, payload) }
+        function onSubmitStopRequested(attemptId) { root.stopSubmit(attemptId) }
+    }
+
+    Process {
+        id: sender
+        command: ["/usr/bin/python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/local.kestrel/control.py", "--submit"]
+        onStarted: {
+            root.owner.submitStarted(root.senderAttempt)
+            if (!root.senderStopping) sender.write(root.senderPayload)
+            sender.stdinEnabled = false
+            root.senderPayload = ""
+        }
+        stdout: SplitParser {
+            splitMarker: ""
+            onRead: function(data) {
+                if (root.senderPending) root.owner.acceptSubmitChunk(root.senderAttempt, data)
+            }
+        }
+        stderr: SplitParser { splitMarker: "" }
+        onExited: function(exitCode, exitStatus) { root.finishSubmit(exitCode, exitStatus) }
+        // Failed startup has no public error signal, so absent a receipt its outcome stays uncertain.
+        onRunningChanged: if (!running && root.senderPending) root.finishSubmit(-1, 1)
+    }
+    Timer {
+        id: senderKill
+        interval: 1000
+        onTriggered: {
+            // A starting QProcess can still have PID zero; never signal its process group.
+            if (sender.processId > 0) sender.signal(9)
+        }
+    }
 
     function start() {
         if (!owner || active) return
@@ -165,5 +236,7 @@ Item {
         watcher.running = false
         conversation.running = false
         preference.running = false
+        senderPayload = ""
+        sender.running = false
     }
 }
