@@ -1603,7 +1603,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.conversation_output = Mock()
         llm.revoke = Mock()
         llm.local_actions = Mock(close=AsyncMock(), drain=AsyncMock())
-        llm.channel = Mock(begin_conversation=AsyncMock(return_value=True), prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), failure=None, preparation=None)
+        llm.channel = Mock(begin_conversation=AsyncMock(return_value=True), prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), known_unavailable=Mock(return_value=False), failure=None, preparation=None)
         stt.drain = AsyncMock()
         stt.failure = None
 

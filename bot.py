@@ -607,6 +607,10 @@ class HermesRequestChannel:
         if self.output is output:
             self.output = None
 
+    def known_unavailable(self) -> bool:
+        return (bool(self.failure) and (self.reader is None or self.reader.done())
+                and (self.process is None or self.process.returncode is not None))
+
     async def drain(self):
         if self.reader is not None:
             task = self.reader
@@ -728,8 +732,7 @@ class HermesRequestChannel:
             self.preparation = None
         errors = []
         reader = self.reader
-        known_unavailable = (reader is not None and reader.done() and self.failure
-                             and (self.process is None or self.process.returncode is not None))
+        known_unavailable = self.known_unavailable()
         if reader is not None:
             reader.cancel()
             try:
@@ -1294,8 +1297,7 @@ class VoiceConversations:
             return_exceptions=True,
         )
         native = await asyncio.gather(self.channel.drain(), return_exceptions=True)
-        known_unavailable = (self.channel.failure and self.channel.reader is None
-                             and (self.channel.process is None or self.channel.process.returncode is not None))
+        known_unavailable = self.channel.known_unavailable()
         if not known_unavailable:
             outcomes.extend(readiness)
             outcomes.extend(native)

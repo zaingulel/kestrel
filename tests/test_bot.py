@@ -1988,7 +1988,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         engine = patch.object(self, 'startup_service', side_effect=lambda: Mock(
             local_actions=Mock(close=AsyncMock(), drain=AsyncMock()),
             channel=Mock(prepare=AsyncMock(), begin_conversation=AsyncMock(return_value=True),
-                         close=AsyncMock(), drain=AsyncMock(), failure=None, reader=None, preparation=None),
+                         close=AsyncMock(), drain=AsyncMock(), known_unavailable=Mock(return_value=False),
+                         failure=None, reader=None, preparation=None),
         ))
         engine.start()
         self.addCleanup(engine.stop)
