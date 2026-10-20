@@ -113,7 +113,7 @@ The status indicator is an accessible button named `Open panel` or `Close panel`
 | Listening | `Kestrel: listening to you. Microphone in use.` |
 | Thinking | `Kestrel: thinking about your message. Microphone in use.` |
 | Speaking | `Kestrel: speaking. Microphone in use.` |
-| Trouble | `Kestrel: brain trouble. A reply could not be completed. Microphone in use.` |
+| Trouble | `Kestrel needs attention. Microphone in use.` |
 
 ### Conversation panel
 
@@ -138,7 +138,7 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 | Listening | `Listening. Microphone in use.` |
 | Thinking | `Thinking. Microphone in use.` |
 | Speaking | `Speaking. Microphone in use.` |
-| Trouble | `Brain trouble. Microphone in use.` |
+| Trouble | `Kestrel needs attention. Microphone in use.` |
 
 Every pointer target is at least 24 by 24.
 
