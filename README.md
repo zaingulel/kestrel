@@ -3,15 +3,15 @@ A local conversation prototype for Omarchy, with speech and the Bonsai brain on 
 
 Bonsai 2 9B runs through the pinned Prism CUDA 12.8 server on the NVIDIA RTX 5080 laptop, with a 64,000-token context and F16 (16-bit floating-point) key and value caches. Hermes uses model alias `bonsai-2-9b` at `http://127.0.0.1:8080/v1`. No Ally connection is needed.
 
-The laptop's local models use the NVIDIA RTX 5080:
+Bonsai and voice generation use the laptop's NVIDIA RTX 5080; speech recognition uses its CPU (central processing unit):
 
 | Component | Model directory | Runtime |
 | --- | --- | --- |
 | Bonsai 2 9B, conversation | `.runtime/models/bonsai-2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf` | `.runtime/tools/bonsai-prism-b10777-e3de715/cuda-12.8/llama-prism-b10777-e3de715/llama-server` |
-| [Nemotron Speech Streaming English 0.6B](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b), speech to text | `.runtime/models/nemotron` | `.runtime/asr-venv` |
+| [Nemotron Speech Streaming English 0.6B](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b), Q8 CPU speech to text | `.runtime/models/nemotron-q8` | `.runtime/voice-venv` with the pinned native CPU library |
 | [VoxCPM2](https://github.com/OpenBMB/VoxCPM), text to speech | `.runtime/models/voxcpm2` | `.runtime/voice-venv` |
 
-Both speech environments use project-local Python 3.12 and CUDA-enabled PyTorch 2.11. Recognition uses Transformers 5.19, which supports Nemotron's streaming model. Voice generation uses Transformers 4.57 in a separate environment to keep its dependencies independent. Model revisions are recorded in `.runtime/models/manifest.json`; installed package versions are in `.runtime/asr-installed.txt` and `.runtime/voice-installed.txt`. Runtime files are excluded from Git.
+Voice uses project-local Python 3.12, CUDA-enabled PyTorch 2.11 and Transformers 4.57. Recognition runs a standard-library worker in that voice interpreter, loading the pinned Q8 model through the native CPU library under `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu`. It needs no separate Python dependency environment. The worker pins the recognition model's size and SHA-256 hash; voice model revisions are recorded in `.runtime/models/manifest.json` and voice package versions in `.runtime/voice-installed.txt`. Keep the old GPU (graphics processing unit) recognition assets and `.runtime/asr-venv` intact; startup does not download or repair recognition assets. Runtime files are excluded from Git.
 
 Conversation runs through a direct Hermes Agent 0.22.2 child process, started by `bot.py` through `hermes_worker.py`. The checkout owns `.runtime/hermes-0.22.2/source`, its interpreter at `.runtime/hermes-0.22.2/venv/bin/python`, and the interpreter's backing files under `.runtime/hermes-0.22.2/managed`. The source must be at exact release commit `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, with no tracked changes. Before importing the engine, readiness checks that identity and requires `run_agent` to resolve to that source's `run_agent.py`. The release reports package metadata `0.0.0`, which does not identify the reviewed source. These checks establish release identity, not cryptographic attestation of the dependency environment. Kestrel's private conversation-history adaptation is release-specific; upgrades require native compatibility checks. A missing interpreter or refused identity requires reinstalling the pinned source and recreating its environment from the upstream frozen lock with Python 3.14.7 and `HERMES_RUNTIME_DIR` set to the owned `managed` directory, then restarting Kestrel. Keep the interpreter backing in that owned layout, outside disposable temporary folders. Preparing a trial checkout does not upgrade the installed production services.
 
@@ -47,6 +47,15 @@ install -Dm644 systemd/kestrel-voice.service ~/.config/systemd/user/kestrel-voic
 systemctl --user daemon-reload
 systemctl --user enable --now kestrel-voice.service
 ```
+
+The tracked units above use the stable checkout. A retained installation override can select another voice checkout and its voice log destination. Inspect the effective installation before using shortcut or relative storage paths:
+
+```sh
+systemctl --user show kestrel-voice.service -p WorkingDirectory -p ExecStart -p DropInPaths
+systemctl --user cat kestrel-voice.service
+```
+
+Use the effective `WorkingDirectory` as the active voice checkout: its `run-voice.sh`, `desktop/control.py`, plugin directory `desktop/`, notes `.runtime/hermes-memory/` and traces `.runtime/hermes-traces/` belong together. For a retained installation, keep these paths and `.runtime/voice-server.log` in that checkout; inspect `StandardOutput` in the installed unit and drop-ins for the actual voice log destination. The brain unit retains its own checkout and `.runtime/brain-server.log`. Keep the retained installation and its private storage when cleaning up a job worktree.
 
 The enabled voice service starts at graphical login after reboot and waits for the desktop session environment before launching voice. This also starts microphone use, including during speech startup. It first starts Bonsai and waits for a successful HTTP (Hypertext Transfer Protocol) 200 response from `/health`, bounded by the brain's 130-second startup allowance. The readiness command ignores curl configuration and proxies, discards the response body and refuses redirects. Managed readiness also verifies that the main process identifier (PID) supplied by systemd owns the listening socket at `127.0.0.1:8080`, using installed `lsof` and coreutils `timeout`. Missing, invalid or mismatched ownership refuses readiness. This verifies HTTP readiness and socket ownership at startup, not model identity. Before creating Hermes, managed voice checks that its owned `kestrel-brain.service` is active. Failed or unavailable status leaves local controls available but sends neither preparation nor user conversation to the port; an ordinary turn receives the engine-failure advice. Ownership and unit status are startup snapshots, not ongoing server identity verification; they do not prevent a later local takeover. Neither service restarts automatically.
 
@@ -139,7 +148,7 @@ MPLCONFIGDIR="$PWD/.runtime/cache/matplotlib" \
   --output .runtime/samples/voice-demo.wav
 ```
 
-Use `.runtime/asr-venv/bin/python` with NVIDIA's documented Transformers interface to load the local recognition model. Specify `local_files_only=True` and move the model to `cuda` to run without network downloads or a CPU fallback.
+The service launches `asr_worker.py` through `.runtime/voice-venv/bin/python`. It loads `.runtime/models/nemotron-q8/nemotron-speech-streaming-en-0.6b.q8_0.gguf` through `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib/libnemo_speech_asr_c.so.1`, explicitly selecting CPU recognition. Missing or mismatched assets refuse startup with advice; the worker does not download or repair them. The caller bounds each recognition exchange, including pipe drainage and response reading, to 60 seconds.
 
 Recorded-sample recognition has no verified runnable recipe here; do not count it as current evidence. Shortcut installation and actual dispatch, native visual and accessible-tree acceptance, microphone/speaker behaviour, live Bonsai replies and the quality of its automatic note decisions require separate installed and live acceptance. Automated boundary checks do not establish those results. Controlled-provider tests do not prove live Bonsai answers or actual login execution after reboot. Live recognition accuracy, physical playback and microphone-to-speaker latency require a spoken check. The service logs a numeric pipeline-response duration in seconds for each reply, measured by Pipecat from detected user silence to its bot-speaking frame. That frame is a pipeline proxy, not physical speaker onset; audible responsiveness still needs a spoken check.
 
@@ -239,14 +248,14 @@ Help executes no tool and sends neither the request nor its reply to brain histo
 
 The optional `local.kestrel` Omarchy plugin in `desktop/` displays Kestrel's status immediately before the clock in the center of the native bar. Install that directory through Omarchy's manual-plugin mechanism at `~/.config/omarchy/plugins/local.kestrel`, enable the plugin and place `local.kestrel` before `omarchy.clock` in `bar.layout.center`, preserving the clock anchor and unrelated settings. The voice service works without the plugin. Click the indicator to open or hide the read-only conversation panel. Finalized user turns and Kestrel's speech-output text appear as they happen through the [private conversation feed](#private-conversation-feed). All text is plain text, with no active links or composer. Healthy empty, unavailable, interrupted, incomplete and oversized states use the [design system's fixed messages](docs/DESIGN-SYSTEM.md#conversation-panel), independently of microphone status.
 
-For keyboard access, first verify `Super + Shift + K` and `Super + F12` are unused in all compositor submaps. These are installation instructions, not a claim that either binding is installed or verified. Add these bindings to `~/.config/hypr/bindings.lua`, preserving existing bindings:
+For keyboard access, first verify `Super + Shift + K` and `Super + F12` are unused in all compositor submaps. These are installation instructions, not a claim that either binding is installed or verified. The example below uses the default stable checkout. For a retained installation override, use the effective voice checkout from the service inspection above for both the `local.kestrel` plugin target and the absolute `desktop/control.py` path. Add these bindings to `~/.config/hypr/bindings.lua`, preserving existing bindings:
 
 ```lua
 o.bind("SUPER + SHIFT + K", "Kestrel start or end conversation", "/usr/bin/python3 /home/zain/Projects/zaingulel/kestrel/desktop/control.py --toggle")
 o.bind("SUPER + F12", "Kestrel panel", "omarchy-shell shell toggle local.kestrel")
 ```
 
-`desktop/control.py --toggle` is the standard-library control command from the stable integration checkout. It contacts only the running service, makes one attempt and does not start the service. A successful `starting` or `inactive` acknowledgement describes the accepted requested state. Refusal, missing service or an ambiguous response fails with fixed advice and attempts a silent native notification; it never retries a toggle automatically.
+`desktop/control.py --toggle` is the standard-library control command from the selected voice checkout. It contacts only the running service, makes one attempt and does not start the service. A successful `starting` or `inactive` acknowledgement describes the accepted requested state. Refusal, missing service or an ambiguous response fails with fixed advice and attempts a silent native notification; it never retries a toggle automatically.
 
 Reload with `hyprctl reload` and require `hyprctl configerrors` to remain clean. `Super + F12` opens or hides the panel and opening focuses **Close panel**. `Tab` and `Shift + Tab` cycle between close and transcript; `Enter` or `Space` activates close. In the transcript, arrows, `PageUp`, `PageDown`, `Home` and `End` scroll. `Escape`, native window close and the close button hide the panel and return compositor focus to the prior window. Updates follow the bottom only while it is already being read; earlier text stays in place.
 
@@ -312,10 +321,10 @@ The notes directory must be real, owned by the current account and mode `0700`. 
 
 Each activation requests a fresh note snapshot for its new native agent. Ordinary brain turns wait for that activation's successful native readiness; local controls and help can work while it is pending. Failure leaves the engine unavailable without a snapshot claim or retry. Caller history, repeat and panel state start empty. An already-accepted turn can finish a note write while dismissal drains it, before the next snapshot is created. Preparation has no note access. The temporary Hermes home links only its native notes directory to this fixed store; orderly cleanup removes the temporary link and home, preserving the notes.
 
-Notes persist across dismissal and service restarts without automatic pruning. The native memory tool can revise or remove entries during accepted turns; you can also inspect, edit or delete the files yourself. To inspect or change them when ready, dismiss an active conversation with **Super + Shift + K**, then stop the voice service before using ordinary local file operations. These commands are operator instructions; run them from the stable checkout only when you intend to stop the service:
+Notes persist across dismissal and service restarts without automatic pruning. The native memory tool can revise or remove entries during accepted turns; you can also inspect, edit or delete the files yourself. To inspect or change them when ready, dismiss an active conversation with **Super + Shift + K**, then stop the voice service before using ordinary local file operations. These commands are operator instructions; inspect the effective installation above and run them from its voice checkout only when you intend to stop the service:
 
 ```sh
-cd ~/Projects/zaingulel/kestrel
+cd -- "$(systemctl --user show kestrel-voice.service -p WorkingDirectory --value)"
 systemctl --user stop kestrel-voice.service
 ```
 

@@ -53,8 +53,7 @@ supervised long-lived waits. For subprocesses, account separately for pipe drain
 escalation to killing, and reaping; a timeout alone does not clean up the child, and unbounded buffering defeats
 output limits. Remove owned temporary homes after their children exit.
 
-Keep protocol standard output separate from diagnostic standard error. Preserve the isolated voice, recognition
-and Hermes dependency environments described in [README.md](../README.md). Private application programming
+Keep protocol standard output separate from diagnostic standard error. Preserve the isolated voice and Hermes dependency environments described in [README.md](../README.md). Recognition uses a standard-library CPU worker process in the voice interpreter, with no separate dependency environment. Private application programming
 interface access needs a short rationale and targeted compatibility checks on dependency or Python upgrades,
 including wire checks for the existing `StreamReader._transport` use. Keep the existing test frameworks; the
 [testing strategy](TESTING-STRATEGY.md) owns verification recipes and evidence selection.
