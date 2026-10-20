@@ -4395,6 +4395,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                     self.assertTrue(committed.empty())
                                     self.assertEqual(contexts[-1], [], 'Local speech stays outside brain history')
                                     self.assertEqual(len(attempts), 1 if failing else index + 1)
+                                    if index == 0:
+                                        transition_count = len(transitions)
+                                        passive_frame = DataFrame()
+                                        await transport.output().push_frame(passive_frame)
+                                        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), passive_frame)
+                                        self.assertEqual(len(transitions), transition_count,
+                                                         'Passive output cannot republish indicator status')
                                     if failing:
                                         if index == 0:
                                             first_fault = next((position for position, transition in enumerate(transitions)
