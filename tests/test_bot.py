@@ -3758,268 +3758,273 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await close()
 
     async def test_panel_attributes_each_synthesis_to_delivered_audio(self):
-        loop = asyncio.get_running_loop()
-        release_failure, release_provider = threading.Event(), threading.Event()
-        release_write = asyncio.Event()
-        for release in (release_failure, release_provider, release_write):
-            self.addCleanup(release.set)
-        provider_paused = asyncio.Event()
-        context_started, context_stopped, context_retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        started_contexts, stopped_contexts, retired_contexts = [], [], []
-        native_completed = speech.VoxCPMTTS.on_audio_context_completed
+        for scenario in (
+            'Failure before synthesis audio.',
+            'Audible segment after synthesis failure.',
+            'Partial synthesis failure.',
+            'Interrupted synthesis failure.',
+            'Delayed synthesis failure.',
+            'Recreated synthesis context failure.',
+            'Healthy synthesis.',
+        ):
+            with self.subTest(scenario=scenario):
+                loop = asyncio.get_running_loop()
+                release_failure, release_provider = threading.Event(), threading.Event()
+                native_failure = threading.Event()
+                release_write = asyncio.Event()
+                for release in (release_failure, release_provider, release_write):
+                    self.addCleanup(release.set)
+                provider_paused = asyncio.Event()
+                context_started, context_stopped, context_retired = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                started_contexts, stopped_contexts, retired_contexts = [], [], []
+                native_completed = speech.VoxCPMTTS.on_audio_context_completed
 
-        async def observe_completed(voice, context_id):
-            await native_completed(voice, context_id)
-            retired_contexts.append(context_id)
-            context_retired.set()
+                async def observe_completed(voice, context_id):
+                    await native_completed(voice, context_id)
+                    retired_contexts.append(context_id)
+                    context_retired.set()
 
-        retirement = patch.object(speech.VoxCPMTTS, 'on_audio_context_completed', observe_completed)
-        retirement.start()
-        self.addCleanup(retirement.stop)
+                retirement = patch.object(speech.VoxCPMTTS, 'on_audio_context_completed', observe_completed)
 
-        def recreated():
-            yield {'content': '[delivery:neutral]\nSpoken first. Failed recreated'}, None
-            loop.call_soon_threadsafe(provider_paused.set)
-            if not release_provider.wait(45):
-                raise AssertionError('Synthetic provider context was never released')
-            yield {'content': ' context.'}, None
-            yield {}, 'stop'
+                def recreated():
+                    yield {'content': '[delivery:neutral]\nSpoken first. Failed recreated'}, None
+                    loop.call_soon_threadsafe(provider_paused.set)
+                    if not release_provider.wait(45):
+                        raise AssertionError('Synthetic provider context was never released')
+                    yield {'content': ' context.'}, None
+                    yield {}, 'stop'
 
-        brain = ScriptedBrain([
-            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nSpoken first. Unheard second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nSpoken first. Failed before audio.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. B'}, None),
-             ({'content': 'oundary second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. U'}, None),
-             ({'content': 'nheard second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nBoundary first. Failed after audio. U'}, None),
-             ({'content': 'nheard second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nSpoken first. Failed after stop.'}, None), ({}, 'stop')],
-            recreated(),
-            [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
-            [({'content': '[delivery:neutral]\nClean later.'}, None), ({}, 'stop')],
-        ])
-        self.addCleanup(brain.close)
+                if scenario == 'Failure before synthesis audio.':
+                    replies = [[({'content': '[delivery:neutral]\nSpoken first. Failed before audio.'}, None), ({}, 'stop')]]
+                elif scenario == 'Audible segment after synthesis failure.':
+                    replies = [[({'content': '[delivery:neutral]\nBoundary first. Failed after audio. B'}, None),
+                                ({'content': 'oundary second.'}, None), ({}, 'stop')]]
+                elif scenario in ('Partial synthesis failure.', 'Interrupted synthesis failure.'):
+                    replies = [[({'content': '[delivery:neutral]\nBoundary first. Failed after audio. U'}, None),
+                                ({'content': 'nheard second.'}, None), ({}, 'stop')]]
+                elif scenario == 'Delayed synthesis failure.':
+                    replies = [[({'content': '[delivery:neutral]\nSpoken first. Failed after stop.'}, None), ({}, 'stop')]]
+                elif scenario == 'Recreated synthesis context failure.':
+                    replies = [recreated()]
+                else:
+                    replies = [
+                        [({'content': '[delivery:neutral]\nSpoken first. Unheard second.'}, None), ({}, 'stop')],
+                        [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
+                        [({'content': '[delivery:neutral]\nBoundary first. Boundary second.'}, None), ({}, 'stop')],
+                        [({'content': '[delivery:neutral]\nClean later.'}, None), ({}, 'stop')],
+                    ]
+                brain = ScriptedBrain([
+                    [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+                    *replies,
+                ])
+                self.addCleanup(brain.close)
 
-        def finite_chunks(**kwargs):
-            if kwargs['text'] in ('Failed before audio.', 'Failed recreated context.'):
-                raise RuntimeError('Synthetic synthesis failure before audio')
-            if kwargs['text'] == 'Failed after stop.':
-                if not release_failure.wait(45):
-                    raise AssertionError('Synthetic delayed failure was never released')
-                raise RuntimeError('Synthetic synthesis failure after native stop')
-            if kwargs['text'] == 'Failed after audio.':
-                yield np.full(2340, 0.25, dtype=np.float32)
-                raise RuntimeError('Synthetic synthesis failure after partial audio')
-            if kwargs['text'] != 'Unheard second.':
-                value = 0.25 if kwargs['text'] == 'Boundary second.' else 0.5
-                yield np.full(5760 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
+                attempts = []
 
-        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
-            transport, _, _, interrupted, _, close = await self.open_session(
-                brain, through_service=True, synthesis_chunks=finite_chunks,
-            )
-            output = transport.output()
-            write = output.write_audio_frame
-            written = []
-            final_write = asyncio.Event()
-            hold_final = False
-            text_frames = []
-            synthesis_failures = []
+                def finite_chunks(**kwargs):
+                    attempts.append(kwargs['text'])
+                    if kwargs['text'] in ('Failed before audio.', 'Failed recreated context.'):
+                        raise RuntimeError('Synthetic synthesis failure before audio')
+                    if kwargs['text'] == 'Failed after stop.':
+                        if not release_failure.wait(45):
+                            raise AssertionError('Synthetic delayed failure was never released')
+                        raise RuntimeError('Synthetic synthesis failure after native stop')
+                    if kwargs['text'] == 'Failed after audio.':
+                        try:
+                            yield np.full(2340, 0.25, dtype=np.float32)
+                            raise RuntimeError('Synthetic synthesis failure after partial audio')
+                        finally:
+                            native_failure.set()
+                    if kwargs['text'] != 'Unheard second.':
+                        value = 0.25 if kwargs['text'] == 'Boundary second.' else 0.5
+                        yield np.full(5760 if kwargs['text'] == 'Spoken first.' else 1500, value, dtype=np.float32)
 
-            @output.event_handler('on_after_push_frame')
-            async def retain_receipt(processor, frame):
-                if isinstance(frame, TTSTextFrame):
-                    text_frames.append(frame)
-                elif isinstance(frame, TTSStartedFrame):
-                    started_contexts.append(frame.context_id)
-                    context_started.set()
-                elif isinstance(frame, TTSStoppedFrame):
-                    stopped_contexts.append(frame.context_id)
-                    context_stopped.set()
-                elif type(frame).__name__ == 'ConversationSynthesisFailedFrame':
-                    synthesis_failures.append(frame)
+                with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime), retirement:
+                    transport, _, _, interrupted, _, close = await self.open_session(
+                        brain, through_service=True, synthesis_chunks=finite_chunks,
+                    )
+                    output = transport.output()
+                    write = output.write_audio_frame
+                    written = []
+                    final_write = asyncio.Event()
+                    hold_final = False
+                    text_frames = []
+                    synthesis_failures = []
 
-            async def observe_write(frame):
-                if hold_final and len(written) == 1:
-                    final_write.set()
-                    await release_write.wait()
-                success = await write(frame)
-                if success:
-                    written.append(frame.audio)
-                return success
+                    @output.event_handler('on_after_push_frame')
+                    async def retain_receipt(processor, frame):
+                        if isinstance(frame, TTSTextFrame):
+                            text_frames.append(frame)
+                        elif isinstance(frame, TTSStartedFrame):
+                            started_contexts.append(frame.context_id)
+                            context_started.set()
+                        elif isinstance(frame, TTSStoppedFrame):
+                            stopped_contexts.append(frame.context_id)
+                            context_stopped.set()
+                        elif type(frame).__name__ == 'ConversationSynthesisFailedFrame':
+                            synthesis_failures.append(frame)
 
-            output.write_audio_frame = observe_write
-            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
-            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+                    async def observe_write(frame):
+                        if hold_final and len(written) == 1:
+                            final_write.set()
+                            await release_write.wait()
+                        success = await write(frame)
+                        if success:
+                            written.append(frame.audio)
+                        return success
 
-            async def rows_until(predicate):
-                async with asyncio.timeout(5):
-                    while True:
-                        snapshot = json.loads(await reader.readline())
-                        if 'turns' in snapshot:
-                            for turn in snapshot['turns']:
-                                if turn['speaker'] == 'kestrel':
-                                    self.assertNotIn('Unheard second.', turn['text'])
-                            if predicate(snapshot['turns']):
-                                return snapshot['turns']
+                    output.write_audio_frame = observe_write
+                    address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+                    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
 
-            async def start(text):
-                interrupted.clear()
-                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                await asyncio.wait_for(interrupted.wait(), 5)
-                await self.finish_user_turn(transport, text)
+                    async def rows_until(predicate):
+                        async with asyncio.timeout(5):
+                            while True:
+                                snapshot = json.loads(await reader.readline())
+                                if 'turns' in snapshot:
+                                    for turn in snapshot['turns']:
+                                        if turn['speaker'] == 'kestrel':
+                                            self.assertNotIn('Unheard second.', turn['text'])
+                                    if len(snapshot['turns']) >= 2 and predicate(snapshot['turns']):
+                                        return snapshot['turns']
 
-            async def matching_context(event, observed, context_id):
-                async with asyncio.timeout(5):
-                    while context_id not in observed:
-                        event.clear()
-                        await event.wait()
+                    async def start(text):
+                        interrupted.clear()
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await asyncio.wait_for(interrupted.wait(), 5)
+                        await self.finish_user_turn(transport, text)
 
-            try:
-                await asyncio.wait_for(asyncio.shield(transport.llm.channel.preparation or transport.llm.channel.reader), bot.ENGINE_TIMEOUT)
-                await start('Mixed synthesis.')
-                rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
-                                        and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(rows[-1]['text'], 'Spoken first.')
-                self.assertEqual(rows[-1]['state'], 'failed')
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
-                stale_text = text_frames[0]
+                    async def matching_context(event, observed, context_id):
+                        async with asyncio.timeout(5):
+                            while context_id not in observed:
+                                event.clear()
+                                await event.wait()
 
-                written.clear()
-                await start('Failure before synthesis audio.')
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Failure before synthesis audio.'
-                                        and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
-                stale_failure = synthesis_failures[-1]
-
-                written.clear()
-                final_write.clear()
-                release_write.clear()
-                hold_final = True
-                await start('Audible segment after synthesis failure.')
-                await asyncio.wait_for(final_write.wait(), 5)
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
-                                        and rows[-1]['text'].startswith('Boundary first.'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'speaking'})
-                self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
-                release_write.set()
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Audible segment after synthesis failure.'
-                                        and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio. Boundary second.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 3840 + bytes(840))
-
-                for interrupt in (False, True):
-                    with self.subTest(exception_interrupted=interrupt):
-                        written.clear()
-                        output.generation_done.clear()
-                        final_write.clear()
-                        release_write.clear()
-                        hold_final = True
-                        prompt = 'Interrupted synthesis failure.' if interrupt else 'Partial synthesis failure.'
-                        await start(prompt)
-                        await asyncio.wait_for(final_write.wait(), 5)
-                        rows = await rows_until(lambda rows: rows[-2]['text'] == prompt
-                                                and rows[-1]['text'].startswith('Boundary first.'))
-                        self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'speaking'})
-                        self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
-                        await asyncio.wait_for(output.generation_done.wait(), 5)
-                        if interrupt:
-                            interrupted.clear()
-                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                            await asyncio.wait_for(interrupted.wait(), 5)
-                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
-                            self.assertEqual(rows[-1]['text'], 'Boundary first. Failed after audio.')
-                            self.assertEqual(len(written), 1)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(transport.llm.channel.preparation or transport.llm.channel.reader), bot.ENGINE_TIMEOUT)
+                        if scenario == 'Failure before synthesis audio.':
+                            await start(scenario)
+                            rows = await rows_until(lambda rows: rows[-2]['text'] == scenario
+                                                    and rows[-1]['state'] in ('complete', 'failed'))
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+                            stale_text = text_frames[0]
+                            stale_failure = synthesis_failures[-1]
+                        elif scenario in ('Audible segment after synthesis failure.',
+                                          'Partial synthesis failure.', 'Interrupted synthesis failure.'):
+                            release_write.clear()
+                            hold_final = True
+                            await start(scenario)
+                            await asyncio.wait_for(final_write.wait(), 5)
+                            rows = await rows_until(lambda rows: rows[-2]['text'] == scenario
+                                                    and rows[-1]['text'].startswith('Boundary first.'))
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'speaking'})
+                            self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                            self.assertTrue(await asyncio.to_thread(native_failure.wait, 5))
+                            if scenario == 'Interrupted synthesis failure.':
+                                interrupted.clear()
+                                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                                await asyncio.wait_for(interrupted.wait(), 5)
+                                rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
+                                self.assertEqual(rows[-1]['text'], 'Boundary first. Failed after audio.')
+                                self.assertEqual(len(written), 1)
+                            else:
+                                release_write.set()
+                                rows = await rows_until(lambda rows: rows[-2]['text'] == scenario
+                                                        and rows[-1]['state'] in ('complete', 'failed'))
+                                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'failed'})
+                                self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 2340)
+                            self.assertNotIn('Boundary second.', attempts)
+                            self.assertNotIn('Unheard second.', attempts)
+                        elif scenario == 'Delayed synthesis failure.':
+                            await start(scenario)
+                            await asyncio.wait_for(context_started.wait(), 5)
+                            await matching_context(context_stopped, stopped_contexts, started_contexts[0])
+                            release_failure.set()
+                            rows = await rows_until(lambda rows: rows[-2]['text'] == scenario
+                                                    and rows[-1]['state'] in ('complete', 'failed'))
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+                        elif scenario == 'Recreated synthesis context failure.':
+                            await start(scenario)
+                            await asyncio.wait_for(provider_paused.wait(), 5)
+                            await asyncio.wait_for(context_started.wait(), 5)
+                            first_context = started_contexts[0]
+                            await matching_context(context_stopped, stopped_contexts, first_context)
+                            await matching_context(context_retired, retired_contexts, first_context)
+                            release_provider.set()
+                            rows = await rows_until(lambda rows: rows[-2]['text'] == scenario
+                                                    and rows[-1]['state'] in ('complete', 'failed'))
+                            self.assertEqual(started_contexts, [first_context, first_context])
+                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
                         else:
+                            await start('Mixed synthesis.')
+                            rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
+                                                    and rows[-1]['state'] in ('complete', 'failed'))
+                            self.assertEqual(rows[-1]['text'], 'Spoken first.')
+                            self.assertEqual(rows[-1]['state'], 'failed')
+                            self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+
+                            for interrupt in (False, True):
+                                with self.subTest(interrupt=interrupt):
+                                    written.clear()
+                                    final_write.clear()
+                                    release_write.clear()
+                                    hold_final = True
+                                    await start('Interrupted boundary.' if interrupt else 'Completed boundary.')
+                                    await asyncio.wait_for(final_write.wait(), 5)
+                                    rows = await rows_until(lambda rows: rows[-2]['text'] in
+                                                            ('Interrupted boundary.', 'Completed boundary.')
+                                                            and rows[-1]['text'].startswith('Boundary first.'))
+                                    self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
+                                    self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
+                                    transport.llm.conversation_output(stale_text)
+                                    if not interrupt:
+                                        transport.llm.conversation_output(stale_failure)
+                                    if interrupt:
+                                        interrupted.clear()
+                                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                                        await asyncio.wait_for(interrupted.wait(), 5)
+                                        rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
+                                        self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
+                                        self.assertEqual(len(written), 1)
+                                    else:
+                                        release_write.set()
+                                        rows = await rows_until(lambda rows: rows[-1]['state'] == 'complete')
+                                        self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
+                                        self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 1500 + bytes(1680))
+
+                            hold_final = False
                             release_write.set()
-                            rows = await rows_until(lambda rows: rows[-1]['state'] in ('complete', 'failed'))
-                            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Boundary first. Failed after audio.', 'state': 'failed'})
-                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 2340)
+                            written.clear()
+                            await self.finish_user_turn(transport, 'A clean later turn.')
+                            rows = await rows_until(lambda rows: rows[-2]['text'] == 'A clean later turn.'
+                                                    and rows[-1]['state'] == 'complete')
+                            self.assertEqual(rows[-1]['text'], 'Clean later.')
+                            self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'interrupted'})
 
-                hold_final = False
-                release_write.set()
-                written.clear()
-                started_contexts.clear()
-                stopped_contexts.clear()
-                context_started.clear()
-                context_stopped.clear()
-                await self.finish_user_turn(transport, 'Delayed synthesis failure.')
-                await asyncio.wait_for(context_started.wait(), 5)
-                await matching_context(context_stopped, stopped_contexts, started_contexts[0])
-                release_failure.set()
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Delayed synthesis failure.'
-                                        and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
-
-                written.clear()
-                started_contexts.clear()
-                stopped_contexts.clear()
-                retired_contexts.clear()
-                context_started.clear()
-                context_stopped.clear()
-                context_retired.clear()
-                await start('Recreated synthesis context failure.')
-                await asyncio.wait_for(provider_paused.wait(), 5)
-                await asyncio.wait_for(context_started.wait(), 5)
-                first_context = started_contexts[0]
-                await matching_context(context_stopped, stopped_contexts, first_context)
-                await matching_context(context_retired, retired_contexts, first_context)
-                release_provider.set()
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'Recreated synthesis context failure.'
-                                        and rows[-1]['state'] in ('complete', 'failed'))
-                self.assertEqual(started_contexts, [first_context, first_context])
-                self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
-                self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
-
-                for interrupt in (False, True):
-                    with self.subTest(interrupt=interrupt):
-                        written.clear()
-                        final_write.clear()
-                        release_write.clear()
-                        hold_final = True
-                        await start('Interrupted boundary.' if interrupt else 'Completed boundary.')
-                        await asyncio.wait_for(final_write.wait(), 5)
-                        rows = await rows_until(lambda rows: rows[-2]['text'] in
-                                                ('Interrupted boundary.', 'Completed boundary.')
-                                                and rows[-1]['text'].startswith('Boundary first.'))
-                        self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
-                        self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
-                        transport.llm.conversation_output(stale_text)
-                        if not interrupt:
-                            transport.llm.conversation_output(stale_failure)
-                        if interrupt:
-                            interrupted.clear()
-                            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                            await asyncio.wait_for(interrupted.wait(), 5)
-                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'interrupted')
-                            self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
-                            self.assertEqual(len(written), 1)
-                        else:
+                        if scenario != 'Healthy synthesis.':
+                            release_failure.set()
+                            release_provider.set()
                             release_write.set()
-                            rows = await rows_until(lambda rows: rows[-1]['state'] == 'complete')
-                            self.assertEqual(rows[-1]['text'], 'Boundary first. Boundary second.')
-                            self.assertEqual(b''.join(written), b'\xff\x3f' * 1500 + b'\xff\x1f' * 1500 + bytes(1680))
-
-                hold_final = False
-                release_write.set()
-                written.clear()
-                await self.finish_user_turn(transport, 'A clean later turn.')
-                rows = await rows_until(lambda rows: rows[-2]['text'] == 'A clean later turn.'
-                                        and rows[-1]['state'] == 'complete')
-                self.assertEqual(rows[-1]['text'], 'Clean later.')
-                self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': 'Boundary first. Boundary second.', 'state': 'interrupted'})
-            finally:
-                release_failure.set()
-                release_provider.set()
-                release_write.set()
-                writer.close()
-                await writer.wait_closed()
-                await close()
+                            service = transport.service
+                            self.assertTrue(service.manager.voice.generation_cleanup_failed)
+                            attempted = list(attempts)
+                            self.assertEqual(await service.toggle(), 'inactive')
+                            await service.state('trouble')
+                            self.assertEqual(await service.toggle(), 'unavailable')
+                            self.assertEqual(attempts, attempted)
+                            self.assertEqual(len(transport.sessions), 1)
+                    finally:
+                        release_failure.set()
+                        release_provider.set()
+                        release_write.set()
+                        writer.close()
+                        await writer.wait_closed()
+                        await close()
+                    if scenario != 'Healthy synthesis.':
+                        self.assertEqual(str(transport.service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
 
     async def test_panel_receives_final_turns_and_spoken_prefix(self):
         blocked, release = threading.Event(), threading.Event()
