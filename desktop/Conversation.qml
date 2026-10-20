@@ -637,7 +637,10 @@ FocusScope {
                 ? Math.max(40, Math.min(composer.contentHeight,
                     composer.contentHeight / composer.lineCount * 5) + 18) : 40
             clip: true
-            padding: 0
+            topPadding: 9
+            bottomPadding: 9
+            leftPadding: 12
+            rightPadding: 12
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             background: Rectangle {
                 color: root.bubbleTint
@@ -658,10 +661,10 @@ FocusScope {
                     wrapMode: TextEdit.Wrap
                     font.family: "monospace"
                     font.pixelSize: root.bodyPixelSize
-                    topPadding: 9
-                    bottomPadding: 9
-                    leftPadding: 12
-                    rightPadding: 12
+                    topPadding: 0
+                    bottomPadding: 0
+                    leftPadding: 0
+                    rightPadding: 0
                     background: null
                     Accessible.name: "Message Kestrel"
                     Accessible.multiLine: true
@@ -686,9 +689,8 @@ FocusScope {
                 }
             }
             Text {
-                x: 12
-                y: 9
-                width: composerScroll.width - 24
+                objectName: "composerPlaceholder"
+                width: composerScroll.availableWidth
                 text: "Message Kestrel"
                 textFormat: Text.PlainText
                 color: root.ink
