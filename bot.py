@@ -1593,7 +1593,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
 
     @aggregators.user().event_handler('on_before_push_frame')
     async def indicator_user_turn(processor, frame):
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, UserStartedSpeakingFrame) and stt.admitted():
             llm.indicator_user_started()
         elif isinstance(frame, UserStoppedSpeakingFrame):
             llm.indicator_user_stopped()

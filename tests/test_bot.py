@@ -3380,6 +3380,80 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([t['source'] for t in manager.conversation.turns if t['speaker'] == 'you'],
                              ['typed', 'spoken', 'typed'])
         transport.capture.stdout.feed_data(bytes(640))
+        queued_vad = VADUserStartedSpeakingFrame()
+        vad_held, release_vad, vad_processed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_vad.set)
+        native_user_process = user.process_frame
+        native_admitted = manager.llm.request_admitted
+        typed_acknowledgements = asyncio.Queue()
+        admission_tokens, settled_before_admission = [], []
+
+        async def hold_queued_vad(frame, direction):
+            if frame is queued_vad:
+                vad_held.set()
+                await release_vad.wait()
+            await native_user_process(frame, direction)
+
+        @user.event_handler('on_after_process_frame')
+        async def queued_vad_completed(processor, frame):
+            if frame is queued_vad:
+                vad_processed.set()
+
+        def acknowledge_queued_handover(token):
+            admission_tokens.append(token)
+            settled_before_admission.append(vad_processed.is_set())
+            native_admitted(token)
+            typed_acknowledgements.put_nowait(token)
+
+        spoken_origin = manager.llm.spoken_origin
+        before_handover = list(manager.conversation.turns)
+        with patch.object(user, 'process_frame', side_effect=hold_queued_vad), \
+                patch.object(manager.llm, 'request_admitted', side_effect=acknowledge_queued_handover):
+            await user.queue_frame(queued_vad)
+            await asyncio.wait_for(vad_held.wait(), 5)
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            accepted_token = manager.pending_submit[1]
+            repeat_finished = asyncio.Event()
+
+            @transport.output().event_handler('on_after_push_frame')
+            async def repeat_output_completed(processor, frame):
+                if isinstance(frame, LLMFullResponseEndFrame) and frame.indicator_reply_token is accepted_token:
+                    repeat_finished.set()
+
+            self.assertTrue(manager.llm.owns_request(accepted_token))
+            self.assertFalse(transport.stt.admitted())
+            release_vad.set()
+            await asyncio.wait_for(vad_processed.wait(), 5)
+            self.assertTrue(manager.llm.owns_request(accepted_token),
+                            'Already-queued speech cannot replace the accepted typed owner')
+            self.assertIs(manager.llm.spoken_origin, spoken_origin)
+            self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), accepted_token)
+            if manager.submission_task is not None:
+                await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+            self.assertIsNone(manager.pending_submit)
+            self.assertTrue(transport.stt.admitted())
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply C.')
+            await asyncio.wait_for(repeat_finished.wait(), 5)
+            self.assertTrue(committed.empty(), 'Typed repeat does not duplicate the native assistant history')
+            self.assertEqual(manager.conversation.turns[len(before_handover):], [
+                {'speaker': 'you', 'text': 'repeat that', 'source': 'typed', 'state': 'complete'},
+                {'speaker': 'kestrel', 'text': 'Reply C.', 'state': 'complete'},
+            ])
+            self.assertEqual(admission_tokens, [accepted_token])
+            self.assertTrue(typed_acknowledgements.empty())
+            self.assertEqual(await service.submit('stop'), 'accepted')
+            next_token = manager.pending_submit[1]
+            self.assertIsNot(next_token, accepted_token)
+            self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), next_token)
+            if manager.submission_task is not None:
+                await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+            self.assertIsNone(manager.pending_submit)
+            self.assertEqual(admission_tokens, [accepted_token, next_token])
+            self.assertEqual(settled_before_admission, [True, True],
+                             'Native queued speech must settle before typed admission reopens input')
+            self.assertTrue(typed_acknowledgements.empty())
+            self.assertEqual(len(brain.requests), 4)
+            self.assertTrue(spoken.empty())
         native = Mock(returncode=None)
         native.stdin.drain = AsyncMock()
         native.wait = AsyncMock()
