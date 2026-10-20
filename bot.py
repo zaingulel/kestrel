@@ -760,7 +760,7 @@ class HermesRequestChannel:
         if len(errors) == 1:
             raise errors[0]
         if errors:
-            raise ExceptionGroup('Hermes channel cleanup failed', errors)
+            raise ExceptionGroup('Hermes channel cleanup failed', errors)  # noqa: F821 - The voice runtime uses Python 3.12.
 
     async def _exchange(self, request, output, *, admitted):
         advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
