@@ -7,6 +7,179 @@ TestCase {
 
     Component { id: serviceComponent; Desktop.Service {} }
 
+    function test_submit_receipt_is_bounded_and_attempt_scoped() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        compare(service.submitPending, false)
+        const sent = []
+        const completed = []
+        const stopped = []
+        service.submitRequested.connect(function(id, payload) { sent.push([id, payload]) })
+        service.submitCompleted.connect(function(id, status) { completed.push([id, status]) })
+        service.submitStopRequested.connect(function(id) { stopped.push(id) })
+        const first = service.submit("typed\nmessage 🦅")
+        verify(first > 0)
+        compare(service.submitPending, true)
+        compare(sent.length, 1)
+        compare(sent[0][0], first)
+        compare(JSON.parse(sent[0][1]).version, 1)
+        compare(JSON.parse(sent[0][1]).text, "typed\nmessage 🦅")
+        verify(sent[0][1].endsWith("\n"))
+        compare(service.submit("must not send"), 0)
+        compare(sent.length, 1)
+        compare(service.acceptSubmitChunk(first + 1, '{"status":"accepted"}\n'), false)
+        service.submitExited(first + 1, 0, 0)
+        compare(service.submitPending, true)
+        compare(completed.length, 0)
+        service.submitStarted(first)
+        verify(service.acceptSubmitChunk(first, '{"status":"acc'))
+        verify(service.acceptSubmitChunk(first, 'epted"}\n'))
+        compare(completed.length, 0, "receipt is not acceptance until a matching normal exit")
+        service.submitExited(first, 0, 0)
+        compare(service.submitPending, false)
+        compare(completed.length, 1)
+        compare(completed[0][0], first)
+        compare(completed[0][1], "accepted")
+        service.submitExited(first, 0, 0)
+        compare(completed.length, 1)
+
+        const cases = [
+            ['{"status":"accepted"}\n', 1, 0, "uncertain"],
+            ['{"status":"accepted"}\n', 0, 1, "uncertain"],
+            ['{"status":"invalid"}\n', 1, 0, "invalid"],
+            ['{"status":"busy"}\n', 1, 0, "busy"],
+            ['{"status":"unavailable"}\n', 1, 0, "unavailable"],
+            ['{"status":"uncertain"}\n', 1, 0, "uncertain"],
+            ['{"status":"busy"}\n', 0, 0, "uncertain"],
+            ['{"status":"accepted"}\n', 2, 0, "uncertain"],
+            ['{"status":"accepted"}', 0, 0, "uncertain"],
+            ['{"status":"accepted"}\n{"status":"accepted"}\n', 0, 0, "uncertain"],
+            ['{"status":"unknown"}\n', 0, 0, "uncertain"],
+            ['{"status":"busy","status":"accepted"}\n', 0, 0, "uncertain"],
+            ['{"status":"accepted","extra":true}\n', 0, 0, "uncertain"],
+            ["x".repeat(65), 0, 0, "uncertain"],
+            ['{"status":"accepted"}\n' + " ".repeat(65), 0, 0, "uncertain"],
+            ['{"status":"accepted"}\n', 0, 0, "accepted"]
+        ]
+        for (const sample of cases) {
+            const attempt = service.submit("another message")
+            verify(attempt > first)
+            service.submitStarted(attempt)
+            compare(service.acceptSubmitChunk(first, '{"status":"accepted"}\n'), false)
+            service.submitExited(first, 0, 0)
+            compare(service.submitPending, true)
+            const count = completed.length
+            service.acceptSubmitChunk(attempt, sample[0])
+            verify(service.submitBufferedLength <= 64)
+            service.submitExited(attempt, sample[1], sample[2])
+            compare(completed.length, count + 1)
+            compare(completed[count][0], attempt)
+            compare(completed[count][1], sample[3])
+            compare(service.submitPending, false)
+            compare(service.submitBufferedLength, 0)
+        }
+        compare(sent.length, cases.length + 1)
+        verify(stopped.length > 0, "bad receipt requests owned child cleanup")
+    }
+
+    function test_submit_failure_and_reconnect_never_replay() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        const sent = []
+        const completed = []
+        const stopped = []
+        service.submitRequested.connect(function(id, payload) { sent.push([id, payload]) })
+        service.submitCompleted.connect(function(id, status) { completed.push([id, status]) })
+        service.submitStopRequested.connect(function(id) { stopped.push(id) })
+        const first = service.submit("no replay")
+        const expiry = findChild(service, "submitExpiry")
+        verify(expiry !== null)
+        compare(expiry.interval, 3000)
+        verify(expiry.running)
+        service.visible = false
+        service.watcherExited()
+        service.conversationExited()
+        verify(service.acceptStatusChunk("I"))
+        verify(service.acceptConversationChunk('{"version":2,"session":"reconnected","turns":[]}\n'))
+        compare(service.submitPending, true)
+        compare(sent.length, 1)
+        compare(stopped.length, 0, "hide and feed reconnect leave the sender alone")
+        compare(completed.length, 0)
+        service.submitStarted(first)
+        expiry.triggered()
+        compare(stopped.length, 1)
+        compare(stopped[0], first)
+        compare(service.submitPending, true, "retain ownership until child exit")
+        compare(service.submit("blocked until reaped"), 0)
+        compare(service.acceptSubmitChunk(first, '{"status":"accepted"}\n'), false)
+        service.submitExited(first, 0, 0)
+        compare(service.submitPending, false)
+        compare(expiry.running, false)
+        compare(completed.length, 1)
+        compare(completed[0][1], "uncertain")
+        compare(sent.length, 1)
+
+        const beforeStart = service.submit("unknown startup")
+        service.submitExited(beforeStart, -1, 1)
+        compare(completed.length, 2)
+        compare(completed[1][1], "uncertain", "no started signal is not proof that no write happened")
+        const afterWrite = service.submit("possible write")
+        service.submitStarted(afterWrite)
+        service.submitExited(afterWrite, -1, 1)
+        compare(completed.length, 3)
+        compare(completed[2][1], "uncertain")
+        compare(sent.length, 3)
+        service.watcherExited()
+        service.conversationExited()
+        service.acceptStatusChunk("D")
+        service.acceptConversationChunk('{"version":2,"session":"later","turns":[]}\n')
+        compare(sent.length, 3)
+        const deliberate = service.submit("deliberate next send")
+        verify(deliberate > afterWrite)
+        service.submitStarted(deliberate)
+        service.submitExited(afterWrite, 0, 0)
+        verify(service.submitPending)
+        verify(service.acceptSubmitChunk(deliberate, '{"status":"accepted"}\n'))
+        service.submitExited(deliberate, 0, 0)
+        compare(completed.length, 4)
+        compare(completed[3][0], deliberate)
+        compare(completed[3][1], "accepted")
+        compare(sent.length, 4)
+
+        for (const invalid of ["", " \t\r\n", null, 1, "x".repeat(4097), "bad\u0000", "bad\u001f", "bad\u007f", "bad\u009f", "\ud800", "\udc00"]) {
+            const count = completed.length
+            const invalidAttempt = service.submit(invalid)
+            verify(invalidAttempt > deliberate)
+            tryCompare(service, "submitPending", false)
+            compare(completed.length, count + 1)
+            compare(completed[count][0], invalidAttempt)
+            compare(completed[count][1], "invalid")
+            compare(sent.length, 4, "invalid native input cannot launch a child")
+        }
+        const maximum = service.submit("🦅".repeat(2048))
+        compare(sent.length, 5)
+        compare(JSON.parse(sent[4][1]).text.length, 4096)
+        service.submitStarted(maximum)
+        service.acceptSubmitChunk(maximum, '{"status":"busy"}\n')
+        service.submitExited(maximum, 1, 0)
+        compare(service.submitPending, false)
+
+        let destroyedStops = 0
+        const doomed = createTemporaryObject(serviceComponent, this)
+        doomed.submitStopRequested.connect(function() { destroyedStops++ })
+        doomed.submit("destroyed draft")
+        doomed.destroy()
+        wait(0)
+        compare(destroyedStops, 1)
+        const replacement = createTemporaryObject(serviceComponent, this)
+        let replacementSends = 0
+        replacement.submitRequested.connect(function() { replacementSends++ })
+        replacement.acceptStatusChunk("I")
+        replacement.acceptConversationChunk('{"version":2,"session":"replacement","turns":[]}\n')
+        compare(replacement.submitPending, false)
+        compare(replacementSends, 0)
+    }
+
     function test_status_input_death_and_silence() {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)

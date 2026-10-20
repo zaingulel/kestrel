@@ -28,6 +28,106 @@ Item {
     readonly property string conversationSession: conversationValue.session
     readonly property string placementAdvisory: placementValue.advisory
 
+    readonly property bool submitPending: submissionValue.pending
+    readonly property int submitAttemptId: submissionValue.attempt
+    readonly property int submitBufferedLength: submissionValue.output.length
+    signal submitRequested(int attemptId, string payload)
+    signal submitCompleted(int attemptId, string status)
+    signal submitStopRequested(int attemptId)
+
+    QtObject {
+        id: submissionValue
+        property int sequence: 0
+        property int attempt: 0
+        property bool pending: false
+        property bool started: false
+        property bool failed: false
+        property string output: ""
+    }
+
+    function submit(text) {
+        if (submissionValue.pending) return 0
+        submissionValue.attempt = ++submissionValue.sequence
+        submissionValue.pending = true
+        submissionValue.started = false
+        submissionValue.failed = false
+        submissionValue.output = ""
+        const attempt = submissionValue.attempt
+        if (!validSubmissionText(text)) {
+            Qt.callLater(function() { root.finishSubmit(attempt, "invalid") })
+        } else {
+            submitExpiry.restart()
+            submitRequested(attempt, JSON.stringify({version: 1, text: text}) + "\n")
+        }
+        return attempt
+    }
+
+    function validSubmissionText(text) {
+        if (typeof text !== "string" || !text.length || text.length > 4096 || !/\S/.test(text)
+                || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text)) return false
+        for (let index = 0; index < text.length; index++) {
+            const unit = text.charCodeAt(index)
+            if (unit >= 0xd800 && unit <= 0xdbff) {
+                const next = text.charCodeAt(++index)
+                if (!(next >= 0xdc00 && next <= 0xdfff)) return false
+            } else if (unit >= 0xdc00 && unit <= 0xdfff) return false
+        }
+        return true
+    }
+
+    function submitStarted(attemptId) {
+        if (submissionValue.pending && attemptId === submissionValue.attempt)
+            submissionValue.started = true
+    }
+
+    function acceptSubmitChunk(attemptId, chunk) {
+        if (!submissionValue.pending || attemptId !== submissionValue.attempt || submissionValue.failed) return false
+        if (typeof chunk !== "string" || chunk.length > 64 - submissionValue.output.length
+                || /[^\x00-\x7f]/.test(chunk)) {
+            submissionValue.failed = true
+            submissionValue.output = ""
+            submitStopRequested(attemptId)
+            return false
+        }
+        submissionValue.output += chunk
+        return true
+    }
+
+    function submitExited(attemptId, exitCode, exitStatus) {
+        if (!submissionValue.pending || attemptId !== submissionValue.attempt) return
+        const receipt = /^\{"status":"(accepted|invalid|busy|unavailable|uncertain)"\}\n$/.exec(submissionValue.output)
+        const status = submissionValue.started && !submissionValue.failed && receipt && exitStatus === 0
+            && exitCode === (receipt[1] === "accepted" ? 0 : 1) ? receipt[1] : "uncertain"
+        finishSubmit(attemptId, status)
+    }
+
+    function finishSubmit(attemptId, status) {
+        if (!submissionValue.pending || attemptId !== submissionValue.attempt) return
+        submitExpiry.stop()
+        submissionValue.pending = false
+        submissionValue.output = ""
+        submitCompleted(attemptId, status)
+    }
+
+    function expireSubmit() {
+        submitExpiry.stop()
+        if (!submissionValue.pending || submissionValue.failed) return
+        submissionValue.failed = true
+        submissionValue.output = ""
+        submitStopRequested(submissionValue.attempt)
+    }
+
+    Timer {
+        id: submitExpiry
+        objectName: "submitExpiry"
+        interval: 3000
+        onTriggered: root.expireSubmit()
+    }
+
+    Component.onDestruction: {
+        if (submissionValue.pending) submitStopRequested(submissionValue.attempt)
+    }
+
     QtObject {
         id: conversationValue
         property var turns: []
