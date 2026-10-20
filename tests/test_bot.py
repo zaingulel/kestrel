@@ -3221,6 +3221,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(release_provider.set)
         synthesis_blocked, release_synthesis = threading.Event(), threading.Event()
         self.addCleanup(release_synthesis.set)
+        timer_entered, release_timer = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_timer.set)
 
         def chunks(**kwargs):
             if 'Unheard obsolete continuation' in kwargs['text']:
@@ -3465,15 +3467,27 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native.stdin.write.side_effect = lambda data: request_written.set()
         service.recognizer.process = native
         self.addCleanup(lambda: native.stdout.feed_data(b'{"text":"cleanup"}\n'))
-        with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 0, 'probability': 0.0}):
+        native_sleep = asyncio.sleep
+
+        async def hold_native_timer(delay, result=None):
+            if asyncio.current_task() is strategies[0]._timeout_task:
+                timer_entered.set()
+                await release_timer.wait()
+                return result
+            return await native_sleep(delay, result=result)
+
+        with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 0, 'probability': 0.0}), \
+                patch.object(asyncio, 'sleep', side_effect=hold_native_timer):
             await process(transport.stt, VADUserStartedSpeakingFrame())
             await process(transport.stt, InputAudioRawFrame(bytes(640), 16000, 1))
             await transcript('abandoned mute')
             await process(transport.stt, VADUserStoppedSpeakingFrame())
+            await asyncio.wait_for(timer_entered.wait(), 5)
             await asyncio.wait_for(request_written.wait(), 5)
             await transport.stt._segment_queue.put(b'queued old segment')
             timer = strategies[0]._timeout_task
             self.assertIsNotNone(timer)
+            self.assertFalse(timer.done())
             self.assertTrue(analyzer._audio_buffer)
             self.assertEqual(await service.submit('stop'), 'accepted')
             # A barrier at the public LLM admission callback observes the forced stop/reset first.
