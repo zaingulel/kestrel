@@ -109,7 +109,7 @@ SYSTEM_PROMPT = (
     '[delivery:reassuring]\n'
     'You can take it one step at a time.\n'
     '\n'
-    'Required output format for every new reply: begin immediately with exactly one of '
+    'Required output format only for final spoken replies, after any memory tool calls: begin immediately with exactly one of '
     '[delivery:neutral], [delivery:curious], [delivery:gently_pleased] or [delivery:reassuring], then'
     ' a newline, then your concise spoken reply. Never omit the header, even for a very short factual'
     ' answer, a changed subject, or a replacement request after an interruption. Earlier assistant '
