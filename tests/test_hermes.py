@@ -397,6 +397,35 @@ print('private storage matrix passed')
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('private storage matrix passed', result.stdout)
 
+    def test_missing_delivery_prefix_defaults_to_neutral(self):
+        import hermes_worker
+
+        for reply, expected in (
+            ('Hello.', 'Hello.'), (' \n\tHello.', 'Hello.'), ('\u00a0Hello.', 'Hello.'),
+            ('delightful', 'delightful'), ('delivery tomorrow', 'delivery tomorrow'),
+            ('d', 'd'), ('de', 'de'), ('del', 'del'), ('deli', 'deli'), ('deliv', 'deliv'),
+            ('delive', 'delive'), ('deliver', 'deliver'), ('delivery', 'delivery'),
+        ):
+            for split in range(len(reply) + 1):
+                with self.subTest(reply=repr(reply), split=split):
+                    reader = hermes_worker.ReplyDeliveryPrefix()
+                    events = reader.feed('') + reader.feed(reply[:split]) + reader.feed('') + reader.feed(reply[split:])
+                    events.extend(reader.finish())
+                    self.assertEqual(events[0], {'delivery': 'neutral'})
+                    self.assertEqual([event for event in events if 'delivery' in event], [{'delivery': 'neutral'}])
+                    self.assertEqual(''.join(event['text'] for event in events if 'text' in event), expected)
+                    self.assertEqual(reader.finish(), [])
+                    self.assertEqual(reader.feed(' More.'), [{'text': ' More.'}])
+                    self.assertEqual(reader.prefix, '')
+        reader = hermes_worker.ReplyDeliveryPrefix()
+        for _ in range(100):
+            self.assertEqual(reader.feed(' ' * 1000), [])
+            self.assertEqual(reader.prefix, '')
+        with self.assertRaisesRegex(RuntimeError, 'empty reply'):
+            reader.finish()
+        self.assertEqual(reader.feed('Hello.'), [{'delivery': 'neutral'}, {'text': 'Hello.'}])
+        reader.finish()
+
     def test_delivery_prefix_accepts_observed_space_delimiter(self):
         import hermes_worker
 
@@ -412,6 +441,22 @@ print('private storage matrix passed')
 
     def test_delivery_prefix_is_bounded_and_fails_closed(self):
         import hermes_worker
+
+        for raw in ('delivery:curious\nWhat did you find?', 'delivery:unknown\nNo.',
+                    'delivery:', ' \n\tdelivery:neutral\nNo.'):
+            with self.subTest(raw=raw, chunks='two'):
+                for split in range(len(raw) + 1):
+                    reader = hermes_worker.ReplyDeliveryPrefix()
+                    self.assertEqual(reader.feed(raw[:split]) + reader.feed(raw[split:]), [])
+                    self.assertEqual(reader.feed('later prose'), [])
+                    with self.assertRaisesRegex(RuntimeError, 'delivery header'):
+                        reader.finish()
+            with self.subTest(raw=raw, chunks='characters'):
+                reader = hermes_worker.ReplyDeliveryPrefix()
+                for char in raw:
+                    self.assertEqual(reader.feed(char), [])
+                with self.assertRaisesRegex(RuntimeError, 'delivery header'):
+                    reader.finish()
 
         for label in ('neutral', 'curious', 'gently_pleased', 'reassuring'):
             for delimiter in (' ', '\n'):
@@ -432,18 +477,19 @@ print('private storage matrix passed')
                 reader.finish()
                 self.assertEqual(events[0], {'delivery': label})
                 self.assertEqual(''.join(e['text'] for e in events[1:]), 'Hello.')
-        for raw in ('Hello.', ' [delivery:neutral]\nHello.', '[delivery:unknown]\nHello.',
+        for raw in (' [delivery:neutral]\nHello.', '\n[delivery:neutral]\nHello.',
+                    '\u00a0[delivery:neutral]\nHello.', '[delivery:unknown]\nHello.', '[other] Hello.',
                     '[delivery:neutral]\tHello.', '[delivery:neutral]\rHello.',
                     '[delivery:neutral]\r\nHello.', '[delivery:neutral]\u00a0Hello.',
                     '[delivery:neutral]Hello.',
-                    '[delivery:' + 'x' * 100000, '[delivery:neutral]', '', None, 7, {}, []):
+                    '[delivery:' + 'x' * 100000, '[', '[deliv', '[delivery:neutral]', None, 7, {}, []):
             with self.subTest(raw=repr(raw)[:80]):
                 reader = hermes_worker.ReplyDeliveryPrefix()
                 self.assertEqual(reader.feed(raw), [])
                 self.assertEqual(reader.feed('later prose'), [])
                 with self.assertRaisesRegex(RuntimeError, 'delivery header'):
                     reader.finish()
-        for raw in ('[delivery:neutral]\n', '[delivery:neutral] ',
+        for raw in ('', ' \n\t', '[delivery:neutral]\n', '[delivery:neutral] ',
                     '[delivery:curious]\n  ', '[delivery:curious]   '):
             reader = hermes_worker.ReplyDeliveryPrefix()
             reader.feed(raw)
@@ -457,6 +503,8 @@ print('private storage matrix passed')
         agent.run_conversation.side_effect = [
             {'completed': True, 'final_response': '[delivery:reassuring]\nFirst.'},
             {'completed': True, 'final_response': '[delivery:neutral]\nSecond.'},
+            {'completed': True, 'final_response': ' \nUntagged.'},
+            {'completed': True, 'final_response': 'delivery'},
         ]
         run_agent.AIAgent = Mock(return_value=agent)
         relay_runtime.get_runtime = Mock(return_value=Mock())
@@ -489,7 +537,7 @@ print('private storage matrix passed')
                       patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'validate_local_configuration'),
-                      patch('sys.stdin', TextIOWrapper(BytesIO(('{"begin":true}\n' + request * 2).encode()))),
+                      patch('sys.stdin', TextIOWrapper(BytesIO(('{"begin":true}\n' + request * 4).encode()))),
                       patch('sys.stdout', output)):
                     self.assertEqual(hermes_worker.main(), 0)
             finally:
@@ -498,8 +546,10 @@ print('private storage matrix passed')
             self.assertEqual([json.loads(line) for line in output.getvalue().splitlines()], [
                 {'ready': True}, {'session_ready': True}, {'delivery': 'reassuring'}, {'text': 'First.'}, {'done': True},
                 {'delivery': 'neutral'}, {'text': 'Second.'}, {'done': True},
+                {'delivery': 'neutral'}, {'text': 'Untagged.'}, {'done': True},
+                {'delivery': 'neutral'}, {'text': 'delivery'}, {'done': True},
             ])
-            self.assertEqual(agent.run_conversation.call_count, 2)
+            self.assertEqual(agent.run_conversation.call_count, 4)
 
     def test_trace_privacy_disclosure(self):
         self.assertIn(
@@ -1097,7 +1147,8 @@ class NativeHermesTests(unittest.TestCase):
         replies = [tool(), [({'content': '['}, None),
                             ({'content': 'delivery:neutral] First.\n\nSecond.'}, None), ({}, 'stop')],
                    [({'content': '[delivery:neutral] Before.'}, None),
-                    *tool()], [({'content': 'After.'}, None), ({}, 'stop')]]
+                    *tool()], [({'content': 'After.'}, None), ({}, 'stop')],
+                   tool(), [({'content': 'Untagged after note.'}, None), ({}, 'stop')]]
         invalid = (' [delivery:neutral] No.', '\n[delivery:neutral] No.', '[delivery:unknown] No.')
         for text in invalid:
             replies.extend((tool(), [({'content': text}, None), ({}, 'stop')]))
@@ -1110,12 +1161,17 @@ class NativeHermesTests(unittest.TestCase):
             events = worker.request([{'role': 'user', 'content': 'Continue after note.'}])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Before.'},
                                       {'text': '\n\nAfter.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 4)
+            self.assertEqual(worker.request([{'role': 'user', 'content': 'Missing header after note.'}]),
+                             [{'delivery': 'neutral'}, {'text': 'Untagged after note.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 6, 'The memory tool round adds two requests without replay')
             from hermes_worker import DELIVERY_ERROR, MEMORY_REPLY_REMINDER
             for text in invalid:
                 self.assertEqual(worker.request([{'role': 'user', 'content': 'Reject malformed header.'}]),
                                  [{'error': DELIVERY_ERROR}], repr(text))
             self.assertEqual(worker.request([{'role': 'user', 'content': 'Fresh turn.'}]),
                              [{'delivery': 'neutral'}, {'text': 'Fresh.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 13)
             self.assertTrue(MEMORY_REPLY_REMINDER)
             system_messages = [message['content'] for _, _, body in brain.requests
                                for message in body['messages'] if message['role'] == 'system']
@@ -1127,6 +1183,8 @@ class NativeHermesTests(unittest.TestCase):
                             (worker.home / 'stream-observations.jsonl').read_text().splitlines()]
             self.assertIn({'fragment': '[', 'pending': False, 'callback': '['}, observations)
             self.assertIn({'fragment': 'After.', 'pending': True, 'callback': '\n\nAfter.'}, observations)
+            self.assertIn({'fragment': 'Untagged after note.', 'pending': True,
+                           'callback': '\n\nUntagged after note.'}, observations)
             for text in invalid[:2]:
                 self.assertIn({'fragment': text, 'pending': True, 'callback': '\n\n' + text}, observations)
 
@@ -1216,8 +1274,14 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual(leaf.read_bytes(), b'corrupt-before-turn-932\xff')
 
     def test_invalid_delivery_header_is_explicit_failure(self):
-        with native_worker([[({'content': '[delivery:unknown]\nDo not speak.'}, None),
-                             ({'content': ' Nor this.'}, None), ({}, 'stop')]]) as (worker, brain):
+        replies = [
+            [({'content': '[delivery:unknown]\nDo not speak.'}, None),
+             ({'content': ' Nor this.'}, None), ({}, 'stop')],
+            [({'content': ' \ndel'}, None), ({'content': 'ivery'}, None),
+             ({'content': ':curious\nDo not speak this either.'}, None), ({}, 'stop')],
+            [({'content': 'del'}, None), ({'content': 'ivery'}, None), ({}, 'stop')],
+        ]
+        with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             worker.begin()
             events = worker.request([{'role': 'user', 'content': 'Hello.'}])
@@ -1226,6 +1290,11 @@ class NativeHermesTests(unittest.TestCase):
             self.assertIn('invalid delivery header', events[0]['error'])
             self.assertIn('Restart Kestrel', events[0]['error'])
             self.assertEqual(len(brain.requests), 1)
+            self.assertEqual(worker.request([{'role': 'user', 'content': 'Bare header.'}]), events)
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual(worker.request([{'role': 'user', 'content': 'Short prose.'}]),
+                             [{'delivery': 'neutral'}, {'text': 'delivery'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 3, 'Malformed metadata never triggers a replay')
 
     def test_trace_flush_failure_refuses_done(self):
         require_native_hermes()

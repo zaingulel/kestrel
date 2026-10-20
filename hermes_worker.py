@@ -36,6 +36,7 @@ class ReplyDeliveryPrefix:
         self.delivery = None
         self.has_text = False
         self.failed = False
+        self.leading_whitespace = False
 
     def feed(self, text: str) -> list[dict]:
         if self.failed:
@@ -48,7 +49,26 @@ class ReplyDeliveryPrefix:
             headers = {f'[delivery:{label}]{delimiter}': label
                        for label in DELIVERY_LABELS for delimiter in (' ', '\n')}
             for index, char in enumerate(text):
+                if not self.prefix:
+                    if char.isspace():
+                        self.leading_whitespace = True
+                        continue
+                    if char == '[' and self.leading_whitespace:
+                        self.failed = True
+                        return []
                 self.prefix += char
+                if not self.prefix.startswith('['):
+                    if self.prefix == 'delivery:':
+                        self.failed = True
+                        self.prefix = ''
+                        return []
+                    if 'delivery:'.startswith(self.prefix):
+                        continue
+                    self.delivery = 'neutral'
+                    events.append({'delivery': 'neutral'})
+                    text = self.prefix + text[index + 1:]
+                    self.prefix = ''
+                    break
                 if self.prefix in headers:
                     self.delivery = headers[self.prefix]
                     self.prefix = ''
@@ -66,9 +86,15 @@ class ReplyDeliveryPrefix:
             events.append({'text': text})
         return events
 
-    def finish(self) -> None:
+    def finish(self) -> list[dict]:
+        if not self.failed and self.delivery is None and self.prefix and 'delivery:'.startswith(self.prefix):
+            self.delivery = 'neutral'
+            self.has_text = True
+            text, self.prefix = self.prefix, ''
+            return [{'delivery': 'neutral'}, {'text': text}]
         if self.failed or self.delivery is None or not self.has_text:
             raise RuntimeError(DELIVERY_ERROR)
+        return []
 
 
 SYSTEM_PROMPT = (
@@ -492,7 +518,8 @@ def main(*, base_url=BONSAI_URL):
                     if not streamed:
                         for event in delivery.feed(final):
                             emit(event)
-                    delivery.finish()
+                    for event in delivery.finish():
+                        emit(event)
                     if preparing:
                         close_agent()
                     emit({'done': True})
