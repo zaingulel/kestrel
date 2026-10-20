@@ -72,31 +72,47 @@ user, so its named anti-regression test keeps pinning it.
 
 ### Whole-conversation evidence
 
-Drive the real `run_conversation` session in [bot.py](../bot.py), retaining its pipeline worker, context
-aggregators, cancellation and speech adapters rather than substituting a fake conversation engine.
+Drive the real `run_voice_service` activation boundary and its `run_conversation` sessions in
+[bot.py](../bot.py), retaining pipeline workers, context aggregators, cancellation and speech adapters.
 [WholeConversationTests.open_session](../tests/test_bot.py) owns a real Hermes service and registers cleanup
-before startup. Dedicated pending-preparation cases observe concurrent preparation, private provider
-requests/history, pending mute and cleanup. Already-ready turn/history fixtures await engine readiness and
-have empty caller history, a ready worker or sticky startup failure, and no pending reader. They do not
-establish production startup timing or pending preparation; completed preparation messages never enter
-caller history.
+before startup. Production lifecycle cases activate through the public control socket; existing active-turn
+fixtures explicitly activate before supplying turns. Dedicated pending-preparation cases observe concurrent
+preparation, private provider requests/history, pending mute and cleanup. Held-preparation cases prove that
+activated local controls/help run while engine readiness is pending, but an ordinary turn waits for its own
+session begin acknowledgement and fresh note snapshot before native submission. Dismissal cases hold begin
+before its write and after its write to observe revocation and drainage without stale authority. Preparation
+messages never enter caller history, panel or audio and have no note authority.
 
 [WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
 drives native user-turn frames through the installed Hermes worker against a controlled streaming provider.
 It observes speech at the transport output and committed assistant context, not merely synthesis activity.
-Captured requests establish ordered history, exclude the interrupted unheard tail, and show empty history
-for a new service lifetime. The fixture refuses a direct provider bypass, controls interruption and observes
-native work finish before the next request. Recognition is unloaded without audio input; voice generation
-uses a finite double through the real adapter.
+Captured requests establish ordered history and exclude the interrupted unheard tail. Lifecycle cases assert
+empty caller history, repeat and panel state at each activation, no inactive recognition, native requests,
+local actions or output, and old native work, generators and audio children completing before reuse. Controlled
+barriers test repeated dismissal/activation and sticky refusal after cleanup failure, including native close
+failure even when the pipeline suppresses its exception. The fixture refuses a direct provider bypass;
+recognition uses controlled pipes and voice generation a finite double through the real adapter.
 
-Related session cases cover engine absence or death, provider refusal, incomplete replies, corrupt worker
-output and startup/turn timeouts, including interrupted-reply drainage. They assert spoken failures without
-automatic session restart or user-turn retry. Timeout cases also assert worker exit and owned-home removal.
-[NativeHermesTests](../tests/test_hermes.py) separately exercises the installed worker's JSON-lines boundary:
-unsolicited tool refusal, isolated configuration/environment, no reusable conversation state and attempted
+Related cases cover engine absence or death, provider refusal, incomplete replies, corrupt worker output and
+startup/turn timeouts, including interrupted-reply drainage. They assert spoken failures without automatic
+session restart or user-turn retry. Known preparation, begin and note-preflight failures retain activated local
+controls/help and an on-request engine advisory without a native retry; uncertain cleanup separately refuses
+reactivation. Timeout cases also assert worker exit and owned-home removal.
+[NativeHermesTests](../tests/test_hermes.py) exercises the installed worker's JSON-lines boundary: tool-free,
+note-free preparation; exactly the native memory tool on accepted turns; refusal of desktop, arbitrary-file,
+terminal, session-search and other unsolicited tools; isolated configuration/environment; and attempted
 network destinations limited to the controlled provider. Its
-`test_production_worker_entrypoint_becomes_ready_without_a_turn` observes the actual worker script become
-ready and exit cleanly with closed standard input, without a conversation or inference.
+`test_production_worker_entrypoint_becomes_ready_without_a_turn` observes worker startup and clean exit with
+closed standard input, without a conversation or inference; worker readiness alone is not session readiness.
+
+Native memory evidence uses scripted provider tool calls and exact file/readback observations for persistence,
+private modes, native budgets/format, fresh snapshots within and across workers, and operator edits/deletion.
+Real temporary storage fixtures establish unsafe/corrupt note refusal without repair, while native begin-wire
+coverage establishes refusal before provider work. Preparation and native review instrumentation establish no
+preparation or background memory authority. A whole-conversation barrier case holds an accepted note write,
+dismisses and requests activation, then observes the write finish before the new snapshot without stale output.
+Distinct note, caller and trace sentinels establish that only notes cross conversations; traces are never ingested.
+These tests establish native tool/storage enforcement, not whether Bonsai chooses useful facts to save.
 
 Local provider-error diagnostics belong in the owned ignored home, as checked by
 `NativeHermesTests.test_provider_failure_is_explicit_and_diagnostics_stay_in_owned_home`.
@@ -107,7 +123,9 @@ Installed-engine evidence is required locally; its absence blocks delivery. Host
 skips native cases when the interpreter is absent: those skips do not prove installed-engine behaviour,
 and local native results do not prove hosted execution. Tracked recognition adapter tests use doubles and
 do not establish actual recognition-worker execution. Controlled providers and speech doubles do not prove
-live recognition accuracy, physical playback, live Bonsai answers or graphical-login startup or spoken latency.
+live recognition accuracy, microphone/echo behaviour, physical playback, live Bonsai answers, automatic-note
+quality, graphical-login startup or spoken latency. Actual shortcut installation/dispatch, native visual
+and accessible-tree acceptance remain separate installed-host evidence; silent automated results do not establish them.
 
 ### Native indicator evidence
 
@@ -208,9 +226,9 @@ mkdir -m 700 .runtime && for asset in bin cache python asr-venv voice-venv model
 done
 ```
 
-The recipe refuses any existing `.runtime` path, including a dangling symlink, and stops with a nonzero result if an asset link fails. Do not link the whole runtime, `hermes-traces`, logs, samples or temporary Hermes homes. Tracing requires `.runtime` to be a real directory owned by the current user without group or world write access; `.runtime/hermes-traces` must also be a real directory owned by that user with mode `0700`. The worker creates its private trace root when absent and refuses unsafe existing paths without repairing or replacing them.
+The recipe refuses any existing `.runtime` path, including a dangling symlink, and stops with a nonzero result if an asset link fails. Do not link the whole runtime, `hermes-traces`, `hermes-memory`, logs, samples or temporary Hermes homes. Native memory fixtures use isolated private note stores, never the owner's production notes. Tracing requires `.runtime` to be a real directory owned by the current user without group or world write access; `.runtime/hermes-traces` must also be a real directory owned by that user with mode `0700`. The worker creates its private trace root when absent and refuses unsafe existing paths without repairing or replacing them.
 
-Under [closeout's existing cleanup rules](../.agents/skills/closeout/SKILL.md#closeout), remove only verified inactive job-created asset links. Never follow the links, delete their shared targets or rebuild those assets for tests. Remove the real `.runtime` directory only with `rmdir` when empty; it is not regenerated disposable storage. Retain a worktree containing `hermes-traces` or other owner data. Trace deletion remains the owner's decision under [README's local conversation trace rules](../README.md#local-conversation-traces).
+Under [closeout's existing cleanup rules](../.agents/skills/closeout/SKILL.md#closeout), remove only verified inactive job-created asset links. Never follow the links, delete their shared targets or rebuild those assets for tests. Remove the real `.runtime` directory only with `rmdir` when empty; it is not regenerated disposable storage. Retain a worktree containing `hermes-traces`, `hermes-memory` or other owner data. Trace and note deletion remain the owner's decision under [README's privacy rules](../README.md#privacy-and-runtime-boundary).
 
 Ruff requires `uvx` (provided by uv). From the repository root, run:
 
