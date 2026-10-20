@@ -367,7 +367,7 @@ FocusScope {
                     readonly property bool activeReply: root.conversationAvailable && !owner
                         && index === root.displayedTurns.length - 1
                         && (modelData.state === "thinking" || modelData.state === "speaking")
-                    readonly property bool spoken: owner && modelData.state === "complete"
+                    readonly property bool spoken: owner && modelData.source === "spoken" && modelData.state === "complete"
                     readonly property int groupGap: index === 0 ? 0
                         : root.displayedTurns[index - 1].speaker === modelData.speaker ? 4 : 14
                     readonly property bool continuesSpeaker: index > 0
@@ -377,7 +377,7 @@ FocusScope {
                     Accessible.role: Accessible.StaticText
                     Accessible.name: (owner ? "You: " : "Kestrel: ")
                         + modelData.text + (notice ? " " + notice : "")
-                    Accessible.description: spoken ? "Spoken message" : ""
+                    Accessible.description: spoken ? "Spoken message" : owner && modelData.source === "typed" ? "Typed message" : ""
                     Rectangle {
                         id: bubble
                         objectName: "turnBubble" + turnItem.index
@@ -412,6 +412,7 @@ FocusScope {
                         Loader {
                             id: provenance
                             objectName: "turnProvenance" + turnItem.index
+                            active: turnItem.spoken
                             x: parent.width - 12 - width
                             y: 8 + body.implicitHeight + 4
                             width: root.captionLineHeight
@@ -428,6 +429,7 @@ FocusScope {
                             HoverHandler { id: provenanceHover }
                             Loader {
                                 objectName: "turnProvenanceTooltip" + turnItem.index
+                                active: turnItem.spoken
                                 sourceComponent: root.tooltipComponent
                                 onLoaded: {
                                     item.parent = provenance

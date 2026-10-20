@@ -46,7 +46,7 @@ TestCase {
     function test_inactive_status_and_empty_conversation() {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)
-        const snapshot = JSON.stringify({version: 1, session: "inactive-session", turns: []}) + "\n"
+        const snapshot = JSON.stringify({version: 2, session: "inactive-session", turns: []}) + "\n"
         verify(service.acceptConversationChunk(snapshot))
         compare(service.conversationMessage, "Say something. Kestrel replies after you.")
         verify(service.acceptStatusChunk("D"))
@@ -66,8 +66,8 @@ TestCase {
         compare(service.conversationMessage, "Conversation unavailable. Reopen the panel.")
         verify(service.acceptConversationChunk(snapshot))
         compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "inactive-session", turns: [
-            {speaker: "you", text: "Existing turn.", state: "complete"}
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "inactive-session", turns: [
+            {speaker: "you", text: "Existing turn.", state: "complete", source: "spoken"}
         ]}) + "\n"))
         compare(service.conversationMessage, "")
         compare(service.turns.length, 1)
@@ -81,8 +81,14 @@ TestCase {
         verify(service !== null)
         const unavailable = "Conversation unavailable. Reopen the panel."
         const tooLarge = "Conversation is too large to display. Restart Kestrel to begin a new conversation."
-        const snapshot = {version: 1, session: "literal-session", turns: [
-            {speaker: "you", text: "<b>Literal owner text</b>", state: "complete"},
+        compare(service.acceptConversationChunk(JSON.stringify({version: 1, session: "old-session", turns: [
+            {speaker: "you", text: "Unlabelled old input", state: "complete"}
+        ]}) + "\n"), false, "version 1 must not guess spoken provenance")
+        compare(service.conversationAvailable, false)
+        compare(service.conversationMessage, unavailable)
+        const snapshot = {version: 2, session: "literal-session", turns: [
+            {speaker: "you", text: "<b>Literal owner text</b>", state: "complete", source: "spoken"},
+            {speaker: "you", text: "<i>Literal typed text</i>", state: "complete", source: "typed"},
             {speaker: "kestrel", text: "Delivered prefix.", state: "interrupted"}
         ]}
         function send(record) { return service.acceptConversationChunk(JSON.stringify(record) + "\n") }
@@ -90,8 +96,11 @@ TestCase {
             verify(send(snapshot))
             compare(service.conversationAvailable, true)
             compare(service.conversationSession, "literal-session")
-            compare(service.turns.length, 2)
+            compare(service.turns.length, 3)
             compare(service.turns[0].text, "<b>Literal owner text</b>")
+            compare(service.turns[0].source, "spoken")
+            compare(service.turns[1].text, "<i>Literal typed text</i>")
+            compare(service.turns[1].source, "typed")
         }
         compare(service.turns.length, 0)
         compare(service.conversationMessage, unavailable)
@@ -100,7 +109,7 @@ TestCase {
         verify(service.acceptConversationChunk(encoded.slice(0, 17)))
         compare(service.turns.length, 0)
         verify(service.acceptConversationChunk(encoded.slice(17)))
-        compare(service.turns.length, 2)
+        compare(service.turns.length, 3)
         compare(service.conversationSession, "literal-session")
         verify(send({alive: "literal-session"}))
         const expiry = findChild(service, "conversationExpiry")
@@ -109,18 +118,31 @@ TestCase {
         verify(expiry.running)
         const invalid = [
             "null\n", "[]\n", "{\n", '{"alive":"other-session"}\n',
-            '{"version":1,"session":"other-session","turns":[]}\n',
-            '{"version":1,"session":"literal-session","turns":[],"extra":true}\n',
-            '{"version":2,"session":"literal-session","turns":[]}\n',
-            '{"version":1,"session":"","turns":[]}\n',
-            '{"version":1,"session":"literal-session","turns":null}\n',
+            '{"version":2,"session":"other-session","turns":[]}\n',
+            '{"version":2,"session":"literal-session","turns":[],"extra":true}\n',
+            '{"version":1,"session":"literal-session","turns":[]}\n',
+            '{"version":2,"session":"","turns":[]}\n',
+            '{"version":2,"session":"literal-session","turns":null}\n',
             '{"unavailable":"invented state"}\n',
             '{"unavailable":"' + unavailable + '","alive":"literal-session"}\n',
             "x".repeat(1048577)
         ]
-        for (const field of ["speaker", "text", "state", "extra"]) {
+        for (const field of ["speaker", "text", "state", "source", "extra"]) {
             const copy = JSON.parse(JSON.stringify(snapshot))
             copy.turns[0][field] = field === "text" ? 3 : "unknown"
+            invalid.push(JSON.stringify(copy) + "\n")
+        }
+        const missing = JSON.parse(JSON.stringify(snapshot))
+        delete missing.turns[0].source
+        invalid.push(JSON.stringify(missing) + "\n")
+        for (const source of [null, true, "kestrel", ""]) {
+            const copy = JSON.parse(JSON.stringify(snapshot))
+            copy.turns[0].source = source
+            invalid.push(JSON.stringify(copy) + "\n")
+        }
+        for (const source of ["spoken", "typed"]) {
+            const copy = JSON.parse(JSON.stringify(snapshot))
+            copy.turns[2].source = source
             invalid.push(JSON.stringify(copy) + "\n")
         }
         for (const chunk of invalid) {
@@ -149,7 +171,7 @@ TestCase {
         compare(service.conversationMessage, tooLarge)
         compare(service.conversationSession, "")
         compare(expiry.running, false)
-        verify(send({version: 1, session: "new-service", turns: []}))
+        verify(send({version: 2, session: "new-service", turns: []}))
         compare(service.conversationAvailable, true)
         compare(service.turns.length, 0)
         compare(service.conversationMessage, "Say something. Kestrel replies after you.")

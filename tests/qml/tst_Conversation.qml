@@ -66,6 +66,57 @@ TestCase {
         }
     }
 
+    function test_typed_and_spoken_provenance() {
+        const content = createTemporaryObject(conversationComponent, test, {
+            width: 320, height: 640, background: "#1a1b26", ink: "#a9b1d6",
+            accentInk: "#7aa2f7", troubleInk: "#D35F5F", conversationMessage: "",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            conversationAvailable: true, currentState: "idle", textScale: 2
+        })
+        verify(content !== null)
+        content.turns = [{speaker: "you", text: "A", state: "complete", source: "typed"}]
+        tryVerify(function() { return findChild(content, "turnBubble0") !== null })
+        const transcript = findChild(content, "transcript")
+        mouseClick(transcript, 2, 2)
+        compare(findChild(content, "turnProvenance0").visible, false,
+            "typed messages must not claim microphone provenance")
+        compare(findChild(content, "turnRow0").Accessible.description, "Typed message")
+        compare(findChild(content, "turnProvenance0").item, null)
+        compare(findChild(content, "turnProvenanceTooltip0").item, null)
+        compare(findChild(content, "turnBubble0").width, 44,
+            "a typed bubble must not reserve the wider doubled caption")
+        compare(findChild(content, "turnBubble0").height,
+            findChild(content, "turnText0").implicitHeight + 16)
+        content.turns = [{speaker: "you", text: "A", state: "complete", source: "spoken"}]
+        tryVerify(function() {
+            const glyph = findChild(content, "turnProvenance0")
+            return glyph !== null && glyph.visible
+        })
+        const provenance = findChild(content, "turnProvenance0")
+        compare(provenance.item.text, "󰍬")
+        compare(findChild(content, "turnRow0").Accessible.description, "Spoken message")
+        compare(findChild(content, "turnBubble0").width, 56)
+        compare(findChild(content, "turnBubble0").height,
+            findChild(content, "turnText0").implicitHeight + 16 + 32 + 4)
+        compare(findChild(content, "turnProvenanceTooltip0").item.text, "Spoken message")
+        const literal = "<b>Typed & literal</b>\nSecond line"
+        content.turns = [{speaker: "you", text: literal, state: "complete", source: "typed"},
+            {speaker: "kestrel", text: literal, state: "complete"},
+            {speaker: "you", text: "Unfinished", state: "thinking", source: "spoken"}]
+        tryVerify(function() { return findChild(content, "turnText2") !== null })
+        for (let i = 0; i < 3; i++) {
+            compare(findChild(content, "turnProvenance" + i).visible, false)
+            compare(findChild(content, "turnBubble" + i).height,
+                findChild(content, "turnText" + i).implicitHeight + 16)
+        }
+        compare(findChild(content, "turnProvenanceTooltip0").item, null)
+        compare(findChild(content, "turnRow0").Accessible.name, "You: " + literal)
+        compare(findChild(content, "turnRow1").Accessible.name, "Kestrel: " + literal)
+        compare(findChild(content, "turnRow1").Accessible.description, "")
+        compare(findChild(content, "turnText0").text, literal)
+        compare(findChild(content, "turnText0").textFormat, Text.PlainText)
+    }
+
     function test_windhover_bubbles_and_scaling() {
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -75,8 +126,8 @@ TestCase {
         })
         verify(content !== null)
         const literal = '<b>Literal</b>\n' + "unbroken".repeat(80)
-        const turns = [{speaker: "you", text: "A", state: "complete"},
-            {speaker: "you", text: literal, state: "complete"},
+        const turns = [{speaker: "you", text: "A", state: "complete", source: "spoken"},
+            {speaker: "you", text: literal, state: "complete", source: "spoken"},
             {speaker: "kestrel", text: "B", state: "complete"},
             {speaker: "kestrel", text: literal, state: "complete"}]
         content.turns = turns
@@ -199,7 +250,7 @@ TestCase {
         let marks = null
         let bubble = null
         function accept(turns) {
-            verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "live-session", turns: turns}) + "\n"))
+            verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "live-session", turns: turns}) + "\n"))
             tryCompare(content, "displayedTurns", service.turns)
             verify(waitForRendering(content))
             tail = findChild(content, "turnTail1")
@@ -359,7 +410,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         verify(service.acceptStatusChunk("D"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "fit-session", turns: []}) + "\n"))
         const content = createTemporaryObject(conversationComponent, window.contentItem, {
             width: Qt.binding(function() { return window.width }),
             height: Qt.binding(function() { return window.height }),
@@ -420,8 +471,8 @@ TestCase {
         compare(microphoneTooltip.visible, false)
         mouseMove(close, close.width / 2, close.height / 2)
         tryCompare(moveTooltip, "visible", false)
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session",
-            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete"}]}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "fit-session",
+            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete", source: "spoken"}]}) + "\n"))
         tryVerify(function() { return findChild(content, "turnProvenance0") !== null })
         const provenance = findChild(content, "turnProvenance0")
         verify(waitForRendering(provenance))
@@ -435,7 +486,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         verify(service.acceptStatusChunk("D"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "tooltip-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "tooltip-session", turns: []}) + "\n"))
         const destroyedBefore = destroyedTooltips
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -514,7 +565,7 @@ TestCase {
     function test_microphone_icons_follow_verified_status() {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "header-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "header-session", turns: []}) + "\n"))
         verify(service.acceptStatusChunk("D"))
         const content = createTemporaryObject(conversationComponent, test, {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
@@ -613,7 +664,7 @@ TestCase {
         }
         let content = makeContent()
         shown(content, true)
-        const history = [{speaker: "you", text: "Existing owner turn.", state: "complete"},
+        const history = [{speaker: "you", text: "Existing owner turn.", state: "complete", source: "spoken"},
             {speaker: "kestrel", text: "Existing reply.", state: "complete"}]
         session(content, "session-a")
         content.turns = history
@@ -667,7 +718,7 @@ TestCase {
         content.turns = history
         settle()
         compare(JSON.stringify(requests), "[]", "new session history must be silent")
-        content.turns = history.concat([{speaker: "you", text: "New live turn.", state: "complete"}])
+        content.turns = history.concat([{speaker: "you", text: "New live turn.", state: "complete", source: "spoken"}])
         settle()
         compare(JSON.stringify(requests), '["You: New live turn."]')
         requests.length = 0
@@ -689,16 +740,16 @@ TestCase {
         content.turns = Qt.binding(function() { return service.turns })
         content.conversationSession = Qt.binding(function() { return service.conversationSession })
         shown(content, true)
-        const wired = [{speaker: "you", text: "Existing turn.", state: "complete"}]
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session", turns: wired}) + "\n"))
+        const wired = [{speaker: "you", text: "Existing turn.", state: "complete", source: "spoken"}]
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "same-session", turns: wired}) + "\n"))
         settle()
         compare(JSON.stringify(requests), "[]", "accepted history must be a silent baseline")
         const returned = wired.concat([{speaker: "kestrel", text: "Completed during disconnection.", state: "complete"}])
         verify(service.acceptConversationChunk(JSON.stringify({unavailable: "Conversation unavailable. Reopen the panel."})
-            + "\n" + JSON.stringify({version: 1, session: "same-session", turns: returned}) + "\n"))
+            + "\n" + JSON.stringify({version: 2, session: "same-session", turns: returned}) + "\n"))
         settle()
         compare(JSON.stringify(requests), "[]", "same-session reconnect history must stay silent when records share a chunk")
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "same-session",
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "same-session",
             turns: returned.concat([{speaker: "kestrel", text: "After batched reconnect.", state: "complete"}])}) + "\n"))
         settle()
         compare(JSON.stringify(requests), '["Kestrel: After batched reconnect."]')
@@ -720,7 +771,7 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)
         verify(service.acceptStatusChunk("I"))
-        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "panel-session", turns: []}) + "\n"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "panel-session", turns: []}) + "\n"))
         const component = Qt.createComponent(Qt.resolvedUrl("../../desktop/Conversation.qml"))
         compare(component.status, Component.Ready, component.errorString())
         const content = createTemporaryObject(component, this, {
@@ -771,7 +822,7 @@ TestCase {
         const activePrompt = textWith(content, "Say something. Kestrel replies after you.")
         verify(activePrompt !== null && activePrompt.visible)
         const literal = '<b>Literal text</b> https://example.invalid ' + "unbroken".repeat(80)
-        const turns = [{speaker: "you", text: literal, state: "complete"}]
+        const turns = [{speaker: "you", text: literal, state: "complete", source: "spoken"}]
         for (let i = 0; i < 18; i++) turns.push({speaker: "kestrel", text: "Literal reply " + i + ".", state: "complete"})
         content.turns = turns
         tryVerify(function() { return transcript.contentHeight > transcript.height })

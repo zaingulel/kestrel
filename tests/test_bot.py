@@ -4132,7 +4132,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             try:
                 self.assertEqual(delivered, [
-                    {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete'},
+                    {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete', 'source': 'spoken'},
                     {'speaker': 'kestrel', 'text': 'Hello.', 'state': 'complete'},
                 ])
                 for utterance in ('repeat that', 'what can I say?'):
@@ -4145,7 +4145,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
                     rows = await turns_until(lambda turns: turns[-2]['text'] == utterance and turns[-1]['state'] == 'complete')
                     self.assertEqual(rows[-2:], [
-                        {'speaker': 'you', 'text': utterance, 'state': 'complete'},
+                        {'speaker': 'you', 'text': utterance, 'state': 'complete', 'source': 'spoken'},
                         {'speaker': 'kestrel', 'text': expected, 'state': 'complete'},
                     ])
                     self.assertTrue(committed.empty(), 'Local spoken responses never enter engine history')
@@ -4228,7 +4228,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await barrier()
                 rows = await turns_until(lambda turns: turns[-1]['text'] == 'mute')
                 self.assertEqual(len(rows), count_before_mute + 1, 'A silent tool creates only the finalized user row')
-                self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete'})
+                self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete', 'source': 'spoken'})
                 self.assertTrue(spoken.empty())
                 self.assertEqual(len(brain.requests), 5, 'Silent controls make no engine request')
                 await start()
@@ -4318,7 +4318,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 if 'turns' in snapshot and snapshot['turns'] and snapshot['turns'][-1]['state'] == 'failed':
                                     break
                         self.assertEqual(snapshot['turns'], [
-                            {'speaker': 'you', 'text': 'what can I say?', 'state': 'complete'},
+                            {'speaker': 'you', 'text': 'what can I say?', 'state': 'complete', 'source': 'spoken'},
                             {'speaker': 'kestrel', 'text': '', 'state': 'failed'},
                         ])
                         self.assertEqual(transport.output().audio_written, 0)

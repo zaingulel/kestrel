@@ -100,14 +100,15 @@ Item {
             conversationExpiry.restart()
             return true
         }
-        if (keys !== "session,turns,version" || record.version !== 1
+        if (keys !== "session,turns,version" || record.version !== 2
                 || typeof record.session !== "string" || !record.session.length || record.session.length > 256
                 || (conversationValue.session !== "" && record.session !== conversationValue.session)
                 || !Array.isArray(record.turns)) return false
         for (const turn of record.turns) {
             if (turn === null || typeof turn !== "object" || Array.isArray(turn)
-                    || Object.keys(turn).sort().join(",") !== "speaker,state,text"
+                    || Object.keys(turn).sort().join(",") !== (turn.speaker === "you" ? "source,speaker,state,text" : "speaker,state,text")
                     || (turn.speaker !== "you" && turn.speaker !== "kestrel")
+                    || (turn.speaker === "you" && turn.source !== "spoken" && turn.source !== "typed")
                     || typeof turn.text !== "string"
                     || ["complete", "thinking", "speaking", "interrupted", "failed"].indexOf(turn.state) === -1) return false
         }

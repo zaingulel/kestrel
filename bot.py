@@ -1070,7 +1070,7 @@ class HermesLLMService(LLMService):
                 and messages[-1].get('role') == 'user'
                 and isinstance(messages[-1].get('content'), str)):
             if self.conversation is not None:
-                self.conversation.user(messages[-1]['content'])
+                self.conversation.user(messages[-1]['content'], source='spoken')
             if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
                 self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
                 messages.pop()

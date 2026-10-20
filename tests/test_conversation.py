@@ -399,9 +399,62 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_source_is_explicit_and_wire_validation_is_closed(self):
+        old = {'version': 1, 'session': 'source-fixture', 'turns': [
+            {'speaker': 'you', 'text': 'Old unlabelled input', 'state': 'complete'},
+        ]}
+        with self.assertRaises(ValueError):
+            conversation.validate_record(conversation.encode(old))
+        turns = [
+            {'speaker': 'you', 'text': '<b>Spoken & literal</b>', 'state': 'complete', 'source': 'spoken'},
+            {'speaker': 'you', 'text': '<b>Typed & literal</b>\nNext line', 'state': 'complete', 'source': 'typed'},
+            {'speaker': 'kestrel', 'text': 'Heard reply.', 'state': 'complete'},
+        ]
+        valid = {'version': 2, 'session': 'source-fixture', 'turns': turns}
+        self.assertEqual(conversation.validate_record(conversation.encode(valid)), valid)
+        invalid = [valid | {'version': 1}, valid | {'extra': True}]
+        missing = turns[0].copy()
+        del missing['source']
+        invalid.append(valid | {'turns': [missing]})
+        for source in ('unknown', 'kestrel', '', None, True):
+            invalid.append(valid | {'turns': [turns[0] | {'source': source}]})
+        invalid.extend([
+            valid | {'turns': [turns[0] | {'extra': 'spoken'}]},
+            valid | {'turns': [turns[2] | {'source': 'spoken'}]},
+            valid | {'turns': [turns[2] | {'source': 'typed'}]},
+        ])
+        for record in invalid:
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                conversation.validate_record(conversation.encode(record))
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            feed = conversation.ConversationFeed()
+            self.addAsyncCleanup(feed.close)
+            await feed.start()
+            self.assertIsNotNone(feed.server)
+            with self.assertRaises(TypeError):
+                feed.user('Source is required')
+            with self.assertRaises(TypeError):
+                feed.user('Source is keyword-only', 'spoken')
+            with self.assertRaises(ValueError):
+                feed.user('Unknown source is refused', source='unknown')
+            self.assertEqual(feed.turns, [])
+            feed.user('<b>Spoken & literal</b>', source='spoken')
+            feed.user('<b>Typed & literal</b>\nNext line', source='typed')
+            token = object()
+            feed.begin_reply(token)
+            feed.spoken(token, 'Heard reply.')
+            feed.finish(token)
+            reader, writer = await asyncio.open_unix_connection(conversation.address())
+            try:
+                line = await asyncio.wait_for(reader.readline(), 1)
+                self.assertEqual(conversation.validate_record(line),
+                                 {'version': 2, 'session': feed.session, 'turns': turns})
+            finally:
+                await conversation.close_writer(writer)
+
     async def test_private_wire_and_corrupt_input(self):
-        valid = {'version': 1, 'session': 'fixture', 'turns': [
-            {'speaker': 'you', 'text': '<b>Private canary</b>', 'state': 'complete'},
+        valid = {'version': 2, 'session': 'fixture', 'turns': [
+            {'speaker': 'you', 'text': '<b>Private canary</b>', 'state': 'complete', 'source': 'spoken'},
         ]}
         self.assertEqual(conversation.validate_record(json.dumps(valid).encode() + b'\n'), valid)
         corrupt = [b'null\n', b'[]\n', b'{"private canary":}\n', b'\xff\n', b'{}',
@@ -409,8 +462,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                    b'{"alive":"old-session"}\n', b'{"unavailable":"private canary"}\n']
         for replacement in ({'version': True}, {'session': ''}, {'turns': {}}, {'extra': 'private canary'},
                             {'turns': [{'speaker': 'brain', 'text': 'canary', 'state': 'complete'}]},
-                            {'turns': [{'speaker': 'you', 'text': 1, 'state': 'complete'}]},
-                            {'turns': [{'speaker': 'you', 'text': 'canary', 'state': 'invented'}]}):
+                            {'turns': [{'speaker': 'you', 'text': 1, 'state': 'complete', 'source': 'spoken'}]},
+                            {'turns': [{'speaker': 'you', 'text': 'canary', 'state': 'invented', 'source': 'spoken'}]}):
             corrupt.append(json.dumps(valid | replacement).encode() + b'\n')
         for line in corrupt:
             with self.subTest(record=line[:40]), self.assertRaises((ValueError, UnicodeError)):
@@ -434,7 +487,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             self.addAsyncCleanup(feed.close)
             await feed.start()
             self.assertIsNotNone(feed.server)
-            feed.user('<b>Private canary</b>')
+            feed.user('<b>Private canary</b>', source='spoken')
             process = await asyncio.create_subprocess_exec(
                 '/usr/bin/python', str(ROOT / 'desktop/conversation.py'), '--watch',
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -470,7 +523,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
 
             accepted = asyncio.Event()
             writers = []
-            hostile_payload = b'{"version":1,"session":"evil","turns":[],"canary":"private canary"}\n'
+            hostile_payload = b'{"version":2,"session":"evil","turns":[],"canary":"private canary"}\n'
 
             def hostile(reader, writer):
                 writers.append(writer)
@@ -501,8 +554,8 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                     writer.close()
                     await writer.wait_closed()
 
-            hostile_payload = (b'{"version":1,"session":"hostile","turns":[{"speaker":"you",'
-                               b'"text":"Private credential canary","state":"complete"}]}\n')
+            hostile_payload = (b'{"version":2,"session":"hostile","turns":[{"speaker":"you",'
+                               b'"text":"Private credential canary","state":"complete","source":"spoken"}]}\n')
             output = io.StringIO()
             emitted = asyncio.Event()
             native_write = output.write
@@ -559,7 +612,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                     server = late.server
                     client_reader, client_writer = await asyncio.open_unix_connection(conversation.address())
                     peer_reader, peer_writer = await asyncio.wait_for(accepted, 1)
-                    late.user('Private accepted connection canary')
+                    late.user('Private accepted connection canary', source='spoken')
                     close_listener = server.close
 
                     def observe_listener_close():
@@ -593,7 +646,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             await feed.start()
             first_session = feed.session
             token, next_token = object(), object()
-            feed.user('Synthetic private turn')
+            feed.user('Synthetic private turn', source='spoken')
             feed.begin_reply(token)
             feed.spoken(token, 'One fact.')
             feed.finish(token, interrupted=True)
@@ -643,7 +696,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(snapshot['turns'], [])
             writer.close()
             await writer.wait_closed()
-            restarted.user('x' * (1024 * 1024))
+            restarted.user('x' * (1024 * 1024), source='spoken')
             self.assertEqual(json.loads(restarted.payload), {'unavailable':
                 'Conversation is too large to display. Restart Kestrel to begin a new conversation.'})
             reader, writer = await asyncio.open_unix_connection(conversation.address())
@@ -678,7 +731,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
                     for number in range(30):
-                        slow.user('Synthetic turn ' + str(number))
+                        slow.user('Synthetic turn ' + str(number), source='spoken')
                     release.set()
                     self.assertEqual(json.loads(await asyncio.wait_for(reader.readline(), 1))['turns'], [])
                     latest = json.loads(await asyncio.wait_for(reader.readline(), 1))
@@ -696,7 +749,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
                     owner = slow.reader_task
-                    slow.user('Voice continues while the panel is blocked')
+                    slow.user('Voice continues while the panel is blocked', source='spoken')
                     await asyncio.wait_for(asyncio.shield(owner), 5)
                     self.assertTrue(owner.done(), 'A blocked drain is bounded and its work is joined')
                 finally:
@@ -708,7 +761,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             old = conversation.ConversationFeed()
             self.addAsyncCleanup(old.close)
             await old.start()
-            old.user('Private prior session canary')
+            old.user('Private prior session canary', source='spoken')
             process = await asyncio.create_subprocess_exec(
                 '/usr/bin/python', str(ROOT / 'desktop/conversation.py'), '--watch',
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
