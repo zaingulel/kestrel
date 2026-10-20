@@ -164,12 +164,15 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
         line, self.buffer = self.buffer.split(b'\n', 1)
         return json.loads(line)
 
-    def request(self, messages):
+    def request(self, messages, *, results=()):
+        results = iter(results)
         self.send(json.dumps({'messages': messages}).encode() + b'\n')
         events = []
         while True:
             event = self.event()
             events.append(event)
+            if 'tool_call' in event:
+                self.send(next(results))
             if 'done' in event or 'error' in event:
                 return events
 
@@ -497,6 +500,8 @@ print('private storage matrix passed')
                 reader.finish()
 
         # Exercise the worker's final-response fallback without a provider stream callback.
+        registry_module = ModuleType('tools.registry')
+        registry_module.registry = Mock()
         run_agent, relay_runtime, native = (ModuleType(name) for name in
                                            ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
         agent = Mock()
@@ -520,8 +525,8 @@ print('private storage matrix passed')
             native.AtofExporter = exporter
             def construct_agent(**kwargs):
                 (home / 'memories').mkdir(mode=0o700, exist_ok=True)
-                agent.valid_tool_names = {'memory'}
-                agent.tools = [{'function': {'name': 'memory'}}]
+                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+                agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
                 agent._memory_store = object()
                 agent._memory_manager = None
                 return agent
@@ -531,7 +536,7 @@ print('private storage matrix passed')
             cwd, mask = os.getcwd(), os.umask(0o077)
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
-                                                'nemo_relay': native}),
+                                                'nemo_relay': native, 'tools.registry': registry_module}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
                       patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
@@ -589,6 +594,8 @@ def shutdown_exporter():
 runtime = Mock(spec=['managed_execution_enabled', 'shutdown'])
 runtime.managed_execution_enabled.return_value = case != 'inactive'
 runtime.shutdown.side_effect = shutdown_runtime
+registry_module = ModuleType('tools.registry')
+registry_module.registry = Mock()
 relay_runtime = ModuleType('agent.relay_runtime')
 relay_runtime.get_runtime = Mock(return_value=None if case == 'missing runtime' else runtime)
 exporter = Mock(spec=['path', 'register', 'force_flush', 'deregister', 'shutdown'])
@@ -612,11 +619,13 @@ def create_exporter(config):
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
 agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users',
-                   '_fire_stream_delta', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
-agent.valid_tool_names = {'memory'}
-agent.tools = [{'function': {'name': 'memory'}}]
+                   '_fire_stream_delta', '_repair_tool_call', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
+agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+if case == 'tool surface':
+    agent.valid_tool_names.add('tool_search')
+agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
 agent._memory_store = object()
-agent._memory_manager = None
+agent._memory_manager = object() if case == 'memory manager' else None
 agent.run_conversation.return_value = {'completed': True, 'final_response': '[delivery:neutral]\\nSynthetic reply.'}
 if case == 'provider shutdown':
     agent.run_conversation.side_effect = RuntimeError('synthetic provider refusal')
@@ -639,7 +648,8 @@ else:
         run_agent.AIAgent.side_effect = RuntimeError('synthetic engine construction failure')
 try:
     with (patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
-                                    'agent.relay_runtime': relay_runtime}),
+                                    'agent.relay_runtime': relay_runtime,
+                                                'tools.registry': registry_module}),
           patch.object(hermes_worker, 'validate_hermes_source')):
         status = hermes_worker.main()
 finally:
@@ -658,23 +668,27 @@ raise SystemExit(status)
             'engine construction': 'synthetic engine construction failure',
             'runtime home': home_error,
             'engine close': engine_close_error,
+            'tool surface': 'Hermes offered tools other than memory and the five desktop tools. Check the pinned Hermes configuration, then restart Kestrel.',
+            'memory manager': 'Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.',
         }
         for case in ('inactive', 'missing runtime', 'creation', 'registration', 'flush',
                      'shutdown', 'exporter shutdown', 'prior terminal shutdown', 'provider shutdown',
-                     'engine import', 'engine construction', 'runtime home', 'engine close'):
+                     'engine import', 'engine construction', 'runtime home', 'engine close',
+                     'tool surface', 'memory manager'):
             with self.subTest(case=case):
                 with tempfile.TemporaryDirectory(prefix='hermes-lifecycle-') as directory:
                     home = Path(directory)
                     turn_case = case in ('flush', 'prior terminal shutdown', 'provider shutdown')
                     request = json.dumps({'messages': [{'role': 'user', 'content': 'Synthetic prompt.'}]}) + '\n'
+                    begin_case = case in ('tool surface', 'memory manager')
                     result = subprocess.run(
                         [sys.executable, '-c', bootstrap, str(ROOT), str(home), case],
-                        env=child_environment(home), input='{"begin":true}\n' + request * 2 if turn_case else '',
+                        env=child_environment(home), input='{"begin":true}\n' if begin_case else '{"begin":true}\n' + request * 2 if turn_case else '',
                         capture_output=True, text=True, timeout=45,
                     )
                     events = [json.loads(line) for line in result.stdout.splitlines()]
                     errors = [event['error'] for event in events if 'error' in event]
-                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertEqual(result.returncode, 0 if begin_case else 1, result.stderr)
                     startup_case = case in ('inactive', 'missing runtime', 'creation', 'registration',
                                             'engine import', 'engine construction', 'runtime home')
                     self.assertNotIn({'done': True}, events)
@@ -806,6 +820,8 @@ raise SystemExit(status)
                         plugins.symlink_to(sentinel)
                     runtime = Mock()
                     runtime.managed_execution_enabled.return_value = True
+                    registry_module = ModuleType('tools.registry')
+                    registry_module.registry = Mock()
                     relay_runtime = ModuleType('agent.relay_runtime')
                     relay_runtime.get_runtime = Mock(return_value=runtime)
                     native = ModuleType('nemo_relay')
@@ -847,7 +863,8 @@ raise SystemExit(status)
                     try:
                         with (patch.dict(os.environ, HERMES_HOME=str(home_setting)),
                               patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
-                                                        'agent.relay_runtime': relay_runtime}),
+                                                        'agent.relay_runtime': relay_runtime,
+                                                        'tools.registry': registry_module}),
                               patch.object(hermes_worker, 'validate_hermes_source'),
                               patch.object(hermes_worker, 'create_trace_directory', return_value=session,
                                            side_effect=directory_failure if kind == 'directory cause' else None),
@@ -1037,6 +1054,163 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_desktop_call_round_trips_through_kestrel_with_observed_result(self):
+        calls = [{'index': 0, 'id': 'mute-call', 'type': 'function',
+                  'function': {'name': 'mute', 'arguments': '{}'}}]
+        result = '{"confirmed": true, "attempted": true, "reason": "observed muted"}'
+        replies = [[({'tool_calls': calls}, None), ({}, 'tool_calls')],
+                   [({'content': '[delivery:neutral] Muted.'}, None), ({}, 'stop')]]
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Please silence the speakers.'}],
+                                    results=[json.dumps({'tool_result': result}).encode() + b'\n'])
+            self.assertEqual(events, [{'tool_call': {'name': 'mute', 'arguments': {}}},
+                                      {'delivery': 'neutral'}, {'text': 'Muted.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool'],
+                             [{'role': 'tool', 'tool_call_id': 'mute-call', 'content': result}])
+
+    def test_fuzzy_desktop_names_are_refused_not_repaired(self):
+        fuzzy = ('unmute', 'set_volum', 'next_trak', 'focus_workspac', 'pause_media_tool')
+        calls = [{'index': index, 'id': f'fuzzy-{index}', 'type': 'function',
+                  'function': {'name': name, 'arguments': '{}'}}
+                 for index, name in enumerate(fuzzy)]
+        canonical = [('MUTE', {}), ('set-volume', {'percent': 30}), ('pause media', {}),
+                     ('next-track', {}), ('focus workspace', {'number': 2})]
+        canonical_calls = [{'index': index, 'id': f'canonical-{index}', 'type': 'function',
+                            'function': {'name': name, 'arguments': json.dumps(arguments)}}
+                           for index, (name, arguments) in enumerate(canonical)]
+        replies = [[({'tool_calls': calls}, None), ({}, 'tool_calls')],
+                   [({'content': '[delivery:neutral] Refused.'}, None), ({}, 'stop')],
+                   [({'tool_calls': canonical_calls}, None), ({}, 'tool_calls')],
+                   [({'content': '[delivery:neutral] Finished.'}, None), ({}, 'stop')]]
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            result = b'{"tool_result":"observed result"}\n'
+            events = worker.request([{'role': 'user', 'content': 'Use only exact tool names.'}],
+                                    results=[result] * 5)
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Refused.'}, {'done': True}])
+            refusals = [m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool']
+            self.assertEqual(len(refusals), 5)
+            for message, name in zip(refusals, fuzzy):
+                self.assertIn(f"Tool '{name}' does not exist", message['content'])
+            events = worker.request([{'role': 'user', 'content': 'Use canonical names.'}],
+                                    results=[result] * 5)
+            self.assertEqual([e for e in events if 'tool_call' in e], [
+                {'tool_call': {'name': 'mute', 'arguments': {}}},
+                {'tool_call': {'name': 'set_volume', 'arguments': {'percent': 30}}},
+                {'tool_call': {'name': 'pause_media', 'arguments': {}}},
+                {'tool_call': {'name': 'next_track', 'arguments': {}}},
+                {'tool_call': {'name': 'focus_workspace', 'arguments': {'number': 2}}},
+            ])
+            self.assertEqual(events[-3:], [{'delivery': 'neutral'}, {'text': 'Finished.'}, {'done': True}])
+
+    def test_invalid_desktop_results_fail_the_turn_and_stop_the_worker(self):
+        original_command = WorkerProcess.command
+
+        def exit_status_command(home, brain, **kwargs):
+            command = original_command(home, brain, **kwargs)
+            command[2] = command[2].replace('    hermes_worker.main(base_url=sys.argv[4])',
+                                           '    raise SystemExit(hermes_worker.main(base_url=sys.argv[4]))')
+            return command
+
+        calls = [{'index': index, 'id': f'call-{index}', 'type': 'function',
+                  'function': {'name': name, 'arguments': '{}'}}
+                 for index, name in enumerate(('mute', 'next_track'))]
+        replies = [[({'tool_calls': calls}, None), ({}, 'tool_calls')],
+                   [({'content': '[delivery:neutral] Do not speak after corruption.'}, None), ({}, 'stop')]]
+        with patch.object(WorkerProcess, 'command', staticmethod(exit_status_command)):
+            with native_worker(replies) as (worker, brain):
+                self.assertEqual(worker.event(), {'ready': True})
+                worker.begin()
+                events = worker.request([{'role': 'user', 'content': 'Silence the output.'}],
+                                        results=[b'{"tool_result":"observed","extra":true}\n',
+                                                 b'{"tool_result":"must not be read"}\n'])
+                self.assertEqual(events, [{'tool_call': {'name': 'mute', 'arguments': {}}},
+                                          {'error': 'Kestrel desktop bridge failed'}])
+                self.assertEqual(worker.process.wait(timeout=5), 1)
+                self.assertEqual(worker.buffer, b'')
+                self.assertEqual(worker.process.stdout.read(), b'')
+                self.assertEqual(len(brain.requests), 2)
+
+    def test_desktop_history_records_become_native_tool_history(self):
+        records = [
+            {'role': 'tool', 'name': 'mute', 'arguments': {}, 'content': 'mute observed'},
+            {'role': 'tool', 'name': 'set_volume', 'arguments': {'percent': 30}, 'content': 'volume observed'},
+            {'role': 'tool', 'name': 'pause_media', 'arguments': {}, 'content': 'pause observed'},
+            {'role': 'tool', 'name': 'next_track', 'arguments': {}, 'content': 'next observed'},
+            {'role': 'tool', 'name': 'focus_workspace', 'arguments': {'number': 2}, 'content': 'workspace observed'},
+        ]
+        history = [{'role': 'user', 'content': 'Change the desktop.'}, *records,
+                   {'role': 'assistant', 'content': 'Finished.'},
+                   {'role': 'user', 'content': 'Silence it again.'}, records[0],
+                   {'role': 'user', 'content': 'What happened?'}]
+        replies = [[({'content': '[delivery:neutral] Observed desktop results.'}, None), ({}, 'stop')]] * 40
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            self.assertEqual(worker.request(history), [{'delivery': 'neutral'},
+                                                       {'text': 'Observed desktop results.'}, {'done': True}])
+            messages = [m for m in brain.requests[0][2]['messages'] if m['role'] != 'system']
+            for message in messages:
+                for call in message.get('tool_calls', []):
+                    call['function']['arguments'] = json.loads(call['function']['arguments'])
+            self.assertEqual(messages, [
+                {'role': 'user', 'content': 'Change the desktop.'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': 'kestrel-desktop-0', 'type': 'function', 'function': {'name': 'mute', 'arguments': {}}},
+                    {'id': 'kestrel-desktop-1', 'type': 'function', 'function': {'name': 'set_volume', 'arguments': {'percent': 30}}},
+                    {'id': 'kestrel-desktop-2', 'type': 'function', 'function': {'name': 'pause_media', 'arguments': {}}},
+                    {'id': 'kestrel-desktop-3', 'type': 'function', 'function': {'name': 'next_track', 'arguments': {}}},
+                    {'id': 'kestrel-desktop-4', 'type': 'function', 'function': {'name': 'focus_workspace', 'arguments': {'number': 2}}},
+                ]},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-0', 'content': 'mute observed'},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-1', 'content': 'volume observed'},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-2', 'content': 'pause observed'},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-3', 'content': 'next observed'},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-4', 'content': 'workspace observed'},
+                {'role': 'assistant', 'content': 'Finished.'},
+                {'role': 'user', 'content': 'Silence it again.'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': 'kestrel-desktop-5', 'type': 'function', 'function': {'name': 'mute', 'arguments': {}}},
+                ]},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-5', 'content': 'mute observed'},
+                {'role': 'user', 'content': 'What happened?'},
+            ])
+            for invalid in ([records[0], {'role': 'user', 'content': 'Next.'}],
+                            [{'role': 'assistant', 'content': 'Earlier.'}, records[0],
+                             {'role': 'user', 'content': 'Next.'}],
+                            [{'role': 'user', 'content': 'Before.'}, records[0], records[0],
+                             {'role': 'user', 'content': 'Next.'}],
+                            [{'role': 'user', 'content': 'Before.'}, *records, records[0],
+                             {'role': 'user', 'content': 'Next.'}]):
+                with self.subTest(invalid=invalid):
+                    events = worker.request(invalid)
+                    self.assertEqual(len(events), 1)
+                    self.assertEqual(set(events[0]), {'error'})
+                    self.assertTrue(events[0]['error'])
+                    self.assertEqual(len(brain.requests), 1)
+            invalid_records = [dict(records[0], extra=True), dict(records[0], name='unmute'),
+                               dict(records[0], name=[]), dict(records[0], content=''),
+                               dict(records[0], content='   '), dict(records[0], content='x' * 1025),
+                               dict(records[0], content=True), dict(records[0], arguments={'extra': 1}),
+                               dict(records[1], arguments={}), dict(records[1], arguments=[]),
+                               dict(records[1], arguments={'percent': 30, 'extra': 1})]
+            invalid_records += [dict(records[1], arguments={'percent': value})
+                                for value in (-1, 101, True, 30.5)]
+            invalid_records += [dict(records[4], arguments={'number': value})
+                                for value in (0, 2147483648, True, 1.5)]
+            for record in invalid_records:
+                with self.subTest(record=record):
+                    events = worker.request([{'role': 'user', 'content': 'Before.'}, record,
+                                             {'role': 'user', 'content': 'Next.'}])
+                    self.assertEqual(len(events), 1)
+                    self.assertEqual(set(events[0]), {'error'})
+                    self.assertTrue(events[0]['error'])
+                    self.assertEqual(len(brain.requests), 1)
+
     def test_private_notes_survive_fresh_sessions_and_workers(self):
         def say(text):
             return [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]
@@ -1093,7 +1267,7 @@ class NativeHermesTests(unittest.TestCase):
                                   if message['role'] == 'tool')
                     self.assertTrue(json.loads(result['content'])['success'], result)
                     self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']},
-                                     {'memory'})
+                                     {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
                 self.assertEqual((notes / 'MEMORY.md').read_text(), expected)
                 self.assertEqual((notes / 'USER.md').read_text(), 'User prefers tea nonce-641.')
                 self.assertEqual(stat.S_IMODE(notes.stat().st_mode), 0o700)
@@ -1238,7 +1412,7 @@ class NativeHermesTests(unittest.TestCase):
                 for index in range(10):
                     self.assertEqual(worker.request([{'role': 'user', 'content': f'Accepted turn {index}.'}]),
                                      [{'delivery': 'neutral'}, {'text': 'Ordinary reply.'}, {'done': True}])
-                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']}, {'memory'})
+                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
                 self.assertEqual(len(brain.requests), 12)
                 thresholds = [json.loads(line) for line in
                               (worker.home / 'review-threshold.jsonl').read_text().splitlines()]
@@ -1591,6 +1765,8 @@ class NativeHermesTests(unittest.TestCase):
 
         run_agent = ModuleType('run_agent')
         run_agent.AIAgent = Mock()
+        registry_module = ModuleType('tools.registry')
+        registry_module.registry = Mock()
         relay_runtime = ModuleType('agent.relay_runtime')
         relay_runtime.get_runtime = Mock()
         relay_runtime.get_runtime.return_value.managed_execution_enabled.return_value = True
@@ -1618,7 +1794,8 @@ class NativeHermesTests(unittest.TestCase):
             try:
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
-                                                'agent.relay_runtime': relay_runtime}),
+                                                'agent.relay_runtime': relay_runtime,
+                                                'tools.registry': registry_module}),
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
                       patch('sys.stdin', TextIOWrapper(BytesIO())),
@@ -1645,6 +1822,7 @@ class NativeHermesTests(unittest.TestCase):
             'compression': {'enabled': False},
             'auxiliary': {'title_generation': {'enabled': False}},
             'plugins': {'enabled': []}, 'mcp_servers': {},
+            'tools': {'tool_search': {'enabled': 'off'}},
         })
         self.assertEqual(json.loads(protocol.getvalue()), {'ready': True})
         run_agent.AIAgent.return_value.close.assert_called_once_with()
@@ -1693,7 +1871,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual(body['max_tokens'], 180)
             self.assertEqual(body.get('reasoning_effort'), 'none')
             self.assertEqual(body.get('temperature'), 0.4)
-            self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory'})
+            self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
             self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
             connections = [json.loads(line) for line in (worker.home / 'connections.jsonl').read_text().splitlines()]
             self.assertTrue(connections)
@@ -1737,7 +1915,7 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(len(system), 1)
                 self.assertEqual(body['messages'][0], system[0])
                 self.assertEqual(system[0]['content'].count(SYSTEM_PROMPT), 1)
-                self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory'})
+                self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
         self.assertIsNotNone(worker.process.returncode)
         self.assertFalse(worker.home.exists())
 
@@ -1860,7 +2038,20 @@ case.assertEqual(messages, original)
                                                  'read_file', 'delegate_task', 'tool_search')):
                 self.assertIn(f"Tool '{name}' does not exist", message['content'])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Conversation only nonce-25.'}, {'done': True}])
-            self.assertEqual({tool['function']['name'] for tool in brain.requests[0][2]['tools']}, {'memory'})
+            self.assertEqual({tool['function']['name'] for tool in brain.requests[0][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+            parameters = {tool['function']['name']: tool['function']['parameters']
+                          for tool in brain.requests[0][2]['tools']}
+            self.assertEqual({name: value for name, value in parameters.items() if name != 'memory'}, {
+                'mute': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
+                'set_volume': {'type': 'object', 'properties': {
+                    'percent': {'type': 'integer', 'minimum': 0, 'maximum': 100}},
+                    'required': ['percent'], 'additionalProperties': False},
+                'pause_media': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
+                'next_track': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
+                'focus_workspace': {'type': 'object', 'properties': {
+                    'number': {'type': 'integer', 'minimum': 1, 'maximum': 2147483647}},
+                    'required': ['number'], 'additionalProperties': False},
+            })
             worker.begin()
             events = worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Fresh caller nonce-26.'}, {'done': True}])

@@ -7186,10 +7186,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
         self.assertIn(
-            'Kestrel handles the exact spoken command mute locally. You cannot invoke that action; '
-            'for a request to mute, explain that the owner must say mute on its own.',
+            'Your tools are native local memory for small facts and preferences, and '
+            "Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace.",
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
         )
 
