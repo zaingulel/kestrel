@@ -1491,23 +1491,17 @@ class VoiceConversations:
                     completions.append((role, interruption.id))
                 await worker.queue_frame(interruption)
                 await asyncio.gather(output_done, assistant_done)
-                if not llm.owns_request(token):
-                    return
                 await self.stt.discard_pending()
                 await user.reset()
                 await completed('user', ProposedUserStoppedSpeakingFrame(), user.queue_frame)
-                if not llm.owns_request(token):
-                    return
                 message = {'role': 'user', 'content': text}
                 llm.typed_origin = (token, 'typed', message, text, self.input_epoch)
                 self.submission_ack = asyncio.get_running_loop().create_future()
                 await completed('user', LLMMessagesAppendFrame(messages=[message], run_llm=True), user.queue_frame)
                 await self.submission_ack
-                if llm.owns_request(token):
-                    self.pending_submit = None
+                self.pending_submit = None
         except Exception:
-            if llm.owns_request(token):
-                self.fail_submission()
+            self.fail_submission()
             self.failure = 'Kestrel input handover failed. Restart Kestrel.'
             self.desired_active = False
             self.revoke()
