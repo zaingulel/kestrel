@@ -165,8 +165,11 @@ MEASURED_FIRST_HI_SCORES = (
 
 
 def hermes_service(*, local_command=None):
+    session_ready = asyncio.get_running_loop().create_future()
+    session_ready.set_result(True)
     return bot.HermesLLMService(
         bot.HermesRequestChannel(), local_actions=bot.LocalActions(command=local_command), admitted=lambda: True,
+        session_ready=session_ready,
     )
 
 
@@ -1984,7 +1987,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(voice.stop)
         engine = patch.object(self, 'startup_service', side_effect=lambda: Mock(
             local_actions=Mock(close=AsyncMock(), drain=AsyncMock()),
-            channel=Mock(prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), failure=None, reader=None, preparation=None),
+            channel=Mock(prepare=AsyncMock(), begin_conversation=AsyncMock(return_value=True),
+                         close=AsyncMock(), drain=AsyncMock(), failure=None, reader=None, preparation=None),
         ))
         engine.start()
         self.addCleanup(engine.stop)
@@ -2000,7 +2004,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admitted, status, conversation):
+            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation):
+                prototype.session_ready = session_ready
                 prototype.admitted = admitted
                 prototype.status = status
                 prototype.conversation = conversation
@@ -2725,12 +2730,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
-                           admitted=None, activate=True, native_audio=False, trace_root=None):
+                           admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None):
         if brain is not None:
             require_native_hermes()
         from desktop import control, status as status_module
         from types import SimpleNamespace
         started, prepared = asyncio.Queue(), asyncio.Event()
+        native_written = asyncio.Event()
         spoken, committed, processed = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
         interrupted = asyncio.Event()
         sessions, processes, bindings, audio_children = [], [], [], []
@@ -2802,13 +2808,22 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             elif brain is None:
                 raise OSError('No controlled provider')
             else:
-                command = WorkerProcess.command(home, brain, trace_root=trace_root)
+                command = WorkerProcess.command(home, brain, trace_root=trace_root, memory_root=memory_root)
             try:
                 process = await native_spawn(*command, **kwargs)
             except OSError:
                 processes.append((None, home))
                 raise
             processes.append((process, home))
+            if native_events is not None:
+                native_write = process.stdin.write
+
+                def write(data):
+                    native_events.append(('write', json.loads(data)))
+                    native_written.set()
+                    return native_write(data)
+
+                process.stdin.write = write
             return process
 
         native_transport = speech.LaptopAudioTransport
@@ -2931,13 +2946,26 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_conversations = bot.VoiceConversations
         admitted_override = admitted
         service_handle = SimpleNamespace(sessions=sessions, audio_children=audio_children, started=started,
-                                         recognizer=recognizer, model=model, channel=supplied_channel)
+                                         recognizer=recognizer, model=model, channel=supplied_channel, native_written=native_written)
 
         def conversations(**kwargs):
             nonlocal controller
             controller = native_conversations(**kwargs)
             service_handle.manager = controller
             return controller
+
+        if native_events is not None:
+            native_read = supplied_channel.read_event
+
+            async def read_event():
+                event = await native_read()
+                native_events.append(('read', event))
+                return event
+
+            binding = patch.object(supplied_channel, 'read_event', side_effect=read_event)
+            binding.start()
+            bindings.append(binding)
+            self.addCleanup(binding.stop)
 
         native_prepare = supplied_channel.prepare
 
@@ -5288,6 +5316,170 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         await close()
 
+    async def test_dismissed_memory_turn_finishes_before_fresh_snapshot(self):
+        notes_home = tempfile.TemporaryDirectory(prefix='kestrel-memory-lifecycle-', dir=ROOT / '.runtime')
+        self.addCleanup(notes_home.cleanup)
+        notes = Path(notes_home.name) / 'notes'
+        held, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        expected_note = 'Notebook preference nonce-519.'
+        events = []
+
+        def memory_reply():
+            held.set()
+            if not release.wait(45):
+                raise AssertionError('Accepted memory turn was never released')
+            yield {'tool_calls': [{'index': 0, 'id': 'remember', 'type': 'function', 'function': {
+                'name': 'memory', 'arguments': json.dumps({
+                    'action': 'add', 'target': 'memory', 'content': expected_note,
+                }),
+            }}]}, None
+            yield {}, 'tool_calls'
+
+        def say(text):
+            return [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]
+
+        brain = ScriptedBrain([say('Prepared.'), memory_reply(), say('Old unheard save.'),
+                               say('Fresh note snapshot.'), say('Snapshot after revoked begin.'),
+                               say('Snapshot after held acknowledgement.')])
+        self.addCleanup(brain.close)
+        handle, spoken, committed, _, processes, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+            memory_root=notes, native_events=events,
+        )
+        service = handle.service
+        manager = service.manager
+        channel = manager.channel
+        unlock = asyncio.Event()
+        self.addCleanup(unlock.set)
+        try:
+            await asyncio.wait_for(asyncio.shield(channel.preparation), 5)
+            self.assertFalse(notes.exists(), 'Inactive preparation has no memory authority')
+            self.assertEqual([event for kind, event in events if kind == 'write'], [{'prepare': True}])
+            self.assertEqual(await service.toggle(), 'starting')
+            old = await asyncio.wait_for(service.started.get(), 5)
+            await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+            await old.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(old, 'Remember old caller nonce-303.')
+            self.assertTrue(await asyncio.to_thread(held.wait, 5))
+            self.assertEqual(await service.toggle(), 'inactive')
+            self.assertEqual(await service.toggle(), 'starting')
+            self.assertFalse(old.admitted())
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertEqual(len(handle.sessions), 1)
+            self.assertFalse((notes / 'MEMORY.md').exists())
+            self.assertEqual(sum(event == {'begin': True} for kind, event in events if kind == 'write'), 1)
+            self.assertEqual([frame async for frame in old.stt.run_stt(b'inactive private audio')], [])
+            await old.llm.process_frame(LLMContextFrame(bot.LLMContext([
+                {'role': 'user', 'content': 'Inactive memory authority nonce-404.'},
+            ])), FrameDirection.DOWNSTREAM)
+            self.assertEqual(len(brain.requests), 2)
+            release.set()
+            fresh = await asyncio.wait_for(service.started.get(), 5)
+            await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+            note = notes / 'MEMORY.md'
+            self.assertEqual(note.read_text(), expected_note)
+            self.assertEqual(note.stat().st_mode & 0o777, 0o600)
+            result = [message for message in brain.requests[2][2]['messages'] if message['role'] == 'tool']
+            self.assertEqual(len(result), 1)
+            self.assertTrue(json.loads(result[0]['content'])['success'])
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertIsNone(fresh.llm.last_spoken_reply)
+            await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(fresh, 'Fresh question nonce-606.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh note snapshot.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh note snapshot.')
+            payload = brain.requests[-1][2]['messages']
+            self.assertIn(expected_note, payload[0]['content'])
+            self.assertNotIn('old caller nonce-303', json.dumps(payload))
+            self.assertEqual([message for message in payload if message['role'] != 'system'],
+                             [{'role': 'user', 'content': 'Fresh question nonce-606.'}])
+
+            for before_write in (True, False):
+                with self.subTest(begin_before_write=before_write):
+                    self.assertEqual(await service.toggle(), 'inactive')
+                    await service.state('inactive')
+                    ready_received = asyncio.Event()
+                    unlock.clear()
+                    native_read = channel.read_event
+
+                    async def held_ack():
+                        event = await native_read()
+                        if event == {'session_ready': True}:
+                            ready_received.set()
+                            await unlock.wait()
+                        return event
+
+                    binding = patch.object(channel, 'read_event', side_effect=held_ack)
+                    if before_write:
+                        await channel.lock.acquire()
+                    else:
+                        binding.start()
+                    writes_before = sum(kind == 'write' and event == {'begin': True} for kind, event in events)
+                    try:
+                        self.assertEqual(await service.toggle(), 'starting')
+                        revoked = await asyncio.wait_for(service.started.get(), 5)
+                        old_ready = manager.session_ready
+                        if not before_write:
+                            await asyncio.wait_for(ready_received.wait(), 5)
+                            note.write_text(expected_note + '\n§\nLatest snapshot nonce-928.')
+                        waiting = asyncio.Event()
+                        native_shield = asyncio.shield
+                        driver = asyncio.current_task()
+
+                        def shield(task):
+                            if task is old_ready and asyncio.current_task() is not driver:
+                                waiting.set()
+                            return native_shield(task)
+
+                        with patch.object(asyncio, 'shield', side_effect=shield):
+                            await revoked.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                            await self.finish_user_turn(revoked, 'Revoked ordinary question nonce-707.')
+                            await asyncio.wait_for(waiting.wait(), 5)
+                        self.assertEqual(await service.toggle(), 'inactive')
+                        self.assertEqual(await service.toggle(), 'starting')
+                        self.assertFalse(old_ready.done())
+                        self.assertFalse(old_ready.cancelled())
+                        self.assertIs(manager.session_ready, old_ready)
+                        self.assertFalse(revoked.admitted())
+                        self.assertEqual(manager.conversation.turns, [])
+                        self.assertEqual(sum(kind == 'write' and event == {'begin': True} for kind, event in events),
+                                         writes_before + (not before_write))
+                    finally:
+                        unlock.set()
+                        if before_write:
+                            channel.lock.release()
+                        else:
+                            binding.stop()
+                    current = await asyncio.wait_for(service.started.get(), 5)
+                    self.assertIsNot(manager.session_ready, old_ready)
+                    self.assertEqual(await asyncio.wait_for(asyncio.shield(old_ready), 5), not before_write)
+                    self.assertTrue(await asyncio.wait_for(asyncio.shield(manager.session_ready), 5))
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
+                    await current.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(current, 'Current fresh question.')
+                    expected = ('Snapshot after revoked begin.' if before_write else
+                                'Snapshot after held acknowledgement.')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), expected)
+                    payload = brain.requests[-1][2]['messages']
+                    self.assertIn(expected_note, payload[0]['content'])
+                    if not before_write:
+                        self.assertIn('Latest snapshot nonce-928.', payload[0]['content'])
+                    self.assertNotIn('nonce-707', json.dumps(payload))
+                    self.assertEqual([message for message in payload if message['role'] != 'system'],
+                                     [{'role': 'user', 'content': 'Current fresh question.'}])
+            self.assertEqual(note.read_text(), expected_note + '\n§\nLatest snapshot nonce-928.')
+            self.assertEqual(len(processes), 1)
+        finally:
+            release.set()
+            unlock.set()
+            await close()
+        self.assertEqual(note.read_text(), expected_note + '\n§\nLatest snapshot nonce-928.')
+
     async def test_native_preparation_is_silent_private_and_does_not_block_mute(self):
         managed = patch.dict(os.environ, {'KESTREL_MANAGED_BRAIN': '1'})
         managed.start()
@@ -5295,6 +5487,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         status_patch = patch.object(bot, 'run_local_command', AsyncMock(return_value=''))
         status = status_patch.start()
         self.addCleanup(status_patch.stop)
+        notes_home = tempfile.TemporaryDirectory(prefix='kestrel-notes-test-', dir=ROOT / '.runtime')
+        self.addCleanup(notes_home.cleanup)
+        notes = Path(notes_home.name) / 'notes'
+        notes.mkdir(mode=0o700)
+        note = notes / 'MEMORY.md'
+        note.write_text('Current notebook nonce-847.')
+        note.chmod(0o600)
+        native_events = []
         held = threading.Event()
         release = threading.Event()
 
@@ -5314,10 +5514,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
         ])
         transport, spoken, committed, _, processes, close = await self.open_session(
-            brain, local_command=command, prepare_engine=True,
+            brain, local_command=command, prepare_engine=True, through_service=True,
+            memory_root=notes, native_events=native_events,
         )
         preparation = transport.llm.channel.preparation
         try:
+            await asyncio.wait_for(transport.service.native_written.wait(), 5)
+            self.assertEqual([event for kind, event in native_events if kind == 'write'], [{'prepare': True}])
             self.assertTrue(await asyncio.to_thread(held.wait, 5))
             status.assert_awaited_once_with([
                 '/usr/bin/systemctl', '--user', 'is-active', '--quiet', 'kestrel-brain.service',
@@ -5341,6 +5544,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(spoken.empty())
             self.assertTrue(committed.empty())
 
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'what can I say?')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), bot.capability_help())
+            self.assertTrue(committed.empty())
+            self.assertEqual(len(brain.requests), 1)
+            self.assertEqual(note.read_text(), 'Current notebook nonce-847.')
+
             checkpoint = asyncio.Event()
             driver = asyncio.current_task()
             native_shield = asyncio.shield
@@ -5351,7 +5561,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             def observe_shield(task):
                 future = native_shield(task)
-                if task is preparation and asyncio.current_task() is not driver:
+                if task is transport.llm.session_ready and asyncio.current_task() is not driver:
                     checkpoint.set()
                 return future
 
@@ -5386,7 +5596,24 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
                     {'role': 'user', 'content': 'Answer the genuine user turn.'},
                 ])
-                self.assertEqual(ordinary_writes, 1)
+                self.assertEqual(ordinary_writes, 2)
+                self.assertEqual([event for kind, event in native_events if kind == 'write'], [
+                    {'prepare': True}, {'begin': True},
+                    {'messages': [{'role': 'user', 'content': 'Answer the genuine user turn.'}]},
+                ])
+                terminal = native_events.index(('read', {'done': True}))
+                begin = native_events.index(('write', {'begin': True}))
+                ready = native_events.index(('read', {'session_ready': True}))
+                ordinary = next(index for index, (kind, event) in enumerate(native_events)
+                                if kind == 'write' and 'messages' in event)
+                self.assertLess(terminal, begin)
+                self.assertLess(begin, ready)
+                self.assertLess(ready, ordinary)
+                system = '\n'.join(message['content'] for message in brain.requests[-1][2]['messages']
+                                   if message['role'] == 'system')
+                self.assertIn('Current notebook nonce-847.', system)
+                self.assertNotIn('Preparation nonce 731.', system)
+                self.assertEqual(note.read_text(), 'Current notebook nonce-847.')
                 self.assertEqual(pending_writes, 0)
         finally:
             release.set()
@@ -5396,38 +5623,84 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(processes[0][1].exists())
 
     async def test_failed_native_preparation_preserves_local_mute_and_reports_on_user_turn(self):
-        brain = ScriptedBrain([400])
-        self.addCleanup(brain.close)
-        command = AsyncMock(side_effect=[
-            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
-        ])
-        transport, spoken, committed, _, processes, close = await self.open_session(
-            brain, local_command=command, prepare_engine=True,
-        )
-        preparation = transport.llm.channel.preparation
-        try:
-            await asyncio.wait_for(asyncio.shield(preparation), 5)
-            self.assertTrue(transport.llm.channel.failure)
-            self.assertTrue(spoken.empty())
-            self.assertTrue(committed.empty())
-            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-            await self.finish_user_turn(transport, 'mute')
-            barrier = DataFrame()
-            await transport.input().queue_frame(barrier)
-            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
-            self.assertEqual(command.await_count, 7)
-            self.assertTrue(spoken.empty())
-            self.assertTrue(committed.empty())
-            await self.assert_failed_reply(
-                transport, spoken, committed, 'Answer after failed preparation.',
-                expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
-            )
-            self.assertEqual(len(brain.requests), 1)
-        finally:
-            await close()
-        self.assertTrue(preparation.done())
-        self.assertIsNotNone(processes[0][0].returncode)
-        self.assertFalse(processes[0][1].exists())
+        for failure in ('prepare', 'begin', 'preflight'):
+            with self.subTest(failure=failure):
+                notes_home = tempfile.TemporaryDirectory(prefix='kestrel-failed-notes-', dir=ROOT / '.runtime')
+                self.addCleanup(notes_home.cleanup)
+                notes = Path(notes_home.name) / 'notes'
+                if failure == 'begin':
+                    notes.mkdir(mode=0o700)
+                    (notes / 'MEMORY.md').write_bytes(b'\xffinvalid note nonce-811')
+                    (notes / 'MEMORY.md').chmod(0o600)
+                brain = ScriptedBrain([400] if failure == 'prepare' else [
+                    [({'content': '[delivery:neutral] Prepared.'}, None), ({}, 'stop')],
+                ])
+                self.addCleanup(brain.close)
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+                ] * 2)
+                events = []
+                transport, spoken, committed, _, processes, close = await self.open_session(
+                    brain, local_command=command, prepare_engine=True, through_service=True,
+                    memory_root=notes, native_events=events,
+                )
+                service = transport.service
+                manager = service.manager
+                channel = manager.channel
+                preparation = channel.preparation
+                try:
+                    await asyncio.wait_for(asyncio.shield(preparation), 5)
+                    await asyncio.wait_for(asyncio.gather(manager.session_ready, return_exceptions=True), 5)
+                    if failure == 'preflight':
+                        self.assertFalse(channel.failure)
+                        note = notes / 'MEMORY.md'
+                        note.write_bytes(b'\xffinvalid note nonce-811')
+                        note.chmod(0o600)
+                        await self.assert_failed_reply(
+                            transport, spoken, committed, 'Ordinary turn with unsafe notes.',
+                            expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
+                        )
+                    self.assertTrue(channel.failure)
+                    await service.state('trouble')
+                    self.assertIsNotNone(channel.process.returncode)
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
+                    self.assertEqual(len(brain.requests), 1)
+                    writes = [event for kind, event in events if kind == 'write']
+                    for activation in range(2):
+                        if activation:
+                            self.assertEqual(await service.toggle(), 'inactive')
+                            self.assertEqual(await service.toggle(), 'starting')
+                            transport = await asyncio.wait_for(service.started.get(), 5)
+                            await asyncio.wait_for(asyncio.gather(manager.session_ready, return_exceptions=True), 5)
+                            self.assertIsNone(manager.failure, 'Known reaped engine failure leaves local activation available')
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'mute')
+                        barrier = DataFrame()
+                        await transport.input().queue_frame(barrier)
+                        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                        self.assertEqual(command.await_count, 7 * (activation + 1))
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'what can I say?')
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), bot.capability_help())
+                        self.assertTrue(committed.empty())
+                        await self.assert_failed_reply(
+                            transport, spoken, committed, 'Answer after failed native initialization.',
+                            expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
+                        )
+                        self.assertEqual(len(brain.requests), 1)
+                        self.assertEqual([event for kind, event in events if kind == 'write'], writes,
+                                         'Sticky engine failure must not retry preparation, begin or ordinary messages')
+                        await service.state('trouble')
+                    if failure != 'prepare':
+                        self.assertEqual((notes / 'MEMORY.md').read_bytes(), b'\xffinvalid note nonce-811')
+                finally:
+                    await close()
+                self.assertTrue(preparation.done())
+                self.assertIsNotNone(processes[0][0].returncode)
+                self.assertFalse(processes[0][1].exists())
 
     async def test_preparation_timeout_and_shutdown_reap_owned_worker(self):
         wire = (
