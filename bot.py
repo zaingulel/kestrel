@@ -31,12 +31,14 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame, BotStoppedSpeakingFrame, StartFrame, UserStartedSpeakingFrame,
-    UserStoppedSpeakingFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
+    UserStoppedSpeakingFrame, ProposedUserStoppedSpeakingFrame, LLMMessagesAppendFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_stop.base_user_turn_stop_strategy import BaseUserTurnStopStrategy
+from pipecat.turns.types import ProcessFrameResult
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
@@ -860,8 +862,19 @@ class LocalActions:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
+    @property
+    def resolves_proposed_turn_stop_frames(self):
+        return True
+
+    async def process_frame(self, frame):
+        if isinstance(frame, ProposedUserStoppedSpeakingFrame):
+            await self.trigger_user_turn_stopped()
+        return ProcessFrameResult.CONTINUE
+
+
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, status=None, conversation=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, status=None, conversation=None, voice_active=None, request_admitted=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -872,6 +885,15 @@ class HermesLLMService(LLMService):
         self.local_actions = local_actions
         self.admitted = admitted
         self.session_ready = session_ready
+        self.voice_active = voice_active or admitted
+        self.request_admitted = request_admitted
+        self.typed_origin = None
+        self.spoken_origin = None
+        self.input_epoch = lambda: 0
+        self.frame_completions = {}
+        self._assistant_reply_token = None
+        self._last_spoken_token = None
+        self._heard_prefix_token = None
         self.lookup = None
         self.status = status
         self.conversation = conversation
@@ -891,8 +913,30 @@ class HermesLLMService(LLMService):
         self._indicator_output_reply = None
         self.last_spoken_reply: str | None = None
 
+    def accept_request(self, token):
+        self._indicator_reply = token
+        self._indicator_output = False
+        self._indicator_pending = False
+
+    def owns_request(self, token):
+        return token is not None and self.admitted() and token is self._indicator_reply
+
+    def valid_origin(self, frame):
+        origin = getattr(frame, 'request_origin', None)
+        if origin is None:
+            return False
+        token, source, message, text, epoch = origin
+        return (isinstance(text, str) and self.owns_request(token) and (source != 'spoken' or epoch == self.input_epoch())
+                and any(item is message for item in frame.context.get_messages())
+                and message.get('role') == 'user' and message.get('content') == text)
+
+    def frame_completed(self, role, frame):
+        future = self.frame_completions.get((role, frame.id))
+        if future is not None and not future.done():
+            future.set_result(None)
+
     def refresh_indicator(self):
-        if self.admitted() and self.status is not None and self._indicator_ready:
+        if self.voice_active() and self.admitted() and self.status is not None and self._indicator_ready:
             state = ('trouble' if self._indicator_voice_failed else
                      'listening' if self._indicator_user else
                      'speaking' if self._indicator_output else
@@ -925,7 +969,8 @@ class HermesLLMService(LLMService):
             self.refresh_indicator()
 
     def indicator_user_started(self):
-        self._indicator_reply = object()
+        self.accept_request(object())
+        self.spoken_origin = (self._indicator_reply, self.input_epoch())
         self._indicator_user = True
         self._indicator_output = False
         self._indicator_pending = False
@@ -951,6 +996,8 @@ class HermesLLMService(LLMService):
 
     def conversation_output(self, frame):
         if not self.admitted() or self.conversation is None:
+            return
+        if not isinstance(frame, InterruptionFrame) and not self.owns_request(self._conversation_attempt):
             return
         if isinstance(frame, ConversationSynthesisFailedFrame):
             token = frame.context.reply_token
@@ -1022,7 +1069,7 @@ class HermesLLMService(LLMService):
                 self.finish_conversation_reply(context.reply_token, failed=True, interrupted=context.reply_token is self._conversation_interrupting)
 
     async def push_reply_end(self, token, *, failed=False):
-        if not self.admitted():
+        if not self.owns_request(token):
             return
         end = LLMFullResponseEndFrame()
         # The output queue, not generation completion, owns the visible reply's end.
@@ -1031,7 +1078,7 @@ class HermesLLMService(LLMService):
         await self.push_frame(end)
 
     async def speak_local_reply(self, message, token):
-        if not self.admitted():
+        if not self.owns_request(token):
             return
         if self.conversation is not None:
             self._conversation_attempt = token
@@ -1051,6 +1098,9 @@ class HermesLLMService(LLMService):
             self.lookup.cancel()
 
     async def process_frame(self, frame, direction):
+        user_request = isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM and not frame.speculation
+        if user_request and not self.valid_origin(frame):
+            return
         if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
             frame.conversation_reply_token = self._conversation_attempt
             self._conversation_interrupting = self._conversation_attempt
@@ -1058,87 +1108,97 @@ class HermesLLMService(LLMService):
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
             return
-        if not self.admitted():
-            self.revoke()
+        if not user_request or not self.valid_origin(frame):
             return
-        token = self._indicator_reply
+        token, source, original, text, _ = frame.request_origin
         self._indicator_user = False
         self._indicator_pending = True
         self.refresh_indicator()
         messages = frame.context.get_messages()
-        if (direction == FrameDirection.DOWNSTREAM and not frame.speculation and messages
-                and messages[-1].get('role') == 'user'
-                and isinstance(messages[-1].get('content'), str)):
-            if self.conversation is not None:
-                self.conversation.user(messages[-1]['content'], source='spoken')
-            if re.fullmatch(r'(stop|cancel)[.!]?', messages[-1]['content'].strip().lower()):
-                self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
-                messages.pop()
-                self.indicator_reply_finished(token)
-                return
-            if re.fullmatch(r'repeat that[.!?]?', messages[-1]['content'].strip().lower()):
-                messages.pop()
+
+        def remove_original():
+            for index, message in enumerate(messages):
+                if message is original:
+                    del messages[index]
+                    break
+
+        if self.conversation is not None:
+            self.conversation.user(text, source=source)
+        if source == 'typed':
+            self.typed_origin = None
+            if self.request_admitted is not None:
+                self.request_admitted(token)
+        if re.fullmatch(r'(stop|cancel)[.!]?', text.strip().lower()):
+            self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
+            remove_original()
+            self.indicator_reply_finished(token)
+            return
+        if re.fullmatch(r'repeat that[.!?]?', text.strip().lower()):
+            remove_original()
+            await self.speak_local_reply(self.last_spoken_reply or "I haven't said anything to repeat yet.", token)
+            return
+        if re.fullmatch(r'what can i say[.!?]?', text.strip().lower()):
+            remove_original()
+            await self.speak_local_reply(capability_help(), token)
+            return
+        tool = match_instant_tool(text)
+        name = match_app_name(text) if tool is None else None
+        if name is not None:
+            lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_actions.command))
+            self.lookup = self.local_actions.retain(lookup)
+            try:
+                tool = await lookup
+            except asyncio.CancelledError:
+                remove_original()
+                raise
+            except (ValueError, RuntimeError, OSError, TimeoutError):
+                remove_original()
                 await self.speak_local_reply(
-                    self.last_spoken_reply or "I haven't said anything to repeat yet.", token,
+                    "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
                 )
                 return
-            if re.fullmatch(r'what can i say[.!?]?', messages[-1]['content'].strip().lower()):
-                messages.pop()
-                await self.speak_local_reply(capability_help(), token)
+            if not self.valid_origin(frame):
                 return
-            tool = match_instant_tool(messages[-1]['content'])
-            name = match_app_name(messages[-1]['content']) if tool is None else None
-            if name is not None:
-                lookup_message = messages[-1]
-                lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_actions.command))
-                self.lookup = self.local_actions.retain(lookup)
-                try:
-                    tool = await lookup
-                except asyncio.CancelledError:
-                    current_messages = frame.context.get_messages()
-                    for index, message in enumerate(current_messages):
-                        if message is lookup_message:
-                            del current_messages[index]
-                            break
-                    raise
-                except (ValueError, RuntimeError, OSError, TimeoutError):
-                    messages.pop()
-                    await self.speak_local_reply(
-                        "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
-                    )
-                    return
-            if tool is not None:
-                messages.pop()
-                result = await self.local_actions.run(tool, admitted=self.admitted)
-                if not self.admitted():
-                    return
-                message = (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
-                           f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
-                           if not result.confirmed else None)
-                if message is not None:
-                    await self.speak_local_reply(message, token)
-                else:
-                    self.indicator_reply_finished(token)
+        if tool is not None:
+            if not self.valid_origin(frame):
                 return
+            remove_original()
+            # LocalActions owns an accepted action independently of later reply ownership.
+            result = await self.local_actions.run(tool, admitted=self.admitted)
+            if not self.owns_request(token):
+                return
+            message = (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
+                       f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
+                       if not result.confirmed else None)
+            if message is not None:
+                await self.speak_local_reply(message, token)
+            else:
+                self.indicator_reply_finished(token)
+            return
         output = None
         failed = False
         started = False
         request = None
 
         async def push_reply_start(delivery):
-            if not self.admitted():
+            if not self.owns_request(token):
                 return
+            if self.conversation is not None and self._conversation_attempt is not token:
+                self._conversation_attempt = token
+                self._conversation_incomplete = False
+                self._conversation_synthesis_failed = False
+                self.conversation.begin_reply(token)
             start = LLMFullResponseStartFrame()
-            start.conversation_reply_token = self._conversation_attempt
+            start.conversation_reply_token = token
             start.speech_delivery = delivery
             await self.push_frame(start)
 
         try:
             ready = await asyncio.shield(self.session_ready)
-            if not self.admitted() or not ready:
+            if not self.valid_origin(frame) or not ready:
                 return
             await self.channel.drain()
-            if not self.admitted():
+            if not self.valid_origin(frame):
                 return
             if self.conversation is not None:
                 self._conversation_attempt = token
@@ -1150,9 +1210,11 @@ class HermesLLMService(LLMService):
                 raise RuntimeError(self.channel.failure)
             output = asyncio.Queue()
             self.output = output
-            request = asyncio.create_task(self.channel.exchange(deepcopy(frame.context.get_messages()), output, admitted=self.admitted))
+            if not self.valid_origin(frame):
+                return
+            request = asyncio.create_task(self.channel.exchange(deepcopy(frame.context.get_messages()), output, admitted=lambda: self.owns_request(token)))
             while event := await output.get():
-                if not self.admitted():
+                if not self.owns_request(token):
                     self.revoke()
                     return
                 if 'delivery' in event:
@@ -1161,7 +1223,7 @@ class HermesLLMService(LLMService):
                 else:
                     await self.push_frame(LLMTextFrame(event['text']))
             await request
-            if self.admitted() and self.channel.failure:
+            if self.owns_request(token) and self.channel.failure:
                 raise RuntimeError(self.channel.failure)
         except Exception as error:
             failed = True
@@ -1170,7 +1232,7 @@ class HermesLLMService(LLMService):
             if not started:
                 await push_reply_start('neutral')
                 started = True
-            if self.admitted():
+            if self.owns_request(token):
                 await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
         finally:
             self.channel.detach(output)
@@ -1208,19 +1270,78 @@ class VoiceConversations:
         self.session_ready = None
         self.failure = None
         self.closed = False
+        self.prepared = False
+        self.transitioning = False
+        self.lifecycle_changed = False
+        self.pending_submit = None
+        self.submission_task = None
+        self.submission_ack = None
+        self.input_epoch = 0
+        self.ingress = None
+        self.stt = None
+
+    def speech_admitted(self):
+        return bool(self.admission is not None and self.admission.is_set() and self.desired_active
+                    and self.pending_submit is None)
+
+    def submit(self, text):
+        if self.closed or self.failure or not self.prepared:
+            return 'unavailable'
+        if self.transitioning or self.lifecycle_changed or self.pending_submit is not None:
+            return 'busy'
+        if self.transport is not None and self.ingress is None:
+            return 'busy'
+        token = object()
+        self.input_epoch += 1
+        self.pending_submit = (text, token)
+        if self.llm is not None:
+            self.llm.accept_request(token)
+        self.changed.set()
+        return 'accepted'
+
+    def fail_submission(self):
+        if self.pending_submit is None:
+            return
+        text, token = self.pending_submit
+        published = self.submission_ack is not None and self.submission_ack.done() and not self.submission_ack.cancelled()
+        if not published:
+            self.conversation.user(text, source='typed')
+        self.conversation.begin_reply(token)
+        self.conversation.finish(token, failed=True)
+
+    def request_admitted(self, token):
+        if self.pending_submit is not None and self.pending_submit[1] is token:
+            if self.submission_ack is not None and not self.submission_ack.done():
+                self.submission_ack.set_result(None)
+
+    def ingress_ready(self, worker, user, context):
+        self.ingress = (worker, user, context)
+        self.changed.set()
 
     def toggle(self) -> str:
         if self.failure or self.closed:
             return 'unavailable'
         self.desired_active = not self.desired_active
+        self.lifecycle_changed = True
+        self.revoke()
         if not self.desired_active:
-            self.revoke()
             self.conversation.clear()
         self.status.set_state('starting' if self.desired_active else 'inactive')
         self.changed.set()
         return 'starting' if self.desired_active else 'inactive'
 
     def revoke(self):
+        self.input_epoch += 1
+        self.pending_submit = None
+        if self.submission_task is not None and self.submission_task is not asyncio.current_task():
+            self.submission_task.cancel()
+        if self.submission_ack is not None and not self.submission_ack.done():
+            self.submission_ack.cancel()
+        if self.llm is not None:
+            self.llm.typed_origin = None
+            for future in self.llm.frame_completions.values():
+                if not future.done():
+                    future.cancel()
         if self.admission is not None:
             self.admission.clear()
         if self.llm is not None:
@@ -1241,18 +1362,26 @@ class VoiceConversations:
             has_audio |= bool(frame.audio)
         if not has_audio:
             raise RuntimeError('VoxCPM preparation produced no audio')
+        self.prepared = True
 
-    async def activate(self):
+    async def activate(self, *, capture_enabled=True):
+        epoch = self.input_epoch
         await self.conversation.begin_session()
-        if not self.desired_active:
+        if self.closed or self.lifecycle_changed or self.input_epoch != epoch or (capture_enabled and not self.desired_active):
             return
         self.admission = asyncio.Event()
         self.admission.set()
         admitted = self.admission.is_set
         self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admitted))
-        self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admitted=admitted)
+        self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admitted=admitted,
+                                             input_admitted=self.speech_admitted, capture_enabled=capture_enabled,
+                                             reply_admitted=lambda token: self.llm is not None and self.llm.owns_request(token))
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admitted=admitted, session_ready=self.session_ready,
-                                    status=self.status, conversation=self.conversation)
+                                    status=self.status, conversation=self.conversation, voice_active=lambda: self.desired_active,
+                                    request_admitted=self.request_admitted)
+        self.llm.input_epoch = lambda: self.input_epoch
+        if self.pending_submit is not None:
+            self.llm.accept_request(self.pending_submit[1])
         adapter = self.llm
 
         def readiness_finished(task):
@@ -1262,15 +1391,17 @@ class VoiceConversations:
                 adapter.refresh_indicator()
 
         self.session_ready.add_done_callback(readiness_finished)
-        self.voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock, admitted=admitted)
+        self.voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock, admitted=admitted, reply_admitted=self.llm.owns_request)
         await self.transport.open()
         if self.transport.capture is not None:
             self.capture_owner = self.status.remember_owner(self.transport.capture.pid)
         if not admitted():
             return
+        self.stt = NemotronSTT(self.recognizer, admitted=self.speech_admitted, input_epoch=lambda: self.input_epoch)
         self.pipeline = asyncio.create_task(run_conversation(
-            NemotronSTT(self.recognizer, admitted=admitted), self.voice, llm=self.llm,
+            self.stt, self.voice, llm=self.llm,
             transport=self.transport, status=self.status, conversation=self.conversation, handle_signals=False,
+            on_ingress_ready=self.ingress_ready,
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
 
@@ -1282,6 +1413,10 @@ class VoiceConversations:
 
     async def finish_conversation(self):
         self.revoke()
+        if self.submission_task is not None:
+            await asyncio.gather(self.submission_task, return_exceptions=True)
+            self.submission_task = None
+        self.ingress = None
         closing = asyncio.create_task(self.transport.close()) if self.transport is not None else None
         if self.pipeline is not None:
             self.pipeline.cancel()
@@ -1319,29 +1454,94 @@ class VoiceConversations:
             raise RuntimeError(self.transport.failure)
         self.transport = self.pipeline = self.llm = self.voice = self.admission = self.session_ready = None
 
+    async def submit_pending(self):
+        text, token = self.pending_submit
+        worker, user, _ = self.ingress
+        llm = self.llm
+        completions = []
+
+        async def completed(role, frame, queue):
+            future = asyncio.get_running_loop().create_future()
+            llm.frame_completions[(role, frame.id)] = future
+            completions.append((role, frame.id))
+            await queue(frame)
+            await future
+
+        try:
+            async with asyncio.timeout(5):
+                interruption = InterruptionFrame()
+                output_done = asyncio.get_running_loop().create_future()
+                assistant_done = asyncio.get_running_loop().create_future()
+                for role, future in (('output', output_done), ('assistant', assistant_done)):
+                    llm.frame_completions[(role, interruption.id)] = future
+                    completions.append((role, interruption.id))
+                await worker.queue_frame(interruption)
+                await asyncio.gather(output_done, assistant_done)
+                if not llm.owns_request(token):
+                    return
+                await self.stt.discard_pending()
+                await user.reset()
+                await completed('user', ProposedUserStoppedSpeakingFrame(), user.queue_frame)
+                if not llm.owns_request(token):
+                    return
+                message = {'role': 'user', 'content': text}
+                llm.typed_origin = (token, 'typed', message, text, self.input_epoch)
+                self.submission_ack = asyncio.get_running_loop().create_future()
+                await completed('user', LLMMessagesAppendFrame(messages=[message], run_llm=True), user.queue_frame)
+                await self.submission_ack
+                if llm.owns_request(token):
+                    self.pending_submit = None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if llm.owns_request(token):
+                self.fail_submission()
+            self.failure = 'Kestrel input handover failed. Restart Kestrel.'
+            self.desired_active = False
+            self.revoke()
+            self.status.set_state('trouble')
+        finally:
+            for key in completions:
+                future = llm.frame_completions.pop(key, None)
+                if future is not None and not future.done():
+                    future.cancel()
+            llm.typed_origin = None
+            self.submission_ack = None
+            self.changed.set()
+
     async def run(self):
         self.status.set_state('inactive')
         while not self.closed:
             await self.changed.wait()
             self.changed.clear()
             try:
+                if self.submission_task is not None and self.submission_task.done():
+                    self.submission_task.result()
+                    self.submission_task = None
                 if self.failure and self.cleanup is not None:
                     self.status.set_state('trouble')
                     continue
-                if self.transport is not None:
-                    if self.pipeline is not None and self.pipeline.done() and self.admission.is_set():
-                        self.failure = 'Kestrel conversation stopped unexpectedly. Restart Kestrel.'
+                stopped = self.pipeline is not None and self.pipeline.done() and self.admission.is_set()
+                if stopped:
+                    self.failure = 'Kestrel conversation stopped unexpectedly. Restart Kestrel.'
+                if self.transport is not None and (self.lifecycle_changed or self.failure):
+                    self.transitioning = True
                     self.cleanup = asyncio.create_task(self.finish_conversation())
                     await asyncio.wait_for(asyncio.shield(self.cleanup), 90)
-                    self.changed.clear()
                 if self.failure:
                     raise RuntimeError(self.failure)
-                if self.desired_active:
+                self.lifecycle_changed = False
+                if self.transport is None and (self.desired_active or self.pending_submit is not None):
+                    self.transitioning = True
                     self.cleanup = None
-                    await self.activate()
-                else:
+                    await self.activate(capture_enabled=self.desired_active)
+                self.transitioning = False
+                if self.pending_submit is not None and self.ingress is not None and self.submission_task is None:
+                    self.submission_task = asyncio.create_task(self.submit_pending())
+                if not self.desired_active:
                     self.status.set_state('inactive')
             except Exception as error:
+                self.fail_submission()
                 self.failure = str(error) or 'Kestrel conversation cleanup failed. Restart Kestrel.'
                 self.desired_active = False
                 self.revoke()
@@ -1367,7 +1567,7 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
-async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None):
+async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -1375,6 +1575,7 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
                 TurnAnalyzerUserTurnStopStrategy(
                     turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=0.6)),
                 ),
+                TypedTurnStopStrategy(),
             ]),
         )
     context = LLMContext([])
@@ -1389,12 +1590,42 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             if isinstance(frame, StartFrame):
                 llm.indicator_input_ready()
 
-        @aggregators.user().event_handler('on_before_push_frame')
-        async def indicator_user_turn(processor, frame):
-            if isinstance(frame, UserStartedSpeakingFrame):
-                llm.indicator_user_started()
-            elif isinstance(frame, UserStoppedSpeakingFrame):
-                llm.indicator_user_stopped()
+    @aggregators.user().event_handler('on_before_push_frame')
+    async def indicator_user_turn(processor, frame):
+        if isinstance(frame, UserStartedSpeakingFrame):
+            llm.indicator_user_started()
+        elif isinstance(frame, UserStoppedSpeakingFrame):
+            llm.indicator_user_stopped()
+        elif isinstance(frame, LLMContextFrame) and not frame.speculation:
+            messages = frame.context.get_messages()
+            if messages and messages[-1].get('role') == 'user':
+                message = messages[-1]
+                if llm.typed_origin is not None and llm.typed_origin[2] is message:
+                    frame.request_origin = llm.typed_origin
+                elif llm.spoken_origin is not None:
+                    token, epoch = llm.spoken_origin
+                    frame.request_origin = (token, 'spoken', message, message.get('content'), epoch)
+
+    @aggregators.user().event_handler('on_after_process_frame')
+    async def user_frame_completed(processor, frame):
+        llm.frame_completed('user', frame)
+        if isinstance(frame, StartFrame) and on_ingress_ready is not None:
+            on_ingress_ready(worker, processor, context)
+
+    @assistant.event_handler('on_before_process_frame')
+    async def assistant_frame_starting(processor, frame):
+        if isinstance(frame, InterruptionFrame):
+            llm._heard_prefix_token = getattr(frame, 'conversation_reply_token', None)
+
+    @assistant.event_handler('on_after_process_frame')
+    async def assistant_frame_completed(processor, frame):
+        if isinstance(frame, InterruptionFrame):
+            llm._heard_prefix_token = None
+        llm.frame_completed('assistant', frame)
+
+    @transport.output().event_handler('on_after_process_frame')
+    async def output_frame_completed(processor, frame):
+        llm.frame_completed('output', frame)
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):
@@ -1402,8 +1633,12 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             messages = frame.context.get_messages()
             if messages and messages[-1].get('role') == 'assistant':
                 text = messages[-1].get('content')
-                if llm.admitted() and isinstance(text, str) and text.strip():
+                token = llm._assistant_reply_token
+                if (llm.admitted() and isinstance(text, str) and text.strip()
+                        and (llm.owns_request(token) or (token is not None and token is llm._heard_prefix_token
+                             and llm._last_spoken_token is not llm._indicator_reply))):
                     llm.last_spoken_reply = text
+                    llm._last_spoken_token = token
 
     output = transport.output()
 
@@ -1418,9 +1653,13 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
                 llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
+        if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
+            context = getattr(frame, 'conversation_audio_context', None)
+            llm._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
         llm.conversation_output(frame)
-        if llm.admitted() and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
+        if llm.owns_request(llm._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
+            llm._last_spoken_token = llm._assistant_reply_token
 
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
@@ -1458,7 +1697,7 @@ async def run_voice_service():
     status.set_state('starting')
     conversation = ConversationFeed()
     conversations = VoiceConversations(status=status, conversation=conversation)
-    control = ConversationControl(conversations.toggle)
+    control = ConversationControl(conversations.toggle, submit=conversations.submit)
     heartbeat = asyncio.create_task(status.heartbeat())
 
     def cancel():

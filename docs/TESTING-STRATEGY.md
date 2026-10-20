@@ -87,11 +87,13 @@ messages never enter caller history, panel or audio and have no note authority.
 drives native user-turn frames through the installed Hermes worker against a controlled streaming provider.
 It observes speech at the transport output and committed assistant context, not merely synthesis activity.
 Captured requests establish ordered history and exclude the interrupted unheard tail. Lifecycle cases assert
-empty caller history, repeat and panel state at each activation, no inactive recognition, native requests,
+empty caller history, repeat and panel state at each activation, no unsolicited inactive recognition, native requests,
 local actions or output, and old native work, generators and audio children completing before reuse. Controlled
 barriers test repeated dismissal/activation and sticky refusal after cleanup failure, including native close
 failure even when the pipeline suppresses its exception. The fixture refuses a direct provider bypass;
 recognition uses controlled pipes and voice generation a finite double through the real adapter.
+
+Typed lifecycle cases use the real same-account control socket and native append/interruption frames. They distinguish session admission from microphone admission: inactive typed turns preserve context and spoken output without starting capture or changing voice activation; explicit voice activation starts fresh history. Matching output-cleanup and assistant heard-prefix completion barriers precede typed append. The production turn-strategy case proves abandoned recognition, queued segments, partial aggregation, the armed semantic timeout and analyzer buffers are discarded while fresh speech still works. Frozen pre-queue request origins reject stale unadmitted turns; already-owned local actions retain accepted order and execute once while their obsolete presentation is suppressed. Held preparation, ingress and native begin barriers establish explicit refusal, busy transitions, accepted ownership despite receipt loss and dismissal revocation without replay. Corrupt isolated notes establish a visible accepted-turn failure before provider work. Fake audio children observe production output bytes and reaping; these observations do not establish physical playback or microphone behavior.
 
 Related cases cover engine absence or death, provider refusal, incomplete replies, corrupt worker output and
 startup/turn timeouts, including interrupted-reply drainage. They assert spoken failures without automatic
