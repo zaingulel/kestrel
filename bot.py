@@ -47,7 +47,7 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
-from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, MEMORY_ERROR, child_environment
+from hermes_worker import DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, MEMORY_ERROR, child_environment, valid_desktop_arguments
 from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
@@ -555,15 +555,30 @@ def capability_help() -> str:
     return message + ' None of these tools needs permission first.'
 
 
+def free_tool(key, *arguments) -> LocalTool | None:
+    tool = LOCAL_TOOLS[key]
+    if tool.permission is not PermissionTier.FREE:
+        return None
+    return replace(tool, run=partial(tool.run, *arguments)) if arguments else tool
+
+
+def local_result_message(tool, result) -> str | None:
+    return (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
+            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
+            if not result.confirmed else None)
+
+
+def brain_result(confirmed, attempted, reason) -> str:
+    return json.dumps({'confirmed': confirmed, 'attempted': attempted, 'reason': reason})
+
+
 def match_instant_tool(text):
     text = text.strip().lower()
     if text in ('mute', 'mute.', 'mute!'):
-        tool = LOCAL_TOOLS['mute']
-        return tool if tool.permission is PermissionTier.FREE else None
+        return free_tool('mute')
     match = re.fullmatch(r'(pause music|next track|take a screenshot)[.!]?', text)
     if match:
-        tool = LOCAL_TOOLS[match[1]]
-        return tool if tool.permission is PermissionTier.FREE else None
+        return free_tool(match[1])
     match = re.fullmatch(r'workspace ([1-9][0-9]{0,9})[.!]?', text)
     if match:
         number = int(match[1])
@@ -571,8 +586,7 @@ def match_instant_tool(text):
         match = re.fullmatch(r'workspace ([a-z -]+)[.!]?', text)
         number = NUMBER_WORDS.get(match[1]) if match else None
     if number is not None and 1 <= number <= 2147483647:
-        tool = LOCAL_TOOLS['workspace']
-        return replace(tool, run=partial(tool.run, number)) if tool.permission is PermissionTier.FREE else None
+        return free_tool('workspace', number)
     match = re.fullmatch(
         r'(?:(?P<leading_please>please) )?'
         r'(?P<command>volume|set (?:the )?volume(?: to)?) '
@@ -586,8 +600,7 @@ def match_instant_tool(text):
     percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
     if percent is None:
         return None
-    tool = LOCAL_TOOLS['volume']
-    return replace(tool, run=partial(tool.run, percent)) if tool.permission is PermissionTier.FREE else None
+    return free_tool('volume', percent)
 
 
 def stop_kestrel():
@@ -623,17 +636,17 @@ class HermesRequestChannel:
                 if task.done():
                     self.reader = None
 
-    async def exchange(self, messages, output, *, admitted):
-        await self._request({'messages': messages}, output, admitted=admitted)
+    async def exchange(self, messages, output, *, admitted, desktop=None):
+        await self._request({'messages': messages}, output, admitted=admitted, desktop=desktop)
 
-    async def _request(self, request, output, *, admitted):
+    async def _request(self, request, output, *, admitted, desktop=None):
         async with self.lock:
             await self.drain()
             if not admitted() or self.closed or self.failure:
                 output.put_nowait(None)
                 return
             self.output = output
-            self.reader = asyncio.create_task(self._exchange(request, output, admitted=admitted))
+            self.reader = asyncio.create_task(self._exchange(request, output, admitted=admitted, desktop=desktop))
             try:
                 await asyncio.shield(self.reader)
             finally:
@@ -768,7 +781,7 @@ class HermesRequestChannel:
         if errors:
             raise ExceptionGroup('Hermes channel cleanup failed', errors)  # noqa: F821 - The voice runtime uses Python 3.12.
 
-    async def _exchange(self, request, output, *, admitted):
+    async def _exchange(self, request, output, *, admitted, desktop=None):
         advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
         try:
             async with asyncio.timeout(ENGINE_TIMEOUT):
@@ -790,6 +803,16 @@ class HermesRequestChannel:
                         has_text = has_text or bool(event['text'].strip())
                         if self.output is output:
                             output.put_nowait(event)
+                    elif (set(event) == {'tool_call'} and desktop is not None
+                          and isinstance(event['tool_call'], dict)
+                          and set(event['tool_call']) == {'name', 'arguments'}
+                          and isinstance(event['tool_call']['name'], str)
+                          and event['tool_call']['name'] in DESKTOP_TOOLS
+                          and isinstance(event['tool_call']['arguments'], dict)):
+                        call = event['tool_call']
+                        content = await desktop(call['name'], call['arguments'])
+                        self.process.stdin.write(json.dumps({'tool_result': content}).encode() + b'\n')
+                        await self.process.stdin.drain()
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
@@ -833,18 +856,25 @@ class LocalActions:
     async def _run(self, tool, *, admitted):
         async with self.lock:
             if self.closed or not admitted():
-                raise asyncio.CancelledError
+                return None
             started = False
+            refused = False
 
             async def command(argv, **kwargs):
-                nonlocal started
+                nonlocal started, refused
                 if not started:
                     if self.closed or not admitted():
+                        refused = True
                         raise asyncio.CancelledError
                     started = True
                 return await self.command(argv, **kwargs)
 
-            result = await tool.run(command=command)
+            try:
+                result = await tool.run(command=command)
+            except asyncio.CancelledError:
+                if not refused:
+                    raise
+                return None
         confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
         if not confirmed:
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
@@ -872,6 +902,12 @@ class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
         if isinstance(frame, ProposedUserStoppedSpeakingFrame):
             await self.trigger_user_turn_stopped()
         return ProcessFrameResult.CONTINUE
+
+
+@dataclass
+class BrainTurn:
+    names: set
+    closed: bool = False
 
 
 class HermesLLMService(LLMService):
@@ -1109,6 +1145,34 @@ class HermesLLMService(LLMService):
         await self.push_frame(frame)
         await self.push_reply_end(token)
 
+    async def desktop_call(self, turn, token, output, name, arguments) -> str:
+        def advise(text):
+            if self.channel.output is output and self.owns_request(token):
+                output.put_nowait({'advisory': text})
+
+        if not valid_desktop_arguments(name, arguments):
+            turn.closed = True
+            advise("I couldn't use that request, so I didn't change anything.")
+            return brain_result(False, False, 'invalid arguments')
+        if name in turn.names:
+            return brain_result(False, False, 'already attempted')
+        turn.names.add(name)
+        if turn.closed:
+            return brain_result(False, False, 'turn closed')
+        key, _, bounds = DESKTOP_TOOLS[name]
+        tool = free_tool(key, *(arguments[key] for key in bounds))
+        if tool is None:
+            turn.closed = True
+            advise("That needs permission, which isn't available by voice yet. I didn't change anything.")
+            return brain_result(False, False, 'permission required')
+        result = await self.local_actions.run(tool, admitted=self.admitted)
+        if result is None:
+            return brain_result(False, False, 'conversation ended')
+        if not result.confirmed:
+            turn.closed = True
+            advise(local_result_message(tool, result))
+        return brain_result(result.confirmed, result.attempted, result.reason)
+
     def revoke(self):
         self.channel.detach(self.output)
         self.output = None
@@ -1186,11 +1250,9 @@ class HermesLLMService(LLMService):
             remove_original()
             # LocalActions owns an accepted action independently of later reply ownership.
             result = await self.local_actions.run(tool, admitted=self.admitted)
-            if not self.owns_request(token):
+            if result is None or not self.owns_request(token):
                 return
-            message = (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
-                       f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
-                       if not result.confirmed else None)
+            message = local_result_message(tool, result)
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:
@@ -1233,16 +1295,27 @@ class HermesLLMService(LLMService):
             self.output = output
             if not self.valid_origin(frame):
                 return
-            request = asyncio.create_task(self.channel.exchange(deepcopy(frame.context.get_messages()), output, admitted=lambda: self.owns_request(token)))
+            turn = BrainTurn(names=set())
+            request = asyncio.create_task(self.channel.exchange(
+                deepcopy(frame.context.get_messages()), output, admitted=lambda: self.owns_request(token),
+                desktop=partial(self.desktop_call, turn, token, output),
+            ))
             while event := await output.get():
                 if not self.owns_request(token):
                     self.revoke()
                     return
-                if 'delivery' in event:
-                    await push_reply_start(event['delivery'])
-                    started = True
-                else:
-                    await self.push_frame(LLMTextFrame(event['text']))
+                if 'advisory' in event:
+                    if not started:
+                        await push_reply_start('neutral')
+                        started = True
+                    await self.push_frame(SpeechAdvisoryFrame(' ' + event['advisory']))
+                    failed = True
+                elif not failed:
+                    if 'delivery' in event:
+                        await push_reply_start(event['delivery'])
+                        started = True
+                    else:
+                        await self.push_frame(LLMTextFrame(event['text']))
             await request
             if self.owns_request(token) and self.channel.failure:
                 raise RuntimeError(self.channel.failure)

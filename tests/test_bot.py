@@ -1199,7 +1199,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 checkpoint.set()
             return real_shield(awaitable)
 
-        async def exchange(messages, output, *, admitted):
+        async def exchange(messages, output, *, admitted, desktop=None):
             requests.append(messages)
             output.put_nowait({'delivery': 'neutral'})
             output.put_nowait(None)
@@ -1909,6 +1909,67 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_desktop_call_envelopes_are_validated_before_execution(self):
+        valid = {'tool_call': {'name': 'mute', 'arguments': {}}}
+        cases = [
+            (valid, True),
+            ({'tool_call': {'name': 'mute', 'arguments': {}}, 'text': 'Hidden.'}, False),
+            ({'tool_call': {'name': 'mute', 'arguments': {}, 'extra': True}}, False),
+            ({'tool_call': {'arguments': {}}}, False),
+            ({'tool_call': {'name': 'mute'}}, False),
+            ({'tool_call': {'name': 'open_app', 'arguments': {}}}, False),
+            ({'tool_call': {'name': ['mute'], 'arguments': {}}}, False),
+            ({'tool_call': {'name': 'mute', 'arguments': []}}, False),
+            ({'tool_call': []}, False),
+            ({'tool_call': None}, False),
+        ]
+        content = '{"confirmed":true,"attempted":true,"reason":"confirmed"}'
+        continuation = [{'delivery': 'neutral'}, {'text': 'Confirmed.'}, {'done': True}]
+        for event, accepted in cases:
+            with self.subTest(event=event):
+                service = hermes_service()
+                process = service.channel.process = Mock(returncode=None)
+                process.stdin.drain = AsyncMock()
+                process.stdout.readline = AsyncMock(side_effect=[
+                    json.dumps(item).encode() + b'\n' for item in [event, *continuation]
+                ])
+                process.wait = AsyncMock()
+                desktop = AsyncMock(return_value=content)
+                output = asyncio.Queue()
+                await service.channel.exchange([{'role': 'user', 'content': 'Please mute.'}], output,
+                                               admitted=service.admitted, desktop=desktop)
+                writes = [json.loads(c.args[0]) for c in process.stdin.write.call_args_list]
+                self.assertEqual(writes[0], {'messages': [{'role': 'user', 'content': 'Please mute.'}]})
+                observed = []
+                while not output.empty():
+                    observed.append(output.get_nowait())
+                if accepted:
+                    desktop.assert_awaited_once_with('mute', {})
+                    self.assertEqual(writes[1:], [{'tool_result': content}])
+                    self.assertEqual(observed, [*continuation[:-1], None])
+                    self.assertIsNone(service.channel.failure)
+                    process.terminate.assert_not_called()
+                else:
+                    desktop.assert_not_awaited()
+                    self.assertEqual(writes[1:], [])
+                    self.assertEqual(observed, [None])
+                    self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
+                    process.terminate.assert_called_once()
+                    process.wait.assert_awaited_once()
+        service = hermes_service()
+        process = service.channel.process = Mock(returncode=None)
+        process.stdin.drain = AsyncMock()
+        process.stdout.readline = AsyncMock(return_value=json.dumps(valid).encode() + b'\n')
+        process.wait = AsyncMock()
+        output = asyncio.Queue()
+        await service.channel._request({'prepare': True}, output, admitted=service.admitted)
+        self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
+        self.assertEqual([json.loads(c.args[0]) for c in process.stdin.write.call_args_list], [{'prepare': True}])
+        self.assertIsNone(output.get_nowait())
+        self.assertTrue(output.empty())
+        process.terminate.assert_called_once()
+        process.wait.assert_awaited_once()
+
     async def test_delivery_events_are_validated_before_text(self):
         cases = [
             ([{'delivery': 'curious'}, {'text': 'Hello.'}, {'done': True}], True),
@@ -2821,6 +2882,204 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_or_permissioned_brain_desktop_calls_execute_nothing(self):
+        permission = "That needs permission, which isn't available by voice yet. I didn't change anything."
+        invalid = "I couldn't use that request, so I didn't change anything."
+        cases = [
+            ('mute', {}, 'permission required', permission),
+            ('set_volume', {'percent': 30.5}, 'invalid arguments', invalid),
+            ('set_volume', {'percent': True}, 'invalid arguments', invalid),
+            ('set_volume', {'percent': 101}, 'invalid arguments', invalid),
+            ('focus_workspace', {'number': 0}, 'invalid arguments', invalid),
+            ('mute', {'extra': 1}, 'invalid arguments', invalid),
+        ]
+        replies = []
+        for name, arguments, _, _ in cases:
+            replies.extend([
+                [({'tool_calls': [{'index': 0, 'id': 'refused', 'type': 'function', 'function': {
+                    'name': name, 'arguments': json.dumps(arguments),
+                }}]}, None), ({}, 'tool_calls')],
+                [({'content': '[delivery:neutral] Untrue success claim.'}, None), ({}, 'stop')],
+            ])
+        brain = ScriptedBrain(replies)
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=AssertionError('Refused arguments must never execute'))
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            for index, (name, arguments, reason, advisory) in enumerate(cases):
+                with self.subTest(name=name, arguments=arguments):
+                    tool = bot.LOCAL_TOOLS['mute']
+                    entry = bot.replace(tool, permission=bot.PermissionTier.ASK) if index == 0 else tool
+                    with patch.dict(bot.LOCAL_TOOLS, mute=entry):
+                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                        await self.finish_user_turn(transport, 'Please handle this desktop request.')
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), advisory)
+                    heard = []
+                    while not spoken.empty():
+                        heard.append(spoken.get_nowait())
+                    self.assertEqual(' '.join(heard), advisory)
+                    self.assertEqual(len(brain.requests), 2 * index + 2)
+                    results = [m for m in brain.requests[-1][2]['messages'] if m['role'] == 'tool']
+                    self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
+                        ('refused', {'confirmed': False, 'attempted': False, 'reason': reason}),
+                    ])
+                    command.assert_not_awaited()
+        finally:
+            await close()
+
+    async def test_confirmed_brain_desktop_call_is_never_repeated_in_a_turn(self):
+        brain = ScriptedBrain([
+            [({'tool_calls': [{'index': 0, 'id': 'volume-first', 'type': 'function', 'function': {
+                'name': 'set_volume', 'arguments': '{"percent":30}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'tool_calls': [{'index': 0, 'id': 'volume-again', 'type': 'function', 'function': {
+                'name': 'set_volume', 'arguments': '{"percent":40}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'content': '[delivery:neutral] Set to thirty.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[
+            'selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
+            '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
+            '{"volume":{"mono":{"value":19660}}}', 'Mute: no',
+        ])
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Please turn the sound down a little.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Set to thirty.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Set to thirty.')
+            self.assertEqual(len(brain.requests), 3)
+            results = [m for m in brain.requests[-1][2]['messages'] if m['role'] == 'tool']
+            self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
+                ('volume-first', {'confirmed': True, 'attempted': True, 'reason': 'confirmed'}),
+                ('volume-again', {'confirmed': False, 'attempted': False, 'reason': 'already attempted'}),
+            ])
+            self.assertEqual(command.await_count, 10)
+            self.assertEqual([c for c in command.await_args_list if 'set-sink-volume' in c.args[0]],
+                             [call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'))])
+        finally:
+            await close()
+
+    async def test_unconfirmed_brain_desktop_call_speaks_fixed_advisory_without_retry(self):
+        brain = ScriptedBrain([
+            [({'tool_calls': [{'index': 0, 'id': 'pause-first', 'type': 'function', 'function': {
+                'name': 'pause_media', 'arguments': '{}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'tool_calls': [{'index': 0, 'id': 'next-refused', 'type': 'function', 'function': {
+                'name': 'next_track', 'arguments': '{}',
+            }}]}, None), ({}, 'tool_calls')],
+            [({'content': '[delivery:neutral] Everything succeeded.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=[LocalDesktopTests.media(), 'unhandled'])
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Please stop the music for me.')
+            advisory = "I couldn't confirm pause. Check the media player. I won't retry."
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), advisory)
+            heard = []
+            while not spoken.empty():
+                heard.append(spoken.get_nowait())
+            self.assertEqual(' '.join(heard), advisory)
+            self.assertEqual(command.await_args_list, [
+                call(('/usr/bin/omarchy-shell', 'media', 'status')),
+                call(('/usr/bin/omarchy-shell', 'media', 'pause')),
+            ])
+            self.assertEqual(len(brain.requests), 3)
+            results = [m for m in brain.requests[-1][2]['messages'] if m['role'] == 'tool']
+            self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
+                ('pause-first', {'confirmed': False, 'attempted': True, 'reason': 'action unhandled'}),
+                ('next-refused', {'confirmed': False, 'attempted': False, 'reason': 'turn closed'}),
+            ])
+            self.assertTrue(committed.empty())
+        finally:
+            await close()
+
+    async def test_brain_desktop_calls_share_instant_tools_and_observed_results(self):
+        cases = [
+            ('mute', {}, 'mute',
+             ['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'],
+             [('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+              ('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'),
+              ('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
+            ('set_volume', {'percent': 30}, 'set volume to thirty',
+             ['selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
+              '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
+              '{"volume":{"mono":{"value":19660}}}', 'Mute: no'],
+             [('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+              ('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'),
+              ('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical'),
+              ('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', '--format=json', 'get-sink-volume', 'physical'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
+            ('pause_media', {}, 'pause music',
+             [LocalDesktopTests.media(), 'ok', LocalDesktopTests.media(playing=False)],
+             [('/usr/bin/omarchy-shell', 'media', 'status'),
+              ('/usr/bin/omarchy-shell', 'media', 'pause'),
+              ('/usr/bin/omarchy-shell', 'media', 'status')]),
+            ('next_track', {}, 'next track',
+             [LocalDesktopTests.media(), 'ok', LocalDesktopTests.media(title='Second track')],
+             [('/usr/bin/omarchy-shell', 'media', 'status'),
+              ('/usr/bin/omarchy-shell', 'media', 'next'),
+              ('/usr/bin/omarchy-shell', 'media', 'status')]),
+            ('focus_workspace', {'number': 3}, 'workspace three',
+             ['{"id":1}', 'ok', '{"id":3}'],
+             [('/usr/bin/hyprctl', '-j', 'activeworkspace'),
+              ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "3" })'),
+              ('/usr/bin/hyprctl', '-j', 'activeworkspace')]),
+        ]
+        replies = []
+        for name, arguments, _, _, _ in cases:
+            replies.extend([
+                [({'tool_calls': [{'index': 0, 'id': name, 'type': 'function', 'function': {
+                    'name': name, 'arguments': json.dumps(arguments),
+                }}]}, None), ({}, 'tool_calls')],
+                [({'content': '[delivery:neutral] Confirmed.'}, None), ({}, 'stop')],
+            ])
+        brain = ScriptedBrain(replies)
+        self.addCleanup(brain.close)
+        command = AsyncMock()
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            for index, (name, arguments, phrase, results, argv) in enumerate(cases):
+                with self.subTest(name=name):
+                    command.reset_mock(side_effect=True)
+                    command.side_effect = results
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'Please use ' + name + ' for me.')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Confirmed.')
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Confirmed.')
+                    self.assertEqual(command.await_args_list, [call(item) for item in argv])
+                    tools = [m for m in brain.requests[2 * index + 1][2]['messages'] if m['role'] == 'tool']
+                    self.assertEqual(len(tools), 1)
+                    self.assertEqual(set(tools[0]), {'role', 'tool_call_id', 'content'})
+                    self.assertEqual(tools[0]['tool_call_id'], name)
+                    self.assertEqual(json.loads(tools[0]['content']),
+                                     {'confirmed': True, 'attempted': True, 'reason': 'confirmed'})
+                    command.reset_mock(side_effect=True)
+                    command.side_effect = results
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, phrase)
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertEqual(command.await_args_list, [call(item) for item in argv])
+                    self.assertEqual(len(brain.requests), 2 * index + 2)
+                    self.assertTrue(spoken.empty())
+                    self.assertTrue(committed.empty())
+        finally:
+            await close()
+
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
                            admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
@@ -8115,9 +8374,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 native_exchange = transport.llm.channel.exchange
 
-                async def capture_exchange(messages, output, *, admitted):
+                async def capture_exchange(messages, output, *, admitted, desktop=None):
                     worker_requests.append(deepcopy(messages))
-                    return await native_exchange(messages, output, admitted=admitted)
+                    return await native_exchange(messages, output, admitted=admitted, desktop=desktop)
 
                 with patch.object(transport.llm.channel, 'exchange', capture_exchange):
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
