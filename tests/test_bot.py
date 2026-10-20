@@ -3758,6 +3758,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await close()
 
     async def test_panel_attributes_each_synthesis_to_delivered_audio(self):
+        stale_failure = None
+        # The healthy scenario consumes the failure receipt from this prior closed session.
         for scenario in (
             'Failure before synthesis audio.',
             'Audible segment after synthesis failure.',
@@ -3908,7 +3910,6 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                                     and rows[-1]['state'] in ('complete', 'failed'))
                             self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'Spoken first.', 'state': 'failed'})
                             self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
-                            stale_text = text_frames[0]
                             stale_failure = synthesis_failures[-1]
                         elif scenario in ('Audible segment after synthesis failure.',
                                           'Partial synthesis failure.', 'Interrupted synthesis failure.'):
@@ -3965,6 +3966,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(rows[-1]['text'], 'Spoken first.')
                             self.assertEqual(rows[-1]['state'], 'failed')
                             self.assertEqual(b''.join(written), b'\xff\x3f' * 5760)
+                            stale_text = text_frames[0]
 
                             for interrupt in (False, True):
                                 with self.subTest(interrupt=interrupt):
@@ -3981,6 +3983,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                     self.assertEqual(written, [b'\xff\x3f' * 1500 + b'\xff\x1f' * 420])
                                     transport.llm.conversation_output(stale_text)
                                     if not interrupt:
+                                        self.assertIsNotNone(
+                                            stale_failure,
+                                            'prior closed synthesis failure must precede the healthy scenario',
+                                        )
                                         transport.llm.conversation_output(stale_failure)
                                     if interrupt:
                                         interrupted.clear()
