@@ -98,6 +98,94 @@ TestCase {
         compare(marks.Accessible.ignored, true)
     }
 
+    function test_feed_marks_geometry_and_motion() {
+        const marks = createTemporaryObject(marksComponent, this, {feed: true, kind: "thinking"})
+        verify(marks !== null)
+        compare(marks.implicitWidth, 40)
+        compare(marks.implicitHeight, 26)
+        compare(marks.opacity, 1)
+        compare(marks.Accessible.ignored, true)
+        compare(marks.thinkingIndex, 1)
+        compare(findChild(marks, "restingBar").visible, false)
+        compare(findChild(marks, "listeningMark").visible, false)
+        compare(findChild(marks, "troubleStem").visible, false)
+        const stepper = findChild(marks, "thinkingStep")
+        compare(stepper.interval, 280)
+        compare(stepper.running, false)
+        for (let i = 0; i < 3; i++) {
+            const mark = findChild(marks, "mark" + i)
+            verify(mark !== null)
+            compare(mark.visible, true)
+            compare(mark.x, [10, 18, 26][i])
+            compare(mark.y, [17, 11, 17][i])
+            compare(mark.width, 4)
+            compare(mark.height, 4)
+            compare(mark.animatedHeight, [8, 16, 11][i])
+            compare(mark.color, Qt.color("white"))
+            compare(mark.border.width, 0)
+            compare(animationPart(marks, "speakingLoop", i).running, false)
+            compare(animationPart(marks, "speakingLoop", i).loops, -1)
+            compare(animationPart(marks, "speakingDown", i).to, 5)
+            compare(animationPart(marks, "speakingUp", i).to, 16)
+            compare(animationPart(marks, "speakingDown", i).duration, [210, 260, 305][i])
+            compare(animationPart(marks, "speakingUp", i).duration, [210, 260, 305][i])
+            compare(animationPart(marks, "speakingDown", i).easing.type, Easing.InOutSine)
+            compare(animationPart(marks, "speakingUp", i).easing.type, Easing.InOutSine)
+        }
+
+        marks.motionEnabled = true
+        compare(stepper.running, true)
+        for (const expectedY of [[17, 17, 11], [11, 17, 17], [17, 11, 17]]) {
+            stepper.triggered()
+            for (let i = 0; i < 3; i++) compare(findChild(marks, "mark" + i).y, expectedY[i])
+        }
+        stepper.triggered()
+        compare(marks.thinkingIndex, 2)
+        marks.motionEnabled = false
+        compare(marks.kind, "thinking")
+        compare(marks.thinkingIndex, 1)
+        compare(stepper.running, false)
+        for (let i = 0; i < 3; i++) {
+            compare(findChild(marks, "mark" + i).y, [17, 11, 17][i])
+            compare(animationPart(marks, "speakingLoop", i).running, false)
+        }
+
+        marks.kind = "speaking"
+        compare(stepper.running, false)
+        for (let i = 0; i < 3; i++) {
+            const mark = findChild(marks, "mark" + i)
+            compare(mark.x, [10, 18, 26][i])
+            compare(mark.width, 4)
+            compare(mark.height, [8, 16, 11][i])
+            compare(mark.y, [13, 5, 10][i])
+            compare(animationPart(marks, "speakingLoop", i).running, false)
+        }
+        marks.motionEnabled = true
+        compare(marks.kind, "speaking")
+        compare(stepper.running, false)
+        for (let i = 0; i < 3; i++) compare(animationPart(marks, "speakingLoop", i).running, true)
+        marks.motionEnabled = false
+        compare(marks.kind, "speaking")
+        for (let i = 0; i < 3; i++) {
+            compare(animationPart(marks, "speakingLoop", i).running, false)
+            compare(findChild(marks, "mark" + i).height, [8, 16, 11][i])
+            compare(findChild(marks, "mark" + i).y, [13, 5, 10][i])
+        }
+        marks.motionEnabled = true
+        for (let i = 0; i < 3; i++) compare(animationPart(marks, "speakingLoop", i).running, true)
+        marks.kind = "thinking"
+        compare(marks.thinkingIndex, 1)
+        compare(stepper.running, true)
+        for (let i = 0; i < 3; i++) {
+            compare(animationPart(marks, "speakingLoop", i).running, false)
+            compare(findChild(marks, "mark" + i).height, 4)
+            compare(findChild(marks, "mark" + i).y, [17, 11, 17][i])
+        }
+        marks.motionEnabled = false
+        compare(marks.kind, "thinking")
+        compare(stepper.running, false)
+    }
+
     function test_all_state_shapes() {
         const marks = createTemporaryObject(marksComponent, this)
         verify(marks !== null)
