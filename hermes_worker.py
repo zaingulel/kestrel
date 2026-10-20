@@ -36,6 +36,7 @@ class ReplyDeliveryPrefix:
         self.delivery = None
         self.has_text = False
         self.failed = False
+        self.leading_whitespace = False
 
     def feed(self, text: str) -> list[dict]:
         if self.failed:
@@ -48,6 +49,18 @@ class ReplyDeliveryPrefix:
             headers = {f'[delivery:{label}]{delimiter}': label
                        for label in DELIVERY_LABELS for delimiter in (' ', '\n')}
             for index, char in enumerate(text):
+                if not self.prefix:
+                    if char.isspace():
+                        self.leading_whitespace = True
+                        continue
+                    if char != '[':
+                        self.delivery = 'neutral'
+                        events.append({'delivery': 'neutral'})
+                        text = text[index:]
+                        break
+                    if self.leading_whitespace:
+                        self.failed = True
+                        return []
                 self.prefix += char
                 if self.prefix in headers:
                     self.delivery = headers[self.prefix]
