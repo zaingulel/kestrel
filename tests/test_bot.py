@@ -4334,8 +4334,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(str(service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
 
     async def test_indicator_local_speech_without_audio_finishes_turn(self):
-        for failing in (False, True):
-            with self.subTest(synthesis='failure' if failing else 'empty'):
+        phrases = ('repeat that', 'what can i say')
+        for failing, local_turns in ((False, phrases), (True, phrases), (True, phrases[::-1])):
+            with self.subTest(synthesis='failure' if failing else 'empty', first_phrase=local_turns[0]):
                 brain = ScriptedBrain([])
                 self.addCleanup(brain.close)
                 attempts = []
@@ -4352,7 +4353,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     transport, _, committed, _, _, close = await self.open_session(
                         brain, local_command=command, status=status, synthesis_chunks=chunks,
                     )
-                    output_events, contexts = [], []
+                    service = transport.service
+                    voice = service.manager.voice
+                    output_events, contexts, transitions = [], [], []
+                    native_set = status.set_state
+
+                    def observe(state):
+                        native_set(state)
+                        transitions.append((state, voice.generation_cleanup_failed))
 
                     @transport.output().event_handler('on_after_push_frame')
                     async def output_event(processor, frame):
@@ -4365,24 +4373,43 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             contexts.append(deepcopy(frame.context.get_messages()))
 
                     try:
-                        for phrase in ('repeat that', 'what can i say'):
-                            with self.subTest(phrase=phrase):
-                                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                                await self.finish_user_turn(transport, phrase)
-                                barrier = DataFrame()
-                                await transport.input().queue_frame(barrier)
-                                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
-                                snapshot = json.loads((Path(runtime) / 'kestrel/indicator.json').read_text())
-                                self.assertEqual(snapshot['state'], 'idle',
-                                                 'A completed local turn without audio cannot remain thinking')
-                                self.assertEqual(output_events, [], 'No audio means no native speaking event')
-                                self.assertTrue(committed.empty())
-                                self.assertEqual(contexts[-1], [], 'Local speech stays outside brain history')
-                        self.assertEqual(len(attempts), 2)
-                        self.assertEqual(brain.requests, [])
-                        command.assert_not_awaited()
+                        with patch.object(status, 'set_state', observe):
+                            first_fault = None
+                            for index, phrase in enumerate(local_turns):
+                                with self.subTest(phrase=phrase, refusal_probe=failing and index == 1):
+                                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                                    await self.finish_user_turn(transport, phrase)
+                                    barrier = DataFrame()
+                                    await transport.input().queue_frame(barrier)
+                                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                                    snapshot = json.loads((Path(runtime) / 'kestrel/indicator.json').read_text())
+                                    self.assertEqual(voice.generation_cleanup_failed, failing)
+                                    self.assertEqual(snapshot['state'], 'trouble' if failing else 'idle',
+                                                     'A failed native voice cannot appear ready after a local turn')
+                                    self.assertEqual(output_events, [], 'No audio means no native speaking event')
+                                    self.assertTrue(committed.empty())
+                                    self.assertEqual(contexts[-1], [], 'Local speech stays outside brain history')
+                                    self.assertEqual(len(attempts), 1 if failing else index + 1)
+                                    if failing:
+                                        if index == 0:
+                                            first_fault = next((position for position, transition in enumerate(transitions)
+                                                                if transition == ('trouble', True)), None)
+                                            self.assertIsNotNone(first_fault, 'Native voice failure must publish trouble')
+                                        if first_fault is not None:
+                                            self.assertTrue(all(state == 'trouble'
+                                                                for state, _ in transitions[first_fault:]), transitions)
+                            self.assertEqual(len(attempts), 1 if failing else 2)
+                            self.assertEqual(brain.requests, [])
+                            command.assert_not_awaited()
                     finally:
+                        if voice.generation_cleanup_failed:
+                            self.assertEqual(await service.toggle(), 'inactive')
+                            await service.state('trouble')
+                            self.assertEqual(await service.toggle(), 'unavailable')
+                            self.assertEqual(len(attempts), 1)
                         await close()
+                    if failing:
+                        self.assertEqual(str(service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
 
     async def test_indicator_tracks_output_interruption_and_local_turns(self):
         blocked, release = threading.Event(), threading.Event()

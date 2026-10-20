@@ -880,6 +880,7 @@ class HermesLLMService(LLMService):
         self._conversation_incomplete = False
         self._conversation_synthesis_failed = False
         self._indicator_ready = False
+        self._indicator_voice_failed = False
         self._indicator_user = False
         self._indicator_output = False
         self._indicator_pending = False
@@ -889,7 +890,8 @@ class HermesLLMService(LLMService):
 
     def refresh_indicator(self):
         if self.admitted() and self.status is not None and self._indicator_ready:
-            state = ('listening' if self._indicator_user else
+            state = ('trouble' if self._indicator_voice_failed else
+                     'listening' if self._indicator_user else
                      'speaking' if self._indicator_output else
                      'thinking' if self._indicator_pending else
                      'trouble' if self.channel.failure else 'idle')
@@ -1400,6 +1402,8 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
 
     @output.event_handler('on_after_push_frame')
     async def on_output_frame(processor, frame):
+        if voice.generation_cleanup_failed:
+            llm._indicator_voice_failed = True
         if status is not None or conversation is not None:
             if isinstance(frame, BotStartedSpeakingFrame):
                 llm.indicator_output_started()
@@ -1408,6 +1412,8 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
         llm.conversation_output(frame)
+        if status is not None or conversation is not None:
+            llm.refresh_indicator()
         if llm.admitted() and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             llm.last_spoken_reply = frame.text
 
