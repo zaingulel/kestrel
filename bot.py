@@ -1204,7 +1204,7 @@ class VoiceConversations:
         if not self.desired_active:
             self.revoke()
             self.conversation.clear()
-        self.status.set_state('starting')
+        self.status.set_state('starting' if self.desired_active else 'inactive')
         self.changed.set()
         return 'starting' if self.desired_active else 'inactive'
 

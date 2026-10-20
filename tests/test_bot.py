@@ -2930,6 +2930,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             transport.sessions = sessions
             transport.audio_children = audio_children
             transport.service = service_handle
+            transport.cleanup_finished = asyncio.get_running_loop().create_future()
             sessions.append(transport)
 
             @output.event_handler('on_after_process_frame')
@@ -2962,6 +2963,17 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             nonlocal controller
             controller = native_conversations(**kwargs)
             service_handle.manager = controller
+            native_finish = controller.finish_conversation
+
+            async def finish_conversation():
+                transport = controller.transport
+                try:
+                    return await native_finish()
+                finally:
+                    if transport is not None and not transport.cleanup_finished.done():
+                        transport.cleanup_finished.set_result(asyncio.current_task())
+
+            controller.finish_conversation = finish_conversation
             return controller
 
         if native_events is not None:
@@ -3117,7 +3129,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(interrupted.wait(), 5)
             await transport.input().queue_frame(InputAudioRawFrame(b'private inactive audio', 16000, 1))
             self.assertEqual(await service.toggle(), 'inactive')
-            await service.state('inactive')
+            cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+            await asyncio.wait_for(asyncio.shield(cleanup), 5)
+            self.assertEqual(service.manager.status._state, 'inactive')
             transport.capture.stdout.feed_data(b'private stale capture' * 100)
             self.assertTrue(transport.reader.done())
             self.assertTrue(transport.capture.reaped.is_set())
@@ -3228,7 +3242,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(transport.sessions), 1)
                 process.stdout.feed_data(b'{"text":"old private transcript"}\n')
                 release_effect.set()
-                await service.state('inactive')
+                cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+                await asyncio.wait_for(asyncio.shield(cleanup), 5)
+                self.assertEqual(service.manager.status._state, 'inactive')
             self.assertEqual(await asyncio.wait_for(consumer, 5), [])
             self.assertEqual(len(writes), 1)
             self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')), 1)
@@ -3245,7 +3261,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rapid_dismiss_summon_has_fresh_history_and_no_old_output(self):
         with self.subTest(outcome='dismiss_during_feed_reset'):
-            entered, release = asyncio.Event(), asyncio.Event()
+            entered, release, reset_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
             self.addCleanup(release.set)
             brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
             self.addCleanup(brain.close)
@@ -3259,6 +3275,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await begin_session()
                 entered.set()
                 await release.wait()
+                reset_finished.set()
 
             try:
                 with patch.object(service.manager.conversation, 'begin_session', side_effect=held_reset):
@@ -3266,7 +3283,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(entered.wait(), 5)
                     self.assertEqual(await service.toggle(), 'inactive')
                     release.set()
-                    await service.state('inactive')
+                    await asyncio.wait_for(reset_finished.wait(), 5)
+                    self.assertEqual(service.manager.status._state, 'inactive')
                 self.assertEqual(handle.sessions, [], 'Dismissed activation must create no capture or adapter')
                 self.assertTrue(spoken.empty())
                 self.assertTrue(committed.empty())
@@ -3320,6 +3338,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 old_voice, old_llm, pipeline = manager.voice, manager.llm, manager.pipeline
                 transport.output().write_gate.clear()
                 native_wait_for = asyncio.wait_for
+                states = []
+                native_set_state = manager.status.set_state
+
+                def set_state(value):
+                    states.append(value)
+                    native_set_state(value)
 
                 async def wait_for(awaitable, timeout):
                     if timeout == 90 and mode == 'watchdog':
@@ -3329,15 +3353,26 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     return await native_wait_for(awaitable, timeout)
 
                 try:
-                    with patch.object(bot.asyncio, 'wait_for', side_effect=wait_for):
+                    with (
+                        patch.object(bot.asyncio, 'wait_for', side_effect=wait_for),
+                        patch.object(manager.status, 'set_state', side_effect=set_state),
+                    ):
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                         await asyncio.wait_for(interrupted.wait(), 5)
                         await self.finish_user_turn(transport, 'Old private request.')
                         await asyncio.wait_for(next_entered.wait(), 5)
                         self.assertEqual(await service.toggle(), 'inactive')
+                        self.assertEqual(manager.status._state, 'inactive')
+                        self.assertFalse(transport.admitted())
+                        self.assertEqual(manager.conversation.turns, [])
                         self.assertEqual(await service.toggle(), 'starting')
+                        self.assertEqual(manager.status._state, 'starting')
                         self.assertEqual(await service.toggle(), 'inactive')
+                        self.assertEqual(manager.status._state, 'inactive')
+                        self.assertFalse(transport.admitted())
+                        self.assertEqual(manager.conversation.turns, [])
                         self.assertEqual(await service.toggle(), 'starting')
+                        self.assertEqual(manager.status._state, 'starting')
                         self.assertFalse(transport.admitted())
                         self.assertEqual(len(transport.sessions), 1)
                         if mode == 'watchdog':
@@ -3387,6 +3422,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(len(transport.sessions), 1)
                             self.assertIs(manager.cleanup, cleanup, 'Late completion retains the original cleanup owner')
                             self.assertEqual(events, [('model', 'Old reply.'), ('closed', 'Old reply.')])
+                        self.assertNotIn('released', states)
                 finally:
                     expire.set()
                     release_next.set()
@@ -3479,7 +3515,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await asyncio.wait_for(spoken.get(), 5), f'Reply {cycle}.')
                     self.assertEqual(await service.toggle(), 'inactive')
                     self.assertEqual(manager.conversation.turns, [])
-                    await service.state('inactive')
+                    cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+                    await asyncio.wait_for(asyncio.shield(cleanup), 5)
+                    self.assertEqual(service.manager.status._state, 'inactive')
                     self.assertTrue(transport.capture.reaped.is_set())
                     self.assertIsNone(transport.playback)
                     self.assertTrue(all(child.reaped.is_set() for child in transport.audio_children))
@@ -5437,8 +5475,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             for before_write in (True, False):
                 with self.subTest(begin_before_write=before_write):
+                    dismissed = manager.transport
                     self.assertEqual(await service.toggle(), 'inactive')
-                    await service.state('inactive')
+                    cleanup = await asyncio.wait_for(asyncio.shield(dismissed.cleanup_finished), 5)
+                    await asyncio.wait_for(asyncio.shield(cleanup), 5)
+                    self.assertEqual(service.manager.status._state, 'inactive')
                     ready_received = asyncio.Event()
                     unlock.clear()
                     native_read = channel.read_event
