@@ -418,7 +418,7 @@ def main(*, base_url=BONSAI_URL):
                         if prepared or attached or begun:
                             raise ValueError('Preparation is permitted only once before a conversation')
                         prepared = True
-                        messages = [{'role': 'user', 'content': 'Hello'}]
+                        messages = [{'role': 'user', 'content': 'Hello.'}]
                     elif set(request) == {'messages'}:
                         if not begun:
                             raise ValueError('Begin a fresh conversation before sending messages')

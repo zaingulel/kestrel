@@ -1154,7 +1154,7 @@ class NativeHermesTests(unittest.TestCase):
                 for _, _, payload in brain.requests:
                     self.assertFalse(payload.get('tools'))
                     self.assertNotIn('User likes green tea nonce-523.', json.dumps(payload))
-                self.assertEqual(brain.requests[0][2]['messages'][-1], {'role': 'user', 'content': 'Hello'})
+                self.assertEqual(brain.requests[0][2]['messages'][-1], {'role': 'user', 'content': 'Hello.'})
                 refusal = next(message for message in brain.requests[1][2]['messages'] if message['role'] == 'tool')
                 self.assertIn("Tool 'memory' does not exist", refusal['content'])
                 self.assertFalse((worker.home / 'memories').is_symlink())
