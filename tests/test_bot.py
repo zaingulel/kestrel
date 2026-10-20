@@ -2022,6 +2022,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 prototype.admitted = admitted
                 prototype.status = status
                 prototype.conversation = conversation
+                if isinstance(prototype, Mock):
+                    prototype.frame_completions = {}
+                    prototype.typed_origin = None
+                    prototype._indicator_reply = object()
+                    prototype.owns_request = lambda token: token is prototype._indicator_reply and prototype.admitted()
                 return prototype
 
             async def activate_fixture(*, capture_enabled=True):
@@ -2204,7 +2209,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.channel.close = AsyncMock(wraps=service.channel.close)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.channel.preparation.done())
 
@@ -2377,6 +2382,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
                     self.assertEqual(self.voice.generate_streaming.call_count, 1)
                     os.environ['KESTREL_VOICE'] = 'unknown'
+                    voice._conversation_reply_token = kwargs['llm']._indicator_reply
+                    await voice.on_turn_context_created('reply')
+                    await voice.create_audio_context('reply')
                     for sentence in ('First reply.', 'Second reply.'):
                         frames = [frame async for frame in voice.run_tts(sentence, 'reply')]
                         self.assertEqual(len(frames), 1)
@@ -2567,12 +2575,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = Forward(output=True)
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertFalse(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
-                        handle_signals=handle_signals, status=status, conversation=conversation, user_params=bot.LLMUserAggregatorParams(
+                        handle_signals=handle_signals, status=status, conversation=conversation,
+                        on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
 
@@ -3640,6 +3649,52 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(spoken.empty())
         self.assertTrue(committed.empty())
         self.assertIsNone(manager.submission_task)
+        self.assertEqual(await service.toggle(), 'starting')
+        handover_session = await asyncio.wait_for(service.started.get(), 5)
+        stop_entered, stop_finished, release_stop = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_stop.set)
+        user = manager.ingress[1]
+
+        @user.event_handler('on_before_process_frame')
+        async def hold_stop(processor, frame):
+            if isinstance(frame, ProposedUserStoppedSpeakingFrame):
+                stop_entered.set()
+                try:
+                    await release_stop.wait()
+                finally:
+                    stop_finished.set()
+
+        self.assertEqual(await service.submit('Cancelled before user completion'), 'accepted')
+        await asyncio.wait_for(stop_entered.wait(), 5)
+        cancelled_submission = manager.submission_task
+        prepared_model = manager.model
+        native_process = service.channel.process
+        self.assertFalse(cancelled_submission.done())
+        self.assertEqual(await service.toggle(), 'inactive')
+        await asyncio.wait_for(stop_finished.wait(), 5)
+        cleanup = await asyncio.wait_for(asyncio.shield(handover_session.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertTrue(cancelled_submission.cancelled())
+        self.assertFalse(manager.closed, 'Dismissing a handover must retain the running service')
+        self.assertIsNone(manager.failure)
+        self.assertEqual(manager.status._state, 'inactive')
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertIsNone(manager.pending_submit)
+        self.assertIsNone(manager.submission_task)
+        self.assertIs(manager.model, prepared_model)
+        self.assertIsNone(native_process.returncode)
+        service.recognizer.close.assert_not_awaited()
+        bot.ECHO_REMOVAL.close.assert_not_called()
+        self.assertEqual(await control.toggle(), 'starting')
+        fresh_session = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNone(fresh_session.llm.last_spoken_reply)
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertEqual(await service.toggle(), 'inactive')
+        cleanup = await asyncio.wait_for(asyncio.shield(fresh_session.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
         corrupt = notes / 'MEMORY.md'
         corrupt.write_bytes(b'isolated invalid notes\xff')
         corrupt.chmod(0o600)
@@ -4678,6 +4733,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             @transport.llm.event_handler('on_before_push_frame')
             async def generated_text(processor, frame):
                 if cancel_without_audio and isinstance(frame, InterruptionFrame) and frame.conversation_reply_token is not None:
+                    # Revoked producers suppress their end frame; inject its delayed transport arrival explicitly.
+                    late = LLMFullResponseEndFrame()
+                    late.indicator_reply_token = frame.conversation_reply_token
+                    late.conversation_reply_failed = False
+                    await output.push_frame(late)
                     await asyncio.wait_for(old_end_output.wait(), 5)
                 if hold_text and isinstance(frame, LLMTextFrame):
                     generated.set()

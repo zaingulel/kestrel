@@ -1689,6 +1689,10 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.indicator_output_started = Mock()
         llm.start_preparation = Mock()
         llm.conversation_output = Mock()
+        llm.frame_completed = Mock()
+        llm.frame_completions = {}
+        llm.owns_request = lambda token: True
+        llm._assistant_reply_token = None
         llm.revoke = Mock()
         llm.local_actions = Mock(close=AsyncMock(), drain=AsyncMock())
         llm.channel = Mock(begin_conversation=AsyncMock(return_value=True), prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), known_unavailable=Mock(return_value=False), failure=None, preparation=None)
@@ -1706,9 +1710,9 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
         native_conversation = bot.run_conversation
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
             from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
-            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, user_params=bot.LLMUserAggregatorParams(
+            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
                 user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
             ))
 

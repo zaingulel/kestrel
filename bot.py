@@ -1516,7 +1516,8 @@ class VoiceConversations:
             self.changed.clear()
             try:
                 if self.submission_task is not None and self.submission_task.done():
-                    self.submission_task.result()
+                    if not self.submission_task.cancelled():
+                        self.submission_task.result()
                     self.submission_task = None
                 if self.failure and self.cleanup is not None:
                     self.status.set_state('trouble')
