@@ -5702,6 +5702,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(processes[0][1].exists())
 
     async def test_failed_native_preparation_preserves_local_mute_and_reports_on_user_turn(self):
+        notes_advisory = ('Local notes are unavailable or unsafe. Check note ownership, permissions, '
+                          'encoding and size, then restart Kestrel.')
         for failure in ('prepare', 'begin', 'preflight'):
             with self.subTest(failure=failure):
                 notes_home = tempfile.TemporaryDirectory(prefix='kestrel-failed-notes-', dir=ROOT / '.runtime')
@@ -5737,7 +5739,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         note.chmod(0o600)
                         await self.assert_failed_reply(
                             transport, spoken, committed, 'Ordinary turn with unsafe notes.',
-                            expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
+                            expected_advisory=notes_advisory,
                         )
                     self.assertTrue(channel.failure)
                     await service.state('trouble')
@@ -5767,7 +5769,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(committed.empty())
                         await self.assert_failed_reply(
                             transport, spoken, committed, 'Answer after failed native initialization.',
-                            expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.",
+                            expected_advisory=("I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+                                               if failure == 'prepare' else notes_advisory),
                         )
                         self.assertEqual(len(brain.requests), 1)
                         self.assertEqual([event for kind, event in events if kind == 'write'], writes,

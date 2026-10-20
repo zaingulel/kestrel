@@ -45,7 +45,7 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
-from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, child_environment
+from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, MEMORY_ERROR, child_environment
 from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
 
 ECHO_REMOVAL = EchoRemoval()
@@ -690,7 +690,8 @@ class HermesRequestChannel:
                 if set(event) == {'session_ready'} and event['session_ready'] is True:
                     return True
                 if set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                    advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+                    advisory = (MEMORY_ERROR if event['error'] == MEMORY_ERROR else
+                                "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
                     raise RuntimeError(event['error'])
                 raise RuntimeError('Invalid Hermes conversation readiness response')
         except Exception as error:
@@ -786,7 +787,8 @@ class HermesRequestChannel:
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+                        advisory = (MEMORY_ERROR if event['error'] == MEMORY_ERROR else
+                                    "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
                         raise RuntimeError(event['error'])
                     else:
                         raise RuntimeError('Invalid or incomplete Hermes response')
