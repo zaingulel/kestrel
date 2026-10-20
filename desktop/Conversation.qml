@@ -45,6 +45,13 @@ FocusScope {
     function focusClose() { closeButton.forceActiveFocus() }
     function announceTurn(text) { root.Accessible.announce(text, Accessible.Polite) }
 
+    function fitTooltip(tooltip) {
+        tooltip.popupType = Popup.Item
+        tooltip.margins = 16
+        tooltip.contentItem.wrapMode = Text.Wrap
+        tooltip.width = Qt.binding(function() { return Math.min(tooltip.implicitWidth, root.width - 32) })
+    }
+
     function updateTurns() {
         const follow = transcript.followBottom
         const previousY = transcript.contentY
@@ -107,6 +114,7 @@ FocusScope {
                 onLoaded: {
                     item.parent = headerRow
                     item.text = Qt.binding(function() { return headerRow.Accessible.description })
+                    root.fitTooltip(item)
                     item.visible = Qt.binding(function() { return headerHover.hovered && !microphoneHover.hovered && !closeButton.hovered })
                 }
             }
@@ -116,6 +124,7 @@ FocusScope {
                 onLoaded: {
                     item.parent = microphoneStatus
                     item.text = Qt.binding(function() { return root.statusSentence })
+                    root.fitTooltip(item)
                     item.visible = Qt.binding(function() { return microphoneHover.hovered })
                 }
             }
@@ -423,6 +432,7 @@ FocusScope {
                                 onLoaded: {
                                     item.parent = provenance
                                     item.text = "Spoken message"
+                                    root.fitTooltip(item)
                                     item.visible = Qt.binding(function() { return provenance.visible && provenanceHover.hovered })
                                 }
                             }

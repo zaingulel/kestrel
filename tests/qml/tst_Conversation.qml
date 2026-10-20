@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Controls
+import QtQuick.Window
 import QtTest
 import "../../desktop" as Desktop
 
@@ -41,10 +43,25 @@ TestCase {
     }
 
     property int destroyedTooltips: 0
+    property int tooltipPixelSize: 12
+    Component { id: tooltipWindow; Window { visible: true; height: 640 } }
     Component {
         id: tooltipDouble
-        Item {
-            property string text: ""
+        ToolTip {
+            id: tooltip
+            delay: 400
+            padding: 0
+            contentItem: Text {
+                text: tooltip.text
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
+                font.family: "monospace"
+                font.pixelSize: test.tooltipPixelSize
+                leftPadding: 10
+                rightPadding: 10
+                topPadding: 6
+                bottomPadding: 6
+            }
             Component.onDestruction: test.destroyedTooltips++
         }
     }
@@ -324,6 +341,96 @@ TestCase {
         unavailable("Conversation is too large to display. Restart Kestrel to begin a new conversation.")
     }
 
+    function test_native_tooltip_text_fits_window_data() {
+        return [
+            {tag: "448-12", panelWidth: 448, pixelSize: 12},
+            {tag: "320-12", panelWidth: 320, pixelSize: 12},
+            {tag: "448-24", panelWidth: 448, pixelSize: 24},
+            {tag: "320-24", panelWidth: 320, pixelSize: 24}
+        ]
+    }
+
+    function test_native_tooltip_text_fits_window(data) {
+        const window = createTemporaryObject(tooltipWindow, test, {width: data.panelWidth})
+        verify(window !== null)
+        window.requestActivate()
+        tryCompare(window, "active", true)
+        tooltipPixelSize = data.pixelSize
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("D"))
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session", turns: []}) + "\n"))
+        const content = createTemporaryObject(conversationComponent, window.contentItem, {
+            width: Qt.binding(function() { return window.width }),
+            height: Qt.binding(function() { return window.height }),
+            background: "#1a1b26", ink: "#a9b1d6", accentInk: "#7aa2f7", troubleInk: "#D35F5F",
+            glyphComponent: glyphDouble, tooltipComponent: tooltipDouble,
+            currentState: Qt.binding(function() { return service.state }),
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            turns: Qt.binding(function() { return service.turns }),
+            conversationSession: Qt.binding(function() { return service.conversationSession }),
+            conversationAvailable: Qt.binding(function() { return service.conversationAvailable })
+        })
+        verify(content !== null)
+        verify(waitForRendering(content))
+        const microphone = findChild(content, "microphoneStatus")
+        const microphoneTooltip = findChild(content, "microphoneTooltip").item
+        const moveTooltip = findChild(content, "headerMoveTooltip").item
+        const title = findChild(content, "conversationTitle")
+        const close = findChild(content, "closeConversation")
+        function readable(popup, literal, multiline) {
+            tryCompare(popup, "opened", true)
+            compare(popup.text, literal)
+            const text = popup.contentItem
+            compare(text.text, literal)
+            compare(text.truncated, false)
+            if (multiline) verify(text.lineCount > 1, "long native text must wrap")
+            verify(text.paintedWidth <= text.width - text.leftPadding - text.rightPadding + 0.5,
+                "painted text must fit inside native horizontal padding")
+            verify(text.paintedHeight <= text.height - text.topPadding - text.bottomPadding + 0.5,
+                "painted text must fit inside native vertical padding")
+            const background = popup.background
+            const topLeft = background.mapToItem(window.contentItem, 0, 0)
+            const bottomRight = background.mapToItem(window.contentItem, background.width, background.height)
+            verify(topLeft.x >= 15.5 && topLeft.y >= 15.5, "native background must clear top and left window edges")
+            verify(bottomRight.x <= window.width - 15.5 && bottomRight.y <= window.height - 15.5,
+                "native background must clear bottom and right window edges")
+            compare(popup.delay, 400)
+        }
+        const inactive = "Inactive. Microphone in use. Press Super + Shift + K to start."
+        verify(service.acceptStatusChunk("D"))
+        mouseMove(content, 1, content.height - 1)
+        mouseMove(microphone, 10, microphone.height / 2)
+        readable(microphoneTooltip, inactive, data.panelWidth === 320 || data.pixelSize === 24)
+        content.focusClose()
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(findChild(content, "transcript").activeFocus, "native tooltips add no focus stop")
+        if (data.tag === "448-12") {
+            window.width = 320
+            tooltipPixelSize = 24
+            verify(waitForRendering(content))
+            readable(microphoneTooltip, inactive, true)
+        }
+        mouseMove(content, 1, content.height / 2)
+        tryCompare(microphoneTooltip, "visible", false)
+        tryCompare(moveTooltip, "visible", false)
+        mouseMove(title, title.width / 2, title.height / 2)
+        readable(moveTooltip, "Move: Super + left drag", false)
+        compare(microphoneTooltip.visible, false)
+        mouseMove(close, close.width / 2, close.height / 2)
+        tryCompare(moveTooltip, "visible", false)
+        verify(service.acceptConversationChunk(JSON.stringify({version: 1, session: "fit-session",
+            turns: [{speaker: "you", text: "Finalized owner turn", state: "complete"}]}) + "\n"))
+        tryVerify(function() { return findChild(content, "turnProvenance0") !== null })
+        const provenance = findChild(content, "turnProvenance0")
+        verify(waitForRendering(provenance))
+        mouseMove(provenance, provenance.width / 2, provenance.height / 2)
+        readable(findChild(content, "turnProvenanceTooltip0").item, "Spoken message", false)
+        window.destroy()
+        tooltipPixelSize = 12
+    }
+
     function test_native_glyph_and_tooltip_injection() {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
@@ -355,7 +462,7 @@ TestCase {
         tryCompare(microphoneTooltip.item, "visible", false)
         tryCompare(moveTooltip.item, "visible", false)
         mouseMove(microphone, 10, microphone.height / 2)
-        tryCompare(microphoneTooltip.item, "visible", true)
+        tryCompare(microphoneTooltip.item, "opened", true)
         compare(microphoneTooltip.item.text, "Inactive. Microphone in use. Press Super + Shift + K to start.")
         compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
         verify(service.acceptStatusChunk("A"))
@@ -366,7 +473,7 @@ TestCase {
         tryCompare(glyph.item, "text", "󰍭")
         compare(microphoneTooltip.item.text, "Not running. Microphone released by Kestrel.")
         mouseMove(title, title.width / 2, title.height / 2)
-        tryCompare(moveTooltip.item, "visible", true)
+        tryCompare(moveTooltip.item, "opened", true)
         compare(moveTooltip.item.text, "Move: Super + left drag")
         compare(microphoneTooltip.item.visible, false)
         mouseMove(close, close.width / 2, close.height / 2)
