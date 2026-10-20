@@ -3283,6 +3283,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await close()
 
     async def test_refusal_after_confirmed_brain_effect_disclaims_only_that_call(self):
+        # Refusing a later call must not deny an earlier confirmed effect.
         invalid = "I couldn't use that request, so I didn't do it."
         permission = "That needs permission, which isn't available by voice yet, so I didn't do it."
         brain = ScriptedBrain([
