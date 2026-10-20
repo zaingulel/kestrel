@@ -664,6 +664,7 @@ FocusScope {
                     rightPadding: 12
                     background: null
                     Accessible.name: "Message Kestrel"
+                    Accessible.multiLine: true
                     KeyNavigation.priority: KeyNavigation.BeforeItem
                     KeyNavigation.tab: sendButton.enabled ? sendButton : closeButton
                     KeyNavigation.backtab: transcript

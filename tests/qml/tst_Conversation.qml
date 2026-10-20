@@ -90,6 +90,7 @@ TestCase {
         content.focusComposer()
         verify(editor.activeFocus)
         compare(editor.Accessible.name, "Message Kestrel")
+        compare(editor.Accessible.multiLine, true)
         compare(send.Accessible.name, "Send message")
         compare(editor.textFormat, TextEdit.PlainText)
         compare(editor.font.italic, false)
