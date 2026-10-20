@@ -518,6 +518,8 @@ LOCAL_TOOLS = {
 }
 
 
+BRIDGED_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key, _, _ in DESKTOP_TOOLS.values())
+
 NUMBER_BASE_WORDS = (
     'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
     'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
@@ -848,12 +850,12 @@ class LocalActions:
         if not task.cancelled():
             task.exception()
 
-    async def run(self, tool, *, admitted):
-        task = self.retain(asyncio.create_task(self._run(tool, admitted=admitted)))
+    async def run(self, tool, *, admitted, observe=None):
+        task = self.retain(asyncio.create_task(self._run(tool, admitted=admitted, observe=observe)))
         # An already-started external effect belongs to the service, not its caller.
         return await asyncio.shield(task)
 
-    async def _run(self, tool, *, admitted):
+    async def _run(self, tool, *, admitted, observe=None):
         async with self.lock:
             if self.closed or not admitted():
                 return None
@@ -867,6 +869,8 @@ class LocalActions:
                         refused = True
                         raise asyncio.CancelledError
                     started = True
+                    if observe is not None:
+                        observe(None)
                 return await self.command(argv, **kwargs)
 
             try:
@@ -875,6 +879,8 @@ class LocalActions:
                 if not refused:
                     raise
                 return None
+            if observe is not None:
+                observe(result)
         confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
         if not confirmed:
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
@@ -905,8 +911,31 @@ class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
 
 
 @dataclass
+class ActionOutcome:
+    subject: str
+    reporter: object
+    result: AudioResult | DesktopResult | None = None
+
+
+def stop_account(outcomes) -> str | None:
+    sections = []
+    for label, predicate in (
+        ('Done', lambda result: result is not None and result.confirmed),
+        ("Couldn't confirm", lambda result: result is not None and result.attempted and not result.confirmed),
+        ('Still finishing', lambda result: result is None),
+    ):
+        subjects = list(dict.fromkeys(item.subject for item in outcomes if predicate(item.result)))
+        if subjects:
+            sections.append(f"{label}: {', '.join(subjects)}.")
+    return "Stopped. " + ' '.join(sections) + " I won't undo anything." if sections else None
+
+
+@dataclass
 class BrainTurn:
     names: set
+    user: dict
+    epoch: int
+    records: list
     closed: bool = False
 
 
@@ -933,6 +962,9 @@ class HermesLLMService(LLMService):
         self._last_spoken_token = None
         self._heard_prefix_token = None
         self.lookup = None
+        self.stop_epoch = 0
+        self.outcomes = []
+        self.brain_turns = []
         self.status = status
         self.conversation = conversation
         self._conversation_attempt = None
@@ -942,6 +974,7 @@ class HermesLLMService(LLMService):
         self._conversation_pending_spans = []
         self._conversation_incomplete = False
         self._conversation_synthesis_failed = False
+        self._conversation_delivered = False
         self._indicator_ready = False
         self._indicator_voice_failed = False
         self._indicator_user = False
@@ -1019,7 +1052,17 @@ class HermesLLMService(LLMService):
             self._indicator_pending = False
             self.refresh_indicator()
 
+    def begin_conversation_reply(self, token):
+        self._conversation_attempt = token
+        self._conversation_incomplete = False
+        self._conversation_synthesis_failed = False
+        self._conversation_delivered = False
+        if self.conversation is not None:
+            self.conversation.begin_reply(token)
+
     def finish_conversation_reply(self, token, *, interrupted=False, failed=False):
+        delivered = (token is not None and token is self._conversation_attempt
+                     and self._conversation_delivered and not (interrupted or failed))
         if self.admitted() and self.conversation is not None:
             self.conversation.finish(token, interrupted=interrupted, failed=failed)
         if self._conversation_attempt is token:
@@ -1029,8 +1072,11 @@ class HermesLLMService(LLMService):
             self._conversation_pending_spans.clear()
             self._conversation_incomplete = False
             self._conversation_synthesis_failed = False
+            self._conversation_delivered = False
         if self._conversation_interrupting is token:
             self._conversation_interrupting = None
+        if delivered:
+            self.retire_outcomes(token)
 
     def remember_assistant_reply(self, text):
         token = self._assistant_reply_token
@@ -1044,13 +1090,13 @@ class HermesLLMService(LLMService):
         if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
             context = getattr(frame, 'conversation_audio_context', None)
             self._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
-        self._conversation_feed_output(frame)
+        self._track_conversation_output(frame)
         if self.owns_request(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             self.last_spoken_reply = frame.text
             self._last_spoken_token = self._assistant_reply_token
 
-    def _conversation_feed_output(self, frame):
-        if not self.admitted() or self.conversation is None:
+    def _track_conversation_output(self, frame):
+        if not self.admitted():
             return
         if not isinstance(frame, InterruptionFrame) and not self.owns_request(self._conversation_attempt):
             return
@@ -1111,7 +1157,10 @@ class HermesLLMService(LLMService):
         if not context.write_failed:
             while context.pending_text_starts and self._conversation_output_bytes > context.pending_text_starts[0][0]:
                 _, text = context.pending_text_starts.pop(0)
-                self.conversation.spoken(context.reply_token, text)
+                if text.strip():
+                    self._conversation_delivered = True
+                if self.conversation is not None:
+                    self.conversation.spoken(context.reply_token, text)
             while self._conversation_pending_spans and self._conversation_pending_spans[0] <= self._conversation_output_bytes:
                 self._conversation_pending_spans.pop(0)
         if isinstance(frame, TTSStoppedFrame):
@@ -1135,15 +1184,29 @@ class HermesLLMService(LLMService):
     async def speak_local_reply(self, message, token):
         if not self.owns_request(token):
             return
-        if self.conversation is not None:
-            self._conversation_attempt = token
-            self._conversation_incomplete = False
-            self._conversation_synthesis_failed = False
-            self.conversation.begin_reply(token)
+        self.begin_conversation_reply(token)
         frame = TTSSpeakFrame(message, append_to_context=False)
-        frame.conversation_reply_token = self._conversation_attempt
+        frame.conversation_reply_token = token
         await self.push_frame(frame)
         await self.push_reply_end(token)
+
+    def retire_outcomes(self, token):
+        self.outcomes = [item for item in self.outcomes if item.reporter is not token or item.result is None]
+
+    async def run_shared(self, tool, *, epoch, reporter, finished=None):
+        outcome = ActionOutcome(tool.subject, reporter)
+
+        def observe(result):
+            if result is None:
+                self.outcomes.append(outcome)
+            else:
+                outcome.result = result
+                if finished is not None:
+                    finished(result)
+
+        return await self.local_actions.run(
+            tool, admitted=lambda: self.admitted() and epoch == self.stop_epoch, observe=observe,
+        )
 
     async def desktop_call(self, turn, token, output, name, arguments) -> str:
         def advise(text):
@@ -1157,17 +1220,26 @@ class HermesLLMService(LLMService):
         if name in turn.names:
             return brain_result(False, False, 'already attempted')
         turn.names.add(name)
+
+        def record(content):
+            turn.records.append({'role': 'tool', 'name': name, 'arguments': deepcopy(arguments), 'content': content})
+            return content
+
         if turn.closed:
-            return brain_result(False, False, 'turn closed')
+            return record(brain_result(False, False, 'turn closed'))
         key, _, bounds = DESKTOP_TOOLS[name]
         tool = free_tool(key, *(arguments[key] for key in bounds))
         if tool is None:
             turn.closed = True
             advise("That needs permission, which isn't available by voice yet. I didn't change anything.")
-            return brain_result(False, False, 'permission required')
-        result = await self.local_actions.run(tool, admitted=self.admitted)
+            return record(brain_result(False, False, 'permission required'))
+        result = await self.run_shared(
+            tool, epoch=turn.epoch, reporter=token,
+            finished=lambda result: record(brain_result(result.confirmed, result.attempted, result.reason)),
+        )
         if result is None:
-            return brain_result(False, False, 'conversation ended')
+            reason = 'stopped' if turn.epoch != self.stop_epoch else 'conversation ended'
+            return record(brain_result(False, False, reason))
         if not result.confirmed:
             turn.closed = True
             advise(local_result_message(tool, result))
@@ -1216,9 +1288,19 @@ class HermesLLMService(LLMService):
             self.dismiss()
             return
         if re.fullmatch(r'(stop|cancel)[.!]?', text.strip().lower()):
+            self.stop_epoch += 1
             self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
             remove_original()
-            await self.push_reply_end(token)
+            self.outcomes = [item for item in self.outcomes
+                             if item.result is None or item.result.confirmed or item.result.attempted]
+            account = stop_account(self.outcomes)
+            if account is None:
+                await self.push_reply_end(token)
+            else:
+                for item in self.outcomes:
+                    if item.result is not None:
+                        item.reporter = token
+                await self.speak_local_reply(account, token)
             return
         if re.fullmatch(r'repeat that[.!?]?', text.strip().lower()):
             remove_original()
@@ -1249,13 +1331,17 @@ class HermesLLMService(LLMService):
                 return
             remove_original()
             # LocalActions owns an accepted action independently of later reply ownership.
-            result = await self.local_actions.run(tool, admitted=self.admitted)
+            if tool.subject in BRIDGED_SUBJECTS:
+                result = await self.run_shared(tool, epoch=self.stop_epoch, reporter=token)
+            else:
+                result = await self.local_actions.run(tool, admitted=self.admitted)
             if result is None or not self.owns_request(token):
                 return
             message = local_result_message(tool, result)
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:
+                self.retire_outcomes(token)
                 await self.push_reply_end(token)
             return
         output = None
@@ -1266,11 +1352,8 @@ class HermesLLMService(LLMService):
         async def push_reply_start(delivery):
             if not self.owns_request(token):
                 return
-            if self.conversation is not None and self._conversation_attempt is not token:
-                self._conversation_attempt = token
-                self._conversation_incomplete = False
-                self._conversation_synthesis_failed = False
-                self.conversation.begin_reply(token)
+            if self._conversation_attempt is not token:
+                self.begin_conversation_reply(token)
             start = LLMFullResponseStartFrame()
             start.conversation_reply_token = token
             start.speech_delivery = delivery
@@ -1283,11 +1366,7 @@ class HermesLLMService(LLMService):
             await self.channel.drain()
             if not self.valid_origin(frame):
                 return
-            if self.conversation is not None:
-                self._conversation_attempt = token
-                self._conversation_incomplete = False
-                self._conversation_synthesis_failed = False
-                self.conversation.begin_reply(token)
+            self.begin_conversation_reply(token)
             await self.start_processing_metrics()
             if self.channel.failure:
                 raise RuntimeError(self.channel.failure)
@@ -1295,9 +1374,16 @@ class HermesLLMService(LLMService):
             self.output = output
             if not self.valid_origin(frame):
                 return
-            turn = BrainTurn(names=set())
+            turn = BrainTurn(names=set(), user=original, epoch=self.stop_epoch, records=[])
+            self.brain_turns.append(turn)
+            history = []
+            for message in frame.context.get_messages():
+                history.append(deepcopy(message))
+                for previous in self.brain_turns:
+                    if previous.user is message:
+                        history.extend(deepcopy(previous.records))
             request = asyncio.create_task(self.channel.exchange(
-                deepcopy(frame.context.get_messages()), output, admitted=lambda: self.owns_request(token),
+                history, output, admitted=lambda: self.owns_request(token),
                 desktop=partial(self.desktop_call, turn, token, output),
             ))
             while event := await output.get():
