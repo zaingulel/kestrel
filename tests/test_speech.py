@@ -886,6 +886,10 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             for _ in range(3):
                 await asyncio.sleep(0)
             self.assertFalse(old.done())
+            old.cancel()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            self.assertFalse(old.done(), 'Repeated cancellation cannot abandon the running GPU chunk')
             new_frames = []
             new = asyncio.create_task(consume(fresh, "new", new_frames))
             release.set()
@@ -899,6 +903,105 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(new_frames), 3)
         finally:
             release.set()
+            await asyncio.gather(old, return_exceptions=True)
+        for outcome in ('cancel_close', 'next_error', 'close_error', 'both_errors', 'body_error'):
+            with self.subTest(cleanup=outcome):
+                next_entered, close_entered = asyncio.Event(), asyncio.Event()
+                release_next, release_close = threading.Event(), threading.Event()
+                self.addCleanup(release_next.set)
+                self.addCleanup(release_close.set)
+                activity = []
+
+                class NativeChunks:
+                    def __init__(self):
+                        self.count = 0
+
+                    def __next__(self):
+                        self.count += 1
+                        if self.count == 1:
+                            return object() if outcome == 'body_error' else np.zeros(10, dtype=np.float32)
+                        loop.call_soon_threadsafe(next_entered.set)
+                        if not release_next.wait(5):
+                            raise AssertionError('Native next was never released')
+                        activity.append('next completed')
+                        if outcome in ('next_error', 'both_errors'):
+                            raise RuntimeError('native next failed')
+                        raise StopIteration
+
+                    def close(self):
+                        loop.call_soon_threadsafe(close_entered.set)
+                        if not release_close.wait(5):
+                            raise AssertionError('Native close was never released')
+                        activity.append('close completed')
+                        if outcome in ('close_error', 'both_errors'):
+                            raise RuntimeError('native close failed')
+
+                def generate(text, **kwargs):
+                    activity.append(('model', text))
+                    if text == 'old':
+                        return NativeChunks()
+
+                    def fresh_chunks():
+                        yield np.zeros(10, dtype=np.float32)
+
+                    return fresh_chunks()
+
+                model = Mock(generate_streaming=Mock(side_effect=generate))
+                lock = asyncio.Lock()
+                adapter = VoxCPMTTS(model, TEST_PRESET, generation_lock=lock)
+                fresh = VoxCPMTTS(model, TEST_PRESET, generation_lock=lock)
+                tasks = []
+                old = asyncio.create_task(consume(adapter, 'old', []))
+                tasks.append(old)
+                try:
+                    if outcome != 'body_error':
+                        await asyncio.wait_for(next_entered.wait(), 5)
+                        old.cancel()
+                        for _ in range(3):
+                            await asyncio.sleep(0)
+                        old.cancel()
+                        release_next.set()
+                    await asyncio.wait_for(close_entered.wait(), 5)
+                    old.cancel()
+                    old.cancel()
+                    for _ in range(3):
+                        await asyncio.sleep(0)
+                    self.assertFalse(old.done(), 'Actual native close still owns the shared model')
+                    self.assertTrue(lock.locked())
+                    queued = None
+                    if outcome != 'body_error':
+                        queued = asyncio.create_task(consume(fresh if outcome == 'cancel_close' else adapter, 'new', []))
+                        tasks.append(queued)
+                    release_close.set()
+                    if outcome == 'cancel_close':
+                        with self.assertRaises(asyncio.CancelledError):
+                            await old
+                        await queued
+                        self.assertFalse(adapter.generation_cleanup_failed)
+                        self.assertLess(activity.index('close completed'), activity.index(('model', 'new')))
+                    elif outcome == 'body_error':
+                        with self.assertRaises(TypeError):
+                            await old
+                        self.assertFalse(adapter.generation_cleanup_failed)
+                    else:
+                        message = 'native next failed' if outcome == 'next_error' else 'native close failed'
+                        with self.assertRaisesRegex(RuntimeError, message) as failure:
+                            await old
+                        self.assertTrue(adapter.generation_cleanup_failed)
+                        if outcome == 'both_errors':
+                            self.assertRegex(str(failure.exception.__cause__ or failure.exception.__context__), 'native next failed')
+                        with self.assertRaisesRegex(RuntimeError, 'generation cleanup failed'):
+                            await queued
+                        self.assertEqual(model.generate_streaming.call_count, 1, 'A queued call must refuse a poisoned adapter')
+                    self.assertEqual(activity.count('close completed'), 1)
+                    self.assertFalse(lock.locked())
+                finally:
+                    release_next.set()
+                    release_close.set()
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
 
 
 class EchoRemovalTests(unittest.TestCase):
@@ -1162,7 +1265,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             spawned.set()
             return capture
 
-        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(side_effect=serial)), on_stopped=Mock())
+        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(side_effect=serial)), on_stopped=Mock(), admitted=lambda: True)
         self.addAsyncCleanup(transport.close)
         with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
             opening = asyncio.create_task(transport.open())
@@ -1206,7 +1309,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     capture.stdout.feed_data(bytes(640))
                     return capture
 
-                transport = speech.LaptopAudioTransport(Mock(microphone_serial=serial), on_stopped=Mock(side_effect=stopped.set))
+                transport = speech.LaptopAudioTransport(Mock(microphone_serial=serial), on_stopped=Mock(side_effect=stopped.set), admitted=lambda: True)
                 with (
                     patch.object(speech.asyncio, "create_subprocess_exec", spawn),
                     patch.object(speech, "LAPTOP_AUDIO_START_TIMEOUT", 0.05 if case == "missing" else 10),
@@ -1258,7 +1361,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             now += duration + 0.002
 
         playback.stdin.drain = AsyncMock(side_effect=drain)
-        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock())
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admitted=lambda: True)
         transport.playback = playback
         self.addAsyncCleanup(transport.close)
         audio = [b"A" * 3840, b"B" * 3840, b"C" * 3840, b"D" * 3840]
@@ -1298,7 +1401,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             waits.put_nowait(duration)
             await release.wait()
 
-        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock())
+        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(), admitted=lambda: True)
         self.addAsyncCleanup(transport.close)
         with (patch.object(speech.asyncio, "create_subprocess_exec", spawn),
               patch.object(speech, "monotonic", lambda: now), patch.object(speech, "sleep", paced)):
@@ -1372,7 +1475,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     processes.append(process)
                     return process
 
-                transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=stopped.set))
+                transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=stopped.set), admitted=lambda: True)
                 with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
                     try:
                         await transport.open()
@@ -1431,7 +1534,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     if failed_spawn == 2:
                         active.cancel()
 
-                transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=shutdown_during_failure))
+                transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=shutdown_during_failure), admitted=lambda: True)
                 with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
                     if failed_spawn == 1:
                         active = asyncio.create_task(transport.open())
@@ -1473,7 +1576,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             if task is not None:
                 task.cancel()
 
-        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=shutdown))
+        transport = speech.LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=Mock(side_effect=shutdown), admitted=lambda: True)
         transport.output()._params.audio_out_write_timeout_secs = 0.05
 
         @transport.output().event_handler("on_error")
@@ -1495,8 +1598,11 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.admitted = lambda: True
         llm.start_preparation = Mock()
         llm.conversation_output = Mock()
-        llm.local_actions = Mock(close=AsyncMock())
-        llm.channel = Mock(close=AsyncMock())
+        llm.revoke = Mock()
+        llm.local_actions = Mock(close=AsyncMock(), drain=AsyncMock())
+        llm.channel = Mock(prepare=AsyncMock(), close=AsyncMock(), drain=AsyncMock(), failure=None, preparation=None)
+        stt.drain = AsyncMock()
+        stt.failure = None
 
         def chunks(**kwargs):
             yield np.zeros(8, dtype=np.float32)
@@ -1515,16 +1621,33 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
             ))
 
-        with (patch.object(speech.asyncio, "create_subprocess_exec", spawn),
+        prepared = asyncio.Event()
+        native_prepare = bot.VoiceConversations.prepare
+
+        async def prepare(manager):
+            await native_prepare(manager)
+            prepared.set()
+
+        with (tempfile.TemporaryDirectory() as runtime,
+              patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
+              patch.object(speech.asyncio, "create_subprocess_exec", spawn),
               patch.object(bot, "LaptopAudioTransport", return_value=transport),
               patch.object(bot, "NemotronSTT", return_value=stt),
               patch.object(bot, "NemotronRecognizer", return_value=stt),
               patch.object(bot, "load_voice_preset", return_value=TEST_PRESET),
-              patch.object(bot, "make_llm", return_value=llm),
+              patch.object(bot, "HermesRequestChannel", return_value=llm.channel),
+              patch.object(bot, "LocalActions", return_value=llm.local_actions),
+              patch.object(bot, "HermesLLMService", return_value=llm),
+              patch.object(bot.VoiceConversations, "prepare", prepare),
+              patch.object(bot.ECHO_REMOVAL, "start"), patch.object(bot.ECHO_REMOVAL, "close"),
+              patch.object(bot.ECHO_REMOVAL, "process", None),
               patch.object(bot.VoxCPM, "from_pretrained", return_value=Mock(generate_streaming=chunks)),
               patch.object(bot, "run_conversation", conversation), patch.object(bot.torch, "set_num_threads")):
-            task = asyncio.create_task(bot.bot())
+            task = asyncio.create_task(bot.run_voice_service())
             try:
+                from desktop import control
+                await asyncio.wait_for(prepared.wait(), 5)
+                self.assertEqual(await control.toggle(), 'starting')
                 await asyncio.wait_for(started.wait(), 5)
                 receipt = speech.ConversationAudioContext(object())
                 start = TTSStartedFrame()
@@ -1570,7 +1693,7 @@ async def main():
             kwargs["stdout"] = asyncio.subprocess.PIPE
         return await original_spawn(*prefix, sys.executable, "-c", code, **kwargs)
     asyncio.create_subprocess_exec = spawn
-    audio = LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=lambda: None)
+    audio = LaptopAudioTransport(Mock(microphone_serial=Mock(return_value=900)), on_stopped=lambda: None, admitted=lambda: True)
     await audio.open()
     await audio.output().write_audio_frame(TTSAudioRawFrame(bytes(3840), 48000, 1))
     await audio.playback.stdout.readline()

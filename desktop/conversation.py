@@ -82,6 +82,7 @@ class ConversationFeed:
         self.server = None
         self.tasks = set()
         self.reader_task = None
+        self.resetting = False
         self.changed = asyncio.Event()
         self.payload = b''
         self.oversized = False
@@ -95,7 +96,7 @@ class ConversationFeed:
             self.server = None
 
     def connected(self, reader, writer):
-        if self.server is None:
+        if self.server is None or self.resetting:
             writer.transport.abort()
             return
         task = asyncio.create_task(self.serve(reader, writer))
@@ -150,6 +151,23 @@ class ConversationFeed:
         if self.oversized:
             self.payload = encode({'unavailable': TOO_LARGE})
         self.changed.set()
+
+    async def begin_session(self):
+        self.resetting = True
+        try:
+            tasks = tuple(self.tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.session = uuid.uuid4().hex
+            self.clear()
+        finally:
+            self.resetting = False
+
+    def clear(self):
+        self.turns.clear()
+        self.active = self.reply = None
+        self.publish()
 
     def user(self, text: str):
         self.turns.append({'speaker': 'you', 'text': text, 'state': 'complete'})

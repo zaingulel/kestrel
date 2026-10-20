@@ -42,6 +42,7 @@ from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
 from desktop.conversation import ConversationFeed
+from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, child_environment
@@ -1113,52 +1114,165 @@ class HermesLLMService(LLMService):
             await self.push_reply_end(token, failed=failed)
 
 
-def make_llm():
-    return HermesLLMService(HermesRequestChannel(), local_actions=LocalActions(), admitted=lambda: True)
+class VoiceConversations:
+    def __init__(self, *, status, conversation):
+        self.status = status
+        self.conversation = conversation
+        self.recognizer = NemotronRecognizer()
+        self.channel = HermesRequestChannel()
+        self.local_actions = LocalActions()
+        self.generation_lock = asyncio.Lock()
+        self.model = None
+        self.preset = None
+        self.desired_active = False
+        self.changed = asyncio.Event()
+        self.pipeline = None
+        self.cleanup = None
+        self.transport = None
+        self.llm = None
+        self.voice = None
+        self.admission = None
+        self.capture_owner = None
+        self.failure = None
+        self.closed = False
 
+    def toggle(self) -> str:
+        if self.failure or self.closed:
+            return 'unavailable'
+        self.desired_active = not self.desired_active
+        if not self.desired_active:
+            self.revoke()
+            self.conversation.clear()
+        self.status.set_state('starting')
+        self.changed.set()
+        return 'starting' if self.desired_active else 'inactive'
 
-async def bot(*, status=None, on_transport_released=None, conversation=None):
-    preset = load_voice_preset(os.environ.get("KESTREL_VOICE", "irish-female"))
-    transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=stop_kestrel)
-    recognizer = NemotronRecognizer()
-    stt = NemotronSTT(recognizer, admitted=lambda: True)
-    llm = None
-    try:
-        await transport.open()
-        if status is not None and transport.capture is not None:
-            status.remember_owner(transport.capture.pid)
-        llm = make_llm()
-        llm.start_preparation()
-        logger.info("Loading local speech models for the conversation")
-        await recognizer.load(preset.pcm)
+    def revoke(self):
+        if self.admission is not None:
+            self.admission.clear()
+        if self.llm is not None:
+            self.llm.revoke()
+
+    async def prepare(self):
+        self.preset = load_voice_preset(os.environ.get('KESTREL_VOICE', 'irish-female'))
+        self.channel.preparation = asyncio.create_task(self.channel.prepare())
+        await self.recognizer.load(self.preset.pcm)
         torch.set_num_threads(4)
-        model = await asyncio.to_thread(
-            VoxCPM.from_pretrained, str(ROOT / ".runtime/models/voxcpm2"),
-            load_denoiser=False, optimize=False, device="cuda", local_files_only=True,
+        self.model = await asyncio.to_thread(
+            VoxCPM.from_pretrained, str(ROOT / '.runtime/models/voxcpm2'),
+            load_denoiser=False, optimize=False, device='cuda', local_files_only=True,
         )
-        voice = VoxCPMTTS(model, preset, generation_lock=asyncio.Lock())
+        voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock)
         has_audio = False
         async for frame in voice.run_tts('Hello.', 'warmup'):
-            has_audio = has_audio or bool(frame.audio)
+            has_audio |= bool(frame.audio)
         if not has_audio:
             raise RuntimeError('VoxCPM preparation produced no audio')
-        await run_conversation(stt, voice, llm=llm, transport=transport, handle_signals=True, status=status, conversation=conversation)
-    finally:
-        try:
-            if llm is not None:
-                try:
-                    await llm.local_actions.close()
-                finally:
-                    await llm.channel.close()
-        finally:
+
+    async def activate(self):
+        await self.conversation.begin_session()
+        if not self.desired_active:
+            return
+        self.admission = asyncio.Event()
+        self.admission.set()
+        admitted = self.admission.is_set
+        self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admitted=admitted)
+        self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admitted=admitted,
+                                    status=self.status, conversation=self.conversation)
+        self.voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock, admitted=admitted)
+        await self.transport.open()
+        if self.transport.capture is not None:
+            self.capture_owner = self.status.remember_owner(self.transport.capture.pid)
+        if not admitted():
+            return
+        self.pipeline = asyncio.create_task(run_conversation(
+            NemotronSTT(self.recognizer, admitted=admitted), self.voice, llm=self.llm,
+            transport=self.transport, status=self.status, conversation=self.conversation, handle_signals=False,
+        ))
+        self.pipeline.add_done_callback(lambda task: self.changed.set())
+
+    def failed_transport(self):
+        self.failure = self.transport.failure
+        self.desired_active = False
+        self.revoke()
+        self.changed.set()
+
+    async def finish_conversation(self):
+        self.revoke()
+        closing = asyncio.create_task(self.transport.close()) if self.transport is not None else None
+        if self.pipeline is not None:
+            self.pipeline.cancel()
+        outcomes = await asyncio.gather(
+            *([closing] if closing is not None else []),
+            *([self.pipeline] if self.pipeline is not None else []), return_exceptions=True,
+        )
+        if self.capture_owner is not None and (closing is None or closing.exception() is None):
+            self.status.retire_owner(self.capture_owner)
+            self.capture_owner = None
+        outcomes.extend(await asyncio.gather(
+            self.recognizer.drain(), self.channel.drain(), self.local_actions.drain(),
+            *([asyncio.shield(self.channel.preparation)] if self.channel.preparation is not None else []),
+            return_exceptions=True,
+        ))
+        async with self.generation_lock:
+            pass
+        if self.voice is not None and self.voice.generation_cleanup_failed:
+            raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
+        if not self.closed and (self.recognizer.failure or self.channel.failure):
+            raise RuntimeError(self.recognizer.failure or self.channel.failure)
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                raise outcome
+        if self.transport is not None and self.transport.failure:
+            raise RuntimeError(self.transport.failure)
+        self.transport = self.pipeline = self.llm = self.voice = self.admission = None
+
+    async def run(self):
+        self.status.set_state('inactive')
+        while not self.closed:
+            await self.changed.wait()
+            self.changed.clear()
             try:
-                await recognizer.close()
+                if self.failure and self.cleanup is not None:
+                    self.status.set_state('trouble')
+                    continue
+                if self.transport is not None:
+                    if self.pipeline is not None and self.pipeline.done() and self.admission.is_set():
+                        self.failure = 'Kestrel conversation stopped unexpectedly. Restart Kestrel.'
+                    self.cleanup = asyncio.create_task(self.finish_conversation())
+                    await asyncio.wait_for(asyncio.shield(self.cleanup), 90)
+                    self.changed.clear()
+                if self.failure:
+                    raise RuntimeError(self.failure)
+                if self.desired_active:
+                    self.cleanup = None
+                    await self.activate()
+                else:
+                    self.status.set_state('inactive')
+            except Exception as error:
+                self.failure = str(error) or 'Kestrel conversation cleanup failed. Restart Kestrel.'
+                self.desired_active = False
+                self.revoke()
+                self.status.set_state('trouble')
+
+    async def close(self):
+        self.closed = True
+        self.desired_active = False
+        self.revoke()
+        self.changed.set()
+        try:
+            try:
+                await self.local_actions.close()
             finally:
-                await transport.close()
-                if on_transport_released is not None:
-                    on_transport_released()
-                if transport.failure:
-                    raise RuntimeError(transport.failure)
+                try:
+                    await self.channel.close()
+                finally:
+                    await self.recognizer.close()
+        finally:
+            if self.cleanup is not None:
+                await asyncio.shield(self.cleanup)
+            elif self.transport is not None:
+                await self.finish_conversation()
 
 
 async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None):
@@ -1246,28 +1360,28 @@ async def run_voice_service():
     stopping = False
     echo_failure = None
     orderly = False
-    transport_released = False
     status = IndicatorStatus()
     status.set_state('starting')
+    conversation = ConversationFeed()
+    conversations = VoiceConversations(status=status, conversation=conversation)
+    control = ConversationControl(conversations.toggle)
+    heartbeat = asyncio.create_task(status.heartbeat())
 
     def cancel():
         nonlocal stopping
         if not stopping:
             stopping = True
+            conversations.revoke()
             task.cancel()
 
     def echo_stopped():
         nonlocal echo_failure
-        echo_failure = "Echo removal has stopped. Restart Kestrel."
+        echo_failure = 'Echo removal has stopped. Restart Kestrel.'
         stop_kestrel()
 
-    def transport_closed():
-        nonlocal transport_released
-        transport_released = True
-
-    conversation = ConversationFeed()
-    heartbeat = asyncio.create_task(status.heartbeat())
     try:
+        # Owning the command endpoint precedes microphone/model preparation.
+        await control.start()
         await conversation.start()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, cancel)
@@ -1275,15 +1389,19 @@ async def run_voice_service():
         if ECHO_REMOVAL.process is not None:
             status.remember_owner(ECHO_REMOVAL.process.pid)
         try:
-            await bot(status=status, on_transport_released=transport_closed, conversation=conversation)
+            await conversations.prepare()
+            await conversations.run()
         except asyncio.CancelledError:
             orderly = stopping
         else:
             orderly = True
     finally:
         try:
-            ECHO_REMOVAL.close()
-            if orderly and echo_failure is None and transport_released:
+            try:
+                await conversations.close()
+            finally:
+                ECHO_REMOVAL.close()
+            if orderly and echo_failure is None and not conversations.failure:
                 status.mark_released()
             else:
                 status.set_state('unavailable')
@@ -1291,6 +1409,7 @@ async def run_voice_service():
             status.set_state('unavailable')
             raise
         finally:
+            await control.close()
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
             await conversation.close()

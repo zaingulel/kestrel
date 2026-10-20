@@ -58,6 +58,35 @@ class StatusTests(unittest.TestCase):
     def read(self):
         return status.read_indicator(self.runtime, proc_root=self.proc, now_ns=self.now)
 
+    def test_capture_owner_retirement_preserves_echo_and_refuses_live_owner(self):
+        self.process(100, 400)
+        self.process(101, 401)
+        with patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
+            publisher = status.IndicatorStatus(self.runtime)
+            echo = publisher.remember_owner(101)
+            self.assertEqual(echo, {'pid': 101, 'start_time': 401})
+            publisher.set_state('inactive')
+            for cycle in range(4):
+                pid = 200 + cycle
+                folder = self.process(pid, 600 + cycle)
+                captured = publisher.remember_owner(pid)
+                self.assertEqual(captured, {'pid': pid, 'start_time': 600 + cycle})
+                with self.assertRaisesRegex(ValueError, 'not been reaped'):
+                    publisher.retire_owner(captured)
+                with self.assertRaises(ValueError):
+                    publisher.retire_owner(captured | {'start_time': 1})
+                shutil.rmtree(folder)
+                publisher.retire_owner(captured)
+                data = json.loads(self.file.read_text())
+                self.assertEqual(data['owners'], [echo])
+                self.assertEqual(data['state'], 'inactive')
+                self.assertFalse(publisher._failed)
+            self.assertEqual(status.read_indicator(self.runtime, proc_root=self.proc), 'inactive')
+            self.assertEqual(status._WIRE['inactive'], 'D')
+            self.assertTrue((self.proc / '101').exists(), 'Retiring capture must retain the echo owner')
+            with self.assertRaises(ValueError):
+                publisher.retire_owner(echo)
+
     def test_released_receipt_requires_all_owners_gone(self):
         self.assertEqual(self.read(), 'not-running')
         for pid, start in ((100, 400), (101, 401), (102, 402)):
