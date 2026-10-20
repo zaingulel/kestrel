@@ -12,6 +12,7 @@ Item {
 
     readonly property string statusSentence: ({
         "not-running": "Not running. Microphone released by Kestrel.",
+        "inactive": "Inactive. Microphone in use. Press Super + Shift + K to start.",
         "starting": "Starting. Microphone may be in use.",
         "unavailable": "Status unavailable. Microphone use unknown.",
         "idle": "Idle. Microphone in use.",
@@ -22,7 +23,8 @@ Item {
     })[state]
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
-    readonly property string conversationMessage: conversationValue.message
+    readonly property string conversationMessage: conversationValue.available && !turns.length && state === "inactive"
+        ? "Press Super + Shift + K to start a conversation." : conversationValue.message
     readonly property string conversationSession: conversationValue.session
     readonly property string placementAdvisory: placementValue.advisory
 
@@ -129,11 +131,11 @@ Item {
 
     function acceptStatusChunk(chunk) {
         if (typeof chunk !== "string" || chunk.length < 1 || chunk.length > 32
-                || /[^AILTSBNU]/.test(chunk)) {
+                || /[^ADILTSBNU]/.test(chunk)) {
             expireStatus()
             return false
         }
-        const states = { A: "starting", I: "idle", L: "listening", T: "thinking",
+        const states = { A: "starting", D: "inactive", I: "idle", L: "listening", T: "thinking",
             S: "speaking", B: "trouble", N: "not-running", U: "unavailable" }
         statusValue.value = states[chunk.charAt(chunk.length - 1)]
         statusExpiry.restart()

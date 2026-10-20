@@ -75,6 +75,7 @@ The indicator's slot is 25 wide and the full bar height. Listening uses the Infl
 | State | Shape | Motion |
 | --- | --- | --- |
 | Not running | One unbroken bar, 15 wide and 2 high, at 0.6 opacity | None |
+| Inactive | Three outlined 3 by 3 squares with 1-pixel strokes, at 0.6 opacity | None |
 | Starting | Three outlined 3 by 3 squares with 1-pixel strokes, at full bar-text opacity | None |
 | Status unavailable | Three 3 by 3 squares raised left-to-right by 0, 3 and 6, at full bar-text opacity | None |
 | Idle | Three squares, 3 high, at 0.6 opacity | None |
@@ -100,11 +101,12 @@ Draw the rings with native QtQuick.Shapes `ShapePath` and `PathAngleArc`, using 
 
 Where the desktop asks for reduced motion, nothing loops: listening uses the still Inflow form above, thinking shows the middle square raised and still, and speaking shows bars 6, 12 and 8 high and still. The same holds for the marks in the panel header.
 
-The status indicator is an accessible button named `Open conversation` or `Close conversation`, followed by the status sentence and any placement advisory. Its 25 by 30 slot is the click target. Its marks are decorative and excluded from assistive technology. Pressing it toggles the panel. Hovering uses the host tooltip to show the state in words:
+The status indicator is an accessible button named `Open panel` or `Close panel`, followed by the status sentence and any placement advisory. Its 25 by 30 slot is the click target. Its marks are decorative and excluded from assistive technology. Pressing it toggles the panel. Hovering uses the host tooltip to show the state in words:
 
 | State | Tooltip |
 | --- | --- |
 | Not running | `Kestrel is not running. It is not holding the microphone.` |
+| Inactive | `Inactive. Microphone in use. Press Super + Shift + K to start.` |
 | Starting | `Starting. Microphone may be in use.` |
 | Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Kestrel: idle. Microphone in use. Waiting for you to speak.` |
@@ -118,17 +120,18 @@ The status indicator is an accessible button named `Open conversation` or `Close
 A floating window of fixed size, 448 by 640, which the owner moves with `Super` and a left drag.
 
 - **Placement.** First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and the native border. Later openings retain the actual dragged position within the compositor configuration lifetime. When the monitor or its work area changes, clamp a position only if it would leave the panel off screen. Preserve a deliberately partly off-screen drag when that work area has not changed. Compositor configuration reload resets placement; cross-reload or restart storage is not provided.
-- **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its square `Close conversation` button, at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. The conversation stays in the voice service while it runs.
+- **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses its square `Close panel` button, at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. These actions only hide or show the panel. `Super + Shift + K` starts or dismisses the voice conversation.
 - **Header.** The title `Kestrel` in bold title text, with the close button at the right. Beneath it, the status row: the current-state mark, the label gap, then the status sentence. Beneath that, the hint `Move: Super + left drag` in caption text, wrapping within the header width.
 - **Header marks.** The same drawing, sizes and motion as the bar, in popups text, with resting states at 0.6 opacity and trouble in bar active. They are decorative: no click, tooltip or keyboard focus, and hidden from assistive technology, because the sentence beside them says the state.
 - **Conversation.** Kestrel's turns sit flush left under a bold `Kestrel` label in accent. The owner's turns are inset by 32 under a bold `You` label in popups text. The reply in progress shows `Thinking` or `Speaking` beside its label. All transcript text is plain text, wraps long words and scrolls vertically. Auto-follow only while already at the bottom; updates never jump away from earlier text being read. This read-only panel has no composer, send control or active links.
-- **Empty and failure copy.** A healthy empty feed says `Say something. Kestrel replies after you.` A stale, malformed or disconnected feed clears the transcript and says `Conversation unavailable. Reopen the panel.` An oversized conversation says `Conversation is too large to display. Restart Kestrel to begin a new conversation.` Interrupted or failed rows end with an accent warning triangle and `Reply interrupted.` or `Reply could not be completed.` These states make no microphone claim.
+- **Empty and failure copy.** A healthy empty feed while inactive says `Press Super + Shift + K to start a conversation.` An active empty feed says `Say something. Kestrel replies after you.` A stale, malformed or disconnected feed clears the transcript and says `Conversation unavailable. Reopen the panel.` An oversized conversation says `Conversation is too large to display. Restart Kestrel to begin a new conversation.` Interrupted or failed rows end with an accent warning triangle and `Reply interrupted.` or `Reply could not be completed.` These states make no microphone claim.
 - **Placement failure.** `Panel position could not be confirmed. Try closing and reopening it.` appears in the panel and the indicator's accessible name and native tooltip. An initial configuration check with errors instead shows `Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel.` The panel stays hidden until placement and clean configuration are confirmed. A new failure actively exposes that tooltip even when the panel is hidden and the pointer is elsewhere; a confirmed opening clears it unless the pointer is still hovering. Cleanup failures preserve the original advisory. Neither message changes microphone status. No native errors or window metadata are shown.
 - **Focus and keys.** Focus uses a 2-pixel accent ring. `Tab` and `Shift + Tab` cycle between close and transcript. `Enter` and `Space` activate close. The transcript accepts arrows, `PageUp`, `PageDown`, `Home` and `End` to scroll; `Escape` hides the panel from either focus target. The transcript has a document role, turns have speaker-named static text roles, and a turn that becomes complete, interrupted or failed while the panel is open is announced politely once, never per token. Opening the panel, reconnecting, a new session and updates while hidden read existing history silently.
 
 | State | Status sentence |
 | --- | --- |
 | Not running | `Not running. Microphone released by Kestrel.` |
+| Inactive | `Inactive. Microphone in use. Press Super + Shift + K to start.` |
 | Starting | `Starting. Microphone may be in use.` |
 | Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Idle. Microphone in use.` |
