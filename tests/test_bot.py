@@ -2210,7 +2210,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.channel.close = AsyncMock(wraps=service.channel.close)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.channel.preparation.done())
 
@@ -2576,13 +2576,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = Forward(output=True)
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertFalse(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
                         handle_signals=handle_signals, status=status, conversation=conversation,
-                        on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
+                        on_ingress_ready=on_ingress_ready, on_reply_finished=on_reply_finished, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
 
@@ -2770,12 +2770,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
                            admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
-                           production_turn_strategies=False):
+                           production_turn_strategies=False, wake_wire=None):
         if brain is not None:
             require_native_hermes()
         from desktop import control, status as status_module
         from types import SimpleNamespace
         started, prepared = asyncio.Queue(), asyncio.Event()
+        waiting = asyncio.Queue()
+        wake_children = []
         native_written = asyncio.Event()
         spoken, committed, processed = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
         interrupted = asyncio.Event()
@@ -2842,6 +2844,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_spawn = asyncio.create_subprocess_exec
 
         async def spawn(*command, **kwargs):
+            if any(str(arg).endswith('/wakeword.py') for arg in command):
+                process = await native_spawn(sys.executable, '-u', '-c', wake_wire or
+                    "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
+                    "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
+                    " sys.stdout.buffer.write(b'W' if data == bytes([1])*640 else b'N'); sys.stdout.buffer.flush()", **kwargs)
+                wake_children.append(process)
+                return process
             self.assertEqual(command, (str(bot.HERMES_PYTHON), str(ROOT / 'hermes_worker.py')))
             home = Path(kwargs['env']['HERMES_HOME'])
             try:
@@ -2901,17 +2910,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             audio_children.append(process)
             return process
 
-        def new_transport(echo, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None):
+        def new_transport(echo, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None, capture_pcm=None):
             active = admitted
             if admitted_override is not None:
                 active = lambda: admitted() and admitted_override()
-            if native_audio:
+            if native_audio or capture_pcm is not None:
                 transport = native_transport(echo, on_stopped=on_stopped, admitted=active,
                                              **({"input_admitted": input_admitted, "capture_enabled": capture_enabled,
-                                                 "reply_admitted": reply_admitted} if input_admitted else {}))
+                                                 "reply_admitted": reply_admitted, "capture_pcm": capture_pcm} if input_admitted else {}))
 
                 async def spawn_audio(*argv, **kwargs):
-                    return child(capture='--record' in argv)
+                    process = child(capture='--record' in argv)
+                    process.wake_capture = capture_pcm is not None
+                    return process
 
                 transport._spawn = spawn_audio
                 original_open = transport.open
@@ -2919,6 +2930,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 async def open_audio():
                     await original_open()
                     transport.llm = controller.llm
+                    if capture_pcm is not None:
+                        waiting.put_nowait(transport)
 
                 transport.open = open_audio
             else:
@@ -2975,7 +2988,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             transport.audio_children = audio_children
             transport.service = service_handle
             transport.cleanup_finished = asyncio.get_running_loop().create_future()
-            sessions.append(transport)
+            if capture_pcm is None:
+                sessions.append(transport)
 
             @output.event_handler('on_after_process_frame')
             async def received(processor, frame):
@@ -3001,7 +3015,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_conversations = bot.VoiceConversations
         admitted_override = admitted
         service_handle = SimpleNamespace(sessions=sessions, audio_children=audio_children, started=started,
-                                         recognizer=recognizer, model=model, channel=supplied_channel, native_written=native_written)
+                                         recognizer=recognizer, model=model, channel=supplied_channel, native_written=native_written, waiting=waiting)
 
         def conversations(**kwargs):
             nonlocal controller
@@ -3114,7 +3128,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if process is not None:
                     self.assertIsNotNone(process.returncode)
                 self.assertFalse(home.exists())
-            for process in audio_children:
+            for process in [*audio_children, *wake_children]:
                 self.assertIsNotNone(process.returncode)
 
         self.addAsyncCleanup(close)
@@ -3201,7 +3215,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual([t['source'] for t in service.manager.conversation.turns if t['speaker'] == 'you'],
                          ['typed', 'typed'])
-        self.assertTrue(all(child.stdin is not None for child in service.audio_children))
+        self.assertTrue(all(child.stdin is not None for child in service.audio_children if not child.wake_capture))
         self.assertTrue(any(child.writes for child in service.audio_children))
         self.assertEqual(await service.toggle(), 'starting')
         fresh = await asyncio.wait_for(service.started.get(), 5)
@@ -3843,6 +3857,183 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(brain.requests), 1)
         await close()
 
+    async def test_wake_waiting_audio_is_private_and_starts_fresh(self):
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        actions = AsyncMock(side_effect=AssertionError('Waiting audio has no action authority'))
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, local_command=actions, through_service=True, activate=False, native_audio=True,
+        )
+        service = handle.service
+        try:
+            try:
+                waiting = await asyncio.wait_for(service.waiting.get(), 5)
+            except TimeoutError:
+                self.fail('Inactive prepared service must open verified private wake capture')
+            self.assertIsNone(service.recognizer.reader)
+            self.assertIsNone(service.manager.pipeline)
+            await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+            with patch.object(service.recognizer, 'transcribe', wraps=service.recognizer.transcribe) as recognition:
+                waiting.capture.stdout.feed_data(bytes(640))
+                waiting.capture.stdout.feed_data(bytes([1]) * 640)
+                active = await asyncio.wait_for(service.started.get(), 5)
+                self.assertTrue(waiting.capture.reaped.is_set(), 'Waiting recorder must exit before recognition')
+                self.assertTrue(waiting.reader.done())
+                self.assertIsNone(waiting.playback)
+                self.assertIsNot(active, waiting)
+                self.assertTrue(service.manager.desired_active)
+                self.assertEqual(service.manager.conversation.turns, [])
+                self.assertEqual(actions.await_count, 0)
+                self.assertIsNone(service.recognizer.reader, 'Waiting PCM must not open ordinary recognition')
+                self.assertEqual(len(brain.requests), 1, 'Only fixed preparation, no waiting-audio request')
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+                recognition.assert_not_called()
+                recognition.assert_not_awaited()
+            await close()
+        finally:
+            await close()
+
+    async def test_wake_cannot_toggle_or_reopen_after_revocation(self):
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        handle, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+        )
+        service = handle.service
+        waiting = await asyncio.wait_for(service.waiting.get(), 5)
+        late_hit = service.manager.wake_detector.on_detected
+        waiting.capture.stdout.feed_data(bytes([1]) * 640)
+        active = await asyncio.wait_for(service.started.get(), 5)
+        late_hit()
+        late_hit()
+        self.assertTrue(service.manager.desired_active)
+        self.assertIs(service.manager.transport, active)
+        self.assertEqual(await service.toggle(), 'inactive')
+        fresh_waiting = await asyncio.wait_for(service.waiting.get(), 5)
+        late_hit()
+        self.assertFalse(service.manager.desired_active)
+        self.assertIs(service.manager.waiting_transport, fresh_waiting)
+        last_hit = service.manager.wake_detector.on_detected
+        service.manager.revoke()
+        last_hit()
+        self.assertFalse(service.manager.desired_active)
+        await close()
+        last_hit()
+        self.assertTrue(service.manager.closed)
+        self.assertTrue(fresh_waiting.capture.reaped.is_set())
+        self.assertEqual(service.manager.conversation.turns, [])
+        self.assertTrue(spoken.empty())
+
+    async def test_wake_rearms_after_typed_output_settles(self):
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nHey Kestrel.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        workspace = 1
+        action_entered, action_release = asyncio.Event(), asyncio.Event()
+        self.addCleanup(action_release.set)
+
+        async def command(argv):
+            nonlocal workspace
+            if argv == ('/usr/bin/hyprctl', '-j', 'activeworkspace'):
+                return json.dumps({'id': workspace})
+            self.assertEqual(argv[:2], ('/usr/bin/hyprctl', 'dispatch'))
+            action_entered.set()
+            await action_release.wait()
+            workspace = 3
+            return 'ok'
+
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True, local_command=command,
+        )
+        service = handle.service
+        manager = service.manager
+        waiting = await asyncio.wait_for(service.waiting.get(), 5)
+        old_hit = manager.wake_detector.on_detected
+        output_end, release_end, settled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.addCleanup(release_end.set)
+        original_state = manager.status.set_state
+
+        def state(value):
+            original_state(value)
+            if value == 'inactive' and manager.pending_submit is None and manager.transport is not None:
+                settled.set()
+
+        with patch.object(manager.status, 'set_state', side_effect=state):
+            self.assertEqual(await service.submit('Say the wake phrase'), 'accepted')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            self.assertTrue(waiting.capture.reaped.is_set())
+
+            @transport.output().event_handler('on_before_push_frame')
+            async def hold_output(processor, frame):
+                if isinstance(frame, LLMFullResponseEndFrame):
+                    output_end.set()
+                    await release_end.wait()
+
+            await asyncio.wait_for(output_end.wait(), 5)
+            await asyncio.wait_for(settled.wait(), 5)
+            self.assertIsNone(manager.wake_detector, 'Typed reply stays suppressed until actual output completion')
+            self.assertTrue(service.waiting.empty())
+            old_hit()
+            self.assertFalse(manager.desired_active)
+            token = transport.llm._indicator_reply
+            release_end.set()
+            fresh = await asyncio.wait_for(service.waiting.get(), 5)
+            self.assertIsNone(transport.capture)
+            self.assertIsNot(fresh, waiting)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Hey Kestrel.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Hey Kestrel.')
+            for text in ('stop', 'workspace three'):
+                self.assertEqual(await service.submit(text), 'accepted')
+                if text == 'workspace three':
+                    await asyncio.wait_for(action_entered.wait(), 5)
+                    self.assertTrue(fresh.capture.reaped.is_set())
+                    self.assertIsNone(manager.wake_detector)
+                    # Obsolete output completion has no authority over a newer typed reply.
+                    late = LLMFullResponseEndFrame()
+                    late.indicator_reply_token = token
+                    late.conversation_reply_failed = False
+                    await transport.output().push_frame(late)
+                    self.assertIsNone(manager.wake_detector)
+                    action_release.set()
+                fresh = await asyncio.wait_for(service.waiting.get(), 5)
+                self.assertFalse(manager.desired_active)
+                self.assertTrue(spoken.empty(), 'Silent typed controls add no spoken reply')
+            self.assertEqual(workspace, 3)
+            self.assertEqual([t['text'] for t in manager.conversation.turns if t['speaker'] == 'you'],
+                             ['Say the wake phrase', 'stop', 'workspace three'])
+        await close()
+
+    async def test_wake_failure_preserves_shortcut(self):
+        messages = []
+        sink = logger.add(lambda message: messages.append(str(message)), format='{message}')
+        self.addCleanup(lambda: logger.remove(sink))
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        handle, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+            wake_wire="import sys; sys.stdout.buffer.write(b'E'); sys.stdout.buffer.flush()",
+        )
+        service = handle.service
+        # This is an observed advisory, independent of the optional detector's internal failure flag.
+        advised = asyncio.Event()
+        if any('Wake phrase unavailable.' in message for message in messages):
+            advised.set()
+        observer = logger.add(lambda message: advised.set() if 'Wake phrase unavailable.' in str(message) else None)
+        self.addCleanup(lambda: logger.remove(observer))
+        await asyncio.wait_for(advised.wait(), 5)
+        self.assertTrue(any('Press Super + Shift + K to start. Check the pinned wake assets and restart Kestrel.' in m
+                            for m in messages))
+        self.assertIsNone(service.manager.failure)
+        self.assertEqual(await service.toggle(), 'starting')
+        active = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNotNone(active.capture)
+        self.assertTrue(service.manager.desired_active)
+        self.assertTrue(spoken.empty())
+        await close()
+
     async def test_inactive_capture_never_reaches_recognition_or_actions(self):
         command = AsyncMock(side_effect=AssertionError('Inactive input cannot execute local commands'))
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
@@ -3852,7 +4043,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         service = handle.service
         try:
-            self.assertEqual(handle.sessions, [], 'Inactive startup opens no capture or playback')
+            self.assertEqual(handle.sessions, [], 'Inactive startup opens no recognition session or playback')
             self.assertIsNone(service.recognizer.reader)
             self.assertEqual(await service.toggle(), 'starting')
             transport = await asyncio.wait_for(service.started.get(), 5)

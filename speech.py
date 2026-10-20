@@ -370,10 +370,11 @@ class LaptopOutput(BaseOutputTransport):
 
 
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None):
+    def __init__(self, echo_removal, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None, capture_pcm=None):
         self.echo_removal = echo_removal
         self.admitted = admitted
         self.input_admitted = input_admitted or admitted
+        self.capture_pcm = capture_pcm
         self.capture_enabled = capture_enabled
         self.reply_admitted = reply_admitted
         self.on_stopped = on_stopped
@@ -461,8 +462,11 @@ class LaptopAudioTransport:
             while True:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 self.received_audio.set()
-                if self.verified and self._input.ready and self.input_admitted() and not self.closed:
-                    await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
+                if self.verified and not self.closed:
+                    if self.capture_pcm is not None:
+                        self.capture_pcm(pcm)
+                    elif self._input.ready and self.input_admitted():
+                        await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
             self.fail(LAPTOP_CAPTURE_FAILURE)
 
