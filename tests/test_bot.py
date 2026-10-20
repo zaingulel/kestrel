@@ -3644,6 +3644,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await close()
 
     async def test_typed_admission_is_owned_across_readiness_and_dismissal(self):
+        require_native_hermes()
         from desktop import control
         prepare_entered, release_prepare = asyncio.Event(), asyncio.Event()
         self.addCleanup(release_prepare.set)
