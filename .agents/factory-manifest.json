@@ -1,6 +1,11 @@
 {
   "canonical": "zaingulel/fabraik",
-  "syncedFrom": "5564fbe4ee57a8ca844b642079ca9231e647c1a9",
+  "release": {
+    "tag": "v0.3.1",
+    "id": 418625611,
+    "assetId": 659863333,
+    "digest": "sha256:368d851dd34f3a9868bf6238166b58e5e55a33a2e087faafaf011e158dfa622b"
+  },
   "entries": [
     {
       "path": ".agents/skills/accessibility-review/SKILL.md",
