@@ -1379,6 +1379,53 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(opening, return_exceptions=True)
         self.assertIsNone(transport.failure)
 
+    async def test_waiting_capture_delivers_only_verified_private_pcm(self):
+        capture = self.child(3200)
+        checked, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        consumed, private = asyncio.Queue(), asyncio.Queue()
+        original_read = capture.stdout.readexactly
+
+        async def read(size):
+            pcm = await original_read(size)
+            consumed.put_nowait(pcm)
+            return pcm
+
+        capture.stdout.readexactly = read
+
+        def serial(pid=None):
+            if pid is not None:
+                checked.set()
+                if not release.wait(5):
+                    raise AssertionError('Verification was not released')
+            return 900
+
+        transport = speech.LaptopAudioTransport(
+            Mock(microphone_serial=serial), on_stopped=Mock(), admitted=lambda: True,
+            input_admitted=lambda: False, capture_pcm=private.put_nowait,
+        )
+        self.addAsyncCleanup(transport.close)
+        with patch.object(transport, '_spawn', return_value=capture):
+            opening = asyncio.create_task(transport.open())
+            try:
+                self.assertTrue(await asyncio.to_thread(checked.wait, 5))
+                capture.stdout.feed_data(b'A' * 640)
+                self.assertEqual(await asyncio.wait_for(consumed.get(), 5), b'A' * 640)
+                self.assertTrue(private.empty())
+                release.set()
+                await asyncio.wait_for(opening, 5)
+                capture.stdout.feed_data(b'B' * 640)
+                self.assertEqual(await asyncio.wait_for(private.get(), 5), b'B' * 640)
+                self.assertFalse(transport.input().ready)
+                self.assertFalse(transport.input_admitted())
+                self.assertIsNone(transport.playback)
+            finally:
+                release.set()
+                await asyncio.gather(opening, return_exceptions=True)
+        await transport.close()
+        self.assertTrue(transport.reader.done())
+        self.assertIsNotNone(capture.returncode)
+
     async def test_capture_failure_stops_without_fallback(self):
         for case in ("eof", "truncated", "missing", "timeout"):
             with self.subTest(case=case):
@@ -1704,6 +1751,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             yield np.zeros(8, dtype=np.float32)
 
         async def spawn(*argv, **kwargs):
+            if any(str(arg).endswith('/wakeword.py') for arg in argv):
+                raise FileNotFoundError('Optional wake assets absent in playback fixture')
             if "--record" in argv:
                 capture.stdout.feed_data(bytes(640))
                 return capture
@@ -1711,9 +1760,9 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
         native_conversation = bot.run_conversation
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
             from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
-            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, on_ingress_ready=on_ingress_ready, user_params=bot.LLMUserAggregatorParams(
+            await native_conversation(stt, voice, llm=llm, transport=transport, status=status, conversation=conversation, on_ingress_ready=on_ingress_ready, on_reply_finished=on_reply_finished, user_params=bot.LLMUserAggregatorParams(
                 user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
             ))
 

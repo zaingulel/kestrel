@@ -49,6 +49,7 @@ from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import DELIVERY_LABELS, HERMES_PYTHON, MEMORY_ERROR, child_environment
 from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
+from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
@@ -1148,7 +1149,7 @@ class HermesLLMService(LLMService):
         if re.fullmatch(r'(stop|cancel)[.!]?', text.strip().lower()):
             self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
             remove_original()
-            self.indicator_reply_finished(token)
+            await self.push_reply_end(token)
             return
         if re.fullmatch(r'repeat that[.!?]?', text.strip().lower()):
             remove_original()
@@ -1188,7 +1189,7 @@ class HermesLLMService(LLMService):
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:
-                self.indicator_reply_finished(token)
+                await self.push_reply_end(token)
             return
         output = None
         failed = False
@@ -1294,6 +1295,62 @@ class VoiceConversations:
         self.input_epoch = 0
         self.ingress = None
         self.stt = None
+        self.waiting_transport = None
+        self.waiting_owner = None
+        self.wake_detector = None
+        self.wake_startup = None
+        self.wake_interval = None
+        self.wake_disabled = False
+        self.wake_reply_token = None
+
+    def invalidate_wake(self):
+        self.wake_interval = None
+
+    def wake_start(self, interval):
+        if self.wake_interval is interval and not self.failure:
+            self.toggle()
+
+    def reply_finished(self, token):
+        if token is self.wake_reply_token:
+            self.wake_reply_token = None
+            self.changed.set()
+
+    def wake_failed(self):
+        if not self.wake_disabled:
+            self.wake_disabled = True
+            self.invalidate_wake()
+            logger.warning(WAKE_ADVICE)
+            self.changed.set()
+
+    async def open_waiting(self, interval):
+        detector = self.wake_detector
+        await detector.start()
+        if self.wake_interval is not interval:
+            return
+        self.waiting_transport = LaptopAudioTransport(
+            ECHO_REMOVAL, on_stopped=self.wake_failed,
+            admitted=lambda: self.wake_interval is interval, input_admitted=lambda: False,
+            capture_pcm=lambda pcm: detector.submit(pcm) if self.wake_interval is interval else None,
+        )
+        await self.waiting_transport.open()
+        if self.waiting_transport.capture is not None:
+            self.waiting_owner = self.status.remember_owner(self.waiting_transport.capture.pid)
+
+    async def close_waiting(self):
+        self.invalidate_wake()
+        if self.wake_startup is not None:
+            self.wake_startup.cancel()
+            await asyncio.gather(self.wake_startup, return_exceptions=True)
+            self.wake_startup = None
+        if self.waiting_transport is not None:
+            await self.waiting_transport.close()
+            if self.waiting_owner is not None:
+                self.status.retire_owner(self.waiting_owner)
+                self.waiting_owner = None
+            self.waiting_transport = None
+        if self.wake_detector is not None:
+            await self.wake_detector.close()
+            self.wake_detector = None
 
     def speech_admitted(self):
         return bool(self.admission is not None and self.admission.is_set() and self.desired_active
@@ -1308,6 +1365,8 @@ class VoiceConversations:
             return 'busy'
         token = object()
         self.input_epoch += 1
+        self.invalidate_wake()
+        self.wake_reply_token = token
         self.pending_submit = (text, token)
         if self.llm is not None:
             self.llm.accept_request(token)
@@ -1346,6 +1405,8 @@ class VoiceConversations:
         return 'starting' if self.desired_active else 'inactive'
 
     def revoke(self):
+        self.invalidate_wake()
+        self.wake_reply_token = None
         self.input_epoch += 1
         self.pending_submit = None
         if self.submission_task is not None and self.submission_task is not asyncio.current_task():
@@ -1415,7 +1476,7 @@ class VoiceConversations:
         self.pipeline = asyncio.create_task(run_conversation(
             self.stt, self.voice, llm=self.llm,
             transport=self.transport, status=self.status, conversation=self.conversation, handle_signals=False,
-            on_ingress_ready=self.ingress_ready,
+            on_ingress_ready=self.ingress_ready, on_reply_finished=self.reply_finished,
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
 
@@ -1517,10 +1578,18 @@ class VoiceConversations:
 
     async def run(self):
         self.status.set_state('inactive')
+        self.changed.set()
         while not self.closed:
             await self.changed.wait()
             self.changed.clear()
             try:
+                if self.wake_startup is not None and self.wake_startup.done():
+                    if not self.wake_startup.cancelled() and self.wake_startup.exception() is not None:
+                        self.wake_failed()
+                if (self.wake_detector is not None and
+                        (self.desired_active or self.pending_submit is not None or self.wake_disabled
+                         or self.lifecycle_changed or self.failure or self.wake_reply_token is not None)):
+                    await self.close_waiting()
                 if self.submission_task is not None and self.submission_task.done():
                     if not self.submission_task.cancelled():
                         self.submission_task.result()
@@ -1547,6 +1616,14 @@ class VoiceConversations:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:
                     self.status.set_state('inactive')
+                    if self.prepared and not self.wake_disabled and self.pending_submit is None and self.wake_reply_token is None and self.wake_detector is None:
+                        interval = object()
+                        self.wake_interval = interval
+                        self.wake_detector = WakeWordDetector(
+                            on_detected=lambda interval=interval: self.wake_start(interval), on_failed=self.wake_failed,
+                        )
+                        self.wake_startup = asyncio.create_task(self.open_waiting(interval))
+                        self.wake_startup.add_done_callback(lambda task: self.changed.set())
             except Exception as error:
                 self.fail_submission()
                 self.failure = str(error) or 'Kestrel conversation cleanup failed. Restart Kestrel.'
@@ -1561,12 +1638,15 @@ class VoiceConversations:
         self.changed.set()
         try:
             try:
-                await self.local_actions.close()
+                await self.close_waiting()
             finally:
                 try:
-                    await self.channel.close()
+                    await self.local_actions.close()
                 finally:
-                    await self.recognizer.close()
+                    try:
+                        await self.channel.close()
+                    finally:
+                        await self.recognizer.close()
         finally:
             if self.cleanup is not None:
                 await asyncio.shield(self.cleanup)
@@ -1574,7 +1654,7 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
-async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None):
+async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -1655,6 +1735,8 @@ async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(frame.indicator_reply_token)
         llm.conversation_output(frame)
+        if isinstance(frame, LLMFullResponseEndFrame) and on_reply_finished is not None:
+            on_reply_finished(frame.indicator_reply_token)
 
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,

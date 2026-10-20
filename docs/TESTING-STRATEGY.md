@@ -129,6 +129,14 @@ live recognition accuracy, microphone/echo behaviour, physical playback, live Bo
 quality, graphical-login startup or spoken latency. Actual shortcut installation/dispatch, native visual
 and accessible-tree acceptance remain separate installed-host evidence; silent automated results do not establish them.
 
+### Local wake evidence
+
+The wake cases in [tests/test_bot.py](../tests/test_bot.py) drive the existing native-audio service fixture. They observe private verified waiting capture, no ordinary recognizer invocation or caller history from waiting audio, recorder reaping before fresh activation, rejection of stale or active hits, typed-output suppression through actual output completion, silent typed controls and optional refusal with the shortcut retained. Existing source-verification and capture-cleanup cases in [tests/test_speech.py](../tests/test_speech.py) remain required.
+
+[tests/test_wakeword.py](../tests/test_wakeword.py) covers actual loader admission before native construction, hostile paths and asset identities, strict probability greater than 0.5, malformed scores and protocol bytes, bounded queue/startup/frame handling and cleanup. Its native fixture pair runs the production worker with the independently provisioned environment and accepted private `.runtime/wakeword/positive.wav`, identified by 24,204 bytes and SHA-256 `ed4d9ddcc6dbf0835eb212dee74514fd5423f95b9c221578e5d24638c6611422`. It requires a hit for that recording plus silence and none for equal-length silence in a fresh child. A wholly absent wake runtime may skip hosted native execution; an existing partial or unsafe runtime must fail rather than skip. Any local skip blocks delivery, and hosted skips do not establish native behavior. Provision the owned real wake environment separately under [README's wake asset rules](../README.md#wake-phrase-assets); do not add it to the shared runtime links.
+
+These observations do not establish physical microphone behavior, normal-conversation or television false-trigger rejection, or production installation. Those require the separate owner-present trial; the prototype's cued and quiet observations do not substitute for it.
+
 ### Native indicator evidence
 
 The native Qt Test cases load the production `desktop/Service.qml` with its real host-injected shell naturally unassigned. They call its actual bounded ingress and trigger its named expiry Timer signals, without starting native children or replacing the shell. The production Loader starts `NativeInputs.qml` only after host injection. The fixed status-byte and observed Hyprland object contracts supply the policy oracle; the [design system](DESIGN-SYSTEM.md#the-three-marks) supplies literal geometry and motion values for the actual `Marks.qml` objects.
@@ -235,7 +243,7 @@ Under [closeout's existing cleanup rules](../.agents/skills/closeout/SKILL.md#cl
 Ruff requires `uvx` (provided by uv). From the repository root, run:
 
 ```sh
-node scripts/run-log.mjs quality ruff -- uvx --isolated --no-config --constraints requirements-test.txt ruff check --select F bot.py speech.py asr_worker.py hermes_worker.py app_resolver.py desktop tests
+node scripts/run-log.mjs quality ruff -- uvx --isolated --no-config --constraints requirements-test.txt ruff check --select F bot.py speech.py wakeword.py asr_worker.py hermes_worker.py app_resolver.py desktop tests
 ```
 
 This uses the existing requirements pin and the hosted check's rules and source selection. `--isolated`
@@ -258,8 +266,8 @@ A commit added on top of one whose checks passed reruns a convergence check wher
 | `npm run lint` | A path under `scripts/`, `.claude/hooks/` or `.codex/hooks/`; `eslint.config.mjs`; or `package.json`, `package-lock.json` or `.npmrc` |
 | `npm run test:scripts` | Any path, and any new head even when no path changed: the suite reads the tracked tree as a whole and queries git about the repository itself |
 | `npm run lint:docs`, in a job that changes documentation | Any path: it resolves every cited path and link against the whole tracked tree |
-| `npm run test:speech` | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `desktop/status.py`, a path under `tests/`, `requirements-test.txt` or `package.json` |
-| Ruff command above | `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, a Python path under `desktop/`, a path under `tests/`, `requirements-test.txt`, or a change to the command or effective Ruff configuration |
+| `npm run test:speech` | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `desktop/status.py`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt` or `package.json` |
+| Ruff command above | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, a Python path under `desktop/`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt`, or a change to the command or effective Ruff configuration |
 
 Command and configuration inputs always rerun the affected check, regardless of filename extension: this includes package commands, ESLint configuration and package or lockfile changes. An unchanged `package-lock.json` together with a preserved installed-package and tool environment establishes unchanged Node inputs; a preserved `.runtime/` establishes unchanged voice inputs. Reinstalling packages, upgrading tools or changing either environment after a receipt was written reruns the affected check.
 
