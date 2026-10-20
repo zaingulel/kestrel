@@ -221,24 +221,24 @@ TestCase {
         verify(service !== null)
         const snapshot = JSON.stringify({version: 2, session: "inactive-session", turns: []}) + "\n"
         verify(service.acceptConversationChunk(snapshot))
-        compare(service.conversationMessage, "Say something. Kestrel replies after you.")
+        compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         verify(service.acceptStatusChunk("D"))
         compare(service.state, "inactive")
         compare(service.statusSentence, "Inactive. Microphone in use. Press Super + Shift + K to start.")
         compare(service.conversationAvailable, true)
         compare(service.turns.length, 0)
-        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         for (const wire of ["A", "I"]) {
             verify(service.acceptStatusChunk(wire))
-            compare(service.conversationMessage, "Say something. Kestrel replies after you.")
+            compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         }
         verify(service.acceptStatusChunk("ID"))
         compare(service.state, "inactive")
-        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         service.conversationExited()
         compare(service.conversationMessage, "Conversation unavailable. Reopen the panel.")
         verify(service.acceptConversationChunk(snapshot))
-        compare(service.conversationMessage, "Press Super + Shift + K to start a conversation.")
+        compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "inactive-session", turns: [
             {speaker: "you", text: "Existing turn.", state: "complete", source: "spoken"}
         ]}) + "\n"))
@@ -347,7 +347,7 @@ TestCase {
         verify(send({version: 2, session: "new-service", turns: []}))
         compare(service.conversationAvailable, true)
         compare(service.turns.length, 0)
-        compare(service.conversationMessage, "Say something. Kestrel replies after you.")
+        compare(service.conversationMessage, "Say something, or type below. Kestrel replies out loud.")
         compare(service.conversationSession, "new-service")
         service.acceptStatusChunk("L")
         service.setPlacementFailure(true)

@@ -23,8 +23,7 @@ Item {
     })[state]
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
-    readonly property string conversationMessage: conversationValue.available && !turns.length && state === "inactive"
-        ? "Press Super + Shift + K to start a conversation." : conversationValue.message
+    readonly property string conversationMessage: conversationValue.message
     readonly property string conversationSession: conversationValue.session
     readonly property string placementAdvisory: placementValue.advisory
 
@@ -215,7 +214,7 @@ Item {
         conversationValue.session = record.session
         conversationValue.turns = record.turns
         conversationValue.available = true
-        conversationValue.message = record.turns.length ? "" : "Say something. Kestrel replies after you."
+        conversationValue.message = record.turns.length ? "" : "Say something, or type below. Kestrel replies out loud."
         conversationExpiry.restart()
         return true
     }
