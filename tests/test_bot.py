@@ -7136,7 +7136,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(committed.empty())
                 self.assertEqual(len(brain.requests), 2)
                 self.assertIn(
-                    'Kestrel handles volume <level> percent or %, set volume [to] <level>, and set the volume [to] <level> locally.',
+                    "Your tools are native local memory for small facts and preferences, and Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace.",
                     ' '.join(m['content'] for m in brain.requests[1][2]['messages'] if m['role'] == 'system'),
                 )
                 self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
