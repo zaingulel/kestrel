@@ -1131,6 +1131,8 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertIn({'fragment': text, 'pending': True, 'callback': '\n\n' + text}, observations)
 
     def test_preparation_and_background_review_have_no_memory_authority(self):
+        from hermes_worker import MEMORY_REPLY_REMINDER
+
         def say(text):
             return [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]
 
@@ -1160,6 +1162,7 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(len(brain.requests), 2)
                 for _, _, payload in brain.requests:
                     self.assertFalse(payload.get('tools'))
+                    self.assertNotIn(MEMORY_REPLY_REMINDER, payload['messages'][0]['content'])
                     self.assertNotIn('User likes green tea nonce-523.', json.dumps(payload))
                 self.assertEqual(brain.requests[0][2]['messages'][-1], {'role': 'user', 'content': 'Hello.'})
                 refusal = next(message for message in brain.requests[1][2]['messages'] if message['role'] == 'tool')
@@ -1561,7 +1564,8 @@ class NativeHermesTests(unittest.TestCase):
             api_mode='chat_completions', model='bonsai-2-9b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=False, session_db=None, fallback_model=None,
-            save_trajectories=False, checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+            ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
+            quiet_mode=True, max_tokens=180,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
