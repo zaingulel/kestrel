@@ -215,12 +215,16 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
         process.stdin.write.side_effect = lambda request: activity.set()
         pcm = bytes(9600)
         with (
-            patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
+            patch.object(speech.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
         ):
             load = asyncio.create_task(service.recognizer.load(pcm))
             load.add_done_callback(lambda completed: activity.set())
             try:
                 await asyncio.wait_for(activity.wait(), 5)
+                spawn.assert_awaited_once_with(
+                    str(speech.ROOT / ".runtime/voice-venv/bin/python"), str(speech.ROOT / "asr_worker.py"),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                )
                 self.assertEqual(process.stdin.write.call_count, 1)
                 request = json.loads(process.stdin.write.call_args.args[0])
                 with wave.open(io.BytesIO(base64.b64decode(request['audio'])), 'rb') as audio:

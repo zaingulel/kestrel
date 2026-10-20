@@ -516,7 +516,7 @@ class NemotronRecognizer:
     async def load(self, reference_pcm: bytes):
         try:
             self.process = await asyncio.create_subprocess_exec(
-                str(ROOT / ".runtime/asr-venv/bin/python"), str(ROOT / "asr_worker.py"),
+                str(ROOT / ".runtime/voice-venv/bin/python"), str(ROOT / "asr_worker.py"),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             )
             response = await asyncio.wait_for(self.process.stdout.readline(), timeout=60)
