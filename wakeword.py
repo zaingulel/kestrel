@@ -12,16 +12,14 @@ import stat
 
 ROOT = Path(__file__).parent
 RUNTIME = ROOT / '.runtime/wakeword'
-ADVICE = 'Wake phrase unavailable. Press Super + Shift + K to start. Check the pinned wake assets and restart Kestrel.'
+ADVICE = 'Wake phrase unavailable. Press Super + Shift + K to start. Check the service log and restart Kestrel.'
 CLEANUP_ADVICE = 'Wake capture cleanup failed. Restart Kestrel.'
 PACKAGE = Path("venv/lib/python3.12/site-packages/pyopen_wakeword")
 ASSET_IDENTITIES = {
     str(PACKAGE / '__init__.py'): (202, 'e7b7baebc5abde645115f5ce4582a22ebd3f95a028e3c9863b6370fdfbdafbf9'),
-    str(PACKAGE / '__main__.py'): (2245, 'c3633b07bbf5113b8899669cb6d9a137fc78e70ca3a900eebebbac7ebb98808a'),
     str(PACKAGE / 'const.py'): (231, '99409b54aa7ed4390096de10b9aa09ac6c474e8881348d4e04a9732540c8cb46'),
     str(PACKAGE / 'openwakeword.py'): (14252, 'c7558168729bc13a9b10330206fc8573871f8d7fe9f94e32655e0aa7969659e9'),
     str(PACKAGE / 'wakeword.py'): (3861, '4cdc1daad709a004f42f242c0c2031120eff91bef67c0c4b12e49854c56708f6'),
-    str(PACKAGE / 'models/hey_jarvis.tflite'): (1278912, '14bff778604985e1b5c19f0f7bbe477a69cf281d8db34b232b3b972411f710e2'),
     str(PACKAGE / 'models/melspectrogram.tflite'): (1092516, '96fa0adccb6e8cf95cb14465409a1a2898ee4a96a85bb9ed3c7eb0e68bf163e8'),
     str(PACKAGE / 'models/embedding_model.tflite'): (1330312, 'c0aea21eb84a4ce90a08c870da41b7a7173b45269e6a3207c71d67c40f3a59d8'),
     str(PACKAGE / 'lib/libtensorflowlite_c.so'): (4835320, '25465edb5cd7aadd00249d4d28f1d922ce5cc90195ad4403458111dd63493bae'),
@@ -88,6 +86,8 @@ def serve(requests, protocol):
     try:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         model, features = load_detector(RUNTIME)
+        # Complete native streaming autofill before admitting microphone frames.
+        detected(model, features, bytes(640))
         protocol.write(b'R')
         protocol.flush()
         while True:
@@ -187,7 +187,7 @@ class WakeWordDetector:
         try:
             await asyncio.shield(self.close_task)
         except asyncio.CancelledError:
-            await self.close_task
+            await asyncio.shield(self.close_task)
             raise
 
     async def _close(self):

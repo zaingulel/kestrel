@@ -1306,11 +1306,8 @@ class VoiceConversations:
     def invalidate_wake(self):
         self.wake_interval = None
 
-    def wake_start(self, epoch, interval):
-        if (self.input_epoch == epoch and self.wake_interval is interval and interval is not None
-                and self.prepared and not self.desired_active and not self.closed and not self.failure
-                and not self.transitioning and not self.lifecycle_changed and self.pending_submit is None
-                and self.wake_reply_token is None):
+    def wake_start(self, interval):
+        if self.wake_interval is interval and not self.failure:
             self.toggle()
 
     def reply_finished(self, token):
@@ -1325,10 +1322,10 @@ class VoiceConversations:
             logger.warning(WAKE_ADVICE)
             self.changed.set()
 
-    async def open_waiting(self, epoch, interval):
+    async def open_waiting(self, interval):
         detector = self.wake_detector
         await detector.start()
-        if self.wake_interval is not interval or self.wake_disabled or self.input_epoch != epoch:
+        if self.wake_interval is not interval:
             return
         self.waiting_transport = LaptopAudioTransport(
             ECHO_REMOVAL, on_stopped=self.wake_failed,
@@ -1620,12 +1617,12 @@ class VoiceConversations:
                 if not self.desired_active:
                     self.status.set_state('inactive')
                     if self.prepared and not self.wake_disabled and self.pending_submit is None and self.wake_reply_token is None and self.wake_detector is None:
-                        epoch, interval = self.input_epoch, object()
+                        interval = object()
                         self.wake_interval = interval
                         self.wake_detector = WakeWordDetector(
-                            on_detected=lambda epoch=epoch, interval=interval: self.wake_start(epoch, interval), on_failed=self.wake_failed,
+                            on_detected=lambda interval=interval: self.wake_start(interval), on_failed=self.wake_failed,
                         )
-                        self.wake_startup = asyncio.create_task(self.open_waiting(epoch, interval))
+                        self.wake_startup = asyncio.create_task(self.open_waiting(interval))
                         self.wake_startup.add_done_callback(lambda task: self.changed.set())
             except Exception as error:
                 self.fail_submission()

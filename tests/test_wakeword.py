@@ -107,13 +107,22 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
         sdk.OpenWakeWord.from_model.side_effect = None
         features = sdk.OpenWakeWordFeatures.from_builtin.return_value
         features.process_streaming.return_value = []
+
+        class Protocol(io.BytesIO):
+            def write(self, data):
+                if data == b'R':
+                    self.ready_pcm = [item.args[0] for item in features.process_streaming.call_args_list]
+                return super().write(data)
+
         for payload, response in ((bytes(640), b'RN'), (b'private truncated PCM', b'RE')):
-            output = io.BytesIO()
+            features.process_streaming.reset_mock()
+            output = Protocol()
             with patch.object(wakeword, 'RUNTIME', runtime), patch.object(wakeword, 'ASSET_IDENTITIES', identities), \
                     patch.dict(sys.modules, pyopen_wakeword=sdk), patch.object(wakeword.resource, 'setrlimit') as core, \
                     patch('sys.stderr', new_callable=io.StringIO) as diagnostics:
                 wakeword.serve(io.BytesIO(payload), output)
             self.assertEqual(output.getvalue(), response)
+            self.assertEqual(output.ready_pcm, [bytes(640)], 'Readiness follows one zero priming frame')
             self.assertNotIn('private', diagnostics.getvalue())
             core.assert_called_once_with(wakeword.resource.RLIMIT_CORE, (0, 0))
             self.assertTrue(model.close.called)
@@ -240,6 +249,51 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.failure.wait(), 5)
         await detector.close()
         self.assertIsNotNone(detector.process.returncode)
+
+    async def test_repeated_cancel_keeps_cleanup_owned(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release.set)
+        detector = self.child("import sys; sys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush(); sys.stdin.buffer.read()")
+        await detector.start()
+        process = detector.process
+        native_wait_closed = process.stdin.wait_closed
+
+        async def reap_after_observation():
+            release.set()
+            if detector.close_task is not None:
+                await asyncio.gather(detector.close_task, return_exceptions=True)
+            if process.stdout._transport is not None:
+                process.stdout._transport.close()
+            if process.returncode is None:
+                process.kill()
+            await asyncio.wait_for(process.wait(), 5)
+
+        self.addAsyncCleanup(reap_after_observation)
+
+        async def held_close():
+            entered.set()
+            await release.wait()
+            await native_wait_closed()
+
+        with patch.object(process.stdin, 'wait_closed', side_effect=held_close):
+            caller = asyncio.create_task(detector.close())
+            self.addCleanup(caller.cancel)
+            await asyncio.wait_for(entered.wait(), 5)
+            caller.cancel()
+            cancellation_delivered = asyncio.Event()
+            asyncio.get_running_loop().call_soon(cancellation_delivered.set)
+            await cancellation_delivered.wait()
+            caller.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+            self.assertFalse(detector.close_task.cancelled(), 'Repeated caller cancellation preserves owned cleanup')
+            release.set()
+            await detector.close()
+        self.assertIsNotNone(process.returncode)
+        self.assertTrue(process.stdin.is_closing())
+        self.assertTrue(process.stdout._transport.is_closing())
+        self.assertTrue(detector.task.done())
+        self.assertTrue(detector.queue.empty())
 
     async def test_pipe_close_failure_still_reaps_and_refuses_cleanup(self):
         detector = self.child("import sys; sys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush(); sys.stdin.buffer.read()")

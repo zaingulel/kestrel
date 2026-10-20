@@ -737,11 +737,16 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 service.last_spoken_reply = 'Known spoken reply.'
                 service.push_frame = AsyncMock()
                 context = bot.LLMContext(deepcopy(messages))
-                await service.process_frame(request_frame(service, context, speculation=speculative), direction)
+                request = request_frame(service, context, speculation=speculative)
+                await service.process_frame(request, direction)
                 self.assertEqual(context.get_messages(), messages[:-1] if consumes else messages,
                                  'An exact completed stop/cancel must be consumed locally')
                 if consumes:
-                    service.push_frame.assert_not_awaited()
+                    service.push_frame.assert_awaited_once()
+                    completion = service.push_frame.await_args.args[0]
+                    self.assertIs(type(completion), LLMFullResponseEndFrame)
+                    self.assertIs(completion.indicator_reply_token, request.request_origin[0])
+                    self.assertFalse(completion.conversation_reply_failed)
                 command.assert_not_awaited()
                 self.assertEqual(service.last_spoken_reply, 'Known spoken reply.')
                 self.assertFalse(service.local_actions.tasks)
@@ -772,20 +777,26 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(service.local_actions.lock.locked())
                 self.assertEqual(len(service.local_actions.tasks), 1)
                 local_task = next(iter(service.local_actions.tasks))
+                service.indicator_user_started()
                 stopping = bot.LLMContext([{'role': 'user', 'content': word}])
-                await asyncio.wait_for(service.process_frame(request_frame(service, stopping), FrameDirection.DOWNSTREAM), 5)
+                stop_request = request_frame(service, stopping)
+                await asyncio.wait_for(service.process_frame(stop_request, FrameDirection.DOWNSTREAM), 5)
                 self.assertEqual(stopping.get_messages(), [])
                 self.assertIs(service.channel.reader, held_reader)
                 self.assertFalse(held_reader.done(), 'Stop does not cancel native engine drainage')
                 self.assertFalse(local_task.done(), 'Stop does not cancel an attempted desktop action')
                 self.assertTrue(service.local_actions.lock.locked())
                 self.assertEqual(len(calls), 2)
-                service.push_frame.assert_not_awaited()
+                service.push_frame.assert_awaited_once()
+                completion = service.push_frame.await_args.args[0]
+                self.assertIs(type(completion), LLMFullResponseEndFrame)
+                self.assertIs(completion.indicator_reply_token, stop_request.request_origin[0])
+                self.assertFalse(completion.conversation_reply_failed)
                 release.set()
                 await asyncio.wait_for(action, 5)
                 self.assertEqual(calls.count(('/usr/bin/omarchy-shell', 'media', 'pause')), 1)
                 self.assertFalse(service.local_actions.tasks)
-                service.push_frame.assert_not_awaited()
+                self.assertEqual(service.push_frame.await_args_list, [call(completion)])
             finally:
                 release.set()
                 await service.local_actions.close()
@@ -3894,6 +3905,44 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await close()
 
+    async def test_wake_cleanup_failure_refuses_activation(self):
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+        self.addCleanup(brain.close)
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+        )
+        service = handle.service
+        manager = service.manager
+        try:
+            waiting = await asyncio.wait_for(service.waiting.get(), 5)
+            detector = manager.wake_detector
+            original_close = detector.close
+            refused = asyncio.Event()
+
+            async def refuse_close():
+                await original_close()
+                refused.set()
+                raise RuntimeError('Wake capture cleanup failed. Restart Kestrel.')
+
+            with patch.object(detector, 'close', side_effect=refuse_close):
+                waiting.capture.stdout.feed_data(bytes([1]) * 640)
+                await asyncio.wait_for(refused.wait(), 5)
+                self.assertEqual(manager.failure, 'Wake capture cleanup failed. Restart Kestrel.')
+                self.assertEqual(manager.status._state, 'trouble')
+                self.assertFalse(manager.desired_active)
+                self.assertTrue(service.started.empty())
+                self.assertEqual(handle.sessions, [])
+                self.assertEqual(await service.toggle(), 'unavailable')
+                self.assertTrue(waiting.capture.reaped.is_set())
+                self.assertTrue(waiting.reader.done())
+                self.assertIsNotNone(detector.process.returncode)
+                self.assertIsNone(service.recognizer.reader)
+                self.assertEqual(manager.conversation.turns, [])
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+        finally:
+            await close()
+
     async def test_wake_cannot_toggle_or_reopen_after_revocation(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
@@ -4024,7 +4073,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         observer = logger.add(lambda message: advised.set() if 'Wake phrase unavailable.' in str(message) else None)
         self.addCleanup(lambda: logger.remove(observer))
         await asyncio.wait_for(advised.wait(), 5)
-        self.assertTrue(any('Press Super + Shift + K to start. Check the pinned wake assets and restart Kestrel.' in m
+        self.assertTrue(any('Press Super + Shift + K to start. Check the service log and restart Kestrel.' in m
                             for m in messages))
         self.assertIsNone(service.manager.failure)
         self.assertEqual(await service.toggle(), 'starting')
@@ -4277,6 +4326,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     return await native_wait_for(awaitable, timeout)
 
                 try:
+                    await asyncio.shield(manager.session_ready)
                     with (
                         patch.object(bot.asyncio, 'wait_for', side_effect=wait_for),
                         patch.object(manager.status, 'set_state', side_effect=set_state),
@@ -4333,6 +4383,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsNot(fresh.llm, old_llm)
                             self.assertIsNone(fresh.llm.last_spoken_reply)
                             self.assertTrue(transport.capture.reaped.is_set())
+                            await asyncio.shield(manager.session_ready)
                             await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
                             await self.finish_user_turn(fresh, 'Fresh private request.')
                             self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
@@ -4415,6 +4466,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(await service.toggle(), 'starting')
                         transport = await asyncio.wait_for(service.started.get(), 5)
+                    await asyncio.shield(manager.session_ready)
                     async with asyncio.timeout(1):
                         while line := await reader.readline():
                             conversation.validate_record(line, previous_session)
@@ -4643,6 +4695,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await self.finish_user_turn(transport, text)
 
             try:
+                await asyncio.shield(transport.service.manager.session_ready)
                 await start('Show chunks as they start.')
                 await asyncio.wait_for(delivered.wait(), 5)
                 await asyncio.wait_for(generation_held.wait(), 5)
@@ -5036,29 +5089,30 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(frame)
                 self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), frame)
 
-            await start()
-            await self.finish_user_turn(transport, 'Hello Kestrel.')
-            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Hello.')
-            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Hello.')
-            delivered = []
-            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
             reader = writer = None
             try:
-                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
-            except (OSError, TimeoutError):
-                pass
-            else:
-                snapshot = json.loads(await asyncio.wait_for(reader.readline(), 1))
-                delivered = snapshot['turns']
+                await asyncio.shield(transport.service.manager.session_ready)
+                await start()
+                await self.finish_user_turn(transport, 'Hello Kestrel.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Hello.')
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Hello.')
+                delivered = []
+                address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+                try:
+                    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+                except (OSError, TimeoutError):
+                    pass
+                else:
+                    snapshot = json.loads(await asyncio.wait_for(reader.readline(), 1))
+                    delivered = snapshot['turns']
 
-            async def turns_until(predicate):
-                async with asyncio.timeout(5):
-                    while True:
-                        row = json.loads(await reader.readline())
-                        if 'turns' in row and predicate(row['turns']):
-                            return row['turns']
+                async def turns_until(predicate):
+                    async with asyncio.timeout(5):
+                        while True:
+                            row = json.loads(await reader.readline())
+                            if 'turns' in row and predicate(row['turns']):
+                                return row['turns']
 
-            try:
                 self.assertEqual(delivered, [
                     {'speaker': 'you', 'text': 'Hello Kestrel.', 'state': 'complete', 'source': 'spoken'},
                     {'speaker': 'kestrel', 'text': 'Hello.', 'state': 'complete'},
@@ -5236,6 +5290,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     endpoint = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
                     reader, writer = await asyncio.open_unix_connection(endpoint)
                     try:
+                        await asyncio.shield(transport.service.manager.session_ready)
                         self.assertEqual(json.loads(await asyncio.wait_for(reader.readline(), 1))['turns'], [])
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                         await asyncio.wait_for(interrupted.wait(), 5)
@@ -7693,6 +7748,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        await asyncio.shield(transport.service.manager.session_ready)
         context = await self.assert_failed_reply(transport, spoken, committed, 'Answer completely.',
                                          expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertIn('Incomplete synthetic reply.', context)
