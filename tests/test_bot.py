@@ -3306,7 +3306,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     if timeout == 90 and mode == 'watchdog':
                         watchdog_seen.set()
                         await expire.wait()
-                        raise TimeoutError('Controlled cleanup watchdog')
+                        return await native_wait_for(awaitable, 0)
                     return await native_wait_for(awaitable, timeout)
 
                 try:
