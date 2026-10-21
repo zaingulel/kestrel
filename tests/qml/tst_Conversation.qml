@@ -642,9 +642,19 @@ TestCase {
                 compare(failure.kind, "trouble")
                 compare(failure.troubleInk, content.troubleInk)
                 compare(failure.motionEnabled, false)
+                if (state === "failed") {
+                    const square = findChild(failure, "mark2")
+                    compare(findChild(failure, "troubleStem").mapToItem(notice, 0, 0).y, 2)
+                    compare(square.mapToItem(notice, 0, square.height).y, 14)
+                }
                 verify(findChild(content, "turnRow1").Accessible.name.indexOf(notice.text) !== -1)
             } else compare(notice.visible, false)
         }
+        const engineAdvisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+        accept([earlier, {speaker: "kestrel", text: engineAdvisory, state: "failed"}])
+        compare(findChild(content, "turnText1").text, engineAdvisory)
+        compare(bubble.visible, true)
+        compare(findChild(content, "turnNotice1").parent.y, bubble.y + bubble.height + 4)
         verify(service.acceptStatusChunk("L"))
         accept([])
         compare(ghost.visible, true)
@@ -1210,6 +1220,10 @@ TestCase {
         content.textScale = 2
         verify(waitForRendering(content))
         compare(sizes(), "28,32,24,32,32,24", "host base size 28 doubles the token sizes")
+        const failure = findChild(content, "turnFailure20")
+        const square = findChild(failure, "mark2")
+        compare(findChild(failure, "troubleStem").mapToItem(findChild(content, "turnNotice20"), 0, 0).y, 10)
+        compare(square.mapToItem(findChild(content, "turnNotice20"), 0, square.height).y, 22)
         const advisory = textWith(content, content.placementAdvisory)
         for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
             const left = item.mapToItem(content, 0, 0).x

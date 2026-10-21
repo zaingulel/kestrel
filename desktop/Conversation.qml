@@ -506,20 +506,26 @@ FocusScope {
                         width: parent.width - 4
                         spacing: 5
                         Accessible.ignored: true
-                        Marks {
-                            id: warningIcon
-                            objectName: "turnFailure" + turnItem.index
+                        Item {
+                            id: failureSlot
                             visible: turnItem.modelData.state === "failed"
                             width: 25
-                            height: 30
-                            kind: "trouble"
-                            ink: root.ink
-                            troubleInk: root.troubleInk
-                            motionEnabled: false
+                            height: root.captionLineHeight
+                            // The mark ink (y 9 to 21 of its fixed 30-high frame) centres on the first caption line.
+                            Marks {
+                                objectName: "turnFailure" + turnItem.index
+                                anchors.centerIn: parent
+                                width: 25
+                                height: 30
+                                kind: "trouble"
+                                ink: root.ink
+                                troubleInk: root.troubleInk
+                                motionEnabled: false
+                            }
                         }
                         Text {
                             objectName: "turnNotice" + turnItem.index
-                            width: parent.width - (warningIcon.visible ? warningIcon.width + parent.spacing : 0)
+                            width: parent.width - (failureSlot.visible ? failureSlot.width + parent.spacing : 0)
                             text: turnItem.notice
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
