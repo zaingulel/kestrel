@@ -139,6 +139,26 @@ Item {
         if (submissionValue.pending) submitStopRequested(submissionValue.attempt)
     }
 
+    // Only a running command blocks a press. Once it exits, the next press is sent as the shortcut sends it;
+    // the form stays unconfirmed until the next verified status.
+    readonly property bool toggleRunning: toggleValue.running
+    readonly property bool toggleUnconfirmed: toggleValue.running || toggleValue.awaitingStatus
+    signal toggleRequested()
+
+    QtObject { id: toggleValue; property bool running: false; property bool awaitingStatus: false }
+
+    function toggle() {
+        if (toggleValue.running) return
+        toggleValue.running = true
+        toggleRequested()
+    }
+
+    function toggleExited() {
+        if (!toggleValue.running) return
+        toggleValue.running = false
+        toggleValue.awaitingStatus = true
+    }
+
     QtObject {
         id: conversationValue
         property var turns: []
@@ -261,6 +281,7 @@ Item {
         const letter = chunk.charAt(chunk.length - 1)
         statusValue.value = letter in advisories ? "trouble" : states[letter]
         statusValue.advisory = advisories[letter] || ""
+        toggleValue.awaitingStatus = false
         statusExpiry.restart()
         return true
     }
@@ -271,6 +292,7 @@ Item {
         statusExpiry.stop()
         statusValue.value = "unavailable"
         statusValue.advisory = ""
+        toggleValue.awaitingStatus = false
     }
 
     function acceptMotionResult(raw, success) {
