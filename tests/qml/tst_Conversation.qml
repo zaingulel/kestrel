@@ -573,7 +573,7 @@ TestCase {
         compare(tail.color, content.bubbleTint)
         compare(marks.feed, true)
         compare(marks.kind, "thinking")
-        compare(findChild(marks, "thinkingStep").running, true)
+        compare(findChild(marks, "rippleDriver").running, true)
         const literal = '<b>Heard prefix</b>\nonly accepted text'
         accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
         compare(bubble.visible, true)
@@ -588,7 +588,7 @@ TestCase {
         compare(word.text, "Speaking")
         function loops(running) {
             for (let i = 0; i < 3; i++)
-                compare(findChild(findChild(marks, "mark" + i), "speakingLoop" + i).running, running)
+                compare(findChild(findChild(marks, "mark" + i), "speakDriver" + i).running, running)
         }
         loops(true)
         content.motionEnabled = false
@@ -626,7 +626,7 @@ TestCase {
         compare(ghost.Accessible.name, "Listening")
         compare(ghost.Accessible.role, Accessible.StaticText)
         compare(inflow.feed, false)
-        compare(findChild(inflow, "listeningLoop").running, true)
+        compare(findChild(inflow, "listenDriver").running, true)
         const path = findChild(content, "listeningGhostPath")
         compare(path.strokeWidth, 1.5)
         compare(path.strokeColor, content.ink)
@@ -668,8 +668,8 @@ TestCase {
                 compare(failure.troubleInk, content.troubleInk)
                 compare(failure.motionEnabled, false)
                 if (state === "failed") {
-                    const square = findChild(failure, "mark2")
-                    compare(findChild(failure, "troubleStem").mapToItem(notice, 0, 0).y, 2)
+                    const square = findChild(failure, "troubleDot")
+                    compare(findChild(failure, "mark2").mapToItem(notice, 0, 0).y, 2)
                     compare(square.mapToItem(notice, 0, square.height).y, 14)
                 }
                 verify(findChild(content, "turnRow1").Accessible.name.indexOf(notice.text) !== -1)
@@ -686,10 +686,10 @@ TestCase {
         compare(ghost.mapToItem(transcript.contentItem, 0, ghost.height).y, transcript.height)
         compare(textWith(content, "Say something, or type below."), null)
         content.motionEnabled = false
-        compare(findChild(inflow, "listeningLoop").running, false)
+        compare(findChild(inflow, "listenDriver").running, false)
         content.motionEnabled = true
         content.announcementsEnabled = false
-        compare(findChild(inflow, "listeningLoop").running, false)
+        compare(findChild(inflow, "listenDriver").running, false)
         content.announcementsEnabled = true
         function unavailable(message) {
             tryCompare(content, "displayedTurns", service.turns)
@@ -698,7 +698,7 @@ TestCase {
             compare(content.displayedTurns.length, 0)
             compare(findChild(content, "turnBubble0"), null)
             compare(ghost.visible, false)
-            compare(findChild(inflow, "listeningLoop").running, false)
+            compare(findChild(inflow, "listenDriver").running, false)
             const advisory = textWith(content, message)
             verify(advisory !== null && advisory.visible)
             compare(advisory.horizontalAlignment, Text.AlignHCenter)
@@ -914,13 +914,7 @@ TestCase {
         const badge = findChild(content, "microphoneQuestion")
         const label = findChild(content, "conversationStatus")
         verify(microphone !== null && glyph !== null && badge !== null && label !== null)
-        function containsMark(item) {
-            if (item.thinkingIndex !== undefined) return true
-            for (let i = 0; i < item.children.length; i++)
-                if (containsMark(item.children[i])) return true
-            return false
-        }
-        compare(containsMark(findChild(content, "conversationHeader")), false, "the header shows no state mark")
+        compare(findChild(findChild(content, "conversationHeader"), "mark0"), null, "the header shows no state mark")
         const expected = [
             ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
             ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start."],
@@ -1246,8 +1240,8 @@ TestCase {
         verify(waitForRendering(content))
         compare(sizes(), "28,32,24,32,32,24", "host base size 28 doubles the token sizes")
         const failure = findChild(content, "turnFailure20")
-        const square = findChild(failure, "mark2")
-        compare(findChild(failure, "troubleStem").mapToItem(findChild(content, "turnNotice20"), 0, 0).y, 10)
+        const square = findChild(failure, "troubleDot")
+        compare(findChild(failure, "mark2").mapToItem(findChild(content, "turnNotice20"), 0, 0).y, 10)
         compare(square.mapToItem(findChild(content, "turnNotice20"), 0, square.height).y, 22)
         const advisory = textWith(content, content.placementAdvisory)
         for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
