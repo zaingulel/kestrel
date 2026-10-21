@@ -13,6 +13,7 @@
 | [Omarchy reuse research](research/omarchy-reuse.md) | What Kestrel can reuse from Omarchy for weather, agent usage, reminders, calendars and other planned abilities. |
 | [Coding standards](CODING-STANDARDS.md) | First-party code conventions. |
 | [Testing strategy](TESTING-STRATEGY.md) | Claim evidence and local suites. |
+| [Local Codex job status](CODEX-STATUS.md) | Explicitly selected, metadata-only status reads through the desktop app's local socket. |
 | [Design system](DESIGN-SYSTEM.md) | Current interface ownership and design boundary. |
 | [Issue tracker](ISSUE-TRACKER.md) | GitHub issue and board vocabulary. |
 | [Documentation sweep](DOC-SWEEP.md) | Inactive routine boundary. |
