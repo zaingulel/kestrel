@@ -875,7 +875,7 @@ class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, status=None, conversation=None, voice_active=None, request_admitted=None, input_epoch=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, dismiss, status=None, conversation=None, voice_active=None, request_admitted=None, input_epoch=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -886,6 +886,7 @@ class HermesLLMService(LLMService):
         self.local_actions = local_actions
         self.admitted = admitted
         self.session_ready = session_ready
+        self.dismiss = dismiss
         self.voice_active = voice_active or admitted
         self.request_admitted = request_admitted
         self.typed_origin = None
@@ -1146,6 +1147,10 @@ class HermesLLMService(LLMService):
             self.typed_origin = None
             if self.request_admitted is not None:
                 self.request_admitted(token)
+        if re.fullmatch(r"that(?:['’]?s| is) all[.!]?", text.strip().lower()):
+            # Dismissal discards this context and revokes reply ownership, so no reply end or history removal follows.
+            self.dismiss()
+            return
         if re.fullmatch(r'(stop|cancel)[.!]?', text.strip().lower()):
             self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
             remove_original()
@@ -1393,16 +1398,19 @@ class VoiceConversations:
         self.changed.set()
 
     def toggle(self) -> str:
+        return self.request_active(not self.desired_active)
+
+    def request_active(self, active: bool) -> str:
         if self.failure or self.closed:
             return 'unavailable'
-        self.desired_active = not self.desired_active
+        self.desired_active = active
         self.lifecycle_changed = True
         self.revoke()
-        if not self.desired_active:
+        if not active:
             self.conversation.clear()
-        self.status.set_state('starting' if self.desired_active else 'inactive')
+        self.status.set_state('starting' if active else 'inactive')
         self.changed.set()
-        return 'starting' if self.desired_active else 'inactive'
+        return 'starting' if active else 'inactive'
 
     def revoke(self):
         self.invalidate_wake()
@@ -1453,7 +1461,7 @@ class VoiceConversations:
                                              input_admitted=self.speech_admitted, capture_enabled=capture_enabled,
                                              reply_admitted=lambda token: self.llm is not None and self.llm.owns_request(token))
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admitted=admitted, session_ready=self.session_ready,
-                                    status=self.status, conversation=self.conversation, voice_active=lambda: self.desired_active,
+                                    dismiss=partial(self.request_active, False), status=self.status, conversation=self.conversation, voice_active=lambda: self.desired_active,
                                     request_admitted=self.request_admitted, input_epoch=lambda: self.input_epoch)
         if self.pending_submit is not None:
             self.llm.accept_request(self.pending_submit[1])
