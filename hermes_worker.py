@@ -449,7 +449,8 @@ def main(*, base_url=BONSAI_URL):
                     model='bonsai-2-9b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
                     session_db=None, fallback_model=None, save_trajectories=False,
-                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+                    # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
+                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180, max_iterations=9,
                     reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )

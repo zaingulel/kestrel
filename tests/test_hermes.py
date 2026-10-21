@@ -48,6 +48,17 @@ class ScriptedBrain:
                     self.wfile.write(b'{"error":{"message":"scripted refusal"}}')
                     return
                 self.send_response(200)
+                if isinstance(reply, str):
+                    if not body.get('stream'):
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({
+                            'id': 'scripted', 'object': 'chat.completion', 'created': 0,
+                            'model': 'bonsai-2-9b', 'choices': [{'index': 0, 'message': {
+                                'role': 'assistant', 'content': reply}, 'finish_reason': 'stop'}],
+                        }).encode())
+                        return
+                    reply = [({'content': reply}, None), ({}, 'stop')]
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
                 for delta, finish in reply:
@@ -1054,6 +1065,82 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_iteration_budget_rejects_repeated_invalid_memory_calls(self):
+        calls = [[({'tool_calls': [{'index': 0, 'id': f'invalid-{index}', 'type': 'function',
+                   'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]}, None),
+                  ({}, 'tool_calls')] for index in range(9)]
+        false_success = '[delivery:neutral] False success nonce-916.'
+        with tempfile.TemporaryDirectory(prefix='hermes-notes-', dir=ROOT / '.runtime') as directory:
+            notes = Path(directory) / 'notes'
+            notes.mkdir(mode=0o700)
+            expected = {'MEMORY.md': 'Existing project note nonce-914.',
+                        'USER.md': 'Existing caller note nonce-915.'}
+            for name, content in expected.items():
+                (notes / name).write_text(content)
+                (notes / name).chmod(0o600)
+            with native_worker([*calls, false_success], memory_root=notes) as (worker, brain):
+                self.assertEqual(worker.event(), {'ready': True})
+                worker.begin()
+                events = worker.request([{'role': 'user', 'content': 'Remember the existing notes.'}])
+                self.assertEqual(events, [{'error': 'Hermes did not complete the reply.'}])
+                self.assertNotIn('done', {key for event in events for key in event})
+                self.assertNotIn('False success nonce-916.', ''.join(event.get('text', '') for event in events))
+                self.assertEqual(len(brain.requests), 10)
+                self.assertEqual([body.get('stream', False) for _, _, body in brain.requests],
+                                 [True] * 9 + [False])
+                results = [message for message in brain.requests[-1][2]['messages']
+                           if message['role'] == 'tool']
+                self.assertEqual([message['tool_call_id'] for message in results],
+                                 [f'invalid-{index}' for index in range(9)])
+                for result in results:
+                    self.assertIn("Missing required parameter: provide 'action' (add/patch/remove) "
+                                  "or 'operations' (batch list). Got neither.", result['content'])
+                self.assertEqual({name: (notes / name).read_text() for name in expected}, expected)
+
+    def test_iteration_budget_allows_full_tool_turn(self):
+        desktop = [('mute', {}, 'mute observed'),
+                   ('set_volume', {'percent': 30}, 'volume observed'),
+                   ('pause_media', {}, 'pause observed'),
+                   ('next_track', {}, 'next observed'),
+                   ('focus_workspace', {'number': 2}, 'workspace observed')]
+        memory = [
+            {'target': 'memory'},
+            {'target': 'memory', 'operations': [
+                {'action': 'add', 'content': 'Cedar notebook nonce-921.'},
+                {'action': 'patch', 'old_text': 'Cedar', 'content': 'Maple'}]},
+            {'target': 'user', 'operations': [
+                {'action': 'add', 'content': 'Caller prefers tea nonce-922.'}]},
+        ]
+        calls = [(name, arguments) for name, arguments, _ in desktop]
+        calls.extend(('memory', arguments) for arguments in memory)
+        replies = [[({'tool_calls': [{'index': 0, 'id': f'full-{index}', 'type': 'function',
+                    'function': {'name': name, 'arguments': json.dumps(arguments)}}]}, None),
+                    ({}, 'tool_calls')] for index, (name, arguments) in enumerate(calls)]
+        replies.append('[delivery:neutral] Desktop observed and notes saved nonce-923.')
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Adjust the desktop and save my notes.'}],
+                                    results=[json.dumps({'tool_result': result}).encode() + b'\n'
+                                             for _, _, result in desktop])
+            self.assertEqual(events, [
+                *[{'tool_call': {'name': name, 'arguments': arguments}} for name, arguments, _ in desktop],
+                {'delivery': 'neutral'}, {'text': 'Desktop observed and notes saved nonce-923.'},
+                {'done': True},
+            ])
+            self.assertEqual(len(brain.requests), 9)
+            self.assertEqual([body.get('stream', False) for _, _, body in brain.requests], [True] * 9)
+            results = [message for message in brain.requests[-1][2]['messages'] if message['role'] == 'tool']
+            self.assertEqual([message['tool_call_id'] for message in results],
+                             [f'full-{index}' for index in range(8)])
+            self.assertEqual([message['content'] for message in results[:5]],
+                             [result for _, _, result in desktop])
+            self.assertIn("Missing required parameter: provide 'action'", results[5]['content'])
+            for result in results[6:]:
+                self.assertTrue(json.loads(result['content'])['success'], result)
+            self.assertEqual((worker.home / 'notes/MEMORY.md').read_text(), 'Maple notebook nonce-921.')
+            self.assertEqual((worker.home / 'notes/USER.md').read_text(), 'Caller prefers tea nonce-922.')
+
     def test_desktop_call_round_trips_through_kestrel_with_observed_result(self):
         calls = [{'index': 0, 'id': 'mute-call', 'type': 'function',
                   'function': {'name': 'mute', 'arguments': '{}'}}]
