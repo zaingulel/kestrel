@@ -1393,16 +1393,19 @@ class VoiceConversations:
         self.changed.set()
 
     def toggle(self) -> str:
+        return self.request_active(not self.desired_active)
+
+    def request_active(self, active: bool) -> str:
         if self.failure or self.closed:
             return 'unavailable'
-        self.desired_active = not self.desired_active
+        self.desired_active = active
         self.lifecycle_changed = True
         self.revoke()
-        if not self.desired_active:
+        if not active:
             self.conversation.clear()
-        self.status.set_state('starting' if self.desired_active else 'inactive')
+        self.status.set_state('starting' if active else 'inactive')
         self.changed.set()
-        return 'starting' if self.desired_active else 'inactive'
+        return 'starting' if active else 'inactive'
 
     def revoke(self):
         self.invalidate_wake()
