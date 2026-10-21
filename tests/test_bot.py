@@ -170,6 +170,7 @@ def hermes_service(*, local_command=None):
     return bot.HermesLLMService(
         bot.HermesRequestChannel(), local_actions=bot.LocalActions(command=local_command), admitted=lambda: True,
         session_ready=session_ready,
+        dismiss=Mock(side_effect=AssertionError("Only an exact that's all turn ends the conversation")),
     )
 
 
@@ -712,6 +713,47 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_thats_all_only_dismisses_completed_exact_turns(self):
+        accepted = ("that's all", " THAT'S ALL. ", "That's all!", "that’s all", "That’s all.",
+                    "thats all", "that is all", "That is all!")
+        rejected = ("that's all?", "that's all!!", "that's all..", '"that\'s all"', "that's  all", "that's\nall",
+                    "that's all I wanted to ask about the weather", "okay, that's all", "that's all, thanks",
+                    "that's not all", "is that all", '')
+        previous = [{'role': 'user', 'content': 'Previous request'},
+                    {'role': 'assistant', 'content': 'Known spoken reply.'}]
+        cases = [(previous + [{'role': 'user', 'content': text}], False, FrameDirection.DOWNSTREAM,
+                  text in accepted, text in rejected) for text in (*accepted, *rejected)]
+        text = "that's all"
+        cases.extend([
+            ([{'role': 'user', 'content': text}], True, FrameDirection.DOWNSTREAM, False, False),
+            ([{'role': 'user', 'content': text}], False, FrameDirection.UPSTREAM, False, False),
+            ([{'role': 'assistant', 'content': text}], False, FrameDirection.DOWNSTREAM, False, False),
+            ([{'role': 'system', 'content': text}], False, FrameDirection.DOWNSTREAM, False, False),
+            ([{'role': 'user', 'content': [{'type': 'text', 'text': text}]}], False, FrameDirection.DOWNSTREAM, False, False),
+        ])
+        for messages, speculative, direction, dismisses, reaches_brain in cases:
+            with self.subTest(messages=messages, speculative=speculative, direction=direction):
+                command = AsyncMock(side_effect=AssertionError('Ending a conversation cannot call desktop commands'))
+                service = hermes_service(local_command=command)
+                service.channel.failure = 'This direct fixture has no engine'
+                service.dismiss = Mock()
+                service.push_frame = AsyncMock()
+                context = bot.LLMContext(deepcopy(messages))
+                request = request_frame(service, context, speculation=speculative)
+                await service.process_frame(request, direction)
+                self.assertEqual(context.get_messages(), messages,
+                                 'Ending a conversation discards the context rather than editing it')
+                if dismisses:
+                    service.dismiss.assert_called_once_with()
+                    service.push_frame.assert_not_awaited()
+                else:
+                    service.dismiss.assert_not_called()
+                if reaches_brain:
+                    self.assertTrue(any(isinstance(call.args[0], speech.SpeechAdvisoryFrame)
+                                        for call in service.push_frame.await_args_list),
+                                    'A turn that is not an exact that is all takes the brain path')
+                command.assert_not_awaited()
 
     async def test_stop_cancel_only_consume_completed_exact_turns(self):
         accepted = ('stop', ' STOP. ', 'Stop!', 'cancel', ' CANCEL. ', 'Cancel!')
@@ -2026,8 +2068,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admitted, session_ready, status, conversation, voice_active=None, request_admitted=None, input_epoch=None):
+            def adapter(channel, *, local_actions, admitted, session_ready, dismiss, status, conversation, voice_active=None, request_admitted=None, input_epoch=None):
                 prototype.session_ready = session_ready
+                prototype.dismiss = dismiss
                 prototype.voice_active = voice_active or admitted
                 prototype.request_admitted = request_admitted
                 prototype.input_epoch = input_epoch
@@ -3239,6 +3282,63 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh.')
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'Spoken fresh'}])
+        await close()
+
+    async def test_thats_all_ends_conversation_without_brain_request_or_activation(self):
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFirst.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nSecond.'}, None), ({}, 'stop')],
+            # Requested only if a that's all turn reaches the brain.
+            [({'content': '[delivery:neutral]\nUnwanted reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True,
+        )
+        service = handle.service
+        manager = service.manager
+        startup_waiting = await asyncio.wait_for(service.waiting.get(), 5)
+        self.assertEqual(await service.toggle(), 'starting')
+        transport = await asyncio.wait_for(service.started.get(), 5)
+        transport.capture.stdout.feed_data(bytes(640))
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Hello.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
+        transport.capture.stdout.feed_data(bytes(640))
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, "That's all.")
+        await asyncio.wait_for(service.state('inactive'), 2)
+        cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertFalse(manager.desired_active)
+        self.assertEqual(manager.status._state, 'inactive')
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertIsNone(manager.transport)
+        self.assertTrue(transport.capture.reaped.is_set())
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
+        self.assertEqual(len(brain.requests), 2)
+        rearmed = await asyncio.wait_for(service.waiting.get(), 5)
+        self.assertIsNot(rearmed, startup_waiting)
+        self.assertEqual(await service.submit('Typed A'), 'accepted')
+        typed = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNone(typed.capture)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        self.assertEqual(await service.submit("that's all"), 'accepted')
+        cleanup = await asyncio.wait_for(asyncio.shield(typed.cleanup_finished), 5)
+        await asyncio.wait_for(asyncio.shield(cleanup), 5)
+        self.assertFalse(manager.desired_active)
+        self.assertEqual(manager.status._state, 'inactive')
+        self.assertEqual(manager.conversation.turns, [])
+        self.assertIsNone(manager.transport)
+        self.assertEqual(len(service.sessions), 2)
+        self.assertTrue(service.started.empty())
+        self.assertTrue(spoken.empty())
+        self.assertTrue(committed.empty())
+        self.assertEqual(len(brain.requests), 3)
         await close()
 
     async def test_typed_interrupt_discards_partial_speech_and_old_output(self):
