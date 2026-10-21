@@ -432,6 +432,28 @@ const isCleanPosixAbsolute = (path) =>
   posix.isAbsolute(path) && path === posix.normalize(path) && (path === '/' || !path.endsWith('/')) && !CONTROL.test(path);
 const safeSocketPath = (path) => typeof path === 'string' && /^\/[A-Za-z0-9/._-]*$/.test(path) && isCleanPosixAbsolute(path);
 
+// The user service manager's units do not inherit no_new_privs. --pipe with --wait returns the command's streams and
+// exit status, oneshot makes a signal-killed command a failure, --quiet keeps systemd-run's notices out of stderr,
+// --collect leaves no failed unit, --no-ask-password never prompts and --setenv keeps the parse locale.
+// --expand-environment=no is omitted: it needs systemd 254 and no operand holds a $, since socket paths pass
+// safeSocketPath and the rest are digits and literals.
+const SERVICE_MANAGER_ROUTE = ['--user', '--pipe', '--wait', '--quiet', '--collect', '--no-ask-password',
+  '--service-type=oneshot', '--setenv=LC_ALL=C', '--'];
+const NO_NEW_PRIVS_REFUSAL = 'no_new_privs blocks sudo in this process and the user service manager route did not complete';
+
+// This process's no_new_privs flag and real user from its /proc status, or null unless each appears once in its canonical form.
+function processPrivilege(stdout) {
+  if (typeof stdout !== 'string' || !stdout.endsWith('\n')) return null;
+  const lines = stdout.slice(0, -1).split('\n');
+  const only = (prefix, pattern) => {
+    const matching = lines.filter((line) => line.startsWith(prefix));
+    return matching.length === 1 ? pattern.exec(matching[0]) : null;
+  };
+  const flag = only('NoNewPrivs:', /^NoNewPrivs:\t([01])$/);
+  const user = only('Uid:', /^Uid:\t(0|[1-9][0-9]*)\t[0-9]+\t[0-9]+\t[0-9]+$/);
+  return flag && user ? { noNewPrivs: flag[1] === '1', uid: user[1] } : null;
+}
+
 // Socket diagnostics identify both the filesystem socket and the distinct kernel socket behind its descriptor.
 function dockerListener(stdout, sockets) {
   const line = completeLine(stdout);
@@ -500,14 +522,17 @@ function proveDockerFilesystem(host, run, platform, env) {
   const executable = completeLine(located.stdout);
   if (!executable || !isCleanPosixAbsolute(executable)) return fail('daemon executable observation is unsupported or malformed');
   // Command-scoped -k bypasses cached credentials without invalidating or updating the cache.
-  const privileged = (command, args) => native('/usr/bin/sudo', ['-kn', '-u', 'root', '-g', 'root', '--', `/usr/bin/${command}`, ...args]);
+  const sudoArgs = (command, args) => ['-kn', '-u', 'root', '-g', 'root', '--', `/usr/bin/${command}`, ...args];
+  // Chosen on the first privileged retry from this process's no_new_privs flag, then pinned for every recheck.
+  let privileged;
+  let refusal = '';
   const statArgs = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--'];
   const observationTypes = ['socket', 'namespace', 'directory', 'regular file'];
   const callerObservation = (expected) => native('stat', [...statArgs, socket, '/proc/self/ns/mnt', '/', expected]);
   const observe = (mode, initial = false) => {
     const result = mode === 'native' ? native('ss', ssArgs) : privileged('ss', ssArgs);
     if (!completeCommand(result)) return { failure: mode === 'native'
-      ? 'listener observation command did not complete cleanly' : 'passwordless listener observation was unavailable' };
+      ? 'listener observation command did not complete cleanly' : `passwordless listener observation was unavailable${refusal}` };
     const listener = dockerListener(result.stdout, sockets);
     const ownershipFailure = { failure: 'listener ownership observation is missing, ambiguous or unsupported' };
     if (!listener) return ownershipFailure;
@@ -524,12 +549,12 @@ function proveDockerFilesystem(host, run, platform, env) {
         if (!completeCommand(stat)) return { failure: 'filesystem identity observation command did not complete cleanly' };
         stdout = stat.stdout;
       } else {
-        // Caller identity must remain unprivileged: sudo's namespace and root are not the caller's.
+        // Caller identity must remain unprivileged: the privileged observer's namespace and root are not the caller's.
         const local = callerObservation(expected);
         if (!completeCommand(local)) return { failure: 'caller filesystem identity observation command did not complete cleanly' };
         if (!dockerIdentityRows(local.stdout, observationTypes)) return { failure: 'caller filesystem identity observation is unsupported or malformed' };
         const remote = privileged('stat', [...statArgs, `/proc/${pid}/fd/${fd}`, `/proc/${pid}/ns/mnt`, `/proc/${pid}/root`, `/proc/${pid}/exe`]);
-        if (!completeCommand(remote)) return { failure: `passwordless ${role} filesystem identity observation was unavailable` };
+        if (!completeCommand(remote)) return { failure: `passwordless ${role} filesystem identity observation was unavailable${refusal}` };
         if (!dockerIdentityRows(remote.stdout, observationTypes)) {
           return { failure: 'filesystem identity observation is unsupported or malformed' };
         }
@@ -545,6 +570,19 @@ function proveDockerFilesystem(host, run, platform, env) {
   let mode = 'native';
   let initial = observe(mode, true);
   if (initial.retry) {
+    // cat inherits this process's no_new_privs flag and user, so its own status is this process's.
+    const status = native('cat', ['/proc/self/status']);
+    if (!completeCommand(status)) return fail('process privilege status observation command did not complete cleanly');
+    const privilege = processPrivilege(status.stdout);
+    if (!privilege) return fail('process privilege status observation is unsupported or malformed');
+    if (privilege.noNewPrivs) {
+      const routeEnv = { ...nativeEnv, XDG_RUNTIME_DIR: `/run/user/${privilege.uid}` };
+      privileged = (command, args) =>
+        run('/usr/bin/systemd-run', [...SERVICE_MANAGER_ROUTE, '/usr/bin/sudo', ...sudoArgs(command, args)], { env: routeEnv });
+      refusal = `: ${NO_NEW_PRIVS_REFUSAL}`;
+    } else {
+      privileged = (command, args) => native('/usr/bin/sudo', sudoArgs(command, args));
+    }
     mode = 'privileged';
     initial = observe(mode);
   }

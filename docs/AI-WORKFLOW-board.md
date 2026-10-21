@@ -43,8 +43,9 @@ current-field read still lets it skip redundant writes and already-clear lanes.
 Add uses the shared read's issue id but still sends the idempotent add mutation even when the read found a card. The
 mutation's returned item id determines the target of the separate Status and configured routing-field writes. If a
 field update fails, add rereads the fields and reports their observed values, or an unknown outcome when that reread
-fails, with a safe whole-command retry. The publication verifier uses the shared item and archive flag only when the
-board read lacks a requested card, preserving its lagging, archived and confirmed-absence diagnoses.
+fails, with a safe whole-command retry. The publication verifier uses the shared item, its archive flag and its card
+fields only when the board read lacks a requested card: a closed archived card is checked from that item like a
+listed one, and the lagging, open-archived and confirmed-absence diagnoses stay distinct.
 
 ### The toolkit in another repository
 

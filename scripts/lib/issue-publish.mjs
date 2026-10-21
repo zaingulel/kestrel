@@ -6,16 +6,16 @@
 // board-config.mjs configures a routing field (Workstream here), a real routing
 // value; a board with no routing field is checked for Status only. Every named
 // issue must also carry exactly one of the kind labels board-config.mjs records:
-// none leaves its kind unstated and two state it twice. Given an Epic plus child numbers, its native children
-// must be exactly that set — a count alone passes when a forgotten child is
-// offset by a stray one. Given a single number, the count is reported rather
-// than asserted, because a lone number cannot distinguish a standalone issue
-// from an Epic whose children were forgotten: showing the count resolves that
-// ambiguity visibly.
+// none leaves its kind unstated and two state it twice. A closed card archived on the board is
+// read from its own board item and judged the same way; an open archived card fails. Given an
+// Epic plus child numbers, its native children must be exactly that set — a count alone passes
+// when a forgotten child is offset by a stray one. Given a single number, the count is reported
+// rather than asserted, because a lone number cannot distinguish a standalone issue from an Epic
+// whose children were forgotten: showing the count resolves that ambiguity visibly.
 
 import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD } from './board-config.mjs';
 import { lookupIssueBoardItem } from './board-move.mjs';
-import { isContentUnresolved, normalizeItem } from './board.mjs';
+import { isContentUnresolved, normalizeItem, parseNode } from './board.mjs';
 
 const FIELDS_VERIFIED = ROUTING_FIELD ? `Statuses and ${ROUTING_FIELD}s` : 'Statuses';
 const KIND_LABEL_NAMES = Object.values(KIND_LABELS);
@@ -118,23 +118,50 @@ function unresolvedReadMessage(number, unresolvedCount) {
   return `requested issue #${number} is not on this board read, which returned ${unresolvedCount} card(s) whose content did not resolve — a just-added card lags the board read, so #${number} may be one of them. Re-run this check before adding the card again.`;
 }
 
+// The card of a requested issue the board read could not list because it is archived: read
+// from the issue-side probe's own board item through the board read's parser, so it is judged
+// like a listed card. Only a closed card passes; an open one is the operator's to unarchive, and
+// an item that cannot be read as this issue's card is never accepted.
+function archivedClosedCard(number, item) {
+  const archived = `requested issue #${number} is archived on the board`;
+  let card;
+  try {
+    card = normalizeItem(parseNode(item));
+  } catch (err) {
+    throw new Error(`${archived}, but its board item could not be read: ${err.message}`);
+  }
+  if (card.number !== number) {
+    throw new Error(
+      `${archived}, but its board item could not be read: its content resolved to ${card.number == null ? 'no issue' : `#${card.number}`}`,
+    );
+  }
+  if (card.state !== 'CLOSED') {
+    throw new Error(`${archived} while still open, so this read — which lists only unarchived cards — does not show it; unarchive the card rather than adding it again.`);
+  }
+  return card;
+}
+
+// Returns the requested numbers that were verified from an archived board item.
 function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
+  const archivedNumbers = [];
   for (const number of numbers) {
-    const card = cardsByNumber.get(number);
+    let card = cardsByNumber.get(number);
     if (!card) {
-      // Absent every way out of here — the ordering only names the cause the operator should act
-      // on, and never softens the verdict on a read the check could not confirm (#572):
+      // Every way out of here but a closed archived card is a failure — the ordering only names
+      // the cause the operator should act on, and never softens the verdict on a read the check
+      // could not confirm (#572):
       // 1. the probe failed and the read returned unresolved cards → the evidence the read DID
       //    establish beats the evidence the probe could not: report the hedged cause;
       // 2. the probe failed on a clean read → no cause is established at all, so say only that;
       // 3. the issue reports an ARCHIVED item on this project → the board read lists unarchived
-      //    cards only, so it can never show this card: unarchiving is the only action that works;
+      //    cards only, so that item is the card's one view: a closed card is read from it and
+      //    checked below like a listed one, and an open card fails, since unarchiving is the only fix;
       // 4. it reports an unarchived item on THIS project → the board read lagged, positively identified;
       // 5. no item on this project → the hedged cause if the read was dirty, otherwise a
       //    confirmed absence, not an inference from nothing.
       let probe;
       try {
-        probe = lookupIssueBoardItem(number, ghExec).item;
+        probe = lookupIssueBoardItem(number, ghExec, { card: true }).item;
       } catch (err) {
         if (unresolvedCount > 0) throw new Error(unresolvedReadMessage(number, unresolvedCount));
         throw new Error(
@@ -142,14 +169,15 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
         );
       }
       if (probe?.isArchived) {
-        throw new Error(`requested issue #${number} is archived on the board, so this read — which lists only unarchived cards — does not show it; unarchive the card rather than adding it again.`);
-      }
-      if (probe) {
+        card = archivedClosedCard(number, probe);
+        archivedNumbers.push(number);
+      } else if (probe) {
         throw new Error(`requested issue #${number} is on the board but not in this board read, which lagged the card; re-run this check rather than adding the card again.`);
+      } else {
+        throw new Error(unresolvedCount > 0
+          ? unresolvedReadMessage(number, unresolvedCount)
+          : `requested issue #${number} is absent from the board`);
       }
-      throw new Error(unresolvedCount > 0
-        ? unresolvedReadMessage(number, unresolvedCount)
-        : `requested issue #${number} is absent from the board`);
     }
     if (ROUTING_FIELD && (typeof card.routing !== 'string' || card.routing.trim() === '')) {
       throw new Error(`requested issue #${number} has no non-empty ${ROUTING_FIELD}`);
@@ -167,6 +195,7 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
       );
     }
   }
+  return archivedNumbers;
 }
 
 function formatNumbers(numbers) {
@@ -175,29 +204,35 @@ function formatNumbers(numbers) {
 
 // The transport functions are injected so the verifier is deterministic in
 // tests. The board is deliberately read once, then the subject gets one native
-// `subIssues` query for its total and its child numbers: no raw project-list read
-// and no per-child lookup. The board-item probe costs a third request only on the
-// absence path, where the check is about to fail anyway.
+// `subIssues` query for its total and its child numbers: no raw project-list read.
+// The board-item probe is one extra request for each requested card the board read
+// lacks, which fails unless the probe finds it closed and archived.
 export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
   const { subjectNumber, childNumbers } = parseIssuePublishArgs(args);
   const standalone = childNumbers.length === 0;
   const requestedNumbers = [subjectNumber, ...childNumbers];
   const { cards, unresolvedCount } = boardCardsByNumber(fetchBoard(ghExec));
-  verifyBoardCards(requestedNumbers, cards, unresolvedCount, ghExec);
+  const archivedNumbers = verifyBoardCards(requestedNumbers, cards, unresolvedCount, ghExec);
 
   const response = ghExec([
     'api', 'graphql', '-f', `query=${nativeChildrenQuery(subjectNumber)}`,
   ]);
   const { totalCount, numbers: nativeChildNumbers } = parseNativeChildren(response);
   const requested = formatNumbers(requestedNumbers);
+  const verified = [
+    `issue-publish: board presence verified for ${requested}.`,
+    `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
+    `issue-publish: exactly one kind label verified for ${requested}.`,
+    ...(archivedNumbers.length === 0 ? [] : [
+      `issue-publish: closed cards archived on the board, verified from their own board items: ${formatNumbers(archivedNumbers)}.`,
+    ]),
+  ];
 
   // The standalone branch compares nothing, so a truncated page cannot mislead it:
   // `totalCount` is accurate however many nodes were read.
   if (standalone) {
     return [
-      `issue-publish: board presence verified for ${requested}.`,
-      `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
-      `issue-publish: exactly one kind label verified for ${requested}.`,
+      ...verified,
       `issue-publish: #${subjectNumber} verified as a standalone issue; it has ${totalCount} native child issues (none supplied; pass them as arguments to verify an Epic).`,
     ];
   }
@@ -222,9 +257,7 @@ export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
   }
 
   return [
-    `issue-publish: board presence verified for ${requested}.`,
-    `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
-    `issue-publish: exactly one kind label verified for ${requested}.`,
+    ...verified,
     `issue-publish: native child set verified: #${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`,
   ];
 }

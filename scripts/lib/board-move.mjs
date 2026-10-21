@@ -19,6 +19,7 @@
 import {
   BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PARKED_LANE, ROUTING_FIELD,
 } from './board-config.mjs';
+import { BOARD_CARD_FIELDS } from './board.mjs';
 
 // The value that clears a non-Status field (`--lane 12:none` releases a parked card).
 // Status is never cleared: an unfielded card is drift the board scan reports.
@@ -31,12 +32,15 @@ export function singleSelectFieldQuery(fieldName) {
     '{ ... on ProjectV2SingleSelectField { id options { id name } } } } } }';
 }
 
-// Read the issue side once, with the current field value only when requested.
-export function issueItemQuery(issueNumber, fieldName = null) {
+// Read the issue side once, with the current field value, or the board read's card fields so an
+// archived item parses like a listed card, only when requested.
+export function issueItemQuery(issueNumber, { fieldName = null, card = false } = {}) {
   const value = fieldName == null ? ''
     : `value: fieldValueByName(name: "${fieldName}") { ... on ProjectV2ItemFieldSingleSelectValue { name } } `;
+  const cardFields = card ? `${BOARD_CARD_FIELDS} ` : '';
   return `{ repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issue(number:${issueNumber}) ` +
-    '{ id projectItems(first:20) { totalCount nodes { id isArchived project { number } ' + value + '} } } } }';
+    '{ id projectItems(first:20) { totalCount nodes { id isArchived ' +
+    'project { number owner { ... on User { login } ... on Organization { login } } } ' + value + cardFields + '} } } } }';
 }
 
 // From a singleSelectFieldQuery response, the project id + field id + its options.
@@ -70,10 +74,12 @@ export function optionIdFor(options, statusName, fieldName = 'Status') {
   return opt.id;
 }
 
-// A complete nonmatching connection means absence; an unreadable one refuses.
+// The board item is the one on the configured owner's project of the configured number, since
+// another owner's project can share that number. A complete nonmatching connection means absence;
+// an unreadable one, a count that disagrees with its items, or two items on the board refuses.
 // Archived items stay visible here because the board read lists unarchived cards only.
-export function lookupIssueBoardItem(number, exec, fieldName = null) {
-  const graphqlResponse = exec(['api', 'graphql', '-f', `query=${issueItemQuery(number, fieldName)}`]);
+export function lookupIssueBoardItem(number, exec, { fieldName = null, card = false } = {}) {
+  const graphqlResponse = exec(['api', 'graphql', '-f', `query=${issueItemQuery(number, { fieldName, card })}`]);
   let payload;
   try {
     payload = typeof graphqlResponse === 'string' ? JSON.parse(graphqlResponse) : graphqlResponse;
@@ -102,6 +108,11 @@ export function lookupIssueBoardItem(number, exec, fieldName = null) {
       `issue #${number} has ${projectItems.totalCount} project items but only ${projectItems.nodes.length} fetched — raise the projectItems first: cap in issueItemQuery`,
     );
   }
+  if (projectItems.nodes.length > projectItems.totalCount) {
+    throw new Error(
+      `board item probe GraphQL response reports ${projectItems.totalCount} project items but returned ${projectItems.nodes.length}`,
+    );
+  }
   // A null node or project cannot establish absence; GraphQL errors stop the transport first.
   for (const node of projectItems.nodes) {
     if (!Number.isSafeInteger(node?.project?.number)) {
@@ -109,8 +120,20 @@ export function lookupIssueBoardItem(number, exec, fieldName = null) {
         `board item probe GraphQL response has a non-integer project number ${JSON.stringify(node?.project?.number)}`,
       );
     }
+    if (typeof node.project.owner?.login !== 'string' || node.project.owner.login === '') {
+      throw new Error(
+        `board item probe GraphQL response has a project with no owner login ${JSON.stringify(node?.project?.owner?.login)}`,
+      );
+    }
   }
-  const boardItem = projectItems.nodes.find((node) => node.project.number === BOARD_PROJECT_NUMBER);
+  const matches = projectItems.nodes.filter((node) =>
+    node.project.number === BOARD_PROJECT_NUMBER && node.project.owner.login === BOARD_OWNER);
+  if (matches.length > 1) {
+    throw new Error(
+      `board item probe GraphQL response has ${matches.length} items on project ${BOARD_OWNER}/${BOARD_PROJECT_NUMBER}; expected at most one`,
+    );
+  }
+  const [boardItem] = matches;
   if (boardItem && typeof boardItem.isArchived !== 'boolean') {
     throw new Error(
       `board item probe GraphQL response has a non-boolean isArchived ${JSON.stringify(boardItem.isArchived)}`,
@@ -170,7 +193,7 @@ export function moveCards(pairs, exec, fieldName = 'Status') {
       }
       const clear = fieldName !== 'Status' && statusName.trim().toLowerCase() === CLEAR_VALUE;
       const optionId = clear ? null : optionIdFor(options, statusName, fieldName);
-      const { item } = lookupIssueBoardItem(issueNumber, exec, fieldName);
+      const { item } = lookupIssueBoardItem(issueNumber, exec, { fieldName });
       if (!item) {
         throw new Error(ROUTING_FIELD
           ? `issue #${issueNumber} is not on the board — add it with Status and ${ROUTING_FIELD}: `

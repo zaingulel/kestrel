@@ -4,8 +4,9 @@
 // In-process cases run `main` with a fake `run` that answers only the command's own argument vectors over small
 // temporary trees; the runner proofs start real processes, and the CLI proofs run the command against real git.
 //
-// Recurring cost: small in-process native-observation cases, representative real-Git CLI fixtures and one live
-// Unix listener. No daemon, image or network service is started. Remove with the cleanup boundary.
+// Recurring cost: small in-process native-observation cases, representative real-Git CLI fixtures, one live
+// Unix listener and two short child Node processes carrying no_new_privs. No daemon, image or network service is
+// started. Remove with the cleanup boundary.
 
 import { spawnSync } from 'node:child_process';
 import {
@@ -74,6 +75,13 @@ const SYSTEMD_CALLER_VECTOR = [...CALLER_VECTOR.slice(0, -1), '/usr/lib/systemd/
 const DAEMON_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/71/fd/3', '/proc/71/ns/mnt', '/proc/71/root', '/proc/71/exe'];
 const SYSTEMD_PROC_VECTOR = ['-L', '-c', '%d:%i:%Hd:%Ld:%F', '--', '/proc/1/fd/9', '/proc/1/ns/mnt', '/proc/1/root', '/proc/1/exe'];
 const SUDO_PREFIX = ['-kn', '-u', 'root', '-g', 'root', '--'];
+// The process status names real user 4242 apart from its effective, saved and filesystem users, so a route taking
+// any other user fails.
+const PROCESS_STATUS = 'Name:\tnode\nUid:\t4242\t4343\t4444\t4545\nGid:\t4242\t4242\t4242\t4242\nNoNewPrivs:\t0\nSeccomp:\t0\n';
+const NO_NEW_PRIVS_STATUS = PROCESS_STATUS.replace('NoNewPrivs:\t0', 'NoNewPrivs:\t1');
+const ROUTE_PREFIX = ['--user', '--pipe', '--wait', '--quiet', '--collect', '--no-ask-password',
+  '--service-type=oneshot', '--setenv=LC_ALL=C', '--', '/usr/bin/sudo'];
+const NO_NEW_PRIVS_CAUSE = 'no_new_privs blocks sudo in this process and the user service manager route did not complete';
 
 // Fake Docker selection is synchronous and cannot inherit or permanently alter the caller's selection.
 function withoutDockerSelection(invoke) {
@@ -93,9 +101,12 @@ function withoutDockerSelection(invoke) {
 // A job worktree at <root>/wt on job/23 beside a main checkout at <root>/main, and a fake `run` answering only the
 // command's argument vectors from `state`: `docker` or `lsof` set to null is not installed, and any other call is
 // recorded in `unexpected` and answers status 99. The fake worktree removal deletes the directory, as git does;
-// `tracked` lists each worktree's tracked paths, `lsof.open` the files processes hold and `processes` the ps rows.
+// `tracked` lists each worktree's tracked paths, `lsof.open` the files processes hold and `processes` the ps rows;
+// `processStatus` is the status of this process (no no_new_privs flag unless set) and `privileged` answers both the
+// direct sudo and the user service manager route.
 function scenario(t) {
   const capturedPath = { ...process.env }.PATH;
+  const nativeEnv = { ...(capturedPath === undefined ? {} : { PATH: capturedPath }), LC_ALL: 'C' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'closeout-cleanup-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const mainDir = join(root, 'main');
@@ -116,6 +127,16 @@ function scenario(t) {
   const calls = [];
   const executions = [];
   const unexpected = [];
+  const privilegedAnswer = (sudoArgs) => {
+    assert.deepEqual(sudoArgs.slice(0, 6), SUDO_PREFIX);
+    const binary = sudoArgs[6];
+    assert.ok(['/usr/bin/ss', '/usr/bin/stat'].includes(binary));
+    const operands = sudoArgs.slice(7);
+    if (binary === '/usr/bin/ss') assert.deepEqual(operands, PROOF_VECTORS.ss);
+    else assert.ok([DAEMON_PROC_VECTOR, SYSTEMD_PROC_VECTOR, SYSTEMD_PROC_VECTOR.with(4, '/proc/1/fd/10')].some((vector) => JSON.stringify(vector) === JSON.stringify(operands)));
+    const result = state.privileged?.[binary === '/usr/bin/ss' ? 'ss' : 'stat'] ?? { absent: true };
+    return typeof result === 'function' ? result(operands) : result;
+  };
   const answer = (name, args, options) => {
     const key = args.join(' ');
     if (name === 'git') {
@@ -179,18 +200,19 @@ function scenario(t) {
       state.onDocker?.(args.slice(2));
       return result;
     }
+    if (name === 'systemd-run') {
+      assert.deepEqual(options.env, { ...nativeEnv, XDG_RUNTIME_DIR: '/run/user/4242' });
+      assert.deepEqual(args.slice(0, ROUTE_PREFIX.length), ROUTE_PREFIX);
+      return privilegedAnswer(args.slice(ROUTE_PREFIX.length));
+    }
+    if (name === 'cat') {
+      assert.deepEqual(options.env, nativeEnv);
+      assert.deepEqual(args, ['/proc/self/status']);
+      return state.processStatus ?? reply(0, PROCESS_STATUS);
+    }
     if (name === 'sudo' || name in PROOF_VECTORS) {
-      assert.deepEqual(options.env, { ...(capturedPath === undefined ? {} : { PATH: capturedPath }), LC_ALL: 'C' });
-      if (name === 'sudo') {
-        assert.deepEqual(args.slice(0, 6), SUDO_PREFIX);
-        const binary = args[6];
-        assert.ok(['/usr/bin/ss', '/usr/bin/stat'].includes(binary));
-        const operands = args.slice(7);
-        if (binary === '/usr/bin/ss') assert.deepEqual(operands, PROOF_VECTORS.ss);
-        else assert.ok([DAEMON_PROC_VECTOR, SYSTEMD_PROC_VECTOR, SYSTEMD_PROC_VECTOR.with(4, '/proc/1/fd/10')].some((vector) => JSON.stringify(vector) === JSON.stringify(operands)));
-        const result = state.privileged?.[binary === '/usr/bin/ss' ? 'ss' : 'stat'] ?? { absent: true };
-        return typeof result === 'function' ? result(operands) : result;
-      }
+      assert.deepEqual(options.env, nativeEnv);
+      if (name === 'sudo') return privilegedAnswer(args);
       let fallback = PROOF_REPLIES[name];
       if (name === 'stat') {
         const vectors = [[PROOF_VECTORS.stat, PROOF_STAT], [SYSTEMD_VECTOR, SYSTEMD_STAT],
@@ -1812,6 +1834,12 @@ function passwordlessProof(s, owners = ACTIVATED_SS) {
   };
 }
 
+// The same proof, with this process carrying no_new_privs, so the observations go through the user service manager.
+function routedProof(s, owners = ACTIVATED_SS) {
+  passwordlessProof(s, owners);
+  s.state.processStatus = reply(0, NO_NEW_PRIVS_STATUS);
+}
+
 function proofTargets(s) {
   const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
   s.state.docker.containers = [
@@ -1833,16 +1861,18 @@ function assertProofRetained(s, result, scratch) {
 }
 
 test('ANTI-REGRESSION: passwordless Docker proof verifies every socket activation owner', async (t) => {
-  for (const [name, privileged, owners] of [
-    ['native singleton', false, PROOF_SS], ['native activated', false, ACTIVATED_SS],
-    ['privileged singleton', true, PROOF_SS], ['privileged activated', true, ACTIVATED_SS],
-    ['reversed display order', true, ACTIVATED_SS.replace('("dockerd",pid=71,fd=3),("systemd",pid=1,fd=9)',
+  for (const [name, mode, owners] of [
+    ['native singleton', 'native', PROOF_SS], ['native activated', 'native', ACTIVATED_SS],
+    ['privileged singleton', 'privileged', PROOF_SS], ['privileged activated', 'privileged', ACTIVATED_SS],
+    ['routed singleton', 'routed', PROOF_SS], ['routed activated', 'routed', ACTIVATED_SS],
+    ['reversed display order', 'privileged', ACTIVATED_SS.replace('("dockerd",pid=71,fd=3),("systemd",pid=1,fd=9)',
       '("systemd",pid=1,fd=9),("dockerd",pid=71,fd=3)')],
   ]) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
-      if (privileged) passwordlessProof(s, owners);
+      if (mode === 'privileged') passwordlessProof(s, owners);
+      else if (mode === 'routed') routedProof(s, owners);
       else s.state.native.ss = reply(0, owners);
       // A display-order-only change between rechecks must keep the same canonical identity.
       if (name === 'reversed display order') {
@@ -1857,6 +1887,10 @@ test('ANTI-REGRESSION: passwordless Docker proof verifies every socket activatio
       assert.deepEqual(s.state.docker.containers.map(({ Id, State }) => [Id, State.Running]), [[ID_B, true]]);
       assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
       assert.deepEqual(dockerCalls(s, 'rm'), [['docker', 'rm', ID_A]]);
+      if (mode === 'routed') {
+        assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
+        assert.ok(s.executions.some(({ command }) => command === '/usr/bin/systemd-run'));
+      }
       assert.deepEqual(s.unexpected, []);
     });
   }
@@ -1907,11 +1941,12 @@ test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and l
       assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
     });
   }
-  for (const change of ['remove systemd', 'change systemd descriptor', 'change systemd identity', 'one failed recheck']) {
+  for (const change of ['remove systemd', 'change systemd descriptor', 'change systemd identity', 'one failed recheck', 'one failed routed recheck']) {
     await t.test(change, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
-      passwordlessProof(s);
+      if (change === 'one failed routed recheck') routedProof(s);
+      else passwordlessProof(s);
       let failedReads = 0;
       s.state.onDocker = ([verb]) => {
         if (verb !== 'stop') return;
@@ -1923,13 +1958,14 @@ test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and l
           s.state.privileged.stat = (args) => reply(0, args[4] === '/proc/1/fd/9'
             ? SYSTEMD_PROC_STAT.replace('60:81:', '60:82:') : DAEMON_PROC_STAT);
         }
-        if (change === 'one failed recheck') s.state.privileged.ss = () => ++failedReads === 1 ? reply(1) : reply(0, ACTIVATED_SS);
+        if (change.startsWith('one failed')) s.state.privileged.ss = () => ++failedReads === 1 ? reply(1) : reply(0, ACTIVATED_SS);
       };
       const result = await s.cleanup(['23', '--scratch', scratch]);
       assert.equal(result.exitCode, 4);
-      const reason = change === 'one failed recheck'
-        ? 'native identity changed or became unreadable: passwordless listener observation was unavailable'
-        : 'native identity changed since initial observation';
+      const reason = {
+        'one failed recheck': 'native identity changed or became unreadable: passwordless listener observation was unavailable',
+        'one failed routed recheck': `native identity changed or became unreadable: passwordless listener observation was unavailable: ${NO_NEW_PRIVS_CAUSE}`,
+      }[change] ?? 'native identity changed since initial observation';
       assert.deepEqual(result.out.filter((line) => line.startsWith('retained container ')), [
         `retained container aaaaaaaaaaaa: Docker filesystem relationship is unverifiable: ${reason}`,
       ]);
@@ -1939,27 +1975,35 @@ test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and l
       assert.ok(existsSync(s.worktree));
       assertWorktreeNotRemoved(s);
       assert.equal(s.state.docker.containers[1].State.Running, true);
-      if (change === 'one failed recheck') assert.equal(failedReads, 1);
+      if (change.startsWith('one failed')) assert.equal(failedReads, 1);
       assert.deepEqual(s.unexpected, []);
     });
   }
 });
 
 test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', async (t) => {
-  for (const trigger of ['native success', 'ownerless']) {
+  for (const trigger of ['native success', 'ownerless', 'ownerless under no_new_privs']) {
     await t.test(trigger, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
-      if (trigger !== 'native success') passwordlessProof(s);
+      if (trigger === 'ownerless') passwordlessProof(s);
+      if (trigger === 'ownerless under no_new_privs') routedProof(s);
       const result = await s.cleanup(['23', '--scratch', scratch]);
       assert.equal(result.exitCode, 0, result.out.join('\n'));
       const sudo = s.executions.filter(({ command }) => command === '/usr/bin/sudo');
-      if (trigger === 'native success') assert.deepEqual(sudo, []);
+      const routes = s.executions.filter(({ command }) => command === '/usr/bin/systemd-run');
+      const statuses = s.executions.filter(({ command }) => command === 'cat');
+      if (trigger === 'native success') assert.deepEqual([...sudo, ...routes, ...statuses], []);
       else {
-        assert.ok(sudo.length > 0);
-        assert.deepEqual(sudo[0].args, [...SUDO_PREFIX, '/usr/bin/ss', ...PROOF_VECTORS.ss]);
-        for (const { command, args } of sudo) {
-          assert.equal(command, '/usr/bin/sudo');
+        assert.equal(statuses.length, 1);
+        const routed = trigger !== 'ownerless';
+        assert.deepEqual(routed ? sudo : routes, []);
+        for (const { args } of routes) assert.deepEqual(args.slice(0, ROUTE_PREFIX.length), ROUTE_PREFIX);
+        // What sudo was asked to run: directly, or after the route's own flags.
+        const asked = routed ? routes.map(({ args }) => args.slice(ROUTE_PREFIX.length)) : sudo.map(({ args }) => args);
+        assert.ok(asked.length > 0);
+        assert.deepEqual(asked[0], [...SUDO_PREFIX, '/usr/bin/ss', ...PROOF_VECTORS.ss]);
+        for (const args of asked) {
           assert.deepEqual(args.slice(0, 6), SUDO_PREFIX);
           if (args[6] === '/usr/bin/stat') {
             assert.ok([DAEMON_PROC_VECTOR, SYSTEMD_PROC_VECTOR].some((vector) => JSON.stringify(vector) === JSON.stringify(args.slice(7))));
@@ -2001,22 +2045,48 @@ test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', 
     ['absent', { absent: true }], ['denied', reply(1, '', 'fixture-secret')], ['failed', { failed: 'ETIMEDOUT' }],
     ['stderr', reply(0, ACTIVATED_SS, 'fixture warning')], ['partial', reply(0, 'u_str LISTEN\n')],
   ]) {
-    for (const stage of ['ss', 'stat']) {
-      await t.test(`privileged ${stage} ${name}`, async (t) => {
+    for (const [mode, stage] of [['privileged', 'ss'], ['privileged', 'stat'], ['routed', 'ss'], ['routed', 'stat']]) {
+      await t.test(`${mode} ${stage} ${name}`, async (t) => {
         const s = scenario(t);
         const scratch = proofTargets(s);
-        passwordlessProof(s);
+        if (mode === 'routed') routedProof(s);
+        else passwordlessProof(s);
         s.state.privileged[stage] = stage === 'stat' && name === 'stderr' ? reply(0, DAEMON_PROC_STAT, 'fixture warning') : result;
         const observed = await s.cleanup(['23', '--scratch', scratch]);
         assertProofRetained(s, observed, scratch);
+        const cause = mode === 'routed' ? `: ${NO_NEW_PRIVS_CAUSE}` : '';
         const reason = name === 'partial'
           ? stage === 'ss' ? 'listener ownership observation is missing, ambiguous or unsupported'
             : 'filesystem identity observation is unsupported or malformed'
-          : stage === 'ss' ? 'passwordless listener observation was unavailable'
-            : 'passwordless systemd filesystem identity observation was unavailable';
+          : stage === 'ss' ? `passwordless listener observation was unavailable${cause}`
+            : `passwordless systemd filesystem identity observation was unavailable${cause}`;
         assert.equal(observed.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+        if (mode === 'routed') assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
       });
     }
+  }
+  const UNFINISHED = 'process privilege status observation command did not complete cleanly';
+  const MALFORMED = 'process privilege status observation is unsupported or malformed';
+  for (const [name, status, reason] of [
+    ['absent', { absent: true }, UNFINISHED], ['failed', { failed: 'EACCES' }, UNFINISHED], ['nonzero', reply(1), UNFINISHED],
+    ['stderr', reply(0, PROCESS_STATUS, 'fixture warning'), UNFINISHED],
+    ['missing flag', reply(0, PROCESS_STATUS.replace('NoNewPrivs:\t0\n', '')), MALFORMED],
+    ['unknown flag value', reply(0, PROCESS_STATUS.replace('NoNewPrivs:\t0', 'NoNewPrivs:\t2')), MALFORMED],
+    ['duplicate flag', reply(0, PROCESS_STATUS + 'NoNewPrivs:\t1\n'), MALFORMED],
+    ['missing user', reply(0, PROCESS_STATUS.replace('Uid:\t4242\t4343\t4444\t4545\n', '')), MALFORMED],
+    ['noncanonical user', reply(0, PROCESS_STATUS.replace('Uid:\t4242', 'Uid:\t04242')), MALFORMED],
+    ['truncated', reply(0, PROCESS_STATUS.slice(0, -1)), MALFORMED],
+  ]) {
+    await t.test(`process status ${name}`, async (t) => {
+      const s = scenario(t);
+      const scratch = proofTargets(s);
+      passwordlessProof(s);
+      s.state.processStatus = status;
+      const result = await s.cleanup(['23', '--scratch', scratch]);
+      assertProofRetained(s, result, scratch);
+      assert.equal(result.out[0], `retained scratch ${scratch}: docker failed: Docker filesystem relationship is unverifiable: ${reason}`);
+      assert.deepEqual(s.executions.filter(({ command }) => ['/usr/bin/sudo', '/usr/bin/systemd-run'].includes(command)), []);
+    });
   }
   for (const [name, baseline] of [['partial', reply(0, 'partial\n')], ['stderr', reply(0, CALLER_STAT, 'fixture warning')], ['nonzero', reply(1)]]) {
     await t.test(`privileged caller baseline ${name}`, async (t) => {
@@ -2047,6 +2117,111 @@ test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', 
     assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
   });
 });
+
+const nativeKey = (...argv) => JSON.stringify(argv);
+const routedKey = (binary, operands) => nativeKey('/usr/bin/systemd-run', ...ROUTE_PREFIX, ...SUDO_PREFIX, binary, ...operands);
+const ROUTED_SS = routedKey('/usr/bin/ss', PROOF_VECTORS.ss);
+const ROUTED_STAT = routedKey('/usr/bin/stat', DAEMON_PROC_VECTOR);
+// The child imports the command and answers every call from its reply table except a `cat` of its own process
+// status, which runs for real so the kernel reports the flag; it prints what it saw as JSON.
+const NO_NEW_PRIVS_CHILD = `
+import { readFileSync } from 'node:fs';
+const { target, replies, cli, lib } = JSON.parse(readFileSync(0, 'utf8'));
+const { main } = await import(cli);
+const { runCommand } = await import(lib);
+const calls = [];
+const unexpected = [];
+const run = (command, args, options = {}) => {
+  const key = JSON.stringify([command, ...args]);
+  let result = key === JSON.stringify(['cat', '/proc/self/status']) ? runCommand(command, args, options) : replies[key];
+  if (!result) {
+    unexpected.push([command, ...args]);
+    result = { status: 99, stdout: '', stderr: '' };
+  }
+  calls.push({ command, args, env: options.env, result });
+  return result;
+};
+const out = [];
+const exitCode = main(['--check', target], { run, output: { log: (line) => out.push(line), error: (line) => out.push(line) } });
+process.stdout.write(JSON.stringify({ exitCode, out, calls, unexpected }));
+`;
+
+// `--check` of a fresh file in a child Node process that really carries no_new_privs, whose native listener shows no
+// owner: { target, exitCode, out, calls, unexpected }, or undefined, after a skip, when no child can carry the flag.
+function checkWithNoNewPrivs(t, overrides = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'closeout-cleanup-nnp-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = placeFile(join(root, 'scratch.txt'));
+  const replies = {
+    [nativeKey('docker', 'context', 'inspect', '--format', '{{json .Endpoints.docker}}')]: reply(0, JSON.stringify({ Host: PROOF_HOST })),
+    [nativeKey('readlink', ...PROOF_VECTORS.readlink)]: PROOF_REPLIES.readlink,
+    [nativeKey('sh', ...PROOF_VECTORS.sh)]: PROOF_REPLIES.sh,
+    [nativeKey('ss', ...PROOF_VECTORS.ss)]: reply(0, OWNERLESS_SS),
+    [nativeKey('stat', ...CALLER_VECTOR)]: reply(0, CALLER_STAT),
+    [ROUTED_SS]: reply(0, PROOF_SS),
+    [ROUTED_STAT]: reply(0, DAEMON_PROC_STAT),
+    [nativeKey('docker', '--host', PROOF_HOST, 'container', 'ls', '--all', '--quiet', '--no-trunc')]: reply(0),
+    [nativeKey('lsof', '-nP', '-Fpcfn', target)]: reply(1),
+    [nativeKey('ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'args=')]: reply(0, '      1       0 /sbin/init\n'),
+    ...overrides,
+  };
+  const request = {
+    target, replies, cli: new URL('../closeout-cleanup.mjs', import.meta.url).href,
+    lib: new URL('./closeout-cleanup.mjs', import.meta.url).href,
+  };
+  // The kernel hands the flag to every child, so a process that carries it needs no helper to pass it on.
+  const carries = /^NoNewPrivs:\t1$/m.test(readFileSync('/proc/self/status', 'utf8'));
+  const childArgs = ['--input-type=module', '-e', NO_NEW_PRIVS_CHILD];
+  const child = spawnSync(carries ? process.execPath : 'setpriv', carries ? childArgs : ['--no-new-privs', process.execPath, ...childArgs], {
+    input: JSON.stringify(request), env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 60_000,
+  });
+  if (child.error?.code === 'ENOENT') {
+    t.skip('setpriv is not installed and this process lacks no_new_privs');
+    return undefined;
+  }
+  assert.equal(child.status, 0, child.stderr);
+  return { target, ...JSON.parse(child.stdout) };
+}
+
+// The kernel's own status line is the oracle that the child carried the flag, and the route never reaches sudo directly.
+function assertRealFlagRoute(observed) {
+  const status = observed.calls.find(({ command }) => command === 'cat');
+  assert.equal(status.result.status, 0);
+  assert.match(status.result.stdout, /^NoNewPrivs:\t1$/m);
+  assert.deepEqual(observed.calls.filter(({ command }) => command === '/usr/bin/sudo'), []);
+  for (const { env } of observed.calls.filter(({ command }) => command === '/usr/bin/systemd-run')) {
+    assert.deepEqual(env, { PATH: process.env.PATH, LC_ALL: 'C', XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` });
+  }
+  assert.deepEqual(observed.unexpected, []);
+}
+
+const routedCalls = (observed) => observed.calls
+  .filter(({ command }) => command === '/usr/bin/systemd-run').map(({ command, args }) => nativeKey(command, ...args));
+
+test('ANTI-REGRESSION: real no_new_privs routes privileged Docker observation through the user service manager and names the flag when refused',
+  { skip: process.platform !== 'linux' && 'no_new_privs is a Linux process flag' }, async (t) => {
+    await t.test('routed observation clears the path', (t) => {
+      const observed = checkWithNoNewPrivs(t);
+      if (!observed) return;
+      assert.equal(observed.exitCode, 0, observed.out.join('\n'));
+      assert.deepEqual(observed.out, [`unused path ${observed.target}`, SUMMARY(1, 0, 0, 0)]);
+      assert.deepEqual(routedCalls(observed), [ROUTED_SS, ROUTED_STAT, ROUTED_SS, ROUTED_STAT]);
+      assertRealFlagRoute(observed);
+    });
+    await t.test('refused route names no_new_privs', (t) => {
+      const observed = checkWithNoNewPrivs(t, {
+        [ROUTED_SS]: reply(1, '', 'Failed to connect to user scope bus via local transport: No such file or directory\n'),
+      });
+      if (!observed) return;
+      assert.equal(observed.exitCode, 4);
+      assert.deepEqual(observed.out, [
+        `unverifiable path ${observed.target}: docker failed: Docker filesystem relationship is unverifiable: passwordless listener observation was unavailable: ${NO_NEW_PRIVS_CAUSE}`,
+        SUMMARY(0, 0, 0, 1),
+      ]);
+      assert.deepEqual(routedCalls(observed), [ROUTED_SS]);
+      assertRealFlagRoute(observed);
+    });
+  });
 
 test('Docker filesystem proof rejects incomplete, ambiguous or mismatched native observations', async (t) => {
   const cases = [];

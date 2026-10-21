@@ -296,7 +296,7 @@ export function checkAgentsDir(dir) {
 // slips past (trailing space, quotes, a form feed, a no-break or ideographic space).
 const FABLE_LINE = /^model:[^\S\n]*["']?fable["']?[^\S\n]*$/m;
 const ASTRA_LINE = /^model[^\S\n]*=[^\S\n]*["']gpt-6-astra["'][^\S\n]*$/m;
-const FABLE_SEATS = ['oracle', 'security-reviewer'];
+const FABLE_SEATS = ['oracle'];
 const ASTRA_SEATS = ['architect', 'oracle', 'security-reviewer'];
 const TURN_LIMITED_SEATS = ['oracle', 'security-reviewer'];
 const TURN_LIMIT_LINE = /^maxTurns: (?:[1-9]|[1-8]\d|90)$/;
@@ -314,8 +314,8 @@ export function checkSeatPolicy(filename, source) {
   const costliestSeats = isClaude ? FABLE_SEATS : ASTRA_SEATS;
   const found = lines.filter((line) => costliest.test(line));
   if (found.length > 0 && !costliestSeats.includes(seat)) {
-    const [runtime, seatList] = isClaude ? ['Claude', 'oracle and security-reviewer'] : ['Codex', 'architect, oracle and security-reviewer'];
-    problems.push(`${filename}: the costliest ${runtime} model may sit only on the ${seatList} seats; found ${JSON.stringify(found)}`);
+    const [runtime, seatList] = isClaude ? ['Claude', 'oracle seat'] : ['Codex', 'architect, oracle and security-reviewer seats'];
+    problems.push(`${filename}: the costliest ${runtime} model may sit only on the ${seatList}; found ${JSON.stringify(found)}`);
   }
 
   if (isClaude && TURN_LIMITED_SEATS.includes(seat)) {

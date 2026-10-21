@@ -1,7 +1,7 @@
 ---
 name: security-reviewer
 description: "Trust-perimeter review for changes that WIDEN a surface in the `security review` row of the Surfaces table in `AGENTS.md`. Read-only; reports findings, doesn't fix. Overkill on an ordinary diff — spawn only when the trust surface moved."
-model: fable
+model: opus
 effort: xhigh
 maxTurns: 90
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch

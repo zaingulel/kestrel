@@ -21,7 +21,12 @@ Owner-invoked to park unfinished work. Completed work uses `closeout`.
    those outward actions. An invocation that explicitly names both push and draft pull-request publication
    satisfies this gate.
 4. **Push the branch** and open or update the draft pull request (`gh pr create --draft`) with the prepared body.
-5. **Board.** `node scripts/board-move.mjs <issue> Ready`, so the card is startable by the next session.
+5. **Board.** `node scripts/board-move.mjs <issue> Ready`, so the card is startable by the next session. A card whose
+   newest claim names `Claude Code cloud` stays in its column under that claim instead, so that the next session's
+   work-pick offers its delivery first, as the `resume` skill says under "Cloud build". In a cloud session step 4 opens
+   the draft with the built-in GitHub tools, and this step is skipped: the card stays where it is for a local session.
+   A local session waiting for a cloud build's draft has no job branch of its own: it skips steps 1 to 4 and ends its
+   wait.
 6. **Leave the worktree in place.** The next session finds the branch in `resume` step 1.
 
 Report the branch, the pull request number, and the one-line next step.

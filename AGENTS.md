@@ -49,7 +49,7 @@ The session that talks to the owner coordinates: it plans the cards that need no
 builder seat, settles reviews, and delivers; it never builds. Residual judgment that would make a handoff
 unreliable is resolved in the plan or the slice is split smaller. In every session, job or not, discovery wider
 than a couple of files goes to the `explorer` seat, so its conclusion reaches the main thread and its file dumps do
-not. The costliest Claude model, Fable, is reached only through the `oracle` and `security-reviewer` seats, and the
+not. The costliest Claude model, Fable, is reached only through the `oracle` seat, and the
 costliest Codex model, Astra, only through the
 `architect`, `oracle` and `security-reviewer` seats; the session and the builders run below that tier, each
 builder at the model its seat file sets. Every subagent is one of the named seats above, dispatched by its seat
@@ -80,6 +80,8 @@ failure modes and key files, and none of them owns a rule.
 Start every owner-facing decision in plain language before any workflow vocabulary: what happened, what the owner
 must decide, the options. The owner reads pull request descriptions and screenshots, not diffs; write for that
 reader. `resume` starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
+Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
+for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
 Report outcomes as they are: show the failing output, name any step skipped and anything guessed, never invent a
 number, and call work done only once it is verified; a value that cannot be computed fails loudly with its cause,
 never as a blank or zero that reads as real.
@@ -92,7 +94,7 @@ Every rule this file does not hold in full has one home:
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
 | Which builder seat a slice goes to; the machinery admissions, the friction route and how machinery leaves; what a plan carries for a change to how the interface looks, and who decides where the `frontend-design` skill and the design system disagree; and the steps of plan approval where a repository has turned it on: how the setting is read, how the plan is presented and revised, and what a resumed session does | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's exact form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
-| The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
+| The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, its same-family form in a cloud build, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
 | Every other rule of the external review, in a repository that has turned that add-on on: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
 | How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; how a repository turns the external review add-on on or off; how a repository turns the documentation sweep off and what that leaves out; and what a repository needs before it runs the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
 | The tracker and triage vocabulary the vendored skills expect to have been provided | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
