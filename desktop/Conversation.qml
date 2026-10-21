@@ -24,6 +24,7 @@ FocusScope {
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
     property string placementAdvisory: ""
+    property string troubleAdvisory: ""
     property var displayedTurns: []
     property int displayedCount: 0
     property string conversationSession: ""
@@ -40,6 +41,8 @@ FocusScope {
     readonly property int titleLineHeight: Math.max(1, Math.round(20 * effectiveTextScale))
     readonly property bool listeningFeed: conversationAvailable && currentState === "listening"
     readonly property int bodyLineHeight: Math.max(1, Math.round(21 * effectiveTextScale))
+    // One body line plus the bubble's vertical padding of 8 above and 8 below.
+    readonly property int transcriptMinimum: bodyLineHeight + 16
     property int editRevision: 0
     property int submittedRevision: 0
     property int pendingAttempt: 0
@@ -81,6 +84,19 @@ FocusScope {
             })[status]
             root.pendingAttempt = 0
         }
+    }
+    function scrollView(view, amount) {
+        view.contentY = Math.max(0, Math.min(Math.max(0, view.contentHeight - view.height), view.contentY + amount))
+    }
+    function scrollKey(view, event) {
+        if (event.key === Qt.Key_Up) scrollView(view, -bodyLineHeight)
+        else if (event.key === Qt.Key_Down) scrollView(view, bodyLineHeight)
+        else if (event.key === Qt.Key_PageUp) scrollView(view, -view.height)
+        else if (event.key === Qt.Key_PageDown) scrollView(view, view.height)
+        else if (event.key === Qt.Key_Home) view.contentY = 0
+        else if (event.key === Qt.Key_End) view.contentY = Math.max(0, view.contentHeight - view.height)
+        else return
+        event.accepted = true
     }
     function announceTurn(text) { root.Accessible.announce(text, Accessible.Polite) }
     onSubmissionNoticeChanged: {
@@ -269,7 +285,7 @@ FocusScope {
                 hoverEnabled: true
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close panel"
-                KeyNavigation.tab: transcript
+                KeyNavigation.tab: advisories.keyboardStop ? advisories : transcript
                 KeyNavigation.backtab: sendButton.enabled ? sendButton : composer
                 contentItem: Text {
                     id: closeGlyph
@@ -301,17 +317,70 @@ FocusScope {
                 Keys.onEnterPressed: root.closeRequested()
             }
         }
-        Text {
+        Flickable {
+            id: advisories
+            objectName: "headerAdvisories"
             width: parent.width
-            visible: text.length > 0
-            text: root.placementAdvisory
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: root.ink
-            font.family: "monospace"
-            font.pixelSize: root.bodyPixelSize
-            lineHeight: root.bodyLineHeight
-            lineHeightMode: Text.FixedHeight
+            visible: root.troubleAdvisory.length > 0 || root.placementAdvisory.length > 0
+            // Never takes the transcript below one bubble line; what does not fit scrolls.
+            height: Math.min(bands.height, Math.max(0,
+                footer.y - 12 - root.transcriptMinimum - header.y - headerRow.height - header.spacing))
+            contentWidth: width
+            contentHeight: bands.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            readonly property bool keyboardStop: contentHeight > height
+            activeFocusOnTab: keyboardStop
+            onKeyboardStopChanged: if (!keyboardStop && focus && root.activeFocus) transcript.forceActiveFocus()
+            Accessible.role: Accessible.StaticText
+            Accessible.name: [root.troubleAdvisory, root.placementAdvisory].filter(function(text) { return text.length > 0 }).join(" ")
+            Accessible.focusable: keyboardStop
+            KeyNavigation.tab: transcript
+            KeyNavigation.backtab: closeButton
+            Keys.onPressed: function(event) { root.scrollKey(advisories, event) }
+            Rectangle {
+                x: 0
+                y: advisories.contentY
+                width: advisories.width
+                height: advisories.height
+                color: "transparent"
+                border.width: advisories.activeFocus ? 2 : 0
+                border.color: root.accentInk
+                z: 1
+                Accessible.ignored: true
+            }
+            Column {
+                id: bands
+                width: advisories.width
+                spacing: 9
+                Text {
+                    objectName: "troubleAdvisory"
+                    width: parent.width
+                    visible: text.length > 0
+                    text: root.troubleAdvisory
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.bodyPixelSize
+                    lineHeight: root.bodyLineHeight
+                    lineHeightMode: Text.FixedHeight
+                    Accessible.ignored: true
+                }
+                Text {
+                    width: parent.width
+                    visible: text.length > 0
+                    text: root.placementAdvisory
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.bodyPixelSize
+                    lineHeight: root.bodyLineHeight
+                    lineHeightMode: Text.FixedHeight
+                    Accessible.ignored: true
+                }
+            }
         }
     }
     Flickable {
@@ -345,25 +414,13 @@ FocusScope {
         Accessible.readOnly: true
         Accessible.focusable: true
         KeyNavigation.tab: composer
-        KeyNavigation.backtab: closeButton
+        KeyNavigation.backtab: advisories.keyboardStop ? advisories : closeButton
 
-        function scrollBy(amount) {
-            contentY = Math.max(0, Math.min(Math.max(0, contentHeight - height), contentY + amount))
-        }
-        Accessible.onScrollUpAction: scrollBy(-root.bodyLineHeight)
-        Accessible.onScrollDownAction: scrollBy(root.bodyLineHeight)
-        Accessible.onPreviousPageAction: scrollBy(-height)
-        Accessible.onNextPageAction: scrollBy(height)
-        Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_Up) scrollBy(-root.bodyLineHeight)
-            else if (event.key === Qt.Key_Down) scrollBy(root.bodyLineHeight)
-            else if (event.key === Qt.Key_PageUp) scrollBy(-height)
-            else if (event.key === Qt.Key_PageDown) scrollBy(height)
-            else if (event.key === Qt.Key_Home) contentY = 0
-            else if (event.key === Qt.Key_End) contentY = Math.max(0, contentHeight - height)
-            else return
-            event.accepted = true
-        }
+        Accessible.onScrollUpAction: root.scrollView(transcript, -root.bodyLineHeight)
+        Accessible.onScrollDownAction: root.scrollView(transcript, root.bodyLineHeight)
+        Accessible.onPreviousPageAction: root.scrollView(transcript, -height)
+        Accessible.onNextPageAction: root.scrollView(transcript, height)
+        Keys.onPressed: function(event) { root.scrollKey(transcript, event) }
         Rectangle {
             x: 0
             y: transcript.contentY
@@ -624,6 +681,26 @@ FocusScope {
         visible: transcript.contentY + transcript.height < transcript.contentHeight
         Accessible.ignored: true
     }
+    Rectangle {
+        objectName: "advisoryTopRule"
+        x: header.x
+        y: header.y + advisories.y
+        width: advisories.width
+        height: 1
+        color: root.edgeRule
+        visible: advisories.contentY > 0
+        Accessible.ignored: true
+    }
+    Rectangle {
+        objectName: "advisoryBottomRule"
+        x: header.x
+        y: header.y + advisories.y + advisories.height - height
+        width: advisories.width
+        height: 1
+        color: root.edgeRule
+        visible: advisories.contentY + advisories.height < advisories.contentHeight
+        Accessible.ignored: true
+    }
     Item {
         id: footer
         objectName: "composerFooter"
@@ -701,7 +778,7 @@ FocusScope {
                             event.accepted = true
                             if (!event.isAutoRepeat) root.sendDraft()
                         } else if (event.key === Qt.Key_PageUp || event.key === Qt.Key_PageDown) {
-                            transcript.scrollBy(event.key === Qt.Key_PageUp ? -transcript.height : transcript.height)
+                            root.scrollView(transcript, event.key === Qt.Key_PageUp ? -transcript.height : transcript.height)
                             event.accepted = true
                         }
                     }

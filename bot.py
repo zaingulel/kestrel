@@ -48,7 +48,10 @@ from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, MEMORY_ERROR, child_environment, valid_desktop_arguments
-from speech import ConversationSynthesisFailedFrame, EchoRemoval, LaptopAudioTransport, NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset
+from speech import (
+    ConversationSynthesisFailedFrame, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
+    NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset,
+)
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
@@ -1013,11 +1016,12 @@ class HermesLLMService(LLMService):
 
     def refresh_indicator(self):
         if self.voice_active() and self.admitted() and self.status is not None and self._indicator_ready:
-            state = ('trouble' if self._indicator_voice_failed else
+            state = ('trouble-voice' if self._indicator_voice_failed else
                      'listening' if self._indicator_user else
                      'speaking' if self._indicator_output else
                      'thinking' if self._indicator_pending else
-                     'trouble' if self.channel.failure else 'idle')
+                     ('trouble-notes' if self.channel.failure_advisory == MEMORY_ERROR else 'trouble-engine')
+                     if self.channel.failure else 'idle')
             self.status.set_state(state)
 
     def indicator_input_ready(self):
@@ -1432,6 +1436,12 @@ class HermesLLMService(LLMService):
             await self.push_reply_end(token, failed=failed)
 
 
+class KnownTrouble(RuntimeError):
+    def __init__(self, state, message):
+        super().__init__(message)
+        self.state = state
+
+
 class VoiceConversations:
     def __init__(self, *, status, conversation):
         self.status = status
@@ -1453,6 +1463,7 @@ class VoiceConversations:
         self.capture_owner = None
         self.session_ready = None
         self.failure = None
+        self.trouble = None
         self.closed = False
         self.prepared = False
         self.transitioning = False
@@ -1651,8 +1662,17 @@ class VoiceConversations:
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
 
+    def record_failure(self, failure: str, trouble: str) -> None:
+        self.failure = failure
+        if self.trouble is None:
+            self.trouble = trouble
+
     def failed_transport(self):
-        self.failure = self.transport.failure
+        failure = self.transport.failure
+        # speech.py owns the transport failure vocabulary.
+        self.record_failure(failure, {
+            LAPTOP_CAPTURE_FAILURE: 'trouble-microphone', LAPTOP_PLAYBACK_FAILURE: 'trouble-playback',
+        }.get(failure, 'trouble'))
         self.desired_active = False
         self.revoke()
         self.changed.set()
@@ -1690,9 +1710,9 @@ class VoiceConversations:
         async with self.generation_lock:
             pass
         if self.voice is not None and self.voice.generation_cleanup_failed:
-            raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
+            raise KnownTrouble('trouble-voice', 'Voice generation cleanup failed. Restart Kestrel.')
         if not self.closed and self.recognizer.failure:
-            raise RuntimeError(self.recognizer.failure)
+            raise KnownTrouble('trouble-recognition', self.recognizer.failure)
         for outcome in outcomes:
             if isinstance(outcome, Exception):
                 raise outcome
@@ -1734,10 +1754,10 @@ class VoiceConversations:
                 self.pending_submit = None
         except Exception:
             self.fail_submission()
-            self.failure = 'Kestrel input handover failed. Restart Kestrel.'
+            self.record_failure('Kestrel input handover failed. Restart Kestrel.', 'trouble-handover')
             self.desired_active = False
             self.revoke()
-            self.status.set_state('trouble')
+            self.status.set_state(self.trouble)
         finally:
             for key in completions:
                 future = llm.frame_completions.pop(key, None)
@@ -1766,10 +1786,11 @@ class VoiceConversations:
                         self.submission_task.result()
                     self.submission_task = None
                 if self.failure and self.cleanup is not None:
-                    self.status.set_state('trouble')
+                    self.status.set_state(self.trouble)
                     continue
                 stopped = self.pipeline is not None and self.pipeline.done() and self.admission.is_set()
                 if stopped:
+                    # A stopped pipeline is a symptom: the cleanup below classifies it.
                     self.failure = 'Kestrel conversation stopped unexpectedly. Restart Kestrel.'
                 if self.transport is not None and (self.lifecycle_changed or self.failure):
                     self.transitioning = True
@@ -1797,10 +1818,11 @@ class VoiceConversations:
                         self.wake_startup.add_done_callback(lambda task: self.changed.set())
             except Exception as error:
                 self.fail_submission()
-                self.failure = str(error) or 'Kestrel conversation cleanup failed. Restart Kestrel.'
+                self.record_failure(str(error) or 'Kestrel conversation cleanup failed. Restart Kestrel.',
+                                    error.state if isinstance(error, KnownTrouble) else 'trouble')
                 self.desired_active = False
                 self.revoke()
-                self.status.set_state('trouble')
+                self.status.set_state(self.trouble)
 
     async def close(self):
         self.closed = True

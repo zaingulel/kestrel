@@ -19,8 +19,9 @@ Item {
         "listening": "Listening. Microphone in use.",
         "thinking": "Thinking. Microphone in use.",
         "speaking": "Speaking. Microphone in use.",
-        "trouble": "Kestrel needs attention. Microphone in use."
+        "trouble": "Kestrel needs attention. Microphone in use. " + troubleAdvisory
     })[state]
+    readonly property string troubleAdvisory: statusValue.advisory
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
     readonly property string conversationMessage: !conversationValue.available ? conversationValue.message
@@ -236,18 +237,30 @@ Item {
         onTriggered: root.conversationExited()
     }
 
-    QtObject { id: statusValue; property string value: "unavailable" }
+    QtObject { id: statusValue; property string value: "unavailable"; property string advisory: "" }
     QtObject { id: motionValue; property bool enabled: false }
 
     function acceptStatusChunk(chunk) {
         if (typeof chunk !== "string" || chunk.length < 1 || chunk.length > 32
-                || /[^ADILTSBNU]/.test(chunk)) {
+                || /[^ADILTSBNUMPRVEOH]/.test(chunk)) {
             expireStatus()
             return false
         }
         const states = { A: "starting", D: "inactive", I: "idle", L: "listening", T: "thinking",
-            S: "speaking", B: "trouble", N: "not-running", U: "unavailable" }
-        statusValue.value = states[chunk.charAt(chunk.length - 1)]
+            S: "speaking", N: "not-running", U: "unavailable" }
+        const advisories = {
+            B: "Cause unknown. Check the service log, then restart Kestrel.",
+            M: "Microphone capture failed. Restart Kestrel.",
+            P: "Audio playback failed. Restart Kestrel.",
+            R: "Speech recognition failed. Restart Kestrel.",
+            V: "Voice generation failed. Restart Kestrel.",
+            E: "Kestrel's engine is unavailable. Restart Kestrel.",
+            O: "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.",
+            H: "A typed message could not reach the conversation. Restart Kestrel."
+        }
+        const letter = chunk.charAt(chunk.length - 1)
+        statusValue.value = letter in advisories ? "trouble" : states[letter]
+        statusValue.advisory = advisories[letter] || ""
         statusExpiry.restart()
         return true
     }
@@ -257,6 +270,7 @@ Item {
     function expireStatus() {
         statusExpiry.stop()
         statusValue.value = "unavailable"
+        statusValue.advisory = ""
     }
 
     function acceptMotionResult(raw, success) {
