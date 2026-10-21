@@ -184,7 +184,7 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
             events.append(event)
             if 'tool_call' in event:
                 self.send(next(results))
-            if 'done' in event or 'error' in event:
+            if 'done' in event or 'error' in event or 'incomplete' in event:
                 return events
 
     def prepare(self):
@@ -513,6 +513,8 @@ print('private storage matrix passed')
         # Exercise the worker's final-response fallback without a provider stream callback.
         registry_module = ModuleType('tools.registry')
         registry_module.registry = Mock()
+        turn_failure_copy = ModuleType('agent.turn_failure_copy')
+        turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
         run_agent, relay_runtime, native = (ModuleType(name) for name in
                                            ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
         agent = Mock()
@@ -547,7 +549,8 @@ print('private storage matrix passed')
             cwd, mask = os.getcwd(), os.umask(0o077)
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
-                                                'nemo_relay': native, 'tools.registry': registry_module}),
+                                                'nemo_relay': native, 'tools.registry': registry_module,
+                                                'agent.turn_failure_copy': turn_failure_copy}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
                       patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
@@ -609,6 +612,8 @@ registry_module = ModuleType('tools.registry')
 registry_module.registry = Mock()
 relay_runtime = ModuleType('agent.relay_runtime')
 relay_runtime.get_runtime = Mock(return_value=None if case == 'missing runtime' else runtime)
+turn_failure_copy = ModuleType('agent.turn_failure_copy')
+turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
 exporter = Mock(spec=['path', 'register', 'force_flush', 'deregister', 'shutdown'])
 exporter.force_flush.side_effect = flush
 exporter.deregister.side_effect = lambda name: calls.append('deregister ' + name)
@@ -660,7 +665,8 @@ else:
 try:
     with (patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                     'agent.relay_runtime': relay_runtime,
-                                                'tools.registry': registry_module}),
+                                    'agent.turn_failure_copy': turn_failure_copy,
+                                    'tools.registry': registry_module}),
           patch.object(hermes_worker, 'validate_hermes_source')):
         status = hermes_worker.main()
 finally:
@@ -835,6 +841,8 @@ raise SystemExit(status)
                     registry_module.registry = Mock()
                     relay_runtime = ModuleType('agent.relay_runtime')
                     relay_runtime.get_runtime = Mock(return_value=runtime)
+                    turn_failure_copy = ModuleType('agent.turn_failure_copy')
+                    turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
                     native = ModuleType('nemo_relay')
                     native.AtofExporterConfig = Mock
                     native.AtofExporterMode = Mock(Append='append')
@@ -875,6 +883,7 @@ raise SystemExit(status)
                         with (patch.dict(os.environ, HERMES_HOME=str(home_setting)),
                               patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                         'agent.relay_runtime': relay_runtime,
+                                                        'agent.turn_failure_copy': turn_failure_copy,
                                                         'tools.registry': registry_module}),
                               patch.object(hermes_worker, 'validate_hermes_source'),
                               patch.object(hermes_worker, 'create_trace_directory', return_value=session,
@@ -1065,7 +1074,7 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
-    def test_iteration_budget_rejects_repeated_invalid_memory_calls(self):
+    def test_iteration_budget_ends_invalid_memory_loop_as_incomplete_turn(self):
         calls = [[({'tool_calls': [{'index': 0, 'id': f'invalid-{index}', 'type': 'function',
                    'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]}, None),
                   ({}, 'tool_calls')] for index in range(9)]
@@ -1078,11 +1087,12 @@ class NativeHermesTests(unittest.TestCase):
             for name, content in expected.items():
                 (notes / name).write_text(content)
                 (notes / name).chmod(0o600)
-            with native_worker([*calls, false_success], memory_root=notes) as (worker, brain):
+            with native_worker([*calls, false_success, '[delivery:neutral] Fifteen nonce-917.'],
+                               memory_root=notes) as (worker, brain):
                 self.assertEqual(worker.event(), {'ready': True})
                 worker.begin()
                 events = worker.request([{'role': 'user', 'content': 'Remember the existing notes.'}])
-                self.assertEqual(events, [{'error': 'Hermes did not complete the reply.'}])
+                self.assertEqual(events, [{'incomplete': True}])
                 self.assertEqual([body.get('stream', False) for _, _, body in brain.requests],
                                  [True] * 9 + [False])
                 results = [message for message in brain.requests[-1][2]['messages']
@@ -1093,6 +1103,96 @@ class NativeHermesTests(unittest.TestCase):
                     self.assertIn("Missing required parameter: provide 'action' (add/patch/remove) "
                                   "or 'operations' (batch list). Got neither.", result['content'])
                 self.assertEqual({name: (notes / name).read_text() for name in expected}, expected)
+                worker.stderr.seek(0)
+                self.assertIn('Hermes turn incomplete: max_iterations_reached(9/9)', worker.stderr.read())
+                next_events = worker.request([
+                    {'role': 'user', 'content': 'Remember the existing notes.'},
+                    {'role': 'assistant', 'content': "I couldn't get a complete reply from the brain."},
+                    {'role': 'user', 'content': 'What is seven plus eight?'},
+                ])
+                self.assertEqual(next_events, [{'delivery': 'neutral'}, {'text': 'Fifteen nonce-917.'},
+                                               {'done': True}])
+                self.assertEqual(len(brain.requests), 11)
+                self.assertNotIn('nonce-916', json.dumps(events + next_events))
+                self.assertNotIn('nonce-916', json.dumps(brain.requests[10]))
+                self.assertEqual({name: (notes / name).read_text() for name in expected}, expected)
+
+    def test_iteration_capped_turn_with_malformed_delivery_stays_fatal(self):
+        calls = [[({'tool_calls': [{'index': 0, 'id': f'invalid-{index}', 'type': 'function',
+                   'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]}, None),
+                  ({}, 'tool_calls')] for index in range(9)]
+        calls[0].insert(0, ({'content': '[delivery:shouting] Checking now.'}, None))
+        with native_worker([*calls, '[delivery:neutral] False success nonce-918.']) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Remember the existing notes.'}])
+            self.assertEqual(events, [{'error': 'Hermes did not complete the reply.'}])
+            self.assertEqual([body.get('stream', False) for _, _, body in brain.requests],
+                             [True] * 9 + [False])
+            observations = [json.loads(line) for line in
+                            (worker.home / 'stream-observations.jsonl').read_text().splitlines()]
+            self.assertIn('[delivery:shouting] Checking now.',
+                          [item['callback'] for item in observations])
+
+    def test_iteration_capped_turn_with_pending_delivery_header_stays_fatal(self):
+        import hermes_worker
+
+        run_agent = ModuleType('run_agent')
+        registry_module = ModuleType('tools.registry')
+        registry_module.registry = Mock()
+        relay_runtime = ModuleType('agent.relay_runtime')
+        relay_runtime.get_runtime = Mock(return_value=Mock())
+        turn_failure_copy = ModuleType('agent.turn_failure_copy')
+        turn_failure_copy.is_max_iteration_handoff = Mock(return_value=True)
+        native = ModuleType('nemo_relay')
+        native.AtofExporterConfig = Mock
+        native.AtofExporterMode = Mock(Append='append')
+        agent = Mock()
+
+        def capped_turn(*args, stream_callback, **kwargs):
+            stream_callback('[deliv')
+            return {'completed': False, 'failed': False, 'interrupted': False,
+                    'turn_exit_reason': 'max_iterations_reached(9/9)',
+                    'final_response': '[delivery:neutral] Unverified summary nonce-919.'}
+
+        agent.run_conversation.side_effect = capped_turn
+        protocol, diagnostic = StringIO(), StringIO()
+        original_cwd = Path.cwd()
+        original_umask = os.umask(0o077)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            home.chmod(0o700)
+
+            def construct_agent(**kwargs):
+                (home / 'memories').mkdir(mode=0o700)
+                return agent
+
+            def create_exporter(config):
+                event_file = Path(config.output_directory) / config.filename
+                event_file.touch(mode=0o600)
+                return Mock(path=str(event_file))
+
+            run_agent.AIAgent = Mock(side_effect=construct_agent)
+            native.AtofExporter = create_exporter
+            try:
+                with (patch.dict(sys.modules, {'run_agent': run_agent, 'tools.registry': registry_module,
+                                              'agent.relay_runtime': relay_runtime,
+                                              'agent.turn_failure_copy': turn_failure_copy,
+                                              'nemo_relay': native}),
+                      patch.dict(os.environ, HERMES_HOME=str(home)),
+                      patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
+                      patch.object(hermes_worker, 'validate_hermes_source'),
+                      patch.object(hermes_worker, 'validate_local_configuration'),
+                      patch('sys.stdin', TextIOWrapper(BytesIO(b'{"prepare":true}\n'))),
+                      patch('sys.stdout', protocol), patch('sys.stderr', diagnostic)):
+                    self.assertEqual(hermes_worker.main(), 0)
+            finally:
+                os.chdir(original_cwd)
+                os.umask(original_umask)
+            self.assertEqual([json.loads(line) for line in protocol.getvalue().splitlines()],
+                             [{'ready': True}, {'error': 'Hermes did not complete the reply.'}])
+            self.assertIn('Hermes turn failed: Hermes did not complete the reply.', diagnostic.getvalue())
+            agent.run_conversation.assert_called_once()
 
     def test_iteration_budget_allows_full_tool_turn(self):
         desktop = [('mute', {}, 'mute observed'),
@@ -1853,6 +1953,8 @@ class NativeHermesTests(unittest.TestCase):
         relay_runtime = ModuleType('agent.relay_runtime')
         relay_runtime.get_runtime = Mock()
         relay_runtime.get_runtime.return_value.managed_execution_enabled.return_value = True
+        turn_failure_copy = ModuleType('agent.turn_failure_copy')
+        turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
         native = ModuleType('nemo_relay')
         native.AtofExporterConfig = Mock
         native.AtofExporterMode = Mock(Append='append')
@@ -1878,6 +1980,7 @@ class NativeHermesTests(unittest.TestCase):
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                 'agent.relay_runtime': relay_runtime,
+                                                'agent.turn_failure_copy': turn_failure_copy,
                                                 'tools.registry': registry_module}),
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),

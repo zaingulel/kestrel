@@ -1956,6 +1956,47 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detached_incomplete_turn_drains_and_next_exchange_succeeds(self):
+        channel = bot.HermesRequestChannel()
+        process = channel.process = Mock(returncode=None)
+        process.stdin.drain = AsyncMock()
+        process.wait = AsyncMock()
+        detached_output = asyncio.Queue()
+        events = iter([{'incomplete': True}, {'delivery': 'neutral'}, {'text': 'Fifteen.'}, {'done': True}])
+
+        async def read_event():
+            event = next(events)
+            if event == {'incomplete': True}:
+                channel.detach(detached_output)
+            return json.dumps(event).encode() + b'\n'
+
+        process.stdout.readline = AsyncMock(side_effect=read_event)
+        await channel.exchange([{'role': 'user', 'content': 'Old request.'}], detached_output,
+                               admitted=lambda: True)
+        self.assertTrue(detached_output.empty(), 'Detached completion cannot append an advisory or terminal marker')
+        self.assertIsNone(channel.failure)
+        self.assertIsNone(channel.failure_advisory)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        process.wait.assert_not_awaited()
+
+        output = asyncio.Queue()
+        await channel.exchange([{'role': 'user', 'content': 'What is seven plus eight?'}], output,
+                               admitted=lambda: True)
+        self.assertEqual([output.get_nowait() for _ in range(output.qsize())],
+                         [{'delivery': 'neutral'}, {'text': 'Fifteen.'}, None])
+        self.assertTrue(detached_output.empty())
+        self.assertIs(channel.process, process)
+        self.assertIsNone(channel.failure)
+        self.assertIsNone(channel.failure_advisory)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+        process.wait.assert_not_awaited()
+        self.assertEqual([json.loads(c.args[0]) for c in process.stdin.write.call_args_list], [
+            {'messages': [{'role': 'user', 'content': 'Old request.'}]},
+            {'messages': [{'role': 'user', 'content': 'What is seven plus eight?'}]},
+        ])
+
     async def test_desktop_call_envelopes_are_validated_before_execution(self):
         valid = {'tool_call': {'name': 'mute', 'arguments': {}}}
         cases = [
@@ -8541,11 +8582,110 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Incomplete synthetic reply.', context)
         self.assertIsNotNone(processes[0][0].returncode)
 
+    async def test_capped_native_turn_fails_alone_and_conversation_continues(self):
+        invalid_calls = [[({'tool_calls': [{'index': 0, 'id': f'invalid-{index}', 'type': 'function',
+                          'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]}, None),
+                         ({}, 'tool_calls')] for index in range(8)]
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral] Checking now.'}, None),
+             ({'tool_calls': [{'index': 0, 'id': 'mute-first', 'type': 'function', 'function': {
+                 'name': 'mute', 'arguments': '{}',
+             }}]}, None), ({}, 'tool_calls')],
+            *invalid_calls,
+            '[delivery:neutral] Muted and searched nonce-931.',
+            [({'content': '[delivery:neutral] Fifteen.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        command = AsyncMock(side_effect=['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
+        first_reply = "Checking now. I couldn't get a complete reply from the brain."
+
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            status = bot.IndicatorStatus(Path(runtime))
+            changes = asyncio.Queue()
+            native_set = status.set_state
+
+            def observe(state):
+                native_set(state)
+                changes.put_nowait(state)
+
+            with patch.object(status, 'set_state', observe):
+                transport, spoken, committed, _, processes, close = await self.open_session(
+                    brain, local_command=command, status=status,
+                )
+                channel = transport.llm.channel
+                worker = channel.process
+                address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
+                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 5)
+
+                async def rows_until(predicate):
+                    async with asyncio.timeout(5):
+                        while True:
+                            snapshot = json.loads(await reader.readline())
+                            if 'turns' in snapshot and predicate(snapshot['turns']):
+                                return snapshot['turns']
+
+                try:
+                    while not changes.empty():
+                        changes.get_nowait()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'Please silence the sound.')
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), first_reply)
+                    heard = []
+                    while not spoken.empty():
+                        heard.append(spoken.get_nowait())
+                    self.assertEqual(' '.join(heard), first_reply)
+                    rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
+                                            and rows[-1]['state'] == 'failed')
+                    self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': first_reply, 'state': 'failed'})
+                    async with asyncio.timeout(5):
+                        while (state := await changes.get()) != 'idle':
+                            self.assertNotEqual(state, 'trouble')
+                    self.assertIsNone(channel.failure)
+                    self.assertIsNone(channel.failure_advisory)
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNone(worker.returncode)
+                    self.assertEqual(len(brain.requests), 10)
+                    self.assertFalse(brain.requests[9][2].get('stream', False))
+
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'What is seven plus eight?')
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fifteen.')
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fifteen.')
+                    next_rows = await rows_until(lambda rows: rows and rows[-1]['text'] == 'Fifteen.'
+                                                 and rows[-1]['state'] == 'complete')
+                    self.assertEqual(len(brain.requests), 11)
+                    messages = [m for m in brain.requests[10][2]['messages'] if m['role'] != 'system']
+                    self.assertEqual(messages[0], {'role': 'user', 'content': 'Please silence the sound.'})
+                    self.assertEqual(messages[1]['role'], 'assistant')
+                    record = messages[1]['tool_calls'][0]
+                    self.assertEqual(len(messages[1]['tool_calls']), 1)
+                    self.assertEqual(record['function']['name'], 'mute')
+                    self.assertEqual(json.loads(record['function']['arguments']), {})
+                    self.assertEqual(messages[2], {'role': 'tool', 'tool_call_id': record['id'],
+                                                 'content': json.dumps({'confirmed': True, 'attempted': True, 'reason': 'confirmed'})})
+                    self.assertEqual(messages[3], {'role': 'assistant', 'content': first_reply})
+                    self.assertEqual(messages[4], {'role': 'user', 'content': 'What is seven plus eight?'})
+                    self.assertEqual(len(messages), 5)
+                    self.assertEqual([c for c in command.await_args_list if 'set-sink-mute' in c.args[0]],
+                                     [call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'))])
+                    self.assertEqual(command.await_count, 7)
+                    self.assertEqual(len(processes), 1)
+                    self.assertIs(channel.process, worker)
+                    self.assertIsNone(worker.returncode)
+                    self.assertNotIn('nonce-931', json.dumps(heard + [first_reply, 'Fifteen.', rows, next_rows]))
+                    self.assertNotIn('nonce-931', json.dumps(brain.requests[10]))
+                    self.assertTrue(spoken.empty())
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+                    await close()
+
     async def test_corrupt_worker_response_speaks_failure(self):
         # External process stand-ins cover malformed JSON and wrongly typed terminal events.
         cases = [
             ('malformed JSON', '{"ready":true}', 'not json'),
             ('wrong done type', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"done":1}'),
+            ('malformed incomplete', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"incomplete":1}'),
             ('wrong ready type', '{"ready":1}', ''),
         ]
         for name, ready, response in cases:

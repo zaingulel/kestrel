@@ -818,6 +818,10 @@ class HermesRequestChannel:
                         await self.process.stdin.drain()
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
+                    elif set(event) == {'incomplete'} and event['incomplete'] is True:
+                        if self.output is output:
+                            output.put_nowait({'advisory': "I couldn't get a complete reply from the brain."})
+                        break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
                         advisory = (MEMORY_ERROR if event['error'] == MEMORY_ERROR else
                                     "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")

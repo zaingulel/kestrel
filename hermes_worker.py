@@ -391,6 +391,7 @@ def main(*, base_url=BONSAI_URL):
             from run_agent import AIAgent
             from tools.registry import registry
             from agent.relay_runtime import get_runtime
+            from agent.turn_failure_copy import is_max_iteration_handoff
             import nemo_relay
 
             bridge_failed = False
@@ -616,6 +617,13 @@ def main(*, base_url=BONSAI_URL):
                             raise RuntimeError(TRACE_FAILURE_ERROR) from None
                     if bridge_failed:
                         raise RuntimeError('Kestrel desktop bridge failed')
+                    if (not delivery.failed
+                            and not (delivery.delivery is None and delivery.prefix.startswith('['))
+                            and is_max_iteration_handoff(result)):
+                        # Hermes marks a capped turn resumable; its closing summary is unverified and never spoken.
+                        print(f"Hermes turn incomplete: {result['turn_exit_reason']}", file=sys.stderr, flush=True)
+                        emit({'incomplete': True})
+                        continue
                     if (not isinstance(result, dict) or result.get('completed') is not True
                             or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
                         reason = result.get('error') if isinstance(result, dict) else None
