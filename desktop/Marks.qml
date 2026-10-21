@@ -1,6 +1,5 @@
 pragma ComponentBehavior: Bound
 import QtQuick
-import QtQuick.Shapes
 
 Item {
     id: root
@@ -9,133 +8,93 @@ Item {
     required property color troubleInk
     property bool motionEnabled: false
     property bool feed: false
-    property int thinkingIndex: 1
+
+    component Glide: NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+    component Phase: FrameAnimation {
+        required property int period
+        property real phase: 0
+        onTriggered: phase = (phase + frameTime * 1000 / period) % 1
+    }
+
+    // A kind without an entry, unavailable included, keeps the base (unavailable) form.
+    readonly property var form: Object.assign({h: [4, 8, 12], lift: 0, spread: 0, hollow: 0, alarm: 0, opacity: 1, listen: 0, think: 0, speak: 0}, ({
+        "not-running": {h: [2, 2, 2], spread: 1, opacity: 0.6},
+        "inactive": {h: [6, 6, 6], hollow: 1, opacity: 0.6},
+        "starting": {h: [6, 6, 6], hollow: 1},
+        "idle": {h: [6, 6, 6], opacity: 0.6},
+        "listening": {h: [12, 12, 12]},
+        "thinking": {h: [6, 12, 6]},
+        "speaking": {h: [12, 6, 12]},
+        "trouble": {h: [6, 6, 7], lift: -2.5, alarm: 1}
+    })[kind])
+
+    property real h0: form.h[0]
+    property real h1: form.h[1]
+    property real h2: form.h[2]
+    property real lift: form.lift
+    property real spread: form.spread
+    property real hollow: form.hollow
+    property real alarm: form.alarm
+    property real fade: form.opacity
+    property real listenWeight: motionEnabled && kind === "listening" ? 1 : 0
+    property real thinkWeight: motionEnabled && kind === "thinking" ? 1 : 0
+    property real speakWeight: motionEnabled && kind === "speaking" ? 1 : 0
+    Behavior on h0 { Glide { objectName: "glide" } }
+    Behavior on h1 { Glide {} }
+    Behavior on h2 { Glide {} }
+    Behavior on lift { Glide {} }
+    Behavior on spread { Glide {} }
+    Behavior on hollow { Glide {} }
+    Behavior on alarm { Glide {} }
+    Behavior on fade { Glide {} }
+    Behavior on listenWeight { Glide {} }
+    Behavior on thinkWeight { Glide {} }
+    Behavior on speakWeight { Glide {} }
+
+    // With motion off the form shows at once, mid-glide included, while the glide values settle unseen;
+    // a synchronous off-and-on flip therefore changes nothing on screen.
+    readonly property var shown: motionEnabled ? ({h: [h0, h1, h2], lift: lift, spread: spread, hollow: hollow,
+        alarm: alarm, opacity: fade, listen: listenWeight, think: thinkWeight, speak: speakWeight}) : form
+    readonly property color barInk: Qt.tint(ink, Qt.rgba(troubleInk.r, troubleInk.g, troubleInk.b, shown.alarm))
+    readonly property real unit: feed ? 4 / 3 : 1
 
     implicitWidth: feed ? 40 : 25
     implicitHeight: feed ? 26 : 30
-    opacity: kind === "idle" || kind === "inactive" || kind === "not-running" ? 0.6 : 1
+    opacity: shown.opacity
     Accessible.ignored: true
 
-    onKindChanged: thinkingIndex = 1
-    onMotionEnabledChanged: thinkingIndex = 1
+    Phase { id: listenDriver; objectName: "listenDriver"; period: 1600; running: root.motionEnabled && root.kind === "listening" }
+    Phase { id: rippleDriver; objectName: "rippleDriver"; period: 840; running: root.motionEnabled && root.kind === "thinking" }
 
-    Rectangle {
-        objectName: "restingBar"
-        visible: root.kind === "not-running"
-        x: 5; y: 19; width: 15; height: 2
-        color: root.ink
-    }
-    Timer {
-        id: thinkingStep
-        objectName: "thinkingStep"
-        interval: 280
-        repeat: true
-        running: root.kind === "thinking" && root.motionEnabled
-        onTriggered: root.thinkingIndex = (root.thinkingIndex + 1) % 3
-    }
-    Item {
-        id: listening
-        objectName: "listeningMark"
-        property real phase: 0
-        readonly property bool active: root.kind === "listening" && root.motionEnabled
-        visible: root.kind === "listening"
-        onActiveChanged: if (!active) phase = 0
-
-        NumberAnimation {
-            objectName: "listeningLoop"
-            target: listening
-            property: "phase"
-            from: 0
-            to: 1
-            duration: 1600
-            easing.type: Easing.Linear
-            loops: Animation.Infinite
-            running: listening.active
-        }
-        Repeater {
-            model: 2
-            delegate: Shape {
-                id: ring
-                required property int index
-                readonly property real ringPhase: (listening.phase + index * 0.5) % 1
-                readonly property real diameter: !root.motionEnabled ? 9
-                    : ringPhase <= 0.7 ? 15 - 10 * Math.pow(ringPhase / 0.7, 2)
-                    : 5 - 2 * Math.pow((ringPhase - 0.7) / 0.3, 2)
-                objectName: "listeningRing" + index
-                preferredRendererType: Shape.CurveRenderer
-                x: 5; y: 7.5; width: 15; height: 15
-                visible: root.motionEnabled || index === 0
-                opacity: !root.motionEnabled ? 0.6
-                    : ringPhase <= 0.7 ? Math.pow(ringPhase / 0.7, 2)
-                    : 1 - (ringPhase - 0.7) / 0.3
-                ShapePath {
-                    objectName: "listeningPath" + ring.index
-                    strokeColor: root.ink
-                    strokeWidth: 1.5
-                    fillColor: "transparent"
-                    PathAngleArc {
-                        objectName: "listeningArc" + ring.index
-                        centerX: 7.5
-                        centerY: 7.5
-                        radiusX: (ring.diameter - 1.5) / 2
-                        radiusY: radiusX
-                        startAngle: 0
-                        sweepAngle: 360
-                    }
-                }
-            }
-        }
-        Rectangle {
-            readonly property real pulseTime: (1600 * listening.phase) % 800
-            objectName: "listeningDot"
-            x: 11; y: 13.5; width: 3; height: 3
-            radius: 1.5
-            color: root.ink
-            scale: root.motionEnabled && pulseTime < 120
-                ? 1 + 0.1 * Math.sin(Math.PI * pulseTime / 120) : 1
-        }
-    }
     Repeater {
         model: 3
         delegate: Rectangle {
-            id: mark
+            id: bar
             required property int index
-            property real animatedHeight: root.feed ? [8, 16, 11][index] : [6, 12, 8][index]
+            readonly property real rippleOffset: (1 - index) / 3
             objectName: "mark" + index
-            visible: root.kind !== "not-running" && root.kind !== "listening"
-            x: root.feed ? 10 + index * 8 : 5 + index * 6
-            y: 21 - height - (root.kind === "unavailable" ? index * 3
-                : root.kind === "thinking" && root.thinkingIndex === index ? (root.feed ? 6 : 5) : 0)
-            width: root.feed ? 4 : 3
-            height: root.kind === "speaking" ? (root.motionEnabled ? animatedHeight
-                : root.feed ? [8, 16, 11][index] : [6, 12, 8][index]) : root.feed ? 4 : 3
-            color: (root.kind === "starting" || root.kind === "inactive") ? "transparent" : root.kind === "trouble" ? root.troubleInk : root.ink
-            border.width: (root.kind === "starting" || root.kind === "inactive") ? 1 : 0
-            border.color: root.ink
-
-            SequentialAnimation on animatedHeight {
-                objectName: "speakingLoop" + mark.index
-                loops: Animation.Infinite
-                running: root.kind === "speaking" && root.motionEnabled
-                NumberAnimation {
-                    objectName: "speakingDown" + mark.index
-                    to: root.feed ? 5 : 4
-                    duration: [420, 520, 610][mark.index] / 2
-                    easing.type: Easing.InOutSine
-                }
-                NumberAnimation {
-                    objectName: "speakingUp" + mark.index
-                    to: root.feed ? 16 : 12
-                    duration: [420, 520, 610][mark.index] / 2
-                    easing.type: Easing.InOutSine
-                }
-            }
+            x: (root.feed ? 10 : 5) + 6 * index * root.unit
+            width: (3 + (index === 2 ? 0 : 3 * root.shown.spread)) * root.unit
+            // Each motion term is its difference from phase 0, so a weight or phase of 0 leaves the still form exactly.
+            height: (root.shown.h[index]
+                + root.shown.listen * 3 * (Math.cos(2 * Math.PI * listenDriver.phase) - 1)
+                + root.shown.think * 4 * (Math.cos(2 * Math.PI * (rippleDriver.phase + rippleOffset)) - Math.cos(2 * Math.PI * rippleOffset))
+                + root.shown.speak * [4, -3, 4][index] * (Math.cos(2 * Math.PI * speakDriver.phase) - 1)) * root.unit
+            y: (root.feed ? 13 : 15) + (index === 2 ? root.shown.lift : 0) * root.unit - height / 2
+            color: Qt.rgba(root.barInk.r, root.barInk.g, root.barInk.b, 1 - root.shown.hollow)
+            border.width: 1
+            border.color: root.barInk
+            Phase { id: speakDriver; objectName: "speakDriver" + bar.index; period: [420, 520, 610][bar.index]; running: root.motionEnabled && root.kind === "speaking" }
         }
     }
     Rectangle {
-        objectName: "troubleStem"
-        visible: root.kind === "trouble"
-        x: 17; y: 9; width: 3; height: 7
+        objectName: "troubleDot"
+        x: (root.feed ? 10 : 5) + 12 * root.unit
+        y: (root.feed ? 13 : 15) + 3 * root.unit
+        width: 3 * root.unit
+        height: 3 * root.unit
         color: root.troubleInk
+        opacity: root.shown.alarm
+        visible: root.shown.alarm !== 0
     }
 }

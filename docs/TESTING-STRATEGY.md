@@ -149,11 +149,11 @@ env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basi
 ```
 
 ```sh
-node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes Indicator::test_listening_inflow_motion
+node scripts/run-log.mjs indicator native -- env QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_QUICK_CONTROLS_STYLE=Basic /usr/lib/qt6/bin/qmltestrunner -input tests/qml Service::test_status_input_death_and_silence Service::test_motion_requires_successful_fresh_true Indicator::test_all_state_shapes Indicator::test_reduced_motion_still_shapes Indicator::test_listening_bars_move_together Indicator::test_state_changes_glide
 node scripts/run-log.mjs indicator qml -- /usr/lib/qt6/bin/qmllint desktop/Service.qml desktop/Marks.qml
 ```
 
-Require all five selected functions to execute without skips; report Qt initialization and cleanup separately from the five slice cases. These checks do not prove native Process bridging, host injection, palette refresh, accessible-tree exposure, rendered contrast, physical audio or microphone release. Drive those boundaries on the installed Omarchy host and record native observations separately, including watcher termination and reaping on reload or removal. A missing native observation is unavailable evidence.
+Require all six selected functions to execute without skips; report Qt initialization and cleanup separately from the six slice cases. These checks do not prove native Process bridging, host injection, palette refresh, accessible-tree exposure, rendered contrast, physical audio or microphone release. Drive those boundaries on the installed Omarchy host and record native observations separately, including watcher termination and reaping on reload or removal. A missing native observation is unavailable evidence.
 
 Native integration and visual receipts are invalidated by changes to desktop QML or the manifest, Qt tests, or the installed Qt, Quickshell or Omarchy environment. Policy and geometry receipts rerun for their corresponding production or test changes. Runtime privacy and release claims also retain the Python lifecycle and reader evidence; native rendering alone cannot establish them.
 
