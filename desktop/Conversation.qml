@@ -24,6 +24,7 @@ FocusScope {
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
     property string placementAdvisory: ""
+    property string troubleAdvisory: ""
     property var displayedTurns: []
     property int displayedCount: 0
     property string conversationSession: ""
@@ -300,6 +301,19 @@ FocusScope {
                 Keys.onReturnPressed: root.closeRequested()
                 Keys.onEnterPressed: root.closeRequested()
             }
+        }
+        Text {
+            objectName: "troubleAdvisory"
+            width: parent.width
+            visible: text.length > 0
+            text: root.troubleAdvisory
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.ink
+            font.family: "monospace"
+            font.pixelSize: root.bodyPixelSize
+            lineHeight: root.bodyLineHeight
+            lineHeightMode: Text.FixedHeight
         }
         Text {
             width: parent.width

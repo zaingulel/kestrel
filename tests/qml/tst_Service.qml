@@ -185,23 +185,52 @@ TestCase {
         verify(service !== null)
         compare(service.shell, null)
         compare(service.state, "unavailable")
+        compare(service.troubleAdvisory, "")
+        const troubles = [
+            ["B", "Cause unknown. Check the service log, then restart Kestrel."],
+            ["M", "Microphone capture failed. Restart Kestrel."],
+            ["P", "Audio playback failed. Restart Kestrel."],
+            ["R", "Speech recognition failed. Restart Kestrel."],
+            ["V", "Voice generation failed. Restart Kestrel."],
+            ["E", "Kestrel's engine is unavailable. Restart Kestrel."],
+            ["O", "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel."],
+            ["H", "A typed message could not reach the conversation. Restart Kestrel."]
+        ]
         const samples = [
             ["A", "starting"], ["I", "idle"], ["L", "listening"],
-            ["T", "thinking"], ["S", "speaking"], ["B", "trouble"],
+            ["T", "thinking"], ["S", "speaking"],
             ["N", "not-running"], ["U", "unavailable"],
             ["AILTSBNUIL", "listening"]
         ]
+        for (const [letter, advisory] of troubles) {
+            service.acceptStatusChunk("L")
+            service.acceptStatusChunk(letter)
+            compare(service.state, "trouble", letter)
+            compare(service.troubleAdvisory, advisory, letter)
+            compare(service.statusSentence, "Kestrel needs attention. Microphone in use. " + advisory, letter)
+            service.acceptStatusChunk("AILTS" + letter)
+            compare(service.troubleAdvisory, advisory, "the last letter of a chunk wins: " + letter)
+        }
         for (const sample of samples) {
+            service.acceptStatusChunk("O")
             service.acceptStatusChunk(sample[0])
             compare(service.state, sample[1])
-            if (sample[0] === "B")
-                compare(service.statusSentence, "Kestrel needs attention. Microphone in use.")
+            compare(service.troubleAdvisory, "", "a non-trouble letter shows no advisory: " + sample[0])
         }
-        for (const invalid of ["", "X", "I\n", "I\u0000", "é", "I private transcript", "I".repeat(33)]) {
+        service.acceptStatusChunk("M")
+        service.watcherExited()
+        compare(service.state, "unavailable")
+        compare(service.troubleAdvisory, "", "watcher exit clears the advisory")
+        for (const invalid of ["", "X", "m", "C", "BX", "I\n", "I\u0000", "é", "I private transcript", "I".repeat(33)]) {
             service.acceptStatusChunk("S")
             compare(service.state, "speaking")
             service.acceptStatusChunk(invalid)
             compare(service.state, "unavailable", "invalid chunk must invalidate the previous state")
+            service.acceptStatusChunk("O")
+            compare(service.state, "trouble")
+            service.acceptStatusChunk(invalid)
+            compare(service.state, "unavailable", "invalid chunk must invalidate trouble")
+            compare(service.troubleAdvisory, "", "invalid chunk must clear the advisory")
         }
         service.acceptStatusChunk("I".repeat(32))
         compare(service.state, "idle")
@@ -214,6 +243,11 @@ TestCase {
         verify(expiry.running)
         expiry.triggered()
         compare(service.state, "unavailable")
+        service.acceptStatusChunk("V")
+        compare(service.troubleAdvisory, "Voice generation failed. Restart Kestrel.")
+        expiry.triggered()
+        compare(service.state, "unavailable")
+        compare(service.troubleAdvisory, "", "expiry clears the advisory")
     }
 
     function test_inactive_status_and_empty_conversation() {

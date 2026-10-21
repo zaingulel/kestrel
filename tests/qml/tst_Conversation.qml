@@ -914,7 +914,8 @@ TestCase {
             width: 448, height: 640, background: "#1a1b26", ink: "#a9b1d6",
             accentInk: "#7aa2f7", troubleInk: "#D35F5F", motionEnabled: true,
             currentState: Qt.binding(function() { return service.state }),
-            statusSentence: Qt.binding(function() { return service.statusSentence })
+            statusSentence: Qt.binding(function() { return service.statusSentence }),
+            troubleAdvisory: Qt.binding(function() { return service.troubleAdvisory })
         })
         verify(content !== null)
         verify(waitForRendering(content))
@@ -928,22 +929,40 @@ TestCase {
         const label = findChild(content, "conversationStatus")
         verify(microphone !== null && glyph !== null && badge !== null && label !== null)
         compare(findChild(findChild(content, "conversationHeader"), "mark0"), null, "the header shows no state mark")
+        const trouble = "Kestrel needs attention. Microphone in use. "
         const expected = [
-            ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
-            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start."],
-            ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
-            ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
-            ["I", "Waiting", "󰍬", false, "Waiting. Microphone in use."],
-            ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
-            ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
-            ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
-            ["B", "Attention", "󰍬", false, "Kestrel needs attention. Microphone in use."]
+            ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel.", "ink", ""],
+            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start.", "ink", ""],
+            ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use.", "ink", ""],
+            ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown.", "ink", ""],
+            ["I", "Waiting", "󰍬", false, "Waiting. Microphone in use.", "ink", ""],
+            ["L", "Listening", "󰍬", false, "Listening. Microphone in use.", "ink", ""],
+            ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use.", "ink", ""],
+            ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use.", "ink", ""],
+            ["B", "Attention", "󰍬", false, trouble + "Cause unknown. Check the service log, then restart Kestrel.", "trouble",
+                "Cause unknown. Check the service log, then restart Kestrel."],
+            ["M", "Attention", "󰍬", false, trouble + "Microphone capture failed. Restart Kestrel.", "trouble",
+                "Microphone capture failed. Restart Kestrel."],
+            ["P", "Attention", "󰍬", false, trouble + "Audio playback failed. Restart Kestrel.", "trouble",
+                "Audio playback failed. Restart Kestrel."],
+            ["R", "Attention", "󰍬", false, trouble + "Speech recognition failed. Restart Kestrel.", "trouble",
+                "Speech recognition failed. Restart Kestrel."],
+            ["V", "Attention", "󰍬", false, trouble + "Voice generation failed. Restart Kestrel.", "trouble",
+                "Voice generation failed. Restart Kestrel."],
+            ["E", "Attention", "󰍬", false, trouble + "Kestrel's engine is unavailable. Restart Kestrel.", "trouble",
+                "Kestrel's engine is unavailable. Restart Kestrel."],
+            ["O", "Attention", "󰍬", false, trouble + "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.", "trouble",
+                "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel."],
+            ["H", "Attention", "󰍬", false, trouble + "A typed message could not reach the conversation. Restart Kestrel.", "trouble",
+                "A typed message could not reach the conversation. Restart Kestrel."]
         ]
+        const band = findChild(content, "troubleAdvisory")
+        verify(band !== null)
         for (const row of expected) {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
-            compare(label.text, row[1])
-            compare(label.color, row[0] === "B" ? content.troubleInk : content.ink)
+            compare(label.text, row[1], row[0])
+            compare(label.color, row[5] === "trouble" ? content.troubleInk : content.ink, row[0])
             compare(glyph.item.text, row[2])
             compare(badge.visible, row[3])
             compare(microphone.Accessible.name, row[4])
@@ -954,8 +973,11 @@ TestCase {
             compare(glyph.item.Accessible.ignored, true)
             compare(textWith(content, row[4]), null)
             compare(textWith(content, "Move: Super + left drag"), null)
+            compare(band.text, row[6], row[0])
+            compare(band.visible, row[6] !== "", row[0])
         }
         function unknown() {
+            compare(band.visible, false)
             compare(label.text, "Unavailable")
             compare(label.color, content.ink)
             compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
@@ -1248,7 +1270,9 @@ TestCase {
                 status.lineHeight, notice.lineHeight, notice.font.pixelSize].join()
         }
         compare(sizes(), "14,16,12,16,16,12", "host base size 14 keeps the token sizes")
+        const longestAdvisory = "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel."
         content.placementAdvisory = "Hyprland has configuration errors. Run hyprctl configerrors, fix the errors, then reopen the panel."
+        content.troubleAdvisory = longestAdvisory
         content.textScale = 2
         verify(waitForRendering(content))
         compare(sizes(), "28,32,24,32,32,24", "host base size 28 doubles the token sizes")
@@ -1257,7 +1281,13 @@ TestCase {
         compare(findChild(failure, "mark2").mapToItem(findChild(content, "turnNotice20"), 0, 0).y, 10)
         compare(square.mapToItem(findChild(content, "turnNotice20"), 0, square.height).y, 22)
         const advisory = textWith(content, content.placementAdvisory)
-        for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
+        const troubleBand = findChild(content, "troubleAdvisory")
+        verify(troubleBand !== null && troubleBand.visible)
+        compare(troubleBand.text, longestAdvisory)
+        verify(troubleBand.lineCount > 1)
+        compare(troubleBand.font.pixelSize, 28)
+        compare(troubleBand.lineHeight, 42)
+        for (const item of [status, troubleBand, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
             const left = item.mapToItem(content, 0, 0).x
             verify(left >= 16 && left + item.width <= 432 && item.contentWidth <= item.width,
                 item.text + " must stay inside the panel: x=" + left + " width=" + item.width + " content=" + item.contentWidth)
@@ -1270,6 +1300,16 @@ TestCase {
         const notice = findChild(content, "turnNotice20")
         const warning = notice.parent.children[0]
         verify(warning.x + warning.width <= notice.x && notice.x + notice.width <= notice.parent.width)
+        const headerRow = findChild(content, "conversationHeader")
+        const bandTop = troubleBand.mapToItem(content, 0, 0).y
+        compare(bandTop, headerRow.mapToItem(content, 0, 0).y + headerRow.height + 9,
+            "the trouble band sits directly below the header row")
+        verify(bandTop + troubleBand.height + 9 <= advisory.mapToItem(content, 0, 0).y,
+            "the trouble band sits above the placement band")
+        verify(transcript.y >= bandTop + troubleBand.height, "the trouble band sits above the transcript")
+        // Both advisories at host base size 28 fill the 640-high panel; the viewport checks below run with the placement band alone.
+        content.troubleAdvisory = ""
+        verify(waitForRendering(content))
         const headerBottom = advisory.mapToItem(content, 0, 0).y + advisory.height
         verify(transcript.y >= headerBottom && transcript.height > 0 && transcript.y + transcript.height <= 624,
             "transcript y=" + transcript.y + " height=" + transcript.height + " header bottom=" + headerBottom)
