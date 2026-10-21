@@ -250,6 +250,65 @@ TestCase {
         compare(service.troubleAdvisory, "", "expiry clears the advisory")
     }
 
+    function test_toggle_runs_once_per_running_command() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        let sent = 0
+        service.toggleRequested.connect(function() { sent++ })
+        compare(service.toggleRunning, false)
+        compare(service.toggleUnconfirmed, false)
+
+        service.acceptStatusChunk("D")
+        service.toggle()
+        compare(sent, 1)
+        compare(service.toggleRunning, true)
+        compare(service.toggleUnconfirmed, true)
+        service.toggle()
+        compare(sent, 1, "a press while the command runs sends nothing")
+
+        service.acceptStatusChunk("A")
+        compare(service.toggleRunning, true, "status does not end the running command")
+        compare(service.toggleUnconfirmed, true, "status while the command runs does not confirm the press")
+
+        service.toggleExited()
+        compare(service.toggleRunning, false)
+        compare(service.toggleUnconfirmed, true, "exit alone does not confirm the press")
+        service.toggleExited()
+        compare(service.toggleRunning, false)
+        compare(service.toggleUnconfirmed, true, "a second exit changes nothing")
+
+        service.toggle()
+        compare(sent, 2, "after exit and before status the next press is sent, as the shortcut would send it")
+        compare(service.toggleRunning, true)
+        service.toggleExited()
+        compare(service.toggleUnconfirmed, true)
+
+        service.acceptStatusChunk("A")
+        compare(service.toggleRunning, false)
+        compare(service.toggleUnconfirmed, false, "the first status after exit confirms the press")
+
+        const ends = [
+            function() { service.acceptStatusChunk("X") },
+            function() { service.watcherExited() },
+            function() { findChild(service, "statusExpiry").triggered() }
+        ]
+        for (const end of ends) {
+            service.acceptStatusChunk("D")
+            service.toggle()
+            service.toggleExited()
+            compare(service.toggleUnconfirmed, true)
+            end()
+            compare(service.toggleUnconfirmed, false, "lost status also ends the unconfirmed form")
+            compare(service.state, "unavailable")
+        }
+        compare(sent, 5)
+
+        service.toggleExited()
+        compare(sent, 5, "an exit with nothing running sends nothing")
+        compare(service.toggleRunning, false)
+        compare(service.toggleUnconfirmed, false)
+    }
+
     function test_inactive_status_and_empty_conversation() {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)

@@ -18,8 +18,6 @@ FocusScope {
     readonly property color bubbleTint: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.10))
     readonly property color bubbleWash: Qt.tint(flatBackground, Qt.rgba(accentInk.r, accentInk.g, accentInk.b, 0.20))
     readonly property color edgeRule: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.20))
-    readonly property string microphoneAppearance: currentState === "not-running" ? "off"
-        : ["inactive", "idle", "listening", "thinking", "speaking", "trouble"].indexOf(currentState) !== -1 ? "on" : "unknown"
     property bool motionEnabled: false
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
@@ -212,56 +210,20 @@ FocusScope {
                     id: microphoneStatus
                     objectName: "microphoneStatus"
                     width: parent.width
-                    spacing: 5
                     Accessible.role: Accessible.StaticText
                     Accessible.name: root.statusSentence
                     Accessible.description: root.statusSentence
                     Accessible.focusable: false
                     HoverHandler { id: microphoneHover }
-                    Item {
-                        id: microphoneSlot
-                        width: Math.max(24, root.bodyLineHeight + root.captionPixelSize / 2)
-                        height: width
-                        Loader {
-                            objectName: "microphoneGlyph"
-                            anchors.fill: parent
-                            sourceComponent: root.glyphComponent
-                            onLoaded: {
-                                item.anchors.fill = item.parent
-                                item.text = Qt.binding(function() { return root.microphoneAppearance === "off" ? "󰍭" : "󰍬" })
-                                item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
-                                item.color = Qt.binding(function() { return root.ink })
-                                item.Accessible.ignored = true
-                            }
-                        }
-                        Rectangle {
-                            objectName: "microphoneQuestion"
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            width: root.captionLineHeight
-                            height: width
-                            radius: width / 2
-                            color: root.flatBackground
-                            visible: root.microphoneAppearance === "unknown"
-                            Accessible.ignored: true
-                            Text {
-                                anchors.centerIn: parent
-                                text: "?"
-                                textFormat: Text.PlainText
-                                color: root.ink
-                                font.family: "monospace"
-                                font.pixelSize: root.captionPixelSize
-                            }
-                        }
-                    }
                     Text {
                         objectName: "conversationStatus"
-                        width: parent.width - microphoneSlot.width - parent.spacing
-                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
                         // No-break spaces keep each phrase whole, so the label wraps only after the middle dot.
-                        text: ({"not-running": "Not running", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "starting": "Starting",
-                            "unavailable": "Unavailable", "idle": "Waiting", "listening": "Listening", "thinking": "Thinking",
-                            "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
+                        text: ({"not-running": "Not\u00a0running\u00a0· Mic\u00a0released", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use",
+                            "starting": "Starting\u00a0· Mic\u00a0in\u00a0use?", "unavailable": "Unavailable\u00a0· Mic\u00a0in\u00a0use?",
+                            "idle": "Waiting\u00a0· Mic\u00a0in\u00a0use", "listening": "Listening\u00a0· Mic\u00a0in\u00a0use",
+                            "thinking": "Thinking\u00a0· Mic\u00a0in\u00a0use", "speaking": "Speaking\u00a0· Mic\u00a0in\u00a0use",
+                            "trouble": "Attention\u00a0· Mic\u00a0in\u00a0use"})[root.currentState] || "Unavailable\u00a0· Mic\u00a0in\u00a0use?"
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         color: root.currentState === "trouble" ? root.troubleInk : root.ink
@@ -286,7 +248,7 @@ FocusScope {
                 Accessible.role: Accessible.Button
                 Accessible.name: "Close panel"
                 KeyNavigation.tab: advisories.keyboardStop ? advisories : transcript
-                KeyNavigation.backtab: sendButton.enabled ? sendButton : composer
+                KeyNavigation.backtab: sendButton.enabled ? sendButton : voiceButton.enabled ? voiceButton : composer
                 contentItem: Text {
                     id: closeGlyph
                     text: "×"
@@ -728,7 +690,7 @@ FocusScope {
             objectName: "composerScroll"
             x: 0
             y: 10 + (submissionNotice.visible ? submissionNotice.height + 6 : 0)
-            width: parent.width - sendButton.width - 9
+            width: parent.width - sendButton.width - 9 - voiceButton.width - 9
             height: composer.contentHeight > 0 && composer.lineCount > 0
                 ? Math.max(40, Math.min(composer.contentHeight,
                     composer.contentHeight / composer.lineCount * 5) + 18) : 40
@@ -765,7 +727,7 @@ FocusScope {
                     Accessible.name: "Message Kestrel"
                     Accessible.multiLine: true
                     KeyNavigation.priority: KeyNavigation.BeforeItem
-                    KeyNavigation.tab: sendButton.enabled ? sendButton : closeButton
+                    KeyNavigation.tab: voiceButton.enabled ? voiceButton : closeButton
                     KeyNavigation.backtab: transcript
                     onTextChanged: {
                         root.editRevision++
@@ -797,6 +759,89 @@ FocusScope {
                 Accessible.ignored: true
             }
         }
+        Loader {
+            objectName: "voiceTooltip"
+            sourceComponent: root.tooltipComponent
+            onLoaded: {
+                item.parent = voiceButton
+                item.text = Qt.binding(function() { return voiceButton.Accessible.name })
+                root.fitTooltip(item)
+                item.visible = Qt.binding(function() { return voiceButton.hovered })
+            }
+        }
+        Button {
+            id: voiceButton
+            objectName: "toggleVoice"
+            anchors.right: sendButton.left
+            anchors.rightMargin: 9
+            y: composerScroll.y + composerScroll.height - height
+            width: Math.max(40, voiceGlyph.implicitWidth + 24)
+            height: Math.max(40, voiceGlyph.implicitHeight + 18)
+            padding: 0
+            hoverEnabled: true
+            enabled: root.service !== null
+            // Verified status and the unconfirmed flag alone decide the form, never a command's reply.
+            readonly property string form: root.service === null || root.service.toggleUnconfirmed ? "unconfirmed"
+                : ["idle", "listening", "thinking", "speaking"].indexOf(root.currentState) !== -1 ? "active"
+                : ["inactive", "not-running"].indexOf(root.currentState) !== -1 ? "resting" : "unconfirmed"
+            Accessible.name: form === "active" ? "End voice conversation"
+                : form === "resting" ? "Start voice conversation" : "Start or end voice conversation"
+            Accessible.description: root.statusSentence
+            KeyNavigation.tab: sendButton.enabled ? sendButton : closeButton
+            KeyNavigation.backtab: composer
+            onClicked: root.service.toggle()
+            Keys.onReturnPressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
+            Keys.onEnterPressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
+            Keys.onSpacePressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
+            contentItem: Loader {
+                id: voiceGlyph
+                sourceComponent: root.glyphComponent
+                onLoaded: {
+                    item.anchors.fill = item.parent
+                    item.text = Qt.binding(function() { return voiceButton.form === "active" ? "󰍬" : "󰍮" })
+                    item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
+                    item.color = Qt.binding(function() { return !voiceButton.enabled ? Qt.rgba(root.ink.r, root.ink.g, root.ink.b, 0.6)
+                        : voiceButton.form === "active" ? root.flatBackground : root.ink })
+                    item.Accessible.ignored = true
+                }
+            }
+            background: Rectangle {
+                radius: 10
+                color: !voiceButton.enabled ? "transparent" : voiceButton.form === "active" ? root.accentInk : root.bubbleTint
+                border.width: voiceButton.enabled ? 0 : 1.5
+                border.color: root.edgeRule
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    radius: 14
+                    color: "transparent"
+                    border.width: 2
+                    border.color: root.accentInk
+                    visible: voiceButton.activeFocus
+                    Accessible.ignored: true
+                }
+            }
+            Rectangle {
+                objectName: "voiceQuestion"
+                z: 1
+                anchors.right: parent.right
+                anchors.top: parent.top
+                width: root.captionLineHeight
+                height: width
+                radius: width / 2
+                color: root.flatBackground
+                visible: voiceButton.enabled && voiceButton.form === "unconfirmed"
+                Accessible.ignored: true
+                Text {
+                    anchors.centerIn: parent
+                    text: "?"
+                    textFormat: Text.PlainText
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.captionPixelSize
+                }
+            }
+        }
         Button {
             id: sendButton
             objectName: "sendMessage"
@@ -810,7 +855,7 @@ FocusScope {
             Accessible.name: "Send message"
             onEnabledChanged: if (!enabled && focus && root.activeFocus) composer.forceActiveFocus()
             KeyNavigation.tab: closeButton
-            KeyNavigation.backtab: composer
+            KeyNavigation.backtab: voiceButton
             onClicked: root.sendDraft()
             Keys.onReturnPressed: function(event) { if (!event.isAutoRepeat) root.sendDraft() }
             Keys.onEnterPressed: function(event) { if (!event.isAutoRepeat) root.sendDraft() }
