@@ -1,4 +1,4 @@
-"""Conversation-only Hermes child; its launching parent owns the temporary home."""
+"""Native Hermes child; its launching parent owns desktop effects and the temporary home."""
 
 from contextlib import redirect_stdout
 import importlib.util
@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
@@ -25,9 +26,35 @@ TRACE_FAILURE_ERROR = ('Local conversation tracing failed. Check free space and 
 RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by this user. '
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
+TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five desktop tools. '
+                      'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+
+
+class DesktopToolSchema(NamedTuple):
+    description: str
+    bounds: dict[str, tuple[int, int]]
+
+
+DESKTOP_TOOLS = {
+    'mute': DesktopToolSchema('Mute the selected audio output.', {}),
+    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (0, 100)}),
+    'pause_media': DesktopToolSchema('Pause current media.', {}),
+    'next_track': DesktopToolSchema('Advance to the next media track.', {}),
+    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (1, 2147483647)}),
+}
+
+
+def valid_desktop_arguments(name: str, arguments: dict) -> bool:
+    if not isinstance(name, str) or name not in DESKTOP_TOOLS or not isinstance(arguments, dict):
+        return False
+    bounds = DESKTOP_TOOLS[name].bounds
+    return set(arguments) == set(bounds) and all(
+        type(arguments[key]) is int and low <= arguments[key] <= high
+        for key, (low, high) in bounds.items()
+    )
 
 
 class ReplyDeliveryPrefix:
@@ -101,17 +128,14 @@ SYSTEM_PROMPT = (
     "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
-    "This session is a local conversation. Your sole tool is native local memory for small "
-    "facts and preferences. Maintain those notes automatically when useful, including updating "
-    "or removing outdated notes. Claim a save only after a successful memory tool result. "
-    "You have no desktop or web access. "
-    "Kestrel handles the exact spoken command mute locally. You cannot invoke that action; "
-    "for a request to mute, explain that the owner must say mute on its own. "
-    "Kestrel handles volume <level> percent or %, set volume [to] <level>, and set the volume [to] <level> locally. "
-    "The owner must say one form on its own, as a complete turn, with a whole-number level from zero to one hundred. "
-    "A percent or % suffix is required after volume <level> and optional after the set forms; "
-    "one please is allowed at either end, never both. "
-    "You cannot invoke desktop actions; only the memory tool is available.\n\n"
+    "This session is a local conversation. Your tools are native local memory for small facts and preferences, "
+    "and Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace. "
+    "Maintain notes automatically when useful, including updating or removing outdated notes. "
+    "Claim a save only after a successful memory tool result. You have no web access or other desktop tools: "
+    "you cannot unmute, resume or go back in media, open apps or take screenshots; say so when asked. "
+    "Call a desktop tool only for an effect the owner asks for, at most once per reply. "
+    "Each desktop result is JSON with confirmed, attempted and reason. "
+    "Say an effect happened only when confirmed is true, never before its result arrives. Never call a desktop tool again to retry it.\n\n"
     'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
     'practical information and ordinary replies without a clear emotional cue. Curious suits an '
@@ -135,7 +159,7 @@ SYSTEM_PROMPT = (
     '[delivery:reassuring]\n'
     'You can take it one step at a time.\n'
     '\n'
-    'Tool calls use their native format without a delivery header. For the first spoken text of each reply, whether before or after memory tool calls, begin immediately with exactly one of '
+    'Tool calls use their native format without a delivery header. For the first spoken text of each reply, whether before or after tool calls, begin immediately with exactly one of '
     '[delivery:neutral], [delivery:curious], [delivery:gently_pleased] or [delivery:reassuring], then'
     ' a newline, then your concise spoken reply. Never omit the header, even for a very short factual'
     ' answer, a changed subject, or a replacement request after an interruption. Earlier assistant '
@@ -338,6 +362,7 @@ def main(*, base_url=BONSAI_URL):
                 'compression': {'enabled': False},
                 'auxiliary': {'title_generation': {'enabled': False}},
                 'plugins': {'enabled': []}, 'mcp_servers': {},
+                'tools': {'tool_search': {'enabled': 'off'}},
             }
             (home / 'config.yaml').write_text(json.dumps(config))
             try:
@@ -364,8 +389,43 @@ def main(*, base_url=BONSAI_URL):
             except Exception as error:
                 raise RuntimeError(TRACE_STARTUP_ERROR) from (error.__cause__ or error)
             from run_agent import AIAgent
+            from tools.registry import registry
             from agent.relay_runtime import get_runtime
+            from agent.turn_failure_copy import is_max_iteration_handoff
             import nemo_relay
+
+            bridge_failed = False
+
+            def desktop_handler(name):
+                def handle(args):
+                    nonlocal bridge_failed
+                    if bridge_failed:
+                        return 'Kestrel desktop bridge failed'
+                    emit({'tool_call': {'name': name, 'arguments': args}})
+                    try:
+                        line = sys.stdin.buffer.readline(4096)
+                        reply = json.loads(line)
+                        if (len(line) == 4096 and not line.endswith(b'\n')
+                                or not isinstance(reply, dict) or set(reply) != {'tool_result'}
+                                or not isinstance(reply['tool_result'], str)
+                                or not reply['tool_result'].strip() or len(reply['tool_result']) > 1024):
+                            raise ValueError('Invalid desktop result')
+                        return reply['tool_result']
+                    except ValueError:
+                        bridge_failed = True
+                        return 'Kestrel desktop bridge failed'
+                return handle
+
+            for name, (description, bounds) in DESKTOP_TOOLS.items():
+                registry.register(
+                    name=name, toolset='kestrel_desktop', handler=desktop_handler(name),
+                    schema={'name': name, 'description': description, 'parameters': {
+                        'type': 'object',
+                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high}
+                                       for key, (low, high) in bounds.items()},
+                        'required': list(bounds), 'additionalProperties': False,
+                    }},
+                )
 
             try:
                 runtime = get_runtime()
@@ -387,22 +447,37 @@ def main(*, base_url=BONSAI_URL):
             def construct_agent(*, memory):
                 built = AIAgent(
                     base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
-                    model='bonsai-2-9b', enabled_toolsets=['memory'] if memory else [], disabled_toolsets=['terminal'],
+                    model='bonsai-2-9b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
                     session_db=None, fallback_model=None, save_trajectories=False,
-                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180,
+                    # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
+                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180, max_iterations=9,
                     reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
-                if memory and (built.valid_tool_names != {'memory'}
-                               or {tool['function']['name'] for tool in built.tools} != {'memory'}
-                               or built._memory_store is None or built._memory_manager is not None):
+                native_repair = built._repair_tool_call
+
+                def exact_repair(name):
+                    repaired = native_repair(name)
+                    if repaired == 'memory' or repaired == name.lower().replace('-', '_').replace(' ', '_'):
+                        return repaired
+                    return None
+
+                built._repair_tool_call = exact_repair
+                refusal = None
+                if memory:
+                    if (built.valid_tool_names != {'memory', *DESKTOP_TOOLS}
+                            or {tool['function']['name'] for tool in built.tools} != {'memory', *DESKTOP_TOOLS}):
+                        refusal = TOOL_SURFACE_ERROR
+                    elif built._memory_store is None or built._memory_manager is not None:
+                        refusal = MEMORY_ERROR
+                if refusal is not None:
                     try:
                         built.close()
                     except Exception:
                         raise RuntimeError(ENGINE_CLOSE_ERROR) from None
-                    raise RuntimeError(MEMORY_ERROR)
+                    raise RuntimeError(refusal)
                 return built
 
             def close_agent():
@@ -427,6 +502,7 @@ def main(*, base_url=BONSAI_URL):
                     status = 1
                     break
                 tracing_failed = False
+                bridge_failed = False
                 try:
                     request = json.loads(line)
                     if not isinstance(request, dict):
@@ -462,7 +538,21 @@ def main(*, base_url=BONSAI_URL):
                         raise ValueError('Expected an exact preparation, begin or messages request')
                     if not isinstance(messages, list) or not messages:
                         raise ValueError('Expected nonempty conversation history')
-                    for message in messages:
+                    group_names = set()
+                    for index, message in enumerate(messages):
+                        if isinstance(message, dict) and message.get('role') == 'tool':
+                            if (set(message) != {'role', 'name', 'arguments', 'content'}
+                                    or not valid_desktop_arguments(message['name'], message['arguments'])
+                                    or not isinstance(message['content'], str) or not message['content'].strip()
+                                    or len(message['content']) > 1024):
+                                raise ValueError('Invalid desktop tool history')
+                            if index == 0 or messages[index - 1]['role'] not in ('user', 'tool'):
+                                raise ValueError('Invalid desktop tool history')
+                            if message['name'] in group_names:
+                                raise ValueError('Invalid desktop tool history')
+                            group_names.add(message['name'])
+                            continue
+                        group_names.clear()
                         if (not isinstance(message, dict) or set(message) != {'role', 'content'}
                                 or message['role'] not in ('user', 'assistant')
                                 or not isinstance(message['content'], str)
@@ -470,6 +560,21 @@ def main(*, base_url=BONSAI_URL):
                             raise ValueError('Expected text-only user/assistant messages')
                     if messages[-1]['role'] != 'user':
                         raise ValueError('Conversation history must end in user')
+                    converted = []
+                    tool_count = 0
+                    for index, message in enumerate(messages):
+                        if message['role'] == 'tool':
+                            if messages[index - 1]['role'] != 'tool':
+                                calls = []
+                                converted.append({'role': 'assistant', 'content': '', 'tool_calls': calls})
+                            call_id = f'kestrel-desktop-{tool_count}'
+                            tool_count += 1
+                            calls.append({'id': call_id, 'type': 'function', 'function': {
+                                'name': message['name'], 'arguments': json.dumps(message['arguments'])}})
+                            converted.append({'role': 'tool', 'tool_call_id': call_id, 'content': message['content']})
+                        else:
+                            converted.append(message.copy())
+                    messages = converted
                     history = []
                     for index, message in enumerate(messages[:-1]):
                         historical = message.copy()
@@ -481,6 +586,8 @@ def main(*, base_url=BONSAI_URL):
 
                     def delta(text):
                         nonlocal streamed
+                        if bridge_failed:
+                            return
                         streamed = True
                         for event in delivery.feed(text):
                             emit(event)
@@ -508,6 +615,15 @@ def main(*, base_url=BONSAI_URL):
                         except Exception:
                             tracing_failed = True
                             raise RuntimeError(TRACE_FAILURE_ERROR) from None
+                    if bridge_failed:
+                        raise RuntimeError('Kestrel desktop bridge failed')
+                    if (not delivery.failed
+                            and not (delivery.delivery is None and delivery.prefix.startswith('['))
+                            and is_max_iteration_handoff(result)):
+                        # Hermes marks a capped turn resumable; its closing summary is unverified and never spoken.
+                        print(f"Hermes turn incomplete: {result['turn_exit_reason']}", file=sys.stderr, flush=True)
+                        emit({'incomplete': True})
+                        continue
                     if (not isinstance(result, dict) or result.get('completed') is not True
                             or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
                         reason = result.get('error') if isinstance(result, dict) else None
@@ -526,7 +642,7 @@ def main(*, base_url=BONSAI_URL):
                 except Exception as error:
                     print(f'Hermes turn failed: {error}', file=sys.stderr, flush=True)
                     emit({'error': str(error) or type(error).__name__})
-                    if tracing_failed:
+                    if tracing_failed or bridge_failed:
                         terminal_failure_reported = True
                         status = 1
                         break

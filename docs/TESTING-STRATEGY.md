@@ -101,7 +101,9 @@ session restart or user-turn retry. Known preparation, begin and note-preflight 
 controls/help and an on-request engine advisory without a native retry; uncertain cleanup separately refuses
 reactivation. Timeout cases also assert worker exit and owned-home removal.
 [NativeHermesTests](../tests/test_hermes.py) exercises the installed worker's JSON-lines boundary: tool-free,
-note-free preparation; exactly the native memory tool on accepted turns; refusal of desktop, arbitrary-file,
+note-free preparation; exactly native memory plus `mute`, `set_volume`, `pause_media`, `next_track` and
+`focus_workspace` on accepted turns; eager tool configuration without search helpers; desktop bridge results
+and native history records; refusal of fuzzy desktop names, malformed bridge results, arbitrary-file,
 terminal, session-search and other unsolicited tools; isolated configuration/environment; and attempted
 network destinations limited to the controlled provider. Its
 `test_production_worker_entrypoint_becomes_ready_without_a_turn` observes worker startup and clean exit with
