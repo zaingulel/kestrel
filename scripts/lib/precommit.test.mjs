@@ -321,7 +321,7 @@ test("ANTI-REGRESSION: pre-commit: a repository commits without the other runtim
     writeFileSync(settings, '{ "runtimes": ["claude"] }\n');
     git(repo, ['add', '.agents/factory-settings.json']);
     const unversioned = runHook(repo);
-    assert.notEqual(unversioned.status, 0, 'a staged settings file the sync refuses must not admit the removal');
+    assert.notEqual(unversioned.status, 0, 'a staged settings file the commit gate refuses must not admit the removal');
     assert.match(unversioned.stderr, /\.agents\/factory-settings\.json: version: is unsupported/);
 
     git(repo, ['rm', '-q', '--cached', '.agents/factory-settings.json']);

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { installs, isGreptilePath, leftOutCause, needNotResolveCause, presentRuntimes, readRuntimes, readSettingsHeader, RUNTIMES, runtimeOf, SEATS, SETTINGS_PATH, sweepOmits, sweepOn, treeSettings } from './runtimes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, run the sync that installs that copy, then make the edit again';
+const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
 
 const header = (extra) => readSettingsHeader(JSON.stringify({ version: 1, ...extra }), 'settings.json');
 // Both runtimes, the add-on on and the sweep off: a tree with these settings leaves out the sweep's files and no other.
@@ -106,8 +106,8 @@ test('the settings file names the runtimes present: no file means both, and an u
     ['{', 'is not valid JSON'],
     ['null', 'file: must hold one JSON object; found null'],
     ['[]', 'file: must hold one JSON object; found []'],
-    ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the sync (only 1); found undefined; ${RECOVERY}`],
-    ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the sync (only 1); found 2; ${RECOVERY}`],
+    ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
+    ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
     ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "extra"; ${RECOVERY}`],
   ];
   for (const [text, message] of refused) {

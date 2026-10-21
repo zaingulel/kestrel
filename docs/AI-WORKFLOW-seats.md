@@ -33,7 +33,7 @@ every edit to a builder seat, reviews, and delivers; it never builds. Each seat 
 tools than the charter needs. Which model and effort each seat runs at is set in its seat file, under
 [`.claude/agents/`](../.claude/agents/) and [`.codex/agents/`](../.codex/agents/);
 [`AGENTS.md`](../AGENTS.md) says under "Runtime notes" which seats the costliest models are kept to. Those values are the defaults: a repository that adopts the workflow may
-override a seat's settings in its own seat settings file, as [the `sync-job` skill](../.agents/skills/sync-job/SKILL.md)
+override a seat's settings in its own seat settings file, as [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md)
 sets out under "How a repository overrides a seat".
 
 ```mermaid
@@ -93,14 +93,15 @@ fixed, and a review finding then costs a replan.
   reviewed and by whom, and what a builder may run.
 - [The `cross-review` skill](../.agents/skills/cross-review/SKILL.md): how a review or a plan review runs on the
   other model family.
-- [The `sync-job` skill](../.agents/skills/sync-job/SKILL.md) under "How a repository overrides a seat": how a
+- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md) under "How a repository overrides a seat": how a
   repository overrides a seat's model, effort or turn cap, and what an override may not do.
 
 ## Failure modes
 
 - **One runtime carries a different first-party charter body.** The commit guard names the seat, both files and differing lines.
   Edit both canonical source charters together and regenerate their installed copies before staging them.
-  A consumer receives the correction through the [sync route](../.agents/skills/sync-job/SKILL.md).
+  A consumer receives the correction through a release update, as the
+  [`shared-files` skill](../.agents/skills/shared-files/SKILL.md) says.
 
 - **A builder is cut off at its turn cap.** Each Claude seat file also sets a turn cap. A builder is cut off at its
   cap with no warning, so a builder's report ends with a literal sentinel line; a report without it means the
@@ -115,8 +116,8 @@ fixed, and a review finding then costs a replan.
 - **A seat file and the seat settings file disagree.** The contract test fails naming the seat until
   `node scripts/factory-sync.mjs --render` has applied the settings file and the result is committed. A settings file
   that would put a costliest model on another seat, raise the turn cap of the `oracle` or `security-reviewer` seat
-  above 90, or name a model the agent check does not know is refused by the sync and by `--render` before either
-  writes.
+  above 90, or name a model the agent check does not know is refused by a release update and by `--render` before
+  either writes.
 
 ## Key files
 

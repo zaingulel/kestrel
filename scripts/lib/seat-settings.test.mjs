@@ -12,7 +12,7 @@ const PRESENT = presentRuntimes('.');
 
 const CLAUDE_PATH = '.claude/agents/builder.md';
 const CODEX_PATH = '.codex/agents/builder.toml';
-const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, run the sync that installs that copy, then make the edit again';
+const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
 
 // The body repeats setting-shaped lines on purpose: only the settings block may change.
 const claudeSeat = (name, model, effort, maxTurns) => `---
@@ -106,8 +106,8 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
   const refused = [
     ['{"version": 1,', `${label}: is not valid JSON`],
     ['[]', `${label}: file: must hold one JSON object; found []`],
-    ['{"seats":{}}', `${label}: version: is unsupported by this copy of the sync (only 1); found undefined; ${RECOVERY}`],
-    ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the sync (only 1); found 2; ${RECOVERY}`],
+    ['{"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
+    ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
     ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],

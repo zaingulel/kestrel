@@ -46,7 +46,7 @@ _Avoid_: trial, prototype
 Ignored environments, model weights, microphone and voice assets under `.runtime/`.
 
 **Factory**:
-The shared Fabraik development workflow installed through canonical sync.
+The shared Fabraik development workflow installed and updated through named releases, as the [shared-files skill](.agents/skills/shared-files/SKILL.md) defines.
 
 **Shared region**:
 The text between the factory-shared markers in AGENTS.md.

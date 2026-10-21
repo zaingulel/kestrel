@@ -1,29 +1,21 @@
-// factory-sync.test.mjs — tests for the factory manifest reader, its drift verification, the sync into an
-// adopter, the render of an adopter's seat settings, the lag check against the canonical main, and the CLI.
+// factory-sync.test.mjs — tests for the factory manifest reader, its drift verification, the render of an adopter's
+// seat settings and the CLI.
 // Run: node --test scripts/lib/factory-sync.test.mjs   (or `npm run test:scripts`)
 //
-// Price tag: every tree is a real temporary directory; sync tests copy one privately built pair of small git
-// repositories into independent directories, and the CLI tests spawn git and node a handful of times. No network:
-// the sync tests inject the source's fetch of origin main, proven on its own against a local bare origin; the two --from wire tests
-// run one with GIT_ALLOW_PROTOCOL=file, so its fetch fails, and one with GIT_SSH_COMMAND serving the source from its
-// own repository, so its fetch succeeds; and the --check wire tests put a fake gh first on the PATH. Retire this file
-// with scripts/lib/factory-sync.mjs.
+// Price tag: every tree is a real temporary directory, and the CLI tests spawn git and node a handful of times. No
+// network. Retire this file with scripts/lib/factory-sync.mjs.
 
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess, { spawnSync } from 'node:child_process';
 import fileSystem, {
   chmodSync,
-  copyFileSync,
-  cpSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
-  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -31,10 +23,9 @@ import fileSystem, {
 } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkLag, checkManifestPath, computeEntries, fetchMain, readManifest, recordIndexModes, renderSettings, syncInto, verifyManifest } from './factory-sync.mjs';
-import { gitExecutable } from './posix-shell.mjs';
+import { checkManifestPath, computeEntries, readManifest, recordIndexModes, renderSettings, verifyManifest } from './factory-sync.mjs';
 import { presentRuntimes } from './runtimes.mjs';
 
 // Whether this machine lets an unprivileged process create a file symlink. Only Windows without Developer Mode or
@@ -58,8 +49,6 @@ const NEEDS_FILE_SYMLINK = { skip: !FILE_SYMLINKS && 'creating a file symlink on
 
 // Computed by `printf 'hello\n' | shasum -a 256`, never by the code under test.
 const HELLO_SHA256 = '5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03';
-// Computed by `printf 'hello\r\n' | shasum -a 256`: the same line as a checkout with CRLF line endings holds it.
-const HELLO_CRLF_SHA256 = 'cd2eca3535741f27a8ae40c31b0c41d4057a7a7b912b33b9aed86485d1c84676';
 // Computed by `printf 'x\ny\n' | shasum -a 256`: the region text excludes both marker lines.
 const REGION_SHA256 = '09834d488008f5f1ef589a2d7cedc52425bee9dd23b2212e4c1d673c5cbb54e4';
 const START = '<!-- factory-shared:start -->';
@@ -247,26 +236,6 @@ test('a missing, unparsable or malformed manifest fails loudly by name', (t) => 
   ]) {
     writeManifest(root, [entry]);
     assert.throws(() => readManifest(root), /malformed manifest entry|invalid manifest path/, JSON.stringify(entry));
-  }
-});
-
-test('a manifest with no adopters list is read and one whose adopters list is malformed is refused by name', (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'factory-sync-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  mkdirSync(join(root, '.agents'));
-  const manifest = join(root, '.agents', 'factory-manifest.json');
-  const base = { canonical: 'example-owner/example-repo', entries: [] };
-  writeFileSync(manifest, JSON.stringify(base));
-  assert.equal(readManifest(root).adopters, undefined);
-  writeFileSync(manifest, JSON.stringify({ ...base, adopters: [] }));
-  assert.deepEqual(readManifest(root).adopters, []);
-  for (const adopters of [null, 'example-owner/adopter', ['no-slash'], [42], {}]) {
-    writeFileSync(manifest, JSON.stringify({ ...base, adopters }));
-    assert.throws(
-      () => readManifest(root),
-      /malformed \.agents\/factory-manifest\.json: it must hold canonical "owner\/repo" and entries/,
-      JSON.stringify(adopters),
-    );
   }
 });
 
@@ -554,7 +523,6 @@ test('ANTI-REGRESSION: a tree that names one runtime verifies without the other\
 const GREPTILE_SKILL = '.agents/skills/greptile/SKILL.md';
 const GREPTILE_SKILL_COPY = '.claude/skills/greptile/SKILL.md';
 const GREPTILE_CONFIG = '.greptile/config.json';
-const GREPTILE_PATHS = [GREPTILE_SKILL, GREPTILE_SKILL_COPY, GREPTILE_CONFIG];
 const SKILL_TEXT = 'greptile skill\n';
 const SKILL_SHA256 = '21672778c2efb166916a1ce3bbfd9a4558bcf0439d66e49a695fda389fcab5be';
 const CONFIG_TEXT = '{"skipReview":"AUTOMATIC"}\n';
@@ -746,7 +714,6 @@ test('--write in the canonical repository records every entry deterministically'
   const expected = `${JSON.stringify(
     {
       canonical: 'example-owner/example-repo',
-      adopters: ['example-owner/adopter'],
       entries: [
         { path: 'AGENTS.md', region: 'factory-shared', sha256: REGION_SHA256 },
         { path: 'docs/a.txt', sha256: HELLO_SHA256 },
@@ -765,29 +732,14 @@ test('--write in the canonical repository records every entry deterministically'
   assert.equal(manifestBytes(root), expected, 'a second --write over unchanged files must yield identical bytes');
 });
 
-test('--write refuses a canonical manifest that holds no adopters list and leaves it untouched', (t) => {
-  const root = staleRepository(t, 'https://github.com/example-owner/example-repo.git');
-  writeFileSync(
-    join(root, MANIFEST),
-    JSON.stringify({ canonical: 'example-owner/example-repo', entries: [{ path: 'docs/a.txt', sha256: ZERO_SHA256 }] }),
-  );
-  const before = manifestBytes(root);
-  const run = runCli(root, '--write');
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /^factory-sync: refusing to --write: \.agents\/factory-manifest\.json holds no adopters list/);
-  assert.equal(manifestBytes(root), before, 'a refused --write must leave the manifest untouched');
-});
-
 const CANONICAL = 'example-owner/example-repo';
 const CANONICAL_URL = `https://github.com/${CANONICAL}`;
 const ADOPTER_URL = 'https://github.com/example-owner/adopter';
 const MANIFEST = '.agents/factory-manifest.json';
 const GIT_ISOLATION = ['-c', 'user.name=Factory Test', '-c', 'user.email=factory@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null'];
-let syncFixtureSeed;
 
 function git(root, ...args) {
-  const seed = syncFixtureSeed !== undefined && (root === join(syncFixtureSeed, 'source') || root === join(syncFixtureSeed, 'target'));
-  const run = spawnSync('git', ['-C', root, ...GIT_ISOLATION, ...(seed ? ['-c', 'maintenance.auto=false'] : []), ...args], { encoding: 'utf8' });
+  const run = spawnSync('git', ['-C', root, ...GIT_ISOLATION, ...args], { encoding: 'utf8' });
   assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
   return run.stdout.trim();
 }
@@ -821,59 +773,18 @@ function repository(root, origin) {
   git(root, 'remote', 'add', 'origin', origin);
 }
 
-const SOURCE_ENTRIES = [
-  { path: 'AGENTS.md', region: 'factory-shared', sha256: ZERO_SHA256 },
-  { path: 'docs/a.txt', sha256: ZERO_SHA256 },
-  { path: 'scripts/run.sh', sha256: ZERO_SHA256 },
-];
-
-// Records the source's manifest from disk over the given entries, then commits the whole source.
-function recordSource(source, entries) {
-  writeManifest(source, computeEntries(source, { entries }));
-  commitAll(source);
-}
-
-// The private baseline: a canonical source on main with a region, a plain file and an executable file; an adopter
-// target whose committed manifest names the canonical, whose shared file is a symlink to a file outside it, and whose
-// script is not yet executable; and that outside directory.
-function createSyncFixture(base) {
-  const [source, target, outside] = ['source', 'target', 'outside'].map((name) => join(base, name));
-  put(outside, 'secret.txt', 'outside\n');
-
-  repository(source, CANONICAL_URL);
-  put(source, 'AGENTS.md', `# Canonical manual\n${START}\nshared v2\n${END}\n## Canonical rules\n`);
-  put(source, 'docs/a.txt', 'hello v2\n');
-  put(source, 'scripts/run.sh', '#!/bin/sh\necho v2\n', 0o755);
-  // The index carries the executable bit where the checkout ignores file modes, as on Windows.
-  git(source, 'update-index', '--add', '--chmod=+x', 'scripts/run.sh');
-  recordSource(source, SOURCE_ENTRIES);
-
-  repository(target, ADOPTER_URL);
-  put(target, 'AGENTS.md', `# Adopter manual\n${START}\nshared v1\n${END}\n## Adopter rules\n`);
-  // Where file symlinks are refused the shared file starts as a regular file, so the "was a symlink" half of the
-  // first sync test is exercised only where file symlinks exist.
-  if (FILE_SYMLINKS) link(target, 'docs/a.txt', '../../outside/secret.txt');
-  else put(target, 'docs/a.txt', 'outside\n');
-  put(target, 'scripts/run.sh', '#!/bin/sh\necho v1\n');
-  put(target, MANIFEST, JSON.stringify({ canonical: CANONICAL, entries: [] }));
-  commitAll(target);
-}
-
-after(() => {
-  if (syncFixtureSeed) rmSync(syncFixtureSeed, { recursive: true, force: true });
-});
-
-function syncFixture(t) {
-  if (!syncFixtureSeed) {
-    syncFixtureSeed = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-seed-')));
-    createSyncFixture(syncFixtureSeed);
+// Runs fn with the given environment variables set, restoring the previous environment afterwards.
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((name) => [name, process.env[name]]));
+  Object.assign(process.env, vars);
+  try {
+    return fn();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-into-')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  cpSync(syncFixtureSeed, base, { recursive: true, verbatimSymlinks: true });
-  const [source, target, outside] = ['source', 'target', 'outside'].map((name) => join(base, name));
-  const fetchMain = (root) => git(root, 'rev-parse', 'refs/heads/main');
-  return { source, target, outside, sync: (options) => syncInto({ source, target, fetchMain, ...options }) };
 }
 
 // Every path under root except .git (git status may refresh the index), with its kind, mode and bytes.
@@ -896,192 +807,8 @@ function snapshot(root) {
   return tree;
 }
 
-test('sync fixtures isolate copied worktrees, Git state and outside paths', (t) => {
-  const traceDirectory = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-trace-')));
-  t.after(() => rmSync(traceDirectory, { recursive: true, force: true }));
-  const tracePath = join(traceDirectory, 'events.jsonl');
-  const a = withEnv({
-    GIT_TRACE2_EVENT: tracePath,
-    GIT_CONFIG_COUNT: '2',
-    GIT_CONFIG_KEY_0: 'maintenance.auto',
-    GIT_CONFIG_VALUE_0: 'true',
-    GIT_CONFIG_KEY_1: 'maintenance.autoDetach',
-    GIT_CONFIG_VALUE_1: 'false',
-    GIT_CONFIG_PARAMETERS: '',
-  }, () => syncFixture(t));
-  let nativeTrace;
-  try {
-    nativeTrace = readFileSync(tracePath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  } catch {
-    assert.fail('native Git trace must contain valid JSON records');
-  }
-  for (const name of ['source', 'target']) {
-    const root = join(syncFixtureSeed, name);
-    assert.ok(nativeTrace.some(({ event, argv }) => event === 'start'
-      && argv[argv.indexOf('-C') + 1] === root && argv.includes('commit')),
-    'native Git trace must include both seed commits');
-  }
-  assert.ok(!nativeTrace.some(({ event, argv }) => event === 'child_start'
-    && argv.includes('maintenance') && argv.includes('run')),
-  'seed construction must not launch automatic maintenance');
-  const b = syncFixture(t);
-  const assertBaseline = (fixture) => {
-    assert.equal(readFileSync(join(fixture.source, 'docs/a.txt'), 'utf8'), 'hello v2\n');
-    assert.equal(readFileSync(join(fixture.source, 'scripts/run.sh'), 'utf8'), '#!/bin/sh\necho v2\n');
-    assert.equal(readFileSync(join(fixture.target, 'scripts/run.sh'), 'utf8'), '#!/bin/sh\necho v1\n');
-    assert.equal(readFileSync(join(fixture.outside, 'secret.txt'), 'utf8'), 'outside\n');
-    assert.equal(readFileSync(join(fixture.target, 'docs/a.txt'), 'utf8'), 'outside\n');
-    if (FILE_SYMLINKS) {
-      assert.ok(lstatSync(join(fixture.target, 'docs/a.txt')).isSymbolicLink());
-      assert.equal(readlinkSync(join(fixture.target, 'docs/a.txt')).replaceAll('\\', '/'), '../../outside/secret.txt');
-    } else {
-      assert.ok(lstatSync(join(fixture.target, 'docs/a.txt')).isFile());
-    }
-    assert.equal(indexMode(fixture.source, 'scripts/run.sh'), '100755');
-    assert.equal(indexMode(fixture.target, 'scripts/run.sh'), '100644');
-    assert.equal(git(fixture.source, 'remote', 'get-url', 'origin'), 'https://github.com/example-owner/example-repo');
-    assert.equal(git(fixture.target, 'remote', 'get-url', 'origin'), 'https://github.com/example-owner/adopter');
-    assert.equal(git(fixture.source, 'symbolic-ref', 'HEAD'), 'refs/heads/main');
-    assert.equal(git(fixture.target, 'symbolic-ref', 'HEAD'), 'refs/heads/main');
-  };
-  const gitBytes = (root) => {
-    const head = git(root, 'rev-parse', 'HEAD');
-    const object = `objects/${head.slice(0, 2)}/${head.slice(2)}`;
-    return Object.fromEntries(['HEAD', 'config', 'index', 'refs/heads/main', object]
-      .map((path) => [path, readFileSync(join(root, '.git', path))]));
-  };
-  assertBaseline(b);
-  const treesBefore = [snapshot(b.source), snapshot(b.target), snapshot(b.outside)];
-  const gitBefore = [gitBytes(b.source), gitBytes(b.target)];
-
-  if (FILE_SYMLINKS) {
-    assert.ok(lstatSync(join(a.target, 'docs/a.txt')).isSymbolicLink());
-    writeFileSync(join(a.target, 'docs/a.txt'), 'A-only outside\n');
-    assert.equal(readFileSync(join(a.outside, 'secret.txt'), 'utf8'), 'A-only outside\n');
-    assert.equal(readFileSync(join(b.outside, 'secret.txt'), 'utf8'), 'outside\n');
-  } else {
-    assert.ok(lstatSync(join(a.target, 'docs/a.txt')).isFile());
-    assert.equal(readFileSync(join(a.target, 'docs/a.txt'), 'utf8'), 'outside\n');
-    writeFileSync(join(a.target, 'docs/a.txt'), 'A-only shared file\n');
-    assert.equal(readFileSync(join(a.outside, 'secret.txt'), 'utf8'), 'outside\n');
-  }
-  writeFileSync(join(a.source, 'docs/a.txt'), 'contaminated source\n');
-  writeFileSync(join(a.source, 'scripts/run.sh'), 'contaminated source script\n');
-  writeFileSync(join(a.target, 'scripts/run.sh'), 'contaminated target script\n');
-  writeFileSync(join(a.target, 'AGENTS.md'), 'contaminated target manual\n');
-  writeFileSync(join(a.outside, 'secret.txt'), 'contaminated outside\n');
-  for (const root of [a.source, a.target]) {
-    const head = git(root, 'rev-parse', 'HEAD');
-    const object = join(root, '.git', 'objects', head.slice(0, 2), head.slice(2));
-    chmodSync(object, 0o644);
-    writeFileSync(object, 'corrupt object\n');
-    for (const path of ['HEAD', 'config', 'index', 'refs/heads/main']) {
-      writeFileSync(join(root, '.git', path), 'corrupt metadata\n');
-    }
-  }
-
-  assert.deepEqual([snapshot(b.source), snapshot(b.target), snapshot(b.outside)], treesBefore);
-  assert.deepEqual([gitBytes(b.source), gitBytes(b.target)], gitBefore);
-  const c = syncFixture(t);
-  assertBaseline(c);
-  assert.deepEqual([snapshot(c.source), snapshot(c.target), snapshot(c.outside)], treesBefore);
-  assert.deepEqual([gitBytes(c.source), gitBytes(c.target)], gitBefore);
-  for (const root of [b.source, b.target, c.source, c.target]) {
-    assert.equal(git(root, 'status', '--porcelain'), '', 'an independent copied repository must remain clean');
-  }
-});
-
-function assertRefused(fixture, cause, options) {
-  const before = [snapshot(fixture.target), snapshot(fixture.outside)];
-  assert.throws(() => fixture.sync(options), cause);
-  assert.deepEqual([snapshot(fixture.target), snapshot(fixture.outside)], before, 'a refused sync must write nothing');
-}
-
-// Commits the whole target with a manifest that lists entries, as the sync that last shared them recorded them.
-function listInTarget(fixture, entries) {
-  put(fixture.target, MANIFEST, JSON.stringify({ canonical: CANONICAL, entries }));
-  commitAll(fixture.target);
-}
-
-for (const mark of ['skip-worktree', 'assume-unchanged']) {
-  test(`ANTI-REGRESSION: a sync refuses ${mark === 'assume-unchanged' ? 'an' : 'a'} ${mark} installed path before writing anything`, (t) => {
-    const fixture = syncFixture(t);
-    const path = 'scripts/run.sh';
-    assert.ok(lstatSync(join(fixture.target, path)).isFile(), 'the marked installed path must be a committed regular file');
-    git(fixture.target, 'update-index', `--${mark}`, '--', path);
-    put(fixture.target, path, 'local edit\n');
-    assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the mark must hide the local edit from git status');
-    assertRefused(fixture, (error) => {
-      assert.equal(error.message, `${path}: the target's index marks it skip-worktree or assume-unchanged, which hides it from git status, so the sync cannot prove it clean; clear both marks with git update-index --no-skip-worktree -- ${path} and git update-index --no-assume-unchanged -- ${path}, commit or restore whatever git status then shows there, then sync`);
-      return true;
-    });
-  });
-}
-
-test('ANTI-REGRESSION: a sync refuses a marked manifest before writing anything', (t) => {
-  const fixture = syncFixture(t);
-  const saved = readFileSync(join(fixture.target, MANIFEST), 'utf8');
-  for (const mark of ['skip-worktree', 'assume-unchanged']) {
-    git(fixture.target, 'update-index', `--${mark}`, '--', MANIFEST);
-    put(fixture.target, MANIFEST, `${saved}local edit\n`);
-    assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the mark must hide the corrupt working-tree manifest from git status');
-    assertRefused(fixture, (error) => {
-      assert.equal(error.message, `${MANIFEST}: the target's index marks it skip-worktree or assume-unchanged, which hides it from git status, so the sync cannot prove it clean; clear both marks with git update-index --no-skip-worktree -- ${MANIFEST} and git update-index --no-assume-unchanged -- ${MANIFEST}, commit or restore whatever git status then shows there, then sync`);
-      return true;
-    });
-    put(fixture.target, MANIFEST, saved);
-    git(fixture.target, 'update-index', `--no-${mark}`, '--', MANIFEST);
-  }
-});
-
-test('a sync writes every shared file and region into the adopter and records the source commit', (t) => {
-  const fixture = syncFixture(t);
-  const at = (path) => join(fixture.target, path);
-  const outsideBefore = snapshot(fixture.outside);
-
-  assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: [], omitted: 0 });
-
-  assert.equal(readFileSync(at('AGENTS.md'), 'utf8'), `# Adopter manual\n${START}\nshared v2\n${END}\n## Adopter rules\n`);
-  assert.ok(lstatSync(at('docs/a.txt')).isFile(), 'a shared file that was a symlink must become a regular file');
-  assert.equal(readFileSync(at('docs/a.txt'), 'utf8'), 'hello v2\n');
-  if (process.platform === 'win32') assert.equal(indexMode(fixture.target, 'docs/a.txt'), '100644');
-  else assert.equal(lstatSync(at('docs/a.txt')).mode & 0o777, 0o644);
-  assert.equal(readFileSync(at('scripts/run.sh'), 'utf8'), '#!/bin/sh\necho v2\n');
-  if (process.platform === 'win32') assert.equal(indexMode(fixture.target, 'scripts/run.sh'), '100755', 'the executable bit must follow the source');
-  else assert.equal(lstatSync(at('scripts/run.sh')).mode & 0o777, 0o755, 'the executable bit must follow the source');
-  assert.deepEqual(snapshot(fixture.outside), outsideBefore, 'the file the old symlink pointed at must be untouched');
-
-  const { canonical, entries } = JSON.parse(readFileSync(join(fixture.source, MANIFEST), 'utf8'));
-  const syncedFrom = git(fixture.source, 'rev-parse', 'HEAD');
-  assert.equal(readFileSync(at(MANIFEST), 'utf8'), `${JSON.stringify({ canonical, syncedFrom, entries }, null, 2)}\n`);
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
-
-test('ANTI-REGRESSION: a sync writes no adopters list into the adopter manifest and removes one an earlier sync left there', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, MANIFEST, JSON.stringify({ canonical: CANONICAL, adopters: ['example-owner/adopter', 'example-owner/private-adopter'], entries: [] }));
-  commitAll(fixture.target);
-
-  fixture.sync();
-
-  const { canonical, adopters, entries } = JSON.parse(readFileSync(join(fixture.source, MANIFEST), 'utf8'));
-  assert.deepEqual(adopters, ['example-owner/adopter'], 'the canonical manifest must hold a list for the sync to leave behind');
-  const syncedFrom = git(fixture.source, 'rev-parse', 'HEAD');
-  const text = readFileSync(join(fixture.target, MANIFEST), 'utf8');
-  assert.equal(text, `${JSON.stringify({ canonical, syncedFrom, entries }, null, 2)}\n`);
-  assert.equal('adopters' in JSON.parse(text), false);
-});
-
-// A sync fixture whose source also shares the given seat files, keyed by path.
-function seatSyncFixture(t, seats) {
-  const fixture = syncFixture(t);
-  for (const [path, text] of Object.entries(seats)) put(fixture.source, path, text);
-  recordSource(fixture.source, [...SOURCE_ENTRIES, ...Object.keys(seats).map((path) => ({ path, sha256: ZERO_SHA256 }))]);
-  return fixture;
-}
-
 // Seat files as a canonical ships them; with a known model and effort each passes the agent check. The bytes a
-// sync is expected to leave are written out by hand in each test, never built by these.
+// render is expected to leave are written out by hand in each test, never built by these.
 const ORACLE_MD = '.claude/agents/oracle.md';
 const BUILDER_MD = '.claude/agents/builder.md';
 const REVIEWER_TOML = '.codex/agents/reviewer.toml';
@@ -1090,234 +817,8 @@ const claudeSeat = (name, model, effort, maxTurns) =>
 const codexSeat = (name, model, effort) =>
   `name = "${name}"\ndescription = "Fixture ${name}"\nmodel = "${model}"\nmodel_reasoning_effort = "${effort}"\nsandbox_mode = "read-only"\ndeveloper_instructions = """\nDo the work.\n"""\n`;
 
-// runtimes left out writes a settings file with no such key.
-const putSettings = (fixture, seats, runtimes) => put(fixture.target, SETTINGS, JSON.stringify({ version: 1, runtimes, seats }));
-
-test('a sync applies the seat settings of the adopter to the fetched bytes and records the replaced defaults', (t) => {
-  const fixture = seatSyncFixture(t, {
-    [ORACLE_MD]: claudeSeat('oracle', 'fable', 'high', 90),
-    [REVIEWER_TOML]: codexSeat('reviewer', 'gpt-6-luna', 'medium'),
-  });
-  const at = (path) => join(fixture.target, path);
-  putSettings(fixture, { claude: { oracle: { model: 'opus', maxTurns: 60 } }, codex: { reviewer: { model_reasoning_effort: 'high' } } });
-  const settingsBefore = readFileSync(at(SETTINGS), 'utf8');
-
-  assert.deepEqual(fixture.sync(), { files: 4, regions: 1, removed: [], omitted: 0 });
-
-  assert.equal(
-    readFileSync(at(ORACLE_MD), 'utf8'),
-    '---\nname: oracle\ndescription: "Fixture oracle"\nmodel: opus\neffort: high\nmaxTurns: 60\n---\nDo the work.\n',
-  );
-  assert.equal(
-    readFileSync(at(REVIEWER_TOML), 'utf8'),
-    'name = "reviewer"\ndescription = "Fixture reviewer"\nmodel = "gpt-6-luna"\nmodel_reasoning_effort = "high"\nsandbox_mode = "read-only"\ndeveloper_instructions = """\nDo the work.\n"""\n',
-  );
-  assert.equal(readFileSync(at(SETTINGS), 'utf8'), settingsBefore, 'a sync must never write the settings file');
-
-  const { canonical, entries } = JSON.parse(readFileSync(join(fixture.source, MANIFEST), 'utf8'));
-  const syncedFrom = git(fixture.source, 'rev-parse', 'HEAD');
-  const seatDefaults = { claude: { oracle: { model: 'fable', maxTurns: 90 } }, codex: { reviewer: { model_reasoning_effort: 'medium' } } };
-  assert.equal(readFileSync(at(MANIFEST), 'utf8'), `${JSON.stringify({ canonical, syncedFrom, seatDefaults, entries }, null, 2)}\n`);
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
-
-test('a retune in the canonical reaches a setting the adopter does not override and leaves the one it does', (t) => {
-  const fixture = seatSyncFixture(t, { [BUILDER_MD]: claudeSeat('builder', 'sonnet', 'medium', 60) });
-  const builder = () => readFileSync(join(fixture.target, BUILDER_MD), 'utf8');
-  const recorded = () => JSON.parse(readFileSync(join(fixture.target, MANIFEST), 'utf8')).seatDefaults;
-  putSettings(fixture, { claude: { builder: { effort: 'high' } } });
-
-  fixture.sync();
-  assert.equal(builder(), '---\nname: builder\ndescription: "Fixture builder"\nmodel: sonnet\neffort: high\nmaxTurns: 60\n---\nDo the work.\n');
-  assert.deepEqual(recorded(), { claude: { builder: { effort: 'medium' } } });
-  commitAll(fixture.target);
-
-  put(fixture.source, BUILDER_MD, claudeSeat('builder', 'opus', 'low', 60));
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: BUILDER_MD, sha256: ZERO_SHA256 }]);
-  fixture.sync();
-  assert.equal(builder(), '---\nname: builder\ndescription: "Fixture builder"\nmodel: opus\neffort: high\nmaxTurns: 60\n---\nDo the work.\n');
-  assert.deepEqual(recorded(), { claude: { builder: { effort: 'low' } } }, 'the recorded default must follow the retune');
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
-
 // The sentence a refused value ends with, word for word as the head of seat-settings.mjs gives it.
-const NAMED_AFTER_SYNC = /; a value only a newer copy of the shared workflow admits can be named after the sync that installs it$/;
-
-test('a sync refuses seat settings it cannot apply and writes nothing', (t) => {
-  const fixture = seatSyncFixture(t, {
-    [ORACLE_MD]: claudeSeat('oracle', 'fable', 'high', 90),
-    [BUILDER_MD]: claudeSeat('builder', 'sonnet', 'medium', 60),
-    '.claude/agents/explorer.md': '---\nname: explorer\ndescription: "Fixture explorer"\nmodel: haiku\n---\nDo the work.\n',
-    '.codex/agents/builder.toml': codexSeat('builder', 'gpt-6-luna', 'medium'),
-    [REVIEWER_TOML]: codexSeat('reviewer', 'gpt-6-luna', 'medium'),
-  });
-
-  put(fixture.target, SETTINGS, '{');
-  assertRefused(fixture, /^Error: \.agents\/factory-settings\.json: is not valid JSON/);
-
-  for (const [name, seats, ...causes] of [
-    [
-      'a seat the fetched manifest does not share',
-      { claude: { planner: { model: 'opus' } } },
-      /^Error: \.agents\/factory-settings\.json names the seat \.claude\/agents\/planner\.md, which is not a file entry of the manifest/,
-      /remove that seat from \.agents\/factory-settings\.json, run node scripts\/factory-sync\.mjs --render, commit, then sync$/,
-    ],
-    ['an unsafe value', { claude: { builder: { model: 'op us' } } }, /seats\.claude\.builder\.model: must be a string matching .*; found "op us"/],
-    [
-      'a setting the seat does not carry',
-      { claude: { explorer: { effort: 'high' } } },
-      /^Error: \.claude\/agents\/explorer\.md: setting effort is not carried exactly once/,
-    ],
-    [
-      'a model the running check does not know',
-      { codex: { reviewer: { model: 'example-newer-model' } } },
-      /\.codex\/agents\/reviewer\.toml.*unknown model `example-newer-model`/,
-      NAMED_AFTER_SYNC,
-    ],
-    [
-      'the costliest Claude model on the builder',
-      { claude: { builder: { model: 'fable' } } },
-      /\.claude\/agents\/builder\.md.*the costliest Claude model may sit only on the oracle and security-reviewer seats/,
-      NAMED_AFTER_SYNC,
-    ],
-    [
-      'the costliest Codex model on the builder',
-      { codex: { builder: { model: 'gpt-6-astra' } } },
-      /\.codex\/agents\/builder\.toml.*the costliest Codex model may sit only on the architect, oracle and security-reviewer seats/,
-      NAMED_AFTER_SYNC,
-    ],
-    [
-      'a turn limit of 120 on the oracle',
-      { claude: { oracle: { maxTurns: 120 } } },
-      /\.claude\/agents\/oracle\.md.*the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to 90/,
-      NAMED_AFTER_SYNC,
-    ],
-    ['inherit', { claude: { builder: { model: 'inherit' } } }, /seats\.claude\.builder\.model: inherit leaves the seat model to the session/],
-  ]) {
-    putSettings(fixture, seats);
-    assertRefused(fixture, (error) => {
-      for (const cause of causes) {
-        assert.match(String(error), cause, name);
-      }
-      return true;
-    });
-  }
-});
-
-// example-newer-model is on no known list, and the seat policy refuses fable on the builder: each is what the
-// canonical ships here, not what the settings file names.
-test('a sync run by a copy that does not know a default the canonical now ships applies the override and judges only the values the settings file names', (t) => {
-  const fixture = seatSyncFixture(t, {
-    [BUILDER_MD]: claudeSeat('builder', 'fable', 'medium', 60),
-    [REVIEWER_TOML]: codexSeat('reviewer', 'example-newer-model', 'medium'),
-  });
-  const at = (path) => join(fixture.target, path);
-  putSettings(fixture, { claude: { builder: { effort: 'high' } }, codex: { reviewer: { model_reasoning_effort: 'high' } } });
-
-  assert.deepEqual(fixture.sync(), { files: 4, regions: 1, removed: [], omitted: 0 });
-
-  assert.equal(
-    readFileSync(at(BUILDER_MD), 'utf8'),
-    '---\nname: builder\ndescription: "Fixture builder"\nmodel: fable\neffort: high\nmaxTurns: 60\n---\nDo the work.\n',
-  );
-  assert.equal(
-    readFileSync(at(REVIEWER_TOML), 'utf8'),
-    'name = "reviewer"\ndescription = "Fixture reviewer"\nmodel = "example-newer-model"\nmodel_reasoning_effort = "high"\nsandbox_mode = "read-only"\ndeveloper_instructions = """\nDo the work.\n"""\n',
-  );
-  assert.deepEqual(JSON.parse(readFileSync(at(MANIFEST), 'utf8')).seatDefaults, {
-    claude: { builder: { effort: 'medium' } },
-    codex: { reviewer: { model_reasoning_effort: 'medium' } },
-  });
-});
-
-// The two seats the canonical ships in the left-out runtime tests, and the bytes of each written out by hand.
-const ORACLE_SHIPPED = '---\nname: oracle\ndescription: "Fixture oracle"\nmodel: fable\neffort: high\nmaxTurns: 90\n---\nDo the work.\n';
-const REVIEWER_SHIPPED =
-  'name = "reviewer"\ndescription = "Fixture reviewer"\nmodel = "gpt-6-luna"\nmodel_reasoning_effort = "medium"\nsandbox_mode = "read-only"\ndeveloper_instructions = """\nDo the work.\n"""\n';
-const bothRuntimesFixture = (t) =>
-  seatSyncFixture(t, { [ORACLE_MD]: claudeSeat('oracle', 'fable', 'high', 90), [REVIEWER_TOML]: codexSeat('reviewer', 'gpt-6-luna', 'medium') });
-
-// The manifest text a sync must leave in the target: every entry of the source's, those at `paths` among them.
-function recordedManifest(fixture, paths) {
-  const { canonical, entries } = JSON.parse(readFileSync(join(fixture.source, MANIFEST), 'utf8'));
-  assert.deepEqual(entries.map(({ path }) => path), ['AGENTS.md', 'docs/a.txt', 'scripts/run.sh', ...paths]);
-  return `${JSON.stringify({ canonical, syncedFrom: git(fixture.source, 'rev-parse', 'HEAD'), entries }, null, 2)}\n`;
-}
-
-test('a sync into a target that names one runtime writes only that runtime\'s files, records every entry, and verifies clean', (t) => {
-  for (const [runtime, written, shipped, leftOut] of [
-    ['claude', ORACLE_MD, ORACLE_SHIPPED, REVIEWER_TOML],
-    ['codex', REVIEWER_TOML, REVIEWER_SHIPPED, ORACLE_MD],
-  ]) {
-    const fixture = bothRuntimesFixture(t);
-    const at = (path) => join(fixture.target, path);
-    putSettings(fixture, {}, [runtime]);
-
-    assert.deepEqual(fixture.sync(), { files: 3, regions: 1, removed: [], omitted: 1 }, runtime);
-
-    assert.equal(readFileSync(at(written), 'utf8'), shipped, runtime);
-    assert.equal(readFileSync(at('docs/a.txt'), 'utf8'), 'hello v2\n', runtime);
-    assert.equal(existsSync(at(leftOut)), false, `${leftOut} belongs to a runtime the target does not name`);
-    assert.equal(readFileSync(at(MANIFEST), 'utf8'), recordedManifest(fixture, [ORACLE_MD, REVIEWER_TOML]), runtime);
-    assert.deepEqual(verifyManifest(fixture.target), [], runtime);
-  }
-});
-
-// A sync fixture whose source also shares the Greptile add-on's three files.
-const greptileFixture = (t) => seatSyncFixture(t, Object.fromEntries(GREPTILE_FILES.map(([path, text]) => [path, text])));
-
-test('a sync into a target that does not turn the Greptile add-on on writes none of its files, records every entry, and verifies clean', (t) => {
-  for (const [name, settings] of [
-    ['no settings file', null],
-    ['greptile false', GREPTILE_OFF],
-  ]) {
-    const fixture = greptileFixture(t);
-    const at = (path) => join(fixture.target, path);
-    if (settings !== null) put(fixture.target, SETTINGS, JSON.stringify(settings));
-
-    assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: [], omitted: 3 }, name);
-
-    assert.equal(readFileSync(at('docs/a.txt'), 'utf8'), 'hello v2\n', name);
-    for (const path of GREPTILE_PATHS) assert.equal(existsSync(at(path)), false, `${name}: ${path} belongs to an add-on the target does not turn on`);
-    assert.equal(readFileSync(at(MANIFEST), 'utf8'), recordedManifest(fixture, GREPTILE_PATHS), name);
-    assert.deepEqual(verifyManifest(fixture.target), [], name);
-  }
-
-  const fixture = greptileFixture(t);
-  const at = (path) => join(fixture.target, path);
-  put(fixture.target, SETTINGS, JSON.stringify(GREPTILE_ON));
-
-  assert.deepEqual(fixture.sync(), { files: 5, regions: 1, removed: [], omitted: 0 });
-
-  for (const [path, text] of GREPTILE_FILES) assert.equal(readFileSync(at(path), 'utf8'), text, path);
-  assert.equal(readFileSync(at(MANIFEST), 'utf8'), recordedManifest(fixture, GREPTILE_PATHS));
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
-
-// A sync fixture whose source also shares the documentation sweep's six files.
-const sweepFixture = (t) => seatSyncFixture(t, Object.fromEntries(SWEEP_PATHS.map((path) => [path, 'hello\n'])));
-
-test('a sync into a target that turns the documentation sweep off writes none of its files, records every entry, and verifies clean', (t) => {
-  const off = sweepFixture(t);
-  const atOff = (path) => join(off.target, path);
-  put(off.target, SETTINGS, JSON.stringify(SWEEP_OFF));
-
-  assert.deepEqual(off.sync(), { files: 2, regions: 1, removed: [], omitted: 6 });
-
-  assert.equal(readFileSync(atOff('docs/a.txt'), 'utf8'), 'hello v2\n');
-  for (const path of SWEEP_PATHS) assert.equal(existsSync(atOff(path)), false, `${path} belongs to the sweep the target turns off`);
-  assert.equal(readFileSync(atOff(MANIFEST), 'utf8'), recordedManifest(off, SWEEP_PATHS));
-  assert.deepEqual(verifyManifest(off.target), []);
-
-  const fixture = sweepFixture(t);
-  const at = (path) => join(fixture.target, path);
-
-  assert.deepEqual(fixture.sync(), { files: 8, regions: 1, removed: [], omitted: 0 }, 'no settings file');
-
-  for (const path of SWEEP_PATHS) assert.equal(readFileSync(at(path), 'utf8'), 'hello\n', path);
-  assert.equal(readFileSync(at(MANIFEST), 'utf8'), recordedManifest(fixture, SWEEP_PATHS));
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
+const NAMED_AFTER_UPDATE = /; a value only a newer copy of the shared workflow admits can be named after the release update that installs it$/;
 
 // An adopter repository holding the two seats with the given bytes, a manifest that lists them with seatDefaults,
 // when given, and a settings file naming seats; null leaves the settings file out.
@@ -1442,7 +943,7 @@ test('render refuses the canonical repository and invalid settings and writes no
       'an unknown model',
       { codex: { reviewer: { model: 'example-newer-model' } } },
       /\.codex\/agents\/reviewer\.toml.*unknown model `example-newer-model`/,
-      NAMED_AFTER_SYNC,
+      NAMED_AFTER_UPDATE,
     ],
     [
       'a setting the seat does not carry',
@@ -1453,13 +954,13 @@ test('render refuses the canonical repository and invalid settings and writes no
       'the costliest Claude model on the builder',
       { claude: { builder: { model: 'fable' } } },
       /\.claude\/agents\/builder\.md.*the costliest Claude model may sit only on the oracle and security-reviewer seats/,
-      NAMED_AFTER_SYNC,
+      NAMED_AFTER_UPDATE,
     ],
     [
       'a turn limit of 120 on the oracle',
       { claude: { oracle: { maxTurns: 120 } } },
       /\.claude\/agents\/oracle\.md.*the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to 90/,
-      NAMED_AFTER_SYNC,
+      NAMED_AFTER_UPDATE,
     ],
     ['inherit', { claude: { builder: { model: 'inherit' } } }, /seats\.claude\.builder\.model: inherit leaves the seat model to the session/],
   ]) {
@@ -1520,27 +1021,19 @@ test('--render exits 1 naming the cause when the settings file is invalid and le
   assert.deepEqual(snapshot(root), before, 'a refused --render must write nothing');
 });
 
-test('render after a sync that applied no settings applies them and keeps the recorded source commit', (t) => {
-  const fixture = seatSyncFixture(t, { [BUILDER_MD]: claudeSeat('builder', 'sonnet', 'medium', 60) });
-  fixture.sync();
-  commitAll(fixture.target);
-  putSettings(fixture, { claude: { builder: { effort: 'high' } } });
-  assert.deepEqual(
-    verifyManifest(fixture.target).map(({ path, actual }) => [path, actual]),
-    [[BUILDER_MD, NOT_RENDERED]],
-  );
+test('render applies settings and keeps the manifest release record and key order', (t) => {
+  const root = renderTree(t);
+  const release = { tag: 'v0.2.0', id: 1, assetId: 2, digest: `sha256:${ZERO_SHA256}` };
+  writeFileSync(join(root, MANIFEST), JSON.stringify({ canonical: CANONICAL, release, entries: SEAT_ENTRIES }));
 
-  assert.deepEqual(renderSettings(fixture.target), { seats: [BUILDER_MD], manifest: true });
+  assert.deepEqual(renderSettings(root), { seats: [CLAUDE_SEAT, CODEX_SEAT], manifest: true });
 
+  assert.equal(readFileSync(join(root, CLAUDE_SEAT), 'utf8'), CLAUDE_OVERRIDDEN);
   assert.equal(
-    readFileSync(join(fixture.target, BUILDER_MD), 'utf8'),
-    '---\nname: builder\ndescription: "Fixture builder"\nmodel: sonnet\neffort: high\nmaxTurns: 60\n---\nDo the work.\n',
+    manifestBytes(root),
+    `${JSON.stringify({ canonical: CANONICAL, release, seatDefaults: SEAT_DEFAULTS, entries: SEAT_ENTRIES }, null, 2)}\n`,
   );
-  const { canonical, entries } = JSON.parse(readFileSync(join(fixture.source, MANIFEST), 'utf8'));
-  const syncedFrom = git(fixture.source, 'rev-parse', 'HEAD');
-  const seatDefaults = { claude: { builder: { effort: 'medium' } } };
-  assert.equal(manifestBytes(fixture.target), `${JSON.stringify({ canonical, syncedFrom, seatDefaults, entries }, null, 2)}\n`);
-  assert.deepEqual(verifyManifest(fixture.target), []);
+  assert.deepEqual(verifyManifest(root), []);
 });
 
 // A tree holding the Claude seat at its shared bytes beside an outside directory holding a valid manifest that
@@ -1581,452 +1074,6 @@ test('render refuses a manifest that is a symlink and writes nothing', NEEDS_FIL
   put(tree, SETTINGS, CLAUDE_OVERRIDE);
   link(tree, MANIFEST, '../../outside/.agents/factory-manifest.json');
   assertRenderRefused(tree, /^Error: \.agents\/factory-manifest\.json is not a regular file \(a symlink\)$/, outside);
-});
-
-test('a sync removes a file the target\'s previous manifest listed and the fetched one does not, reports it, and removes nothing else', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'retired.sh', 'hello\n', 0o755);
-  put(fixture.target, 'own.sh', 'own\n', 0o755);
-  listInTarget(fixture, [
-    { path: 'retired.sh', sha256: HELLO_SHA256, executable: true },
-    { path: 'gone.txt', sha256: HELLO_SHA256 },
-  ]);
-  const before = snapshot(fixture.target);
-
-  assert.deepEqual(fixture.sync().removed, ['retired.sh']);
-
-  const after = snapshot(fixture.target);
-  assert.deepEqual(Object.keys(after), Object.keys(before).filter((path) => path !== 'retired.sh'));
-  assert.equal(after['own.sh'], before['own.sh']);
-
-  commitAll(fixture.target);
-  assert.deepEqual(fixture.sync().removed, []);
-  assert.deepEqual(snapshot(fixture.target), after);
-});
-
-// A line-ending attribute gives a path disk bytes that differ from HEAD's while git status is clean and the index
-// carries no mark: the one state where only one of the two byte comparisons can refuse.
-const CRLF_ON_DISK = 'retired.sh text eol=crlf\n';
-
-test('a retired path whose bytes on disk are not the recorded ones, while HEAD holds the recorded ones, is refused by name, and nothing is removed', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, '.gitattributes', CRLF_ON_DISK);
-  put(fixture.target, 'first.sh', 'hello\n');
-  put(fixture.target, 'retired.sh', 'hello\r\n');
-  listInTarget(fixture, [
-    { path: 'first.sh', sha256: HELLO_SHA256 },
-    { path: 'retired.sh', sha256: HELLO_SHA256 },
-  ]);
-  assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the line-ending difference must be invisible to git status');
-  assert.equal(git(fixture.target, 'rev-parse', 'HEAD:retired.sh'), git(fixture.target, 'rev-parse', 'HEAD:first.sh'), 'HEAD must hold the recorded bytes');
-  assertRefused(fixture, /retired\.sh: the manifest no longer shares it, .*but this is a file with other bytes/);
-});
-
-test('a retired path under a parent symlinked outside the target is refused, and the file outside is not removed', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.outside, 'hello.txt', 'hello\n');
-  link(fixture.target, 'gone', '../outside');
-  listInTarget(fixture, [{ path: 'gone/hello.txt', sha256: HELLO_SHA256 }]);
-  assertRefused(fixture, /gone\/hello\.txt: its parent .*[\\/]gone is a symlink/);
-});
-
-test('a retired path with a change staged but not committed is refused as uncommitted', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'retired.sh', 'hello\n');
-  listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_SHA256 }]);
-  put(fixture.target, 'retired.sh', 'edited\n');
-  git(fixture.target, 'add', 'retired.sh');
-  put(fixture.target, 'retired.sh', 'hello\n');
-  assertRefused(fixture, /the target has uncommitted changes at shared paths: .*retired\.sh/);
-});
-
-test('a target whose committed manifest lists a path that climbs out of the tree is refused, and nothing outside it is removed', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.outside, 'hello.txt', 'hello\n');
-  listInTarget(fixture, [{ path: '../outside/hello.txt', sha256: HELLO_SHA256 }]);
-  assertRefused(fixture, /invalid manifest path "\.\.\/outside\/hello\.txt"/);
-});
-
-test('a region the fetched manifest no longer shares is refused by name, and the adopter\'s file is left whole', (t) => {
-  const fixture = syncFixture(t);
-  recordSource(fixture.source, SOURCE_ENTRIES.filter((entry) => !('region' in entry)));
-  put(fixture.target, 'AGENTS.md', `# Adopter manual\n${START}\nx\ny\n${END}\n## Adopter rules\n`);
-  listInTarget(fixture, [{ path: 'AGENTS.md', region: 'factory-shared', sha256: REGION_SHA256 }]);
-  assertRefused(fixture, /AGENTS\.md: the manifest no longer shares this file's factory-shared region/);
-});
-
-test('a retired path holding the recorded bytes in a file that is ignored and was never committed is refused, and the file stays', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, '.gitignore', 'retired.sh\n');
-  listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_SHA256 }]);
-  put(fixture.target, 'retired.sh', 'hello\n');
-  assert.equal(git(fixture.target, 'status', '--porcelain', '--untracked-files=all'), '', 'the ignored file must be hidden from git status');
-  assertRefused(fixture, /retired\.sh: the manifest no longer shares it, .*HEAD does not hold those bytes as a regular file/);
-});
-
-test('a retired path holding the recorded bytes while HEAD holds other bytes is refused, and the file stays', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, '.gitattributes', CRLF_ON_DISK);
-  put(fixture.target, 'retired.sh', 'hello\r\n');
-  listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_CRLF_SHA256 }]);
-  assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the difference from HEAD must be invisible to git status');
-  assertRefused(fixture, /retired\.sh: the manifest no longer shares it, .*HEAD does not hold those bytes as a regular file/);
-});
-
-for (const [mark, state, gone] of [
-  ['skip-worktree', 'its file gone from the disk', true],
-  ['assume-unchanged', 'its file intact', false],
-]) {
-  test(`a retired path whose index entry is marked ${mark}, ${state}, is refused by name, and nothing is written or removed`, (t) => {
-    const fixture = syncFixture(t);
-    put(fixture.target, 'retired.sh', 'hello\n');
-    listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_SHA256 }]);
-    git(fixture.target, 'update-index', `--${mark}`, 'retired.sh');
-    if (gone) rmSync(join(fixture.target, 'retired.sh'));
-    assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the mark must keep the path out of git status');
-    assertRefused(fixture, /retired\.sh: the manifest no longer shares it, but the target's index marks it skip-worktree or assume-unchanged/);
-  });
-}
-
-test('a retired path whose committed object cannot be read is refused by name, and the file stays', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'retired.sh', 'hello\n');
-  listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_SHA256 }]);
-  const object = git(fixture.target, 'rev-parse', 'HEAD:retired.sh');
-  rmSync(join(fixture.target, '.git', 'objects', object.slice(0, 2), object.slice(2)));
-  assertRefused(fixture, /^Error: retired\.sh: the manifest no longer shares it, but the sync cannot read the object /);
-});
-
-test('a retired path that differs only in letter case from a path the fetched manifest shares is refused by name, and nothing is removed', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'agents.md', 'hello\n');
-  listInTarget(fixture, [{ path: 'agents.md', sha256: HELLO_SHA256 }]);
-  assertRefused(fixture, /agents\.md: the manifest no longer shares it but now shares AGENTS\.md/);
-});
-
-// The canonical retunes the reviewer between the two syncs, so the bytes the target holds are the ones its own
-// committed manifest recorded and not the ones the fetched manifest records.
-test('a sync after a target stops naming a runtime removes that runtime\'s files that hold the recorded bytes, and nothing else', (t) => {
-  const fixture = bothRuntimesFixture(t);
-  assert.deepEqual(fixture.sync(), { files: 4, regions: 1, removed: [], omitted: 0 });
-  put(fixture.target, '.codex/own.toml', 'own\n');
-  putSettings(fixture, {}, ['claude']);
-  commitAll(fixture.target);
-  put(fixture.source, REVIEWER_TOML, codexSeat('reviewer', 'gpt-6-luna', 'high'));
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: ORACLE_MD, sha256: ZERO_SHA256 }, { path: REVIEWER_TOML, sha256: ZERO_SHA256 }]);
-  const before = snapshot(fixture.target);
-  // snapshot keys its paths with the platform's separator.
-  const [removed, manifest] = [join(REVIEWER_TOML), join(MANIFEST)];
-
-  assert.deepEqual(fixture.sync(), { files: 3, regions: 1, removed: [REVIEWER_TOML], omitted: 1 });
-
-  const after = snapshot(fixture.target);
-  assert.deepEqual(Object.keys(after), Object.keys(before).filter((path) => path !== removed));
-  for (const path of Object.keys(after)) if (path !== manifest) assert.equal(after[path], before[path], path);
-  assert.equal(JSON.parse(readFileSync(join(fixture.target, MANIFEST), 'utf8')).entries.length, 5, 'the record must keep every entry');
-  assert.deepEqual(verifyManifest(fixture.target), []);
-
-  commitAll(fixture.target);
-  assert.deepEqual(fixture.sync(), { files: 3, regions: 1, removed: [], omitted: 1 });
-  assert.deepEqual(snapshot(fixture.target), after);
-});
-
-// The canonical changes the reviewer's configuration between the two syncs, so the bytes the target holds are the ones
-// its own committed manifest recorded and not the ones the fetched manifest records.
-test('a sync after a target turns the Greptile add-on off removes its files that hold the recorded bytes, and nothing else', (t) => {
-  const fixture = greptileFixture(t);
-  put(fixture.target, SETTINGS, JSON.stringify(GREPTILE_ON));
-  assert.deepEqual(fixture.sync(), { files: 5, regions: 1, removed: [], omitted: 0 });
-  put(fixture.target, '.greptile/own.json', 'own\n');
-  put(fixture.target, SETTINGS, JSON.stringify(GREPTILE_OFF));
-  commitAll(fixture.target);
-  put(fixture.source, GREPTILE_CONFIG, '{"skipReview":"NEVER"}\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, ...GREPTILE_PATHS.map((path) => ({ path, sha256: ZERO_SHA256 }))]);
-  const before = snapshot(fixture.target);
-  // snapshot keys its paths with the platform's separator.
-  const removed = GREPTILE_PATHS.map((path) => join(path));
-  const manifest = join(MANIFEST);
-
-  assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: GREPTILE_PATHS, omitted: 3 });
-
-  const after = snapshot(fixture.target);
-  assert.deepEqual(Object.keys(after), Object.keys(before).filter((path) => !removed.includes(path)));
-  for (const path of Object.keys(after)) if (path !== manifest) assert.equal(after[path], before[path], path);
-  assert.equal(JSON.parse(readFileSync(join(fixture.target, MANIFEST), 'utf8')).entries.length, 6, 'the record must keep every entry');
-  assert.deepEqual(verifyManifest(fixture.target), []);
-
-  commitAll(fixture.target);
-  assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: [], omitted: 3 });
-  assert.deepEqual(snapshot(fixture.target), after);
-});
-
-test('a sync after a target turns the documentation sweep off removes its files that hold the recorded bytes, and nothing else', (t) => {
-  const fixture = sweepFixture(t);
-  assert.deepEqual(fixture.sync(), { files: 8, regions: 1, removed: [], omitted: 0 });
-  put(fixture.target, 'scripts/lib/own.mjs', 'own\n');
-  put(fixture.target, SETTINGS, JSON.stringify(SWEEP_OFF));
-  commitAll(fixture.target);
-  put(fixture.source, SWEEP_PATHS[3], 'hello v2\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, ...SWEEP_PATHS.map((path) => ({ path, sha256: ZERO_SHA256 }))]);
-  const before = snapshot(fixture.target);
-  // snapshot keys its paths with the platform's separator.
-  const removed = SWEEP_PATHS.map((path) => join(path));
-  const manifest = join(MANIFEST);
-
-  assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: SWEEP_PATHS, omitted: 6 });
-
-  const after = snapshot(fixture.target);
-  assert.deepEqual(Object.keys(after), Object.keys(before).filter((path) => !removed.includes(path)));
-  for (const path of Object.keys(after)) if (path !== manifest) assert.equal(after[path], before[path], path);
-  assert.equal(JSON.parse(readFileSync(join(fixture.target, MANIFEST), 'utf8')).entries.length, 9, 'the record must keep every entry');
-  assert.deepEqual(verifyManifest(fixture.target), []);
-
-  commitAll(fixture.target);
-  assert.deepEqual(fixture.sync(), { files: 2, regions: 1, removed: [], omitted: 6 });
-  assert.deepEqual(snapshot(fixture.target), after);
-});
-
-test('a file of a left-out runtime that holds other bytes is refused by name, and nothing is written or removed', (t) => {
-  for (const listed of [true, false]) {
-    const fixture = bothRuntimesFixture(t);
-    if (listed) fixture.sync();
-    put(fixture.target, REVIEWER_TOML, codexSeat('reviewer', 'gpt-6-luna', 'high'));
-    putSettings(fixture, {}, ['claude']);
-    commitAll(fixture.target);
-    assertRefused(fixture, (error) => {
-      assert.match(
-        String(error),
-        /^Error: \.codex\/agents\/reviewer\.toml: the settings file names no codex runtime, and the sync removes only the exact bytes it last recorded there, but this is a file with other bytes; /,
-        listed ? 'the previous manifest lists the path' : 'the previous manifest does not list the path',
-      );
-      return true;
-    });
-  }
-});
-
-test('a target whose committed manifest cannot be read is refused by name, never synced as a first sync', (t) => {
-  const fixture = syncFixture(t);
-  const object = git(fixture.target, 'rev-parse', `HEAD:${MANIFEST}`);
-  rmSync(join(fixture.target, '.git', 'objects', object.slice(0, 2), object.slice(2)));
-  assertRefused(fixture, /cannot read the target's \.agents\/factory-manifest\.json at HEAD/, { canonical: CANONICAL });
-});
-
-test('a target with no commit is refused by name, never synced as a first sync', (t) => {
-  const fixture = syncFixture(t);
-  // With no region to write, a sync that took the failed listing for a first sync would complete and write.
-  recordSource(fixture.source, SOURCE_ENTRIES.filter((entry) => !('region' in entry)));
-  rmSync(fixture.target, { recursive: true, force: true });
-  repository(fixture.target, ADOPTER_URL);
-  assertRefused(fixture, /cannot list \.agents\/factory-manifest\.json in the target's HEAD, .*a target with no commit needs one first/, { canonical: CANONICAL });
-});
-
-test('a manifest entry that climbs out of the tree is refused', (t) => {
-  const fixture = syncFixture(t);
-  writeManifest(fixture.source, [...computeEntries(fixture.source, { entries: SOURCE_ENTRIES }), { path: '../x', sha256: HELLO_SHA256 }]);
-  commitAll(fixture.source);
-  assertRefused(fixture, /invalid manifest path "\.\.\/x"/);
-});
-
-test('an entry whose parent in the target is a symlink to a directory outside it is refused', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, 'evil/x.txt', 'x\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: 'evil/x.txt', sha256: ZERO_SHA256 }]);
-  link(fixture.target, 'evil', '../outside');
-  commitAll(fixture.target);
-  assertRefused(fixture, /evil\/x\.txt: .*outside the target/);
-});
-
-test('a file entry whose parent in the target is a symlink to a directory inside it is refused', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, 'alias/x.txt', 'x\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: 'alias/x.txt', sha256: ZERO_SHA256 }]);
-  link(fixture.target, 'alias', 'docs');
-  commitAll(fixture.target);
-  assertRefused(fixture, /alias\/x\.txt: its parent .*[\\/]alias is a symlink/);
-  assert.equal(lstatSync(join(fixture.target, 'docs', 'x.txt'), { throwIfNoEntry: false }), undefined, 'nothing may land at the symlink destination');
-});
-
-// An adopter that still commits a former shared symlink is told how to migrate off it.
-test('a file entry under a symlinked directory in the target is refused, naming the git rm that clears it', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, '.claude/skills/x/SKILL.md', 'skill\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: '.claude/skills/x/SKILL.md', sha256: ZERO_SHA256 }]);
-  put(fixture.target, '.agents/skills/x/SKILL.md', 'skill\n');
-  link(fixture.target, '.claude/skills/x', '../../.agents/skills/x');
-  commitAll(fixture.target);
-  assertRefused(
-    fixture,
-    /\.claude\/skills\/x\/SKILL\.md: its parent .*[\\/]\.claude[\\/]skills[\\/]x is a symlink, .*remove it first: git rm \.claude\/skills\/x, commit, then sync$/,
-  );
-});
-
-test('a file entry whose parent is a regular file in the target is refused, naming the git rm that clears it', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, '.claude/skills/x/SKILL.md', 'skill\n');
-  recordSource(fixture.source, [...SOURCE_ENTRIES, { path: '.claude/skills/x/SKILL.md', sha256: ZERO_SHA256 }]);
-  put(fixture.target, '.agents/skills/x/SKILL.md', 'skill\n');
-  put(fixture.target, '.claude/skills/x', '../../.agents/skills/x');
-  commitAll(fixture.target);
-  assertRefused(
-    fixture,
-    /\.claude\/skills\/x\/SKILL\.md: its parent .*[\\/]\.claude[\\/]skills[\\/]x is a file, not a directory, .*remove it first: git rm \.claude\/skills\/x, commit, then sync$/,
-  );
-});
-
-test('a non-empty directory where a file entry goes is refused', (t) => {
-  const fixture = syncFixture(t);
-  rmSync(join(fixture.target, 'scripts', 'run.sh'));
-  put(fixture.target, 'scripts/run.sh/kept.txt', 'kept\n');
-  commitAll(fixture.target);
-  assertRefused(fixture, /scripts\/run\.sh: .*non-empty directory/);
-});
-
-test('a source whose HEAD is not its freshly fetched origin main is refused', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.source, 'checkout', '-q', '-b', 'job/branch');
-  git(fixture.source, 'commit', '-q', '--allow-empty', '-m', 'job work');
-  assertRefused(fixture, /not on its freshly fetched origin main/);
-});
-
-test('a failed fetch of the source origin main is refused', (t) => {
-  const fixture = syncFixture(t);
-  const fetchMain = () => {
-    throw new Error('could not resolve host');
-  };
-  assertRefused(fixture, /cannot fetch the source's origin main \(could not resolve host\)/, { fetchMain });
-});
-
-for (const [name, dirty] of [
-  ['a modified shared file', (source) => put(source, 'docs/a.txt', 'edited\n')],
-  [
-    'an untracked file at a manifest path',
-    (source) => {
-      put(source, 'docs/new.txt', 'new\n');
-      writeManifest(source, computeEntries(source, { entries: [...SOURCE_ENTRIES, { path: 'docs/new.txt', sha256: ZERO_SHA256 }] }));
-      git(source, 'add', MANIFEST);
-      git(source, 'commit', '-q', '-m', 'record without the file');
-    },
-  ],
-]) {
-  test(`a source with ${name} is refused as uncommitted`, (t) => {
-    const fixture = syncFixture(t);
-    dirty(fixture.source);
-    assertRefused(fixture, /the source has uncommitted changes at shared paths: .*docs\/(a|new)\.txt/);
-  });
-}
-
-test('a source that fails its own manifest is refused, naming the mismatched path', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, 'docs/a.txt', 'drift\n');
-  commitAll(fixture.source);
-  assertRefused(fixture, /the source does not match its own manifest at docs\/a\.txt/);
-});
-
-test('a source whose origin is not the canonical is refused', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.source, 'remote', 'set-url', 'origin', 'https://github.com/example-owner/fork');
-  assertRefused(fixture, /the source's origin https:\/\/github\.com\/example-owner\/fork is not github\.com\/example-owner\/example-repo/);
-});
-
-test('a source with no origin remote is refused', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.source, 'remote', 'remove', 'origin');
-  assertRefused(fixture, /the source has no origin remote/);
-});
-
-test('a target whose origin is the canonical is refused', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.target, 'remote', 'set-url', 'origin', 'git@github.com:example-owner/example-repo.git');
-  assertRefused(fixture, /never sync into the canonical/);
-});
-
-test('a --canonical that disagrees with the target\'s committed manifest is refused', (t) => {
-  assertRefused(syncFixture(t), /--canonical example-owner\/other disagrees with/, { canonical: 'example-owner/other' });
-});
-
-test('a target with no committed manifest needs --canonical, and syncs with it', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.target, 'rm', '-q', MANIFEST);
-  commitAll(fixture.target);
-  assertRefused(fixture, /no canonical repository/);
-  fixture.sync({ canonical: CANONICAL });
-  assert.deepEqual(verifyManifest(fixture.target), []);
-});
-
-for (const [name, manual] of [
-  ['missing markers', '# Adopter manual\n'],
-  ['duplicated markers', `${START}\n${START}\nx\n${END}\n`],
-  ['no file at all', null],
-]) {
-  test(`a target AGENTS.md with ${name} is refused as malformed region markers`, (t) => {
-    const fixture = syncFixture(t);
-    if (manual === null) rmSync(join(fixture.target, 'AGENTS.md'));
-    else put(fixture.target, 'AGENTS.md', manual);
-    commitAll(fixture.target);
-    assertRefused(fixture, /target AGENTS\.md: malformed region markers/);
-  });
-}
-
-test('a target AGENTS.md that is a symlink is refused, even to a file with well-formed markers', NEEDS_FILE_SYMLINK, (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.outside, 'manual.md', `# Outside manual\n${START}\nshared v1\n${END}\n`);
-  rmSync(join(fixture.target, 'AGENTS.md'));
-  link(fixture.target, 'AGENTS.md', '../outside/manual.md');
-  commitAll(fixture.target);
-  assertRefused(fixture, /AGENTS\.md/);
-});
-
-test('a sync gives each file its committed mode, whatever the mode in the source working tree', (t) => {
-  const fixture = syncFixture(t);
-  git(fixture.source, 'config', 'core.fileMode', 'false');
-  chmodSync(join(fixture.source, 'scripts', 'run.sh'), 0o644);
-  chmodSync(join(fixture.source, 'docs', 'a.txt'), 0o755);
-  assert.equal(git(fixture.source, 'status', '--porcelain'), '', 'the mode change must be invisible to git status');
-  fixture.sync();
-  if (process.platform === 'win32') {
-    assert.equal(indexMode(fixture.target, 'scripts/run.sh'), '100755');
-    assert.equal(indexMode(fixture.target, 'docs/a.txt'), '100644');
-  } else {
-    assert.equal(lstatSync(join(fixture.target, 'scripts', 'run.sh')).mode & 0o777, 0o755);
-    assert.equal(lstatSync(join(fixture.target, 'docs', 'a.txt')).mode & 0o777, 0o644);
-  }
-});
-
-test('a target that does not honour file modes gets each file\'s committed mode in its index', (t) => {
-  const fixture = syncFixture(t);
-  const outsideBefore = snapshot(fixture.outside);
-  const files = [
-    { path: 'docs/a.txt', bytes: 'hello v2\n', mode: '100644' },
-    { path: 'scripts/run.sh', bytes: '#!/bin/sh\necho v2\n', mode: '100755' },
-  ];
-  git(fixture.target, 'config', 'core.fileMode', 'false');
-  git(fixture.target, 'config', 'core.symlinks', 'false');
-  for (const { path } of files) {
-    rmSync(join(fixture.target, path));
-    put(fixture.target, path, '../../outside/secret.txt');
-    const blob = git(fixture.target, 'hash-object', '-w', '--', path);
-    git(fixture.target, 'update-index', '--add', '--cacheinfo', `120000,${blob},${path}`);
-  }
-  commitAll(fixture.target);
-  for (const { path } of files) {
-    assert.ok(lstatSync(join(fixture.target, path)).isFile());
-    assert.equal(indexMode(fixture.target, path), '120000');
-  }
-  assert.equal(git(fixture.target, 'status', '--porcelain'), '', 'the committed link pointers must start clean');
-
-  fixture.sync();
-
-  for (const { path, bytes, mode } of files) {
-    assert.ok(lstatSync(join(fixture.target, path)).isFile());
-    assert.equal(readFileSync(join(fixture.target, path), 'utf8'), bytes);
-    const indexed = spawnSync('git', ['-C', fixture.target, ...GIT_ISOLATION, 'show', `:${path}`], { encoding: 'utf8' });
-    assert.equal(indexed.status, 0, indexed.stderr);
-    assert.equal(indexed.stdout, bytes);
-    assert.equal(indexMode(fixture.target, path), mode);
-  }
-  assert.deepEqual(snapshot(fixture.outside), outsideBefore);
-  assert.equal(git(fixture.target, 'config', 'core.fileMode'), 'false');
-  assert.equal(git(fixture.target, 'config', 'core.symlinks'), 'false');
 });
 
 test('recordIndexModes preserves filtered bytes and refuses unsafe input before staging', (t) => {
@@ -2208,449 +1255,11 @@ test('recordIndexModes bounds Git arguments and preserves conflicting index entr
 
 });
 
-test('a source commit whose file mode differs from its manifest is refused, naming the path', (t) => {
-  const fixture = syncFixture(t);
-  // The index carries the mode where the checkout ignores it; the chmod stops git add restoring it where it does not.
-  chmodSync(join(fixture.source, 'scripts', 'run.sh'), 0o644);
-  git(fixture.source, 'update-index', '--chmod=-x', 'scripts/run.sh');
-  commitAll(fixture.source);
-  assertRefused(fixture, /the source does not match its own manifest at scripts\/run\.sh in its commit/);
-});
-
-test('a source AGENTS.md with malformed markers is refused', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.source, 'AGENTS.md', `# Canonical manual\nshared v2\n${END}\n`);
-  commitAll(fixture.source);
-  assertRefused(fixture, /^Error: AGENTS\.md: malformed region markers/);
-});
-
-test('a target with uncommitted changes at a manifest path is refused', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'scripts/run.sh', 'local edit\n');
-  assertRefused(fixture, /the target has uncommitted changes at shared paths: .*scripts\/run\.sh/);
-});
-
-// Commits the source's manifest with its canonical replaced.
-function recanonicalise(source, canonical) {
-  put(source, MANIFEST, JSON.stringify({ ...readManifest(source), canonical }));
-  commitAll(source);
-}
-
-test('a source manifest that names another canonical is refused', (t) => {
-  const fixture = syncFixture(t);
-  recanonicalise(fixture.source, 'example-owner/other');
-  assertRefused(fixture, /the source's manifest names the canonical example-owner\/other, not example-owner\/example-repo/);
-});
-
-test('a source manifest naming the canonical in another case syncs and records the target\'s canonical', (t) => {
-  const fixture = syncFixture(t);
-  recanonicalise(fixture.source, 'Example-Owner/Example-Repo');
-  fixture.sync();
-  assert.equal(readManifest(fixture.target).canonical, CANONICAL);
-});
-
-// Runs fn with the given environment variables set, restoring the previous environment afterwards.
-function withEnv(vars, fn) {
-  const saved = Object.fromEntries(Object.keys(vars).map((name) => [name, process.env[name]]));
-  Object.assign(process.env, vars);
-  try {
-    return fn();
-  } finally {
-    for (const [name, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
-}
-
-// The source's committed scripts/run.sh, as syncFixture writes it.
-const COMMITTED_RUN = '#!/bin/sh\necho v2\n';
-
-// Rewrites the source's shared script and re-records the manifest over it, in the working tree only.
-function tamper(source) {
-  put(source, 'scripts/run.sh', '#!/bin/sh\necho tampered\n', 0o755);
-  writeManifest(source, computeEntries(source, { entries: SOURCE_ENTRIES }));
-}
-
-// Runs the sync under env: it either refuses, writing nothing, or writes the source's committed bytes.
-function assertCommittedOrRefused(fixture, env) {
-  const before = [snapshot(fixture.target), snapshot(fixture.outside)];
-  let refused = false;
-  try {
-    withEnv(env, () => fixture.sync());
-  } catch {
-    refused = true;
-  }
-  if (refused) assert.deepEqual([snapshot(fixture.target), snapshot(fixture.outside)], before, 'a refused sync must write nothing');
-  else assert.equal(readFileSync(join(fixture.target, 'scripts/run.sh'), 'utf8'), COMMITTED_RUN, 'the sync wrote bytes the source never committed');
-}
-
-test('a tampered shared file and manifest hidden from git status by skip-worktree are never synced; the committed bytes are', (t) => {
-  const fixture = syncFixture(t);
-  const committed = JSON.parse(git(fixture.source, 'show', `HEAD:${MANIFEST}`));
-  tamper(fixture.source);
-  git(fixture.source, 'update-index', '--skip-worktree', 'scripts/run.sh', MANIFEST);
-  assert.equal(git(fixture.source, 'status', '--porcelain'), '', 'the tamper must be hidden from git status');
-
-  fixture.sync();
-
-  assert.equal(readFileSync(join(fixture.target, 'scripts/run.sh'), 'utf8'), COMMITTED_RUN);
-  assert.deepEqual(readManifest(fixture.target).entries, committed.entries);
-});
-
-// The hostile value is relative, so each repository reads its own copy: an absolute one would give the target the
-// source's index, which fails the target's status check and hides whether the source's tamper was synced.
-test('an inherited GIT_INDEX_FILE that hides a tamper cannot change what is synced', (t) => {
-  const fixture = syncFixture(t);
-  const hostile = { GIT_INDEX_FILE: '.git/hostile-index' };
-  for (const root of [fixture.source, fixture.target]) cpSync(join(root, '.git', 'index'), join(root, hostile.GIT_INDEX_FILE));
-  withEnv(hostile, () => git(fixture.source, 'update-index', '--skip-worktree', 'scripts/run.sh', MANIFEST));
-  tamper(fixture.source);
-  assertCommittedOrRefused(fixture, hostile);
-});
-
-// The hostile value is relative, so the target's copy can be the target's own repository while the source's is a
-// copy whose main commits a tamper; an absolute one would point both at one repository, which the origin checks
-// refuse whatever the environment.
-test('an inherited GIT_DIR cannot redirect the sync to another repository', (t) => {
-  const fixture = syncFixture(t);
-  const hostile = { GIT_DIR: 'hostile.git' };
-  cpSync(join(fixture.source, '.git'), join(fixture.source, hostile.GIT_DIR), { recursive: true });
-  link(fixture.target, hostile.GIT_DIR, '.git');
-  withEnv(hostile, () => {
-    tamper(fixture.source);
-    git(fixture.source, 'add', '--', 'scripts/run.sh', MANIFEST);
-    git(fixture.source, 'commit', '-q', '-m', 'hostile');
-  });
-  assertCommittedOrRefused(fixture, hostile);
-});
-
-test('fetchMain returns the origin main tip of a clone that is behind it', (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-fetch-')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const [origin, work, clone] = ['origin.git', 'work', 'clone'].map((name) => join(base, name));
-  git(base, 'init', '-q', '--bare', '-b', 'main', origin);
-  repository(work, origin);
-  put(work, 'a.txt', 'one\n');
-  commitAll(work);
-  git(work, 'push', '-q', 'origin', 'main');
-  git(base, 'clone', '-q', origin, clone);
-  put(work, 'a.txt', 'two\n');
-  commitAll(work);
-  git(work, 'push', '-q', 'origin', 'main');
-  const tip = git(origin, 'rev-parse', 'main');
-  assert.notEqual(git(clone, 'rev-parse', 'HEAD'), tip, 'the clone must start behind its origin');
-  assert.equal(fetchMain(clone), tip);
-});
-
-// GIT_ALLOW_PROTOCOL=file makes the fixture's https origin unreachable without touching the network.
-const NO_NETWORK = { GIT_ALLOW_PROTOCOL: 'file' };
-
-test('fetchMain throws for an unreachable origin, and a sync that uses it writes nothing', (t) => {
-  const fixture = syncFixture(t);
-  withEnv(NO_NETWORK, () => {
-    assert.throws(() => fetchMain(fixture.source), /transport 'https' not allowed/);
-    assertRefused(fixture, /cannot fetch the source's origin main \(.*transport 'https' not allowed/, { fetchMain });
-  });
-});
-
-test('--from reaches the real fetch and, when it fails, exits 1 naming it and leaves the target unchanged', (t) => {
-  const fixture = syncFixture(t);
-  const before = snapshot(fixture.target);
-  const run = spawnSync(process.execPath, [CLI, '--from', fixture.source], {
-    cwd: fixture.target,
-    encoding: 'utf8',
-    env: { ...process.env, ...NO_NETWORK },
-  });
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /^factory-sync: cannot fetch the source's origin main \(.*transport 'https' not allowed/);
-  assert.deepEqual(snapshot(fixture.target), before, 'a refused --from must write nothing');
-});
-
-// An insteadOf rewrite cannot stand in for the network, since the origin check reads `git remote get-url`, which
-// expands it. The transport can: with the source's origin set to the canonical's ssh address, GIT_SSH_COMMAND makes
-// git run a local command in place of ssh. git runs it in the source, so `git upload-pack .` serves the source's own
-// repository: the real fetch runs and nothing leaves the machine.
-const SERVED_BY_ITSELF = { GIT_SSH_VARIANT: 'simple', GIT_SSH_COMMAND: 'serve() { git upload-pack .; }; serve' };
-
-test('--from prints what it wrote and each retired file it removed, and exits 0', (t) => {
-  const fixture = syncFixture(t);
-  put(fixture.target, 'retired.sh', 'hello\n');
-  listInTarget(fixture, [{ path: 'retired.sh', sha256: HELLO_SHA256 }]);
-  git(fixture.source, 'remote', 'set-url', 'origin', `git@github.com:${CANONICAL}.git`);
-  const run = spawnSync(process.execPath, [CLI, '--from', fixture.source], {
-    cwd: fixture.target,
-    encoding: 'utf8',
-    env: { ...process.env, ...SERVED_BY_ITSELF },
-  });
-  assert.equal(run.status, 0, run.stderr);
-  const expectedSource = process.platform === 'win32' ? realpathSync.native(fixture.source) : fixture.source;
-  const expectedTarget = process.platform === 'win32' ? realpathSync.native(fixture.target) : fixture.target;
-  assert.deepEqual(run.stdout.split('\n'), [
-    `factory-sync: wrote 2 files and 1 regions from ${expectedSource} into ${expectedTarget}`,
-    'factory-sync: removed 1 retired files',
-    '  retired.sh',
-    '',
-  ]);
-  assert.equal(existsSync(join(fixture.target, 'retired.sh')), false, 'the printed file must be gone');
-});
-
-test('--from prints how many entries it left out', (t) => {
-  const fixture = bothRuntimesFixture(t);
-  putSettings(fixture, {}, ['claude']);
-  git(fixture.source, 'remote', 'set-url', 'origin', `git@github.com:${CANONICAL}.git`);
-  const run = spawnSync(process.execPath, [CLI, '--from', fixture.source], {
-    cwd: fixture.target,
-    encoding: 'utf8',
-    env: { ...process.env, ...SERVED_BY_ITSELF },
-  });
-  assert.equal(run.status, 0, run.stderr);
-  const expectedSource = process.platform === 'win32' ? realpathSync.native(fixture.source) : fixture.source;
-  const expectedTarget = process.platform === 'win32' ? realpathSync.native(fixture.target) : fixture.target;
-  assert.deepEqual(run.stdout.split('\n'), [
-    `factory-sync: wrote 3 files and 1 regions from ${expectedSource} into ${expectedTarget}`,
-    'factory-sync: left out 1 entries the settings file leaves out',
-    'factory-sync: removed 0 retired files',
-    '',
-  ]);
-});
-
-test('--from with no value, or an unknown flag, prints the usage for both modes and exits 2', (t) => {
+test('--from, --check or an unknown flag prints the usage for --write and --render and exits 2', (t) => {
   const root = staleRepository(t, CANONICAL_URL);
-  for (const args of [['--from'], ['--from', root, '--bogus', 'x'], ['--into', root]]) {
+  for (const args of [['--from', root], ['--check'], ['--into', root], ['--bogus']]) {
     const run = runCli(root, ...args);
     assert.equal(run.status, 2, args.join(' '));
-    assert.match(run.stderr, /usage: .*--write .*--from <source> \[--into <target>\] \[--canonical <owner\/repo>\]/);
+    assert.equal(run.stderr.trim(), 'usage: node scripts/factory-sync.mjs --write | --render', args.join(' '));
   }
-});
-
-test('--from the repository it runs in is refused as the same repository', (t) => {
-  const root = staleRepository(t, ADOPTER_URL);
-  const run = runCli(root, '--from', join(root, 'docs'));
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /^factory-sync: the source and target are the same repository/);
-});
-
-const LAG_MANIFEST = {
-  canonical: CANONICAL,
-  adopters: ['example-owner/adopter'],
-  entries: [
-    { path: 'a.txt', sha256: HELLO_SHA256 },
-    { path: 'AGENTS.md', region: 'factory-shared', sha256: REGION_SHA256 },
-  ],
-};
-
-// Checks a local manifest (an object, raw text, or null for none) against the canonical's manifest text.
-function lag(t, local, fetchCanonicalManifest) {
-  const root = mkdtempSync(join(tmpdir(), 'factory-sync-lag-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  if (local !== null) put(root, MANIFEST, typeof local === 'string' ? local : JSON.stringify(local));
-  return checkLag({ root, fetchCanonicalManifest });
-}
-
-const remote = (manifest) => () => JSON.stringify(manifest);
-const withEntries = (entries) => ({ ...LAG_MANIFEST, entries });
-const [A, REGION] = LAG_MANIFEST.entries;
-// An adopter's own manifest: a sync writes no adopters list into it.
-const ADOPTER_MANIFEST = { canonical: CANONICAL, syncedFrom: 'abc123', entries: LAG_MANIFEST.entries };
-
-test('a local manifest matching the canonical main, apart from syncedFrom, is in sync', (t) => {
-  const asked = [];
-  const fetch = (canonical) => {
-    asked.push(canonical);
-    return JSON.stringify(LAG_MANIFEST);
-  };
-  assert.deepEqual(lag(t, { ...LAG_MANIFEST, syncedFrom: 'abc123' }, fetch), { state: 'in-sync', differences: [], cause: null });
-  assert.deepEqual(asked, [CANONICAL]);
-});
-
-test('a local manifest with no adopters list or a different one is in sync with a canonical main that holds one', (t) => {
-  const listed = { ...LAG_MANIFEST, adopters: ['example-owner/adopter', 'example-owner/other'] };
-  assert.deepEqual(lag(t, ADOPTER_MANIFEST, remote(listed)), { state: 'in-sync', differences: [], cause: null });
-  assert.deepEqual(lag(t, LAG_MANIFEST, remote(listed)), { state: 'in-sync', differences: [], cause: null });
-});
-
-for (const [name, canonicalMain, differences] of [
-  ['a changed hash', withEntries([{ ...A, sha256: ZERO_SHA256 }, REGION]), ['a.txt: changed']],
-  ['a changed executable bit', withEntries([{ ...A, executable: true }, REGION]), ['a.txt: changed']],
-  ['an entry missing here', withEntries([A, REGION, { path: 'docs/new.md', sha256: HELLO_SHA256 }]), ['docs/new.md: missing here']],
-  ['an entry no longer shared', withEntries([REGION]), ['a.txt: no longer shared']],
-  [
-    'a different canonical',
-    { ...LAG_MANIFEST, canonical: 'example-owner/renamed' },
-    ['canonical: example-owner/example-repo here, example-owner/renamed on main'],
-  ],
-  [
-    'several differences, listed by path',
-    withEntries([{ path: 'z.txt', sha256: HELLO_SHA256 }, { ...REGION, sha256: ZERO_SHA256 }]),
-    ['AGENTS.md: changed', 'a.txt: no longer shared', 'z.txt: missing here'],
-  ],
-]) {
-  test(`${name} is reported as drifted`, (t) => {
-    assert.deepEqual(lag(t, ADOPTER_MANIFEST, remote(canonicalMain)), { state: 'drifted', differences, cause: null });
-  });
-}
-
-for (const [name, local, fetch, cause] of [
-  [
-    'a failed fetch of the canonical manifest',
-    LAG_MANIFEST,
-    () => {
-      throw new Error('gh is not installed');
-    },
-    /^cannot fetch example-owner\/example-repo main's \.agents\/factory-manifest\.json \(gh is not installed\)$/,
-  ],
-  ['a canonical manifest that is not JSON', LAG_MANIFEST, () => '<html>', /main's \.agents\/factory-manifest\.json is not valid JSON/],
-  [
-    'a canonical manifest with a malformed entry',
-    LAG_MANIFEST,
-    remote(withEntries([A, { path: '../x', sha256: HELLO_SHA256 }])),
-    /invalid manifest path "\.\.\/x"/,
-  ],
-  [
-    'a canonical manifest that lists one path twice',
-    LAG_MANIFEST,
-    remote(withEntries([A, REGION, A])),
-    /^example-owner\/example-repo main's \.agents\/factory-manifest\.json lists a\.txt more than once$/,
-  ],
-  [
-    'a canonical manifest that lists two paths naming one file',
-    LAG_MANIFEST,
-    remote(withEntries([A, REGION, { ...A, path: 'A.txt' }])),
-    /^example-owner\/example-repo main's \.agents\/factory-manifest\.json lists a\.txt and A\.txt, which name the same file on a case-insensitive or Unicode-normalising disk$/,
-  ],
-  [
-    'a canonical manifest that lists one path under another',
-    LAG_MANIFEST,
-    remote(withEntries([A, REGION, { path: 'A.txt/x', sha256: HELLO_SHA256 }])),
-    /^example-owner\/example-repo main's \.agents\/factory-manifest\.json lists a\.txt and A\.txt\/x, and A\.txt\/x lies under a\.txt$/,
-  ],
-  ['no local manifest', null, remote(LAG_MANIFEST), /^no factory manifest here; run the first sync with --from$/],
-  ['a malformed local manifest', '{', remote(LAG_MANIFEST), /^\.agents\/factory-manifest\.json is not valid JSON/],
-]) {
-  test(`${name} leaves the sync state unknown, never in sync`, (t) => {
-    const result = lag(t, local, fetch);
-    assert.equal(result.state, 'unknown');
-    assert.deepEqual(result.differences, []);
-    assert.match(result.cause, cause);
-  });
-}
-
-test('--check with any other argument prints the usage for all four modes and exits 2', (t) => {
-  const run = runCli(staleRepository(t, ADOPTER_URL), '--check', 'extra');
-  assert.equal(run.status, 2);
-  assert.match(run.stderr, /^usage: node scripts\/factory-sync\.mjs --write \| --check \| --render \| --from <source>/);
-});
-
-// The environment with PATH replaced. Windows names are case-insensitive, so any other spelling of PATH is dropped
-// rather than left to compete with it.
-function withPath(path) {
-  const env = { ...process.env };
-  if (process.platform === 'win32') for (const name of Object.keys(env)) if (name.toUpperCase() === 'PATH') delete env[name];
-  return { ...env, PATH: path };
-}
-
-test('--check without gh on the PATH reports the sync state unknown and exits 2', (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-check-')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const root = join(base, 'adopter');
-  repository(root, ADOPTER_URL);
-  put(root, MANIFEST, JSON.stringify(LAG_MANIFEST));
-  // A PATH holding git alone, so the check reaches the fetch and gh is the only thing missing. On Windows that is
-  // git's own directory, since a file symlink to git.exe needs privilege.
-  let bin;
-  if (process.platform === 'win32') {
-    bin = dirname(gitExecutable());
-    assert.ok(!existsSync(join(bin, 'gh.exe')), `${bin} must not hold gh.exe`);
-  } else {
-    bin = join(base, 'bin');
-    mkdirSync(bin);
-    symlinkSync(spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim(), join(bin, 'git'));
-  }
-  const run = spawnSync(process.execPath, [CLI, '--check'], { cwd: root, encoding: 'utf8', env: withPath(bin) });
-  assert.equal(run.status, 2, run.stderr);
-  assert.match(run.stderr, /^factory-sync: sync state unknown: cannot fetch example-owner\/example-repo main's .*\(gh is not installed\)$/m);
-});
-
-const REPOSITORY_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-
-// The arguments of the one gh call --check makes for canonical's manifest on main.
-const contentsCall = (canonical) => [
-  'api',
-  '--hostname',
-  'github.com',
-  `repos/${canonical}/contents/${MANIFEST}?ref=main`,
-  '-H',
-  'Accept: application/vnd.github.raw+json',
-];
-
-// Runs --check in root with a fake gh first on the PATH. The fake logs every call's arguments and answers only the
-// contents call for canonical's manifest, printing manifestText; any other call exits 1. Returns the run and the
-// logged calls. Windows runs no shebang script, so there gh.exe is a copy of node that a preload turns into the fake;
-// node takes the first argument as its script, so the preload reads it back from process.argv[1].
-function checkWithFakeGh(t, root, canonical, manifestText) {
-  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-gh-')));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
-  const [calls, answer] = [join(bin, 'calls'), join(bin, 'answer')];
-  writeFileSync(answer, manifestText);
-  const imports = "const { appendFileSync, readFileSync } = require('node:fs');\n";
-  const body = `appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
-if (JSON.stringify(args) !== ${JSON.stringify(JSON.stringify(contentsCall(canonical)))}) {
-  process.stderr.write('unexpected gh call\\n');
-  process.exit(1);
-}
-process.stdout.write(readFileSync(${JSON.stringify(answer)}, 'utf8'));
-`;
-  const env = withPath(`${bin}${delimiter}${process.env.PATH}`);
-  if (process.platform === 'win32') {
-    copyFileSync(process.execPath, join(bin, 'gh.exe'));
-    const preload = join(bin, 'fake-gh.cjs');
-    writeFileSync(
-      preload,
-      `${imports}const { basename } = require('node:path');
-if (basename(process.execPath).toLowerCase() === 'gh.exe') {
-const args = [basename(process.argv[1]), ...process.argv.slice(2)];
-${body}process.exit(0);
-}
-`,
-    );
-    env.NODE_OPTIONS = [process.env.NODE_OPTIONS, `--require ${JSON.stringify(preload)}`].filter(Boolean).join(' ');
-  } else put(bin, 'gh', `#!/usr/bin/env node\n${imports}const args = process.argv.slice(2);\n${body}`, 0o755);
-  const run = spawnSync(process.execPath, [CLI, '--check'], { cwd: root, encoding: 'utf8', env });
-  const logged = readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-  return { run, calls: logged };
-}
-
-test('--check asks gh for the canonical manifest on github.com, never the configured default host', (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'factory-sync-check-')));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const root = join(base, 'adopter');
-  repository(root, ADOPTER_URL);
-  put(root, MANIFEST, JSON.stringify(LAG_MANIFEST));
-  const { run, calls } = checkWithFakeGh(t, root, CANONICAL, JSON.stringify(LAG_MANIFEST));
-  assert.deepEqual(calls, [contentsCall(CANONICAL)]);
-  assert.equal(run.status, 0, run.stderr);
-});
-
-test('--check exits 0 and prints in sync when the canonical main holds this repository\'s manifest', (t) => {
-  const text = readFileSync(join(REPOSITORY_ROOT, MANIFEST), 'utf8');
-  const { canonical } = JSON.parse(text);
-  const { run } = checkWithFakeGh(t, REPOSITORY_ROOT, canonical, text);
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, new RegExp(`^factory-sync: in sync with ${canonical} main$`, 'm'));
-});
-
-test('--check exits 1 and lists the changed path when one canonical entry differs', (t) => {
-  const manifest = JSON.parse(readFileSync(join(REPOSITORY_ROOT, MANIFEST), 'utf8'));
-  const changed = manifest.entries.find((entry) => 'sha256' in entry);
-  const entries = manifest.entries.map((entry) => (entry === changed ? { ...entry, sha256: ZERO_SHA256 } : entry));
-  const { run } = checkWithFakeGh(t, REPOSITORY_ROOT, manifest.canonical, JSON.stringify({ ...manifest, entries }));
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stderr, /^factory-sync: behind /m);
-  assert.deepEqual(
-    run.stderr.split('\n').filter((line) => line.startsWith('  ')),
-    [`  ${changed.path}: changed`],
-  );
-  assert.match(run.stderr, /^factory-sync: lag is information .*--from <checkout of /m);
-  assert.doesNotMatch(run.stderr, /open a sync card/);
 });

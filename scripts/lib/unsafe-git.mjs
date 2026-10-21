@@ -1,6 +1,6 @@
-// unsafe-git.mjs — the pure decision logic behind .claude/hooks/block-unsafe-git.mjs and
-// .codex/hooks/block-unsafe-git.mjs (the PreToolUse(Bash) guards). Extracted so the rules get unit
-// test coverage; each hook stays a thin stdin/stderr/exit-code shell around blockReason().
+// unsafe-git.mjs: pure Git refusals shared by the Claude and Codex PreToolUse(Bash) guards,
+// plus cleanup-specific permission for the Claude root hook. The hooks supply checkout facts;
+// direct unit tests cover the policy and subprocess tests cover its wiring.
 //
 // Thirteen plain rules, judged on the actual command segments of an agent's shell call:
 //   git commit --no-verify   -> skips the pre-commit gates
@@ -661,4 +661,13 @@ export function blockReason(cmd, checkout) {
     if (hit) return hit;
   }
   return substitutedReason || substitutedTexts.map(worktreeReason).find(Boolean) || '';
+}
+
+// Cleanup-specific automatic permission recognizes raw literal syntax only. Unsupported shell
+// forms receive no grant; a direct job-local call is refused before any editable helper loads.
+export function cleanupPermission(command, trustedCheckout) {
+  if (typeof command !== 'string' || !/^[ \t]*node[ \t]+scripts\/closeout-cleanup\.mjs(?=[ \t]|$)/.test(command)) return undefined;
+  if (trustedCheckout !== true) return 'deny';
+  if (/^[ \t]*node[ \t]+scripts\/closeout-cleanup\.mjs(?:[ \t]+[A-Za-z0-9_./:@,+%=-]+)*[ \t]*$/.test(command)) return 'allow';
+  return undefined;
 }

@@ -2,7 +2,7 @@
 //
 // Pure: no file system, no git. The imports are the agent check, whose bound an override must keep, and runtimes.mjs,
 // which owns the file's top-level rules so every reader of the file applies them. Reading, verifying and writing the
-// files is for the sync, which imports this module; the settings file is read only by runtimes.mjs.
+// files is for factory-sync.mjs and the release update, which import this module; the settings file is read only by runtimes.mjs.
 //
 // SETTINGS FILE: SETTINGS_PATH (runtimes.mjs), version 1. Each runtime's own setting names are used:
 //   { "version": 1, "runtimes": ["claude", "codex"], "seats": { "claude": { "builder": { "model": "opus", "effort": "high", "maxTurns": 120 } },
@@ -11,7 +11,7 @@
 // Every rule below is a refusal that names the file, the place in it and the offending value (printed through
 // JSON.stringify), raised before any file is written. Where a rule says "with the recovery", the refusal ends with
 // this sentence, because the cause may be a file written for a newer copy of the workflow than the one installed:
-//   if a newer copy of the shared workflow admits this, undo the edit, run the sync that installs that copy, then make the edit again
+//   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
 //     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep` and `crossFamilyReview`.
@@ -33,7 +33,7 @@
 //  7. An override may not introduce a problem. The agent check and the seat policy are run on the shared bytes and
 //     on the rendered bytes, and any problem reported for the rendered bytes and not for the shared bytes is a
 //     refusal that quotes it and ends with this sentence:
-//       a value only a newer copy of the shared workflow admits can be named after the sync that installs it
+//       a value only a newer copy of the shared workflow admits can be named after the release update that installs it
 //  8. A manifest never lists the settings path. The comparison is the folded one the manifest already uses for its
 //     own entries. A seatDefaults record obeys rules 2 to 5 and names only seat files the same manifest lists.
 //  9. `runtimes`, when present, is a non-empty array naming `claude`, `codex` or both, each once; with no key both
@@ -42,18 +42,18 @@
 //     is off. Anything else is refused. No script acts on the value: the session reads it, as the `resume` skill
 //     says under "4. Plan".
 // 11. `greptile`, when present, is `true` or `false`; with no key, as with `false`, the Greptile add-on is off.
-//     Anything else is refused. The sync and the manifest check act on the value: runtimes.mjs names the add-on's
+//     Anything else is refused. The release update and the manifest check act on the value: runtimes.mjs names the add-on's
 //     paths, which a tree installs only where the value is `true`.
 // 12. `docSweep`, when present, is `true` or `false`; with no key, as with `true`, the documentation sweep is on.
-//     Anything else is refused. The sync and the manifest check act on the value.
+//     Anything else is refused. The release update and the manifest check act on the value.
 // 13. `crossFamilyReview`, when present, is `true`, and only where both runtimes are present; with no key no
-//     cross-family review is authorized. Anything else is refused. No sync or check acts on the value. `fabraik init`
+//     cross-family review is authorized. Anything else is refused. No update or check acts on the value. `fabraik init`
 //     writes it only on a yes to its disclosure, and the session reads it, as the `resume` skill says under
 //     "6. Verify and review".
 //
 // The JSON half of rule 1, the list half of rule 9 and rules 10, 11, 12 and 13 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is
-// substituteSeatSettings; 7 is overrideProblems. The file half of rule 1, rule 3 and rule 8 belong to the sync.
+// substituteSeatSettings; 7 is overrideProblems. The file half of rule 1 belongs to readSettingsFile (runtimes.mjs); rules 3 and 8 belong to factory-sync.mjs.
 
 import { checkAgentSource, checkCodexAgentSource, checkSeatPolicy } from './check-agents.mjs';
 import { isRecord, readSettingsHeader, refusal, RUNTIMES } from './runtimes.mjs';

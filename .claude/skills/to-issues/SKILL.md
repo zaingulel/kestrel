@@ -19,6 +19,28 @@ does not hold `"docSweep": false`, an issue the day-after sweep triage filed und
 issue created with gh still records blockers and parents as built-in links (step 6), never as body text. The sweep
 triage, which has no gh, carries its manual's `Blocked by:` line instead.
 
+## Specification entry
+
+When the vendored `to-spec` skill writes a specification, and in the interview that gathers its requirements, ask the
+owner about outcomes the owner can judge: the intended behaviour, what should happen when something fails, and which
+business trade-offs are acceptable. Put each question as a concrete plain-language example, such as what a person
+using the product sees when their change cannot be saved, with a recommended answer. The agents decide the testing
+seams, which modules are tested, where the tests sit and the architectural consequences themselves, from the code and
+the repository's standing documents, never asking the owner to choose them, and record them in the specification's
+implementation and testing decisions. In place of `to-spec`'s check that the seams match the owner's expectations,
+confirm with the owner, by the same kind of example, the behaviour those tests will prove. The owner still confirms
+what the product means, the acceptance that makes it testable and every material decision left open; a technical
+choice is material where it changes cost, risk or what users get, and is put to the owner as that consequence, with
+a recommendation.
+
+In place of `to-spec`'s demand that its numbered list of user stories be "LONG" and "extremely extensive", a
+specification is complete when its stories cover every outcome the owner agreed, what should happen when something
+fails and every edge case the agreed behaviour can actually meet. There is no minimum, maximum or target number of
+stories: each story states agreed behaviour that no other story already covers, so a simple request can take a few
+stories and a complex one keeps every story its accepted scope needs. A concise specification never drops agreed
+work: every story keeps the benefit its "so that" clause names, and the implementation decisions, architectural
+decisions among them, the testing decisions and what is out of scope are recorded in full, however few the stories.
+
 ## Process
 
 ### 1. Gather context
