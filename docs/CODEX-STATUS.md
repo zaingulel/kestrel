@@ -1,6 +1,6 @@
 # Local Codex job status
 
-`desktop.codex_status.read_codex_status` reads one explicitly selected Codex job through the desktop app's private local socket. It returns a fresh, metadata-only observation for that call. The voice service does not call this adapter.
+`codex_status.read_codex_status` reads one explicitly selected Codex job through the desktop app's private local socket. It returns a fresh, metadata-only observation for that call. The voice service does not call this adapter.
 
 ## Use
 
@@ -9,7 +9,7 @@ Import the library function and provide both the job identifier and the existing
 ```python
 from pathlib import Path
 
-from desktop.codex_status import read_codex_status
+from codex_status import read_codex_status
 
 status = read_codex_status("selected-job-id", socket_path=Path("/absolute/path/to/desktop.sock"))
 ```

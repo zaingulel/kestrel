@@ -129,7 +129,7 @@ class UnixPeer:
 
 class CodexStatusTests(unittest.TestCase):
     def test_selected_snapshot_and_both_waits(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         # Native sanitized observations and #175 define these literal outcomes.
         statuses = (
@@ -158,7 +158,7 @@ class CodexStatusTests(unittest.TestCase):
             self.assertTrue(peer.eof)
 
     def test_only_read_protocol_is_sent(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         inbound = [
             {"type": "request", "requestId": "untrusted-request", "method": "thread-owner-discovery"},
@@ -196,7 +196,7 @@ class CodexStatusTests(unittest.TestCase):
             read_codex_status(THREAD, socket_path=peer.path, method="thread-follower-interrupt-turn")
 
     def test_content_never_escapes(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         sentinel = "PRIVATE_CONTENT_SENTINEL_175"
         full = snapshot({"type": "active", "activeFlags": []})
@@ -226,7 +226,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual(diagnostics.getvalue(), "")
 
     def test_unsafe_endpoint_never_connects(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         with tempfile.TemporaryDirectory(prefix="kestrel-status-admission-") as home:
             root = Path(home)
@@ -242,7 +242,7 @@ class CodexStatusTests(unittest.TestCase):
                 leaf.symlink_to(path)
                 regular = private / "regular"
                 regular.write_text("not a socket")
-                cases = [Path("relative.sock"), root / "missing", regular, leaf,
+                cases = [Path("relative.sock"), root / "missing", root / "nul\x00socket", regular, leaf,
                          link / "ipc.sock", regular / "ipc.sock"]
                 for bad in cases:
                     with self.subTest(path=str(bad)), mock.patch("socket.socket", side_effect=OSError("admission must precede socket")) as constructor:
@@ -322,7 +322,7 @@ class CodexStatusTests(unittest.TestCase):
             self.assertTrue(peer.eof)
 
     def test_hostile_wire_is_unavailable(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         incompatible = "Incompatible local status data. Check desktop protocol compatibility."
         limited = "Local status read exceeded its limits. Check the desktop source before reading again."
@@ -401,7 +401,7 @@ class CodexStatusTests(unittest.TestCase):
             self.assertEqual(read_codex_status(THREAD, socket_path=peer.path).state, "idle")
 
     def test_failure_discards_previous_success(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         with UnixPeer({"type": "active", "activeFlags": []}) as peer:
             first = read_codex_status(THREAD, socket_path=peer.path)
@@ -422,7 +422,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertNotEqual(peer.ledger[0]["requestId"], fresh.ledger[0]["requestId"])
 
     def test_deadline_and_cleanup(self):
-        from desktop.codex_status import read_codex_status
+        from codex_status import read_codex_status
 
         real_socket = socket.socket
         limited = "Local status read exceeded its limits. Check the desktop source before reading again."
@@ -465,8 +465,6 @@ class CodexStatusTests(unittest.TestCase):
                             self.actual.sendall(data[:6])
                             raise OSError("private partial-write diagnostic")
                         self.actual.sendall(data)
-                        if is_follow and phase == "interruption":
-                            raise KeyboardInterrupt
                         if phase == "write-deadline":
                             now[0] += 5.1
                         elif phase == "shared-deadline":
@@ -475,6 +473,8 @@ class CodexStatusTests(unittest.TestCase):
                     def recv(self, size):
                         data = self.actual.recv(size)
                         if b'"thread-stream-state-changed"' in data:
+                            if phase == "interruption":
+                                raise KeyboardInterrupt
                             if phase == "read-deadline":
                                 now[0] += 5.1
                             elif phase == "shared-deadline":
@@ -499,7 +499,7 @@ class CodexStatusTests(unittest.TestCase):
                     if "deadline" in phase:
                         self.assertEqual(result.reason, limited)
                 followed = any(message.get("params", {}).get("following") is True for message in sent)
-                if followed:
+                if followed and phase != "partial-follow":
                     self.assertIs(sent[-1]["params"]["following"], False)
                     self.assertGreater(timeouts[-1], 0)
                     self.assertLessEqual(timeouts[-1], 0.25)
@@ -508,9 +508,8 @@ class CodexStatusTests(unittest.TestCase):
                     self.assertTrue(any(0 < value <= 1 for value in timeouts[:-1]))
             self.assertTrue(peer.eof)
             if phase == "partial-follow":
-                size, = struct.unpack("<I", peer.raw_tail[6:10])
-                cleanup = json.loads(peer.raw_tail[10:10 + size])
-                self.assertIs(cleanup["params"]["following"], False)
+                self.assertEqual(peer.raw_tail, framed(sent[-1])[:6])
+                self.assertIs(sent[-1]["params"]["following"], True)
 
 
 if __name__ == "__main__":

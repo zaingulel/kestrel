@@ -77,7 +77,7 @@ def _endpoint(path):
                 or stat.S_IMODE(endpoint.st_mode) != 0o600):
             raise _Refused(_UNSAFE)
         return ((parent.st_dev, parent.st_ino), (endpoint.st_dev, endpoint.st_ino))
-    except OSError:
+    except (OSError, ValueError):
         raise _Refused(_UNSAFE) from None
 
 
@@ -154,7 +154,7 @@ class _IncomingFrames:
                                  parse_constant=_finite, parse_float=_finite)
             _nesting(message)
             _remaining(self.deadline)
-        except (ValueError, UnicodeError, RecursionError):
+        except (ValueError, RecursionError):
             raise _Refused(_INCOMPATIBLE) from None
         if not isinstance(message, dict):
             raise _Refused(_INCOMPATIBLE)
@@ -214,12 +214,13 @@ def read_codex_status(thread_id: str, *, socket_path: Path) -> CodexStatus:
         client = result["clientId"]
         owner = _request(connection, incoming, client, "thread-owner-discovery", 1,
                          {"hostId": "local", "conversationId": thread_id})["handledByClientId"]
-        following = {
+        follow = {
             "type": "broadcast", "sourceClientId": client, "version": 1,
             "method": "thread-stream-following-changed", "targetClientIds": [owner],
             "params": {"conversationId": thread_id, "hostId": "local", "following": True},
         }
-        _send(connection, following, deadline)
+        _send(connection, follow, deadline)
+        following = follow
         while True:
             message = incoming.receive()
             if (message.get("type") != "broadcast"
@@ -247,7 +248,7 @@ def read_codex_status(thread_id: str, *, socket_path: Path) -> CodexStatus:
         return CodexStatus(thread_id, "unavailable", datetime.now(timezone.utc), error.args[0])
     except TimeoutError:
         return CodexStatus(thread_id, "unavailable", datetime.now(timezone.utc), _LIMIT)
-    except (OSError, ValueError, TypeError, RecursionError):
+    except OSError:
         return CodexStatus(thread_id, "unavailable", datetime.now(timezone.utc), _TRANSPORT)
     finally:
         if connection is not None:
