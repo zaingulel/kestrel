@@ -373,7 +373,8 @@ FocusScope {
         Column {
             id: turnColumn
             width: transcript.width
-            y: Math.max(0, transcript.height - height)
+            // With no turns the column holds only the hint, centred; turns and the listening ghost rest at the bottom.
+            y: Math.max(0, root.displayedTurns.length || root.listeningFeed ? transcript.height - height : (transcript.height - height) / 2)
             Text {
                 width: parent.width
                 visible: text.length > 0

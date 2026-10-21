@@ -648,6 +648,7 @@ TestCase {
         verify(service.acceptStatusChunk("L"))
         accept([])
         compare(ghost.visible, true)
+        compare(ghost.mapToItem(transcript.contentItem, 0, ghost.height).y, transcript.height)
         compare(textWith(content, "Say something, or type below."), null)
         content.motionEnabled = false
         compare(findChild(inflow, "listeningLoop").running, false)
@@ -666,6 +667,7 @@ TestCase {
             const advisory = textWith(content, message)
             verify(advisory !== null && advisory.visible)
             compare(advisory.horizontalAlignment, Text.AlignHCenter)
+            fuzzyCompare(advisory.mapToItem(transcript.contentItem, 0, advisory.height / 2).y, transcript.height / 2, 0.5)
         }
         accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
         findChild(service, "conversationExpiry").triggered()
@@ -1097,6 +1099,7 @@ TestCase {
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
         compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        fuzzyCompare(inactivePrompt.mapToItem(transcript.contentItem, 0, inactivePrompt.height / 2).y, transcript.height / 2, 0.5)
         content.focusComposer()
         verify(findChild(content, "composer").activeFocus)
         keyClick(Qt.Key_Tab)
