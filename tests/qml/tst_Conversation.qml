@@ -536,6 +536,7 @@ TestCase {
         let tail = null
         let marks = null
         let bubble = null
+        let word = null
         function accept(turns) {
             verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "live-session", turns: turns}) + "\n"))
             tryCompare(content, "displayedTurns", service.turns)
@@ -543,6 +544,7 @@ TestCase {
             tail = findChild(content, "turnTail1")
             marks = findChild(content, "turnLiveMarks1")
             bubble = findChild(content, "turnBubble1")
+            word = findChild(content, "turnLiveWord1")
         }
         const earlier = {speaker: "kestrel", text: "Earlier", state: "thinking"}
         verify(service.acceptStatusChunk("T"))
@@ -553,7 +555,16 @@ TestCase {
         verify(tail !== null && marks !== null)
         compare(findChild(content, "turnTail0").visible, false, "only the final accepted reply is active")
         compare(tail.visible, true)
-        compare(tail.width, 40)
+        verify(word !== null)
+        compare(word.text, "Thinking")
+        compare(word.font.pixelSize, 12)
+        compare(word.lineHeight, 16)
+        compare(word.x, 40)
+        compare(tail.width, 40 + Math.ceil(word.implicitWidth) + 10)
+        compare(word.y + word.height / 2, tail.height / 2)
+        compare(word.Accessible.ignored, true)
+        compare(marks.x, 0)
+        compare(marks.y, 0)
         compare(tail.height, 26)
         compare(tail.topLeftRadius, 10)
         compare(tail.topRightRadius, 10)
@@ -574,6 +585,7 @@ TestCase {
         compare(findChild(content, "turnText1").text, literal)
         compare(findChild(content, "turnText1").textFormat, Text.PlainText)
         compare(marks.kind, "speaking")
+        compare(word.text, "Speaking")
         function loops(running) {
             for (let i = 0; i < 3; i++)
                 compare(findChild(findChild(marks, "mark" + i), "speakingLoop" + i).running, running)
@@ -581,6 +593,8 @@ TestCase {
         loops(true)
         content.motionEnabled = false
         loops(false)
+        compare(word.visible, true)
+        compare(word.text, "Speaking")
         content.motionEnabled = true
         loops(true)
         content.announcementsEnabled = false
@@ -589,6 +603,17 @@ TestCase {
         content.visible = true
         content.announcementsEnabled = true
         loops(true)
+        content.textScale = 2
+        verify(waitForRendering(content))
+        compare(tail.height, 42)
+        compare(word.font.pixelSize, 24)
+        compare(word.y + word.height / 2, 21)
+        compare(findChild(content, "turnRow1").height, 4 + bubble.height + 42)
+        content.textScale = 1
+        verify(waitForRendering(content))
+        accept([earlier, {speaker: "kestrel", text: "Hi", state: "speaking"}])
+        compare(tail.topRightRadius, 10)
+        compare(tail.topLeftRadius, 0)
         const ghost = findChild(content, "listeningGhost")
         const inflow = findChild(content, "listeningGhostMark")
         verify(ghost !== null && inflow !== null)
