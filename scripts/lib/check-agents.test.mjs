@@ -139,7 +139,7 @@ test('ANTI-REGRESSION: the costliest model on a seat outside its named seats is 
   for (const line of ['model:  fable', 'model: fable ', "model: 'fable'", 'model: "fable"', 'model: fable ', 'model: fable\f']) {
     const problems = checkSeatPolicy('builder.md', `---\nname: builder\n${line}\n---\nBody.\n`);
     assert.equal(problems.length, 1, line);
-    assert.match(problems[0], /^builder\.md: the costliest Claude model may sit only on the oracle and security-reviewer seats; found /, line);
+    assert.match(problems[0], /^builder\.md: the costliest Claude model may sit only on the oracle seat; found /, line);
   }
   for (const line of ["model = 'gpt-6-astra'", 'model="gpt-6-astra"', 'model =  "gpt-6-astra" ', 'model\v="gpt-6-astra"', 'model = "gpt-6-astra"　']) {
     const problems = checkSeatPolicy('builder.toml', `name = "builder"\n${line}\nsandbox_mode = "workspace-write"\n`);
@@ -150,9 +150,18 @@ test('ANTI-REGRESSION: the costliest model on a seat outside its named seats is 
   assert.deepEqual(checkSeatPolicy('builder.toml', 'model = "gpt-6-astra-mini"\n'), []);
 });
 
+// The seat name is written out here from AGENTS.md, never imported, so a change to the module's list cannot move it.
+// Mutation: put security-reviewer back among the seats that may hold the costliest Claude model, and this goes red.
+test('ANTI-REGRESSION: the costliest Claude model is refused on the security-reviewer seat', () => {
+  assert.deepEqual(
+    checkSeatPolicy('security-reviewer.md', '---\nname: security-reviewer\nmodel: fable\nmaxTurns: 90\n---\nBody.\n'),
+    ['security-reviewer.md: the costliest Claude model may sit only on the oracle seat; found ["model: fable"]'],
+  );
+});
+
 // Mutation: require the costliest model on its named seats, and this goes red.
 test('a seat the costliest model may sit on may hold it or a cheaper known model', () => {
-  for (const seat of ['oracle', 'security-reviewer']) {
+  for (const seat of ['oracle']) {
     for (const model of ['fable', 'opus', 'sonnet']) {
       assert.deepEqual(checkSeatPolicy(`${seat}.md`, `---\nname: ${seat}\nmodel: ${model}\nmaxTurns: 90\n---\nBody.\n`), [], `${seat} ${model}`);
     }

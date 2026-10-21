@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
+import { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
 import { addIssueToBoard } from './board-add.mjs';
 import { issueItemReply } from './board-fixtures.mjs';
 import { main as boardAddMain } from '../board-add.mjs';
@@ -104,7 +104,7 @@ test('addIssueToBoard adds the card and sets BOTH Status and Workstream, in that
 // addProjectV2ItemById returns the EXISTING item for an issue already on the board,
 // so a re-run must still set both fields rather than skip them.
 test('addIssueToBoard is idempotent: an issue already on the board still gets both fields set', () => {
-  const { exec, calls } = recordingExec({ itemId: 'PVTI_alreadythere', nodeIdJson: issueItemReply([{ id: 'PVTI_read', isArchived: false, project: { number: BOARD_PROJECT_NUMBER }, value: null }], { issueId: ISSUE_NODE_ID }) });
+  const { exec, calls } = recordingExec({ itemId: 'PVTI_alreadythere', nodeIdJson: issueItemReply([{ id: 'PVTI_read', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: null }], { issueId: ISSUE_NODE_ID }) });
   const result = addIssueToBoard(
     { issueNumber: 543, statusName: 'In progress', workstreamName: 'Platform' },
     exec,
@@ -341,12 +341,12 @@ test('board-add refuses incomplete issue-item replies before mutation', () => {
   const unreadableIssue = issueItemReply();
   unreadableIssue.data.repository.issue = null;
   const cases = [
-    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99 } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
+    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99, owner: { login: BOARD_OWNER } } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
     [missingCount, /no non-negative integer projectItems\.totalCount/],
     [unreadableIssue, /no readable issue/],
     ['not json at all', /not valid JSON/],
     [issueItemReply([{ id: 'bad', isArchived: false, project: null }]), /non-integer project number/],
-    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER } }]), /non-boolean isArchived/],
+    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } }]), /non-boolean isArchived/],
     [missingNodes, /no projectItems\.nodes\[\] array/],
   ];
   for (const [reply, expected] of cases) {

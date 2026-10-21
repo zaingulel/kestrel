@@ -1,10 +1,13 @@
-// merge-watch.test.mjs: the merge watch's exit contract and required-check rules, through the fake-gh seam.
+// merge-watch.test.mjs: the merge watch's exit contract and required-check rules, and the draft wait's exit contract,
+// through the fake-gh seam.
 //
-// Polling scenarios run `main` with an in-memory ghExec and a recording sleep that returns at once. The argument
-// contract and terminal success/failure cases run the real command as a subprocess with the same fake replies.
+// Polling scenarios run `main` with an in-memory ghExec and a recording sleep that returns at once. The pull-request
+// form's argument contract and terminal success/failure cases run the real command as a subprocess with the same fake
+// replies. The draft wait runs in-process only: it shares the command's process wiring, which those cases prove.
 //
-// Recurring cost: no subprocess or disk state for polling; CLI wire proofs start Node for the command and each
-// faked gh call, with no network. Removal condition: retire with scripts/merge-watch.mjs.
+// Recurring cost: no subprocess or disk state for polling or the draft wait; CLI wire proofs start Node for the
+// command and each faked gh call, with no network. Removal condition: retire with scripts/merge-watch.mjs, and the
+// draft-wait tests with its `--draft` mode.
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,7 +20,7 @@ import { installFakeGh } from './fake-gh.mjs';
 import { main } from '../merge-watch.mjs';
 
 const CLI = fileURLToPath(new URL('../merge-watch.mjs', import.meta.url));
-const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number>';
+const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue-number>';
 
 // Each state-view call advances the scenario; checks use that step and the last step repeats. A reply is
 // [exit code, body]. Rules preserve gh's pagination/slurp behavior, and both paths refuse missing arguments.
@@ -167,7 +170,7 @@ function runCli(args, steps = [MERGED], options) {
   return { ...run, calls, lastOut: run.stdout.trimEnd().split('\n').at(-1) };
 }
 
-test('merge-watch exits 2 with its usage before any gh call for a missing, non-numeric or extra argument, or any flag', () => {
+test('merge-watch exits 2 with its usage before any gh call for a missing, non-numeric or extra argument, or any flag outside the draft form', () => {
   for (const args of [[], ['seven'], ['7x'], ['0'], ['7', '8'], ['--help'], ['-7'], ['7', '--interval=1'], ['--repo', '7']]) {
     const run = runCli(args);
     assert.equal(run.status, 2, `${JSON.stringify(args)} must exit 2; stdout:\n${run.stdout}\nstderr:\n${run.stderr}`);
@@ -535,5 +538,78 @@ test('the watch only ever reads GitHub state', async () => {
   assert.deepEqual(run.calls.map(callKind), ['base', 'branch', 'rules', 'view', 'checks', 'view']);
   for (const write of [['pr', 'merge', '7'], ['pr', 'ready', '7'], ['pr', 'comment', '7'], ['issue', 'edit', '7'], ['api', '-X', 'PATCH', 'repos/{owner}/{repo}/pulls/7'], ['api', 'repos/{owner}/{repo}/issues/7/comments', '-f', 'body=x']]) {
     assert.throws(() => assertReadOnly([write]), /must only read/, `the read-only check must refuse gh ${write.join(' ')}`);
+  }
+});
+
+const DRAFT_LIST = ['pr', 'list', '--head', 'job/7', '--state', 'open', '--json', 'number'];
+
+// Runs the draft wait in-process: each gh call takes the next reply and the last repeats; a sleep past the twentieth
+// means the wait never stopped.
+async function waitDraft(replies, args = ['--draft', 'job/7']) {
+  const calls = [];
+  const ghExec = (call) => {
+    calls.push(call);
+    const [code, body] = replies[Math.min(calls.length, replies.length) - 1];
+    if (code === 0) return body + '\n';
+    throw Object.assign(new Error(body), { status: code, stdout: '', stderr: body + '\n' });
+  };
+  const lines = [];
+  const sleeps = [];
+  const output = { log: (line) => lines.push(line), error: (line) => lines.push(line) };
+  const sleep = async (ms) => {
+    sleeps.push(ms);
+    if (sleeps.length > 20) throw new Error('the draft wait did not stop');
+  };
+  const status = await main(args, { ghExec, output, sleep });
+  return { status, lines, last: lines.at(-1), sleeps, calls };
+}
+
+test('the draft wait reads only the open pull requests on its branch, keeps waiting while there are none, and exits 0 printing the number once one opens', async () => {
+  const run = await waitDraft([[0, '[]'], [0, '[]'], [0, '[{"number":12}]']]);
+  assert.equal(run.status, 0);
+  assert.equal(run.last, '12');
+  assert.equal(run.sleeps.length, 2);
+  assert.deepEqual(run.calls, [DRAFT_LIST, DRAFT_LIST, DRAFT_LIST]);
+});
+
+test('the draft wait exits 1 the moment gh fails, with the gh error as its last line and no read after it', async () => {
+  const run = await waitDraft([[0, '[]'], [1, 'error connecting to api.github.com']]);
+  assert.equal(run.status, 1);
+  assert.equal(run.last, 'error connecting to api.github.com');
+  assert.equal(run.calls.length, 2);
+  assert.equal(run.sleeps.length, 1);
+});
+
+test('the draft wait exits 1 without waiting on a pull request list it cannot read', async () => {
+  for (const body of ['{}', '[{}]', '[null]', '[{"number":"12"}]', '[{"number":0}]']) {
+    const run = await waitDraft([[0, body]]);
+    assert.equal(run.status, 1, body);
+    assert.equal(run.last, `unreadable pull request list: ${body}`);
+    assert.equal(run.sleeps.length, 0, body);
+    assert.equal(run.calls.length, 1, body);
+  }
+  const garbled = await waitDraft([[0, 'not json']]);
+  assert.equal(garbled.status, 1);
+  assert.match(garbled.last, /JSON/);
+  assert.equal(garbled.sleeps.length, 0);
+});
+
+test('the draft wait exits 1 naming each number when more than one pull request is open on its branch', async () => {
+  const run = await waitDraft([[0, '[{"number":12},{"number":13}]']]);
+  assert.equal(run.status, 1);
+  assert.equal(run.last, 'more than one open pull request on job/7: 12 13');
+  assert.equal(run.sleeps.length, 0);
+});
+
+test('the draft wait exits 2 with its usage before any gh call unless given exactly --draft and a job branch', async () => {
+  for (const args of [
+    ['--draft'], ['--draft', '7'], ['--draft', 'job/0'], ['--draft', 'job/07'], ['--draft', 'job/7x'], ['--draft', 'job/'],
+    ['--draft', 'main'], ['--draft', 'feature/job/7'], ['--draft', 'job/7', '8'], ['--draft=job/7'], ['job/7'],
+    ['job/7', '--draft'], ['--draft', '--draft'],
+  ]) {
+    const run = await waitDraft([[0, '[{"number":12}]']], args);
+    assert.equal(run.status, 2, JSON.stringify(args));
+    assert.deepEqual(run.lines, [USAGE], JSON.stringify(args));
+    assert.deepEqual(run.calls, [], JSON.stringify(args));
   }
 });

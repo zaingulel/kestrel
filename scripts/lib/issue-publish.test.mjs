@@ -35,10 +35,9 @@ function graphChildren(numbers, totalCount = numbers.length) {
 
 // The projects the ISSUE side reports an item on. The absence path probes that side before
 // it claims anything, so every stub has to answer the probe as well as the children query.
-// `archived` is per item and defaults to false: an unarchived card is the ordinary case.
-function graphProbe(projectNumbers = [], totalCount = projectNumbers.length, archived = []) {
+function graphProbe(projectNumbers = [], totalCount = projectNumbers.length) {
   return JSON.stringify(issueItemReply(projectNumbers.map((number, i) => ({
-    id: `item-${i}`, isArchived: archived[i] ?? false, project: { number }, value: null,
+    id: `item-${i}`, isArchived: false, project: { number, owner: { login: BOARD_OWNER } }, value: null,
   })), { totalCount }));
 }
 
@@ -119,17 +118,34 @@ const UNRESOLVED_NODE = leanNode({
   status: 'Backlog',
 });
 
-function boardRead(nodes, { probeProjects = [], probeArchived = [], probeResponse } = {}) {
+function boardRead(nodes, { probeProjects = [], probeResponse, children = [] } = {}) {
   const queries = [];
   const ghExec = (command) => {
     const query = command.find((arg) => arg.startsWith('query='));
     queries.push(query);
     // One slurped page: the array shape the real `--paginate --slurp` walk hands fetchBoard (#1155).
     if (query.includes('projectV2')) return JSON.stringify([leanBoardPage(nodes)]);
-    if (query.includes('projectItems')) return probeResponse ?? graphProbe(probeProjects, probeProjects.length, probeArchived);
-    return graphChildren([]);
+    if (query.includes('projectItems')) return probeResponse ?? graphProbe(probeProjects);
+    return graphChildren(children);
   };
   return { queries, dependencies: { fetchBoard, ghExec } };
+}
+
+// A closed card archived on this board: the issue-side probe answers with its own board item,
+// and the board read lists unarchived cards only, so this is the only view of it.
+const ARCHIVED_CARD = {
+  id: 'PVTI_archived',
+  content: { __typename: 'Issue', number: 999, title: 'Finished card', state: 'CLOSED', labels: [KIND_LABELS.task] },
+  status: 'Done',
+  routing: 'Platform',
+};
+
+function archivedItem(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER) {
+  return { ...leanNode({ ...ARCHIVED_CARD, ...card }), isArchived: true, project: { number: project, owner: { login: owner } } };
+}
+
+function archivedProbe(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER) {
+  return JSON.stringify(issueItemReply([archivedItem(card, project, owner)]));
 }
 
 test('issue-publish: a card that was never added still fails loud as absent from the board', () => {
@@ -235,18 +251,18 @@ test('issue-publish: an issue whose card the board read omitted entirely is repo
   assert.match(errors.join('\n'), /re-run this check rather than adding the card again/);
 });
 
-test('issue-publish: an archived card is reported as archived with an unarchive action, never as a lagging read', () => {
+test('issue-publish: an open card archived on the board is reported as archived with an unarchive action, never as a lagging read', () => {
   // The two reads disagree about archived cards BY CONSTRUCTION: `ProjectV2.items` defaults to
   // NOT_ARCHIVED so the board read never lists one, while `Issue.projectItems` includes archived
   // items so the probe always sees it. That is byte-identical to the lagging-read shape, and
   // reported as lag it hands the operator a re-run that can never succeed (#304 live).
-  const archivedProbe = { probeProjects: [BOARD_PROJECT_NUMBER], probeArchived: [true] };
-  const { dependencies } = boardRead([RESOLVED_NODE], archivedProbe);
+  const probeResponse = archivedProbe({ content: { ...ARCHIVED_CARD.content, state: 'OPEN' } });
+  const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse });
 
   assert.throws(
     () => verifyIssuePublication(['999'], dependencies),
     (error) => {
-      assert.match(error.message, /#999 is archived on the board/);
+      assert.match(error.message, /#999 is archived on the board while still open/);
       assert.match(error.message, /unarchive the card rather than adding it again/);
       assert.doesNotMatch(error.message, /re-run this check/);
       assert.doesNotMatch(error.message, /absent from the board/);
@@ -257,11 +273,115 @@ test('issue-publish: an archived card is reported as archived with an unarchive 
   // Naming the archived cause must not soften the exit status: the check still fails.
   const errors = [];
   const status = main(['999'], {
-    ...boardRead([RESOLVED_NODE], archivedProbe).dependencies,
+    ...boardRead([RESOLVED_NODE], { probeResponse }).dependencies,
     output: { log: () => { throw new Error('no success line may be printed'); }, error: (line) => errors.push(line) },
   });
   assert.equal(status, 1);
   assert.match(errors.join('\n'), /unarchive the card rather than adding it again/);
+});
+
+test('issue-publish: a closed card archived only on another project still fails as absent from this board', () => {
+  const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse: archivedProbe({}, BOARD_PROJECT_NUMBER + 1) });
+
+  assert.throws(
+    () => verifyIssuePublication(['999'], dependencies),
+    /requested issue #999 is absent from the board/,
+  );
+});
+
+test('issue-publish: a closed card archived on another owner\'s project of the same number still fails as absent from this board', () => {
+  const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse: archivedProbe({}, BOARD_PROJECT_NUMBER, 'someone-else') });
+
+  assert.throws(
+    () => verifyIssuePublication(['999'], dependencies),
+    /requested issue #999 is absent from the board/,
+  );
+});
+
+test('issue-publish: a probe reply with two items on this board is refused, never accepted', () => {
+  const probeResponse = JSON.stringify(issueItemReply([archivedItem(), archivedItem()]));
+
+  assert.throws(
+    () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE], { probeResponse }).dependencies),
+    /could not confirm whether issue #999 is on the board: .*2 items on project/,
+  );
+});
+
+test('issue-publish: a probe reply whose items outnumber its count is refused, never accepted', () => {
+  const probeResponse = JSON.stringify(issueItemReply([archivedItem()], { totalCount: 0 }));
+
+  assert.throws(
+    () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE], { probeResponse }).dependencies),
+    /could not confirm whether issue #999 is on the board: .*reports 0 project items but returned 1/,
+  );
+});
+
+test('issue-publish: an archived board item that cannot be read as this issue\'s card is never accepted', () => {
+  // Each case is a closed archived item the parser cannot judge as #999. None may pass, and none
+  // may send the operator to unarchive a card they cannot see.
+  const cases = [
+    [{ content: null }, /resolved to no issue/],
+    [{ content: { ...ARCHIVED_CARD.content, number: 1000 } }, /resolved to #1000/],
+    [{ content: { ...ARCHIVED_CARD.content, labels: { totalCount: 25, nodes: [] } } }, /has 25 labels but only 0 fetched/],
+  ];
+
+  for (const [card, expected] of cases) {
+    const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse: archivedProbe(card) });
+    assert.throws(
+      () => verifyIssuePublication(['999'], dependencies),
+      (error) => {
+        assert.match(error.message, /#999 is archived on the board, but its board item could not be read/);
+        assert.match(error.message, expected);
+        assert.doesNotMatch(error.message, /unarchive/);
+        return true;
+      },
+    );
+  }
+});
+
+test('issue-publish: an Epic whose children include a closed card archived on the board passes, verified from that card\'s own board item', () => {
+  const epic = leanNode({
+    id: 'PVTI_epic',
+    content: { __typename: 'Issue', number: 475, title: 'Epic card', labels: [KIND_LABELS.epic] },
+    status: 'Ready',
+    routing: 'Platform',
+  });
+  const task = leanNode({
+    id: 'PVTI_task',
+    content: { __typename: 'Issue', number: 476, title: 'Task card', labels: [KIND_LABELS.task] },
+    status: 'Ready',
+    routing: 'Product',
+  });
+  const { queries, dependencies } = boardRead([epic, task], { probeResponse: archivedProbe(), children: [476, 999] });
+
+  assert.deepEqual(verifyIssuePublication(['475', '476', '999'], dependencies), [
+    'issue-publish: board presence verified for #475, #476, #999.',
+    'issue-publish: Statuses and Workstreams verified for #475, #476, #999.',
+    'issue-publish: exactly one kind label verified for #475, #476, #999.',
+    'issue-publish: closed cards archived on the board, verified from their own board items: #999.',
+    'issue-publish: native child set verified: #475 has exactly the 2 supplied child issues.',
+  ]);
+  // The archived card is judged from the probe's own item, so the probe has to ask for the card
+  // fields the board read asks for, on the right issue; without them its item has no Status.
+  const probeQuery = queries.find((query) => query.includes('projectItems'));
+  assert.match(probeQuery, /issue\(number:999\)/);
+  assert.match(
+    probeQuery,
+    /isArchived project \{ number owner \{ \.\.\. on User \{ login \} \.\.\. on Organization \{ login \} \} \} content \{ __typename \.\.\. on Issue \{ number title state .*labels\(first:20\) \{ totalCount nodes \{ name \} \}.*fieldValues\(first:20\) \{ totalCount/s,
+  );
+});
+
+test('issue-publish: a closed card archived on the board still needs a Status, a Workstream and exactly one kind label', () => {
+  const cases = [
+    [{ status: undefined }, /#999 has no non-empty Status/],
+    [{ routing: undefined }, /#999 has no non-empty Workstream/],
+    [{ content: { ...ARCHIVED_CARD.content, labels: ['area:board'] } }, /#999 needs exactly one kind label .* but has 0/],
+  ];
+
+  for (const [card, expected] of cases) {
+    const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse: archivedProbe(card) });
+    assert.throws(() => verifyIssuePublication(['999'], dependencies), expected);
+  }
 });
 
 test('issue-publish: a probe that cannot prove it read every project item never yields a confirmed absence', () => {
@@ -293,7 +413,7 @@ test('issue-publish: a probe that cannot prove it read every project item never 
     // The archived verdict is read off the matching node, so a non-boolean `isArchived` cannot
     // be defaulted into "not archived" — that is the archived card reported as a lagging read.
     [
-      JSON.stringify(issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER }, value: null }])),
+      JSON.stringify(issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: null }])),
       /board item probe GraphQL response has a non-boolean isArchived/,
     ],
   ];

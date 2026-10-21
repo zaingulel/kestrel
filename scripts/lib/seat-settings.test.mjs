@@ -199,7 +199,7 @@ test('ANTI-REGRESSION: an override that breaks the seat policy is reported and o
 
   const fableOffSeat = overrideProblems(CLAUDE_PATH, buffer(claudeSeat('builder', 'sonnet', 'high', 150)), buffer(claudeSeat('builder', 'fable', 'high', 150)));
   assert.equal(fableOffSeat.length, 1);
-  assert.match(fableOffSeat[0], /^builder\.md: the costliest Claude model may sit only on the oracle and security-reviewer seats; found \["model: fable"\]/);
+  assert.match(fableOffSeat[0], /^builder\.md: the costliest Claude model may sit only on the oracle seat; found \["model: fable"\]/);
 
   const astraOffSeat = overrideProblems(CODEX_PATH, buffer(codexSeat('builder', 'gpt-6.1-sol', 'medium')), buffer(codexSeat('builder', 'gpt-6-astra', 'medium')));
   assert.equal(astraOffSeat.length, 1);

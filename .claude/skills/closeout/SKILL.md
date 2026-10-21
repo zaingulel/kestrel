@@ -42,7 +42,16 @@ process list; nothing is inferred from chat.
    `node scripts/board.mjs --closeout` (strict: it fails on an unreadable card or a non-advisory drift row) and
    reconcile anything it reports.
 5. **Branch and worktree.** Confirm the exact job worktree path and its ownership, then settle which scratch goes
-   with it. **Scratch files and folders.** Apply `AGENTS.md`'s Disposable job cleanup authority to job scratch,
+   with it. **Lasting links.** Build the owner-facing deliverable inventory from files changed by the merged pull
+   request or confirmed pushed commit and from the job plan or worklog. Add job files linked in chat or opened for
+   review when that history is available; chat is never the inventory's sole source. Use the verified repository
+   and the full confirmed merge or pushed commit from step 1. For each published file, make an authenticated GitHub
+   Contents API read with `ref` set to that full commit and use the response's `html_url` as its permalink. Require
+   that URL to identify the verified repository, exact commit and intended repository-relative path after decoding.
+   Before deleting any target containing a deliverable, send its verified link to the owner in chat. If the
+   destination is unpublished or cannot be verified, retain the deliverable and its containing cleanup target and
+   report why. This does not authorize uploading or pushing private or untracked evidence.
+   **Scratch files and folders.** Apply `AGENTS.md`'s Disposable job cleanup authority to job scratch,
    including local prompts, drafts and disposable verification reports once no longer needed, inside or outside
    the worktree and not just verifier-reported paths. Inspect each exact target and its contents against actual
    file-writing tool calls or commands read in this session's transcript or in transcripts of helpers it
@@ -105,6 +114,10 @@ process list; nothing is inferred from chat.
    socket filter: `src <socket>`, or `( src <endpoint> or src <socket> )` when its alias differs. For each owner,
    it uses the same sudo prefix followed by `/usr/bin/stat -L -c '%d:%i:%Hd:%Ld:%F' --` and exactly
    `/proc/<pid>/fd/<fd>`, `/proc/<pid>/ns/mnt`, `/proc/<pid>/root` and `/proc/<pid>/exe`.
+   When the command's own process carries the Linux `no_new_privs` flag, which stops sudo from gaining root, it
+   starts each of those two sudo commands, and nothing else, through the calling user's service manager with
+   `/usr/bin/systemd-run --user`, whose units do not inherit the flag. A retention reason naming `no_new_privs`
+   means the observation needed that route and the route did not complete it.
    [The installed proof implementation](../../../scripts/lib/closeout-cleanup.mjs) owns the exact argument
    construction. Caller observations stay unprivileged. The command neither prompts nor installs tools or
    privilege; unavailable passwordless observation retains the targets.
@@ -179,6 +192,7 @@ process list; nothing is inferred from chat.
    on the issue, or the document or rule that owns the topic. Never as a new document.
 
 Report what was confirmed, what was moved, and anything left for the owner.
+Use the verified GitHub deliverable links required by step 5 in place of local links into a removed worktree.
 
 ## Update local main
 

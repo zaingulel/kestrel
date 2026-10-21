@@ -2,10 +2,10 @@
 
 A repository runs Claude Code, Codex or both, and its settings file names which. Each runtime reads the same contract,
 skills and seat charters through its own copy or format. This page explains what they share, where each keeps its own
-files, which layer of a working setup is the factory's, the repository's choice or a person's own, and what changes on
-native Windows. This page is part of [the workflow guide](AI-WORKFLOW.md). Related:
-[Enforced or instructed](AI-WORKFLOW-enforcement.md) for what the hooks refuse, and [The seats](AI-WORKFLOW-seats.md)
-for the agent seats each runtime defines.
+files, which layer of a working setup is the factory's, the repository's choice or a person's own, what changes on
+native Windows, and how a card is built in a cloud session. This page is part of [the workflow guide](AI-WORKFLOW.md).
+Related: [Enforced or instructed](AI-WORKFLOW-enforcement.md) for what the hooks refuse, and
+[The seats](AI-WORKFLOW-seats.md) for the agent seats each runtime defines.
 
 ## Mental model
 
@@ -70,6 +70,45 @@ in openai/codex). So a changed `commandWindows` needs re-approval only on Window
 on macOS and Linux, and on Windows only for a handler without `commandWindows`; any other fingerprinted change,
 or moving a handler or inserting one ahead of it, needs it on every platform. Re-approve by running `/hooks` in
 Codex at the repository root on each affected platform.
+
+### In a cloud session
+
+A Claude Code cloud session runs on a machine the platform provides, from a fresh clone, and `CLAUDE_CODE_REMOTE` reads
+`true` there. Its GitHub requests pass through the platform's GitHub proxy, which refuses every GraphQL request whatever
+the credential and attaches no network secret to a GitHub request, so the board scripts cannot run there and no token
+given to the environment changes that. The session runs in auto mode, never Accept edits, in an environment that holds
+no environment variables, no network secrets and no credential in its setup script. It acts on GitHub as the owner,
+through tools no hook observes, so the skill's list of permitted writes is the only bound on what it publishes. The board is kept in step from the owner's machine: a local session claims the
+card, waits for its draft with `node scripts/merge-watch.mjs --draft job/<issue>` and delivers it in the same session,
+and the cloud session plans, builds, reviews and opens the draft pull request under that claim. Every review runs in
+the cloud on Claude seats and the pull request body declares it, so no Codex review follows at delivery. A fix made
+after the review of the final tree gets a review scoped to it before the draft opens, and the body names the commit the
+last review covered, which delivery checks against the branch before it goes on. A card whose local session parks or
+ends before the draft opens keeps its claim, and the next session offers its delivery first. Only a card that takes the
+pull request route is built this way: a change the direct route to `main` admits is built locally. Codex has no cloud
+build.
+
+| Step | Where it runs | The card's column after it |
+|---|---|---|
+| Pick, claim with the runtime `Claude Code cloud`, move, start message carrying the claim's address | A local session | In progress |
+| Plan, build, review, and a review scoped to any fix made after the review of the final tree | The cloud session | In progress |
+| Draft pull request whose body names the commit the last review covered | The cloud session | In progress |
+| Wait for the draft, then the owner's confirmation that the cloud session has stopped | The local session that gave the start message, or the next session, whose work-pick offers the card first | In progress |
+| Reviewed commit checked against the branch, convergence checks again, visual work, push authorisation | The same local session | Awaiting push |
+| Push, ready, auto-merge | The same local session | In review |
+| Merge | The board's own Item closed workflow | Done |
+
+| Check | In the cloud session | At local delivery |
+|---|---|---|
+| Git guard | Runs, as observed: it refuses a commit in the clone as the integration checkout, so the job runs in a worktree | Runs |
+| Builder handoff check | Runs, as observed: it refuses a malformed builder dispatch | Runs |
+| Turn-end check | Runs in the worktree, as observed: it refuses to end a turn on a lint error while `src/` has a pending change. The platform adds its own turn-end hook asking for untracked work to be committed and pushed, which the session answers only with the job's own commits | Runs |
+| Git hooks | Armed by `npm ci`; run on every commit and push | Run |
+| Claude seats | Run from `.claude/agents/`; a review seat that cannot be dispatched there stops the build | Not run again |
+| Codex seats and cross-family review | None: there is no Codex command line, and the reviews run on Claude seats, declared in the pull request body | Not run |
+| Convergence checks | Run; the body quotes the receipts | Run again, since the receipts stay on the cloud machine |
+| Visual verification | Not run | Run |
+| Reviewed commit | Named in the body on a `Reviewed commit:` line, once a review has covered every commit | Read from the draft; delivery stops and the owner is told where it is missing or is not the branch's head |
 
 ## What the factory carries, what setup chooses and what stays yours
 
@@ -136,6 +175,8 @@ in the settings file stands apart from push authorisation too.
 - [The `resume` skill](../.agents/skills/resume/SKILL.md) under "6. Verify and review": how a session reads the
   recorded cross-family authorization, what it asks where none is recorded, and that the authorization answers no
   permission prompt.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md) under "Cloud build": how a card is built in a cloud session,
+  which cards the route carries, what a local session does at each end, and how a cloud claim is released.
 
 ## Failure modes
 
@@ -164,6 +205,25 @@ in the settings file stands apart from push authorisation too.
   An untrusted checkout or inactive hooks still needs the
   runtime trust and hook checks above. A retained target or runtime refusal is reported with its reason; the allowance
   makes no promise that every platform or target can complete cleanup without intervention.
+- **A board script fails in a cloud session.** The proxy refuses GraphQL; a cloud session never runs them, and a local
+  session moves the card.
+- **A cloud session cannot confirm its claim.** It builds nothing: the claim its start message names was released,
+  withdrawn or followed by a later claim, the issue is closed, or the job branch already exists.
+- **A card goes back to `Ready` during a cloud build.** A released claim stops no cloud session that is already
+  building, so the session that moves the card first has the owner confirm the cloud session has stopped and is
+  archived. Only then does it release the claim, which keeps any later start message from building.
+- **A cloud build turns out to be a direct-route change.** It opens no draft and the owner is told, because the route
+  carries only pull request changes; such a card is built locally.
+- **A cloud machine is reclaimed.** Only pushed work survives; the cloud session pushes its branch before it waits on
+  the owner.
+- **The local session ends before the draft opens.** The card keeps its `Claude Code cloud` claim in its column, and the
+  next session's work-pick offers its delivery first: waiting for the draft, or delivering it once it is open.
+- **The wait for the draft stops without one.** It exits non-zero with its reason as the last line, whether more than
+  one pull request is open on the branch, the reply cannot be read or `gh` failed; the session tells the owner and waits
+  again on the owner's say.
+- **A draft names no reviewed commit, or one that is not its branch's head.** Delivery stops and the owner is told. A
+  draft a cloud session opened before the review of the final tree is finished on the local route, its reviews
+  included; a branch that moved after its last review is not delivered as reviewed.
 
 ## Key files
 
@@ -175,3 +235,4 @@ in the settings file stands apart from push authorisation too.
 - `.codex/hooks/verify-green.mjs` and `scripts/lib/posix-shell.mjs`: the Windows route to the shell hooks.
 - `scripts/lib/codex-hooks-windows.test.mjs`: the proof of the Windows registrations.
 - `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out.
+- `scripts/merge-watch.mjs`: with `--draft`, the local session's wait for a cloud build's draft.

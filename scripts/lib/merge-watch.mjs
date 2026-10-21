@@ -1,4 +1,4 @@
-// merge-watch.mjs — watches one pull request until it merges or can no longer merge unattended.
+// merge-watch.mjs — watches one pull request until it merges or can no longer merge unattended, or waits for one to open on a branch.
 //
 // Read-only: every `gh` call reads pull request state, branch protection, rulesets, checks or workflow runs.
 // `gh pr checks --required` lists a check only once GitHub has created its run, so the full
@@ -10,6 +10,7 @@
 // required-check list that is not a list of names, a pull request state or merge state it does not know,
 // a required check without a known bucket, or a workflow run or run list without the fields the
 // watch compares. There is no wall-clock cap: the caller's runtime waits on the process itself.
+// The draft wait reads only the open pull requests on its branch, at the same interval, with the same stops.
 
 export const WATCH_INTERVAL_MS = 30_000;
 
@@ -134,6 +135,26 @@ export async function watchMerge({ pr, ghExec, sleep }) {
       }
       if (mergeStateStatus === 'BLOCKED' && !buckets.some((bucket) => bucket === 'pending' || bucket === 'unreported')) {
         return { exitCode: 1, reason: `merge blocked with every required check finished: ${view} ${buckets.join(' ')}`.trimEnd() };
+      }
+      await sleep(WATCH_INTERVAL_MS);
+    }
+  } catch (err) {
+    return { exitCode: 1, reason: failureText(err) };
+  }
+}
+
+// Resolves to { exitCode, reason }: 0 with the number once exactly one pull request is open on `head`, 1 for every
+// other stop. An empty list keeps the wait going.
+export async function watchDraft({ head, ghExec, sleep }) {
+  try {
+    for (;;) {
+      const open = JSON.parse(ghExec(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number']));
+      if (!Array.isArray(open) || !open.every((pr) => Number.isInteger(pr?.number) && pr.number > 0)) {
+        return { exitCode: 1, reason: `unreadable pull request list: ${JSON.stringify(open)}` };
+      }
+      if (open.length === 1) return { exitCode: 0, reason: String(open[0].number) };
+      if (open.length > 1) {
+        return { exitCode: 1, reason: `more than one open pull request on ${head}: ${open.map((pr) => pr.number).join(' ')}` };
       }
       await sleep(WATCH_INTERVAL_MS);
     }

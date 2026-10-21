@@ -87,14 +87,14 @@ test('optionIdFor throws on an unknown status, naming the valid options', () => 
 test('lookupIssueBoardItem resolves complete replies and requests the configured issue and field', () => {
   for (const value of [{ name: 'Done' }, null]) {
     const nodes = [
-      { id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1 }, value: null },
-      { id: 'item-a', isArchived: true, project: { number: BOARD_PROJECT_NUMBER }, value },
+      { id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1, owner: { login: BOARD_OWNER } }, value: null },
+      { id: 'item-a', isArchived: true, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value },
     ];
     const calls = [];
     const result = lookupIssueBoardItem(453, (args) => {
       calls.push(args);
       return JSON.stringify(issueItemReply(nodes, { issueId: 'I_453' }));
-    }, 'Lane');
+    }, { fieldName: 'Lane' });
     assert.deepEqual(result, { issueId: 'I_453', item: nodes[1] });
     assert.equal(calls.length, 1);
     const query = calls[0][3];
@@ -102,12 +102,19 @@ test('lookupIssueBoardItem resolves complete replies and requests the configured
     assert.match(query, /issue\(number:453\) \{ id projectItems\(first:20\) \{ totalCount nodes \{ id isArchived project/);
     assert.match(query, /value: fieldValueByName\(name: "Lane"\)/);
   }
-  for (const nodes of [[], [{ id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1 }, value: null }]]) {
+  for (const nodes of [[], [{ id: 'other', isArchived: false, project: { number: BOARD_PROJECT_NUMBER + 1, owner: { login: BOARD_OWNER } }, value: null }]]) {
     assert.deepEqual(lookupIssueBoardItem(453, (args) => {
       assert.doesNotMatch(args[3], /fieldValueByName/);
       return issueItemReply(nodes);
     }), { issueId: 'I_fixture', item: null });
   }
+});
+
+test('lookupIssueBoardItem matches the configured owner and refuses a project with no owner login', () => {
+  const elsewhere = [{ id: 'elsewhere', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: 'someone-else' } }, value: null }];
+  assert.deepEqual(lookupIssueBoardItem(453, () => issueItemReply(elsewhere)), { issueId: 'I_fixture', item: null });
+  const ownerless = [{ id: 'ownerless', isArchived: false, project: { number: BOARD_PROJECT_NUMBER }, value: null }];
+  assert.throws(() => lookupIssueBoardItem(453, () => issueItemReply(ownerless)), /no owner login/);
 });
 
 test('moveCards preserves the configured add advice for a complete absent reply', () => {
@@ -121,7 +128,7 @@ test('moveCards preserves the configured add advice for a complete absent reply'
 test('moveCards refuses a matching item without an id', () => {
   assert.throws(() => moveCards([{ issueNumber: 453, statusName: 'Ready' }], (args) =>
     args[3]?.includes('projectV2(number:') ? STATUS_FIELD_JSON
-      : issueItemReply([{ isArchived: false, project: { number: BOARD_PROJECT_NUMBER }, value: null }])), /board item for #453 has no id/);
+      : issueItemReply([{ isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: null }])), /board item for #453 has no id/);
 });
 
 test('parseBatchArgs parses "<issue#>:<Status>" pairs, incl. multi-word "In review"', () => {
@@ -165,7 +172,7 @@ function recordingExec(itemIdByIssue, currentStatusByIssue = {}) {
       return JSON.stringify(issueItemReply([{
         id: itemIdByIssue[issueNumber],
         isArchived: false,
-        project: { number: BOARD_PROJECT_NUMBER },
+        project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } },
         value: status ? { name: status } : null,
       }]));
     }
@@ -369,12 +376,12 @@ test('board-move refuses incomplete issue-item replies with their cause and no w
   const unreadableIssue = issueItemReply();
   unreadableIssue.data.repository.issue = null;
   const cases = [
-    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99 } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
+    [issueItemReply([{ id: 'other', isArchived: false, project: { number: 99, owner: { login: BOARD_OWNER } } }], { totalCount: 21 }), /has 21 project items but only 1 fetched/],
     [missingCount, /no non-negative integer projectItems\.totalCount/],
     [unreadableIssue, /no readable issue/],
     ['not json at all', /not valid JSON/],
     [issueItemReply([{ id: 'bad', isArchived: false, project: null }]), /non-integer project number/],
-    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER } }]), /non-boolean isArchived/],
+    [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } }]), /non-boolean isArchived/],
     [missingNodes, /no projectItems\.nodes\[\] array/],
   ];
   for (const [reply, expected] of cases) {

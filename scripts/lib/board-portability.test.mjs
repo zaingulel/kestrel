@@ -124,7 +124,7 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }, is
     const valueField = query.match(/value: fieldValueByName\(name: "([^"]+)"\)/);
     if (query.includes('projectItems(first:20)')) {
       const current = valueField ? currentValues[valueField[1]] : null;
-      const nodes = [{ id: 'PVTI_11', isArchived: false, project: { number: boardPage.data[rootKey].projectV2.number }, value: current ? { name: current } : null }];
+      const nodes = [{ id: 'PVTI_11', isArchived: false, project: { number: boardPage.data[rootKey].projectV2.number, owner: { login: boardPage.data[rootKey].login } }, value: current ? { name: current } : null }];
       return JSON.stringify(issueItemReply(nodes, { issueId: 'I_11' }));
     }
     if (query.includes('subIssues')) {
@@ -294,7 +294,7 @@ test('with no routing field, board-move names a board-add command that takes a S
   const root = adoptToolkit(t, NO_ROUTING_CONFIG);
   const { moveCards } = await load(root, 'lib/board-move.mjs');
   const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
-  const offBoard = issueItemReply([{ id: 'x', isArchived: false, project: { number: 8 }, value: null }]);
+  const offBoard = issueItemReply([{ id: 'x', isArchived: false, project: { number: 8, owner: { login: 'acme-org' } }, value: null }]);
   const { exec } = recordingGh('organization', await boardPageFor(root));
   assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
     args[3]?.includes('projectItems') ? offBoard : exec(args)), (error) => {
@@ -633,7 +633,7 @@ test('the copied moveCards never clears Status: none is an unknown Status', asyn
 test('the copied board-move CLI parks one card and releases another with --lane, writing each by literal ids', async (t) => {
   const root = adoptToolkit(t, PARKED_CONFIG);
   const { issueItemReply } = await load(root, 'lib/board-fixtures.mjs');
-  const item = (id, lane) => issueItemReply([{ id, isArchived: false, project: { number: 7 }, value: lane ? { name: lane } : null }]);
+  const item = (id, lane) => issueItemReply([{ id, isArchived: false, project: { number: 7, owner: { login: 'acme-org' } }, value: lane ? { name: lane } : null }]);
   const lane = {
     field: {
       data: {

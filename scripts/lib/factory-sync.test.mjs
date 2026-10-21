@@ -953,7 +953,7 @@ test('render refuses the canonical repository and invalid settings and writes no
     [
       'the costliest Claude model on the builder',
       { claude: { builder: { model: 'fable' } } },
-      /\.claude\/agents\/builder\.md.*the costliest Claude model may sit only on the oracle and security-reviewer seats/,
+      /\.claude\/agents\/builder\.md.*the costliest Claude model may sit only on the oracle seat/,
       NAMED_AFTER_UPDATE,
     ],
     [

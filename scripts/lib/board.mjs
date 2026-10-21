@@ -87,6 +87,10 @@ export function parseBoardArgs(argv) {
 // only the field's name is needed here, to read one card's value off fieldValues.
 const STATUS_FIELD = 'Status';
 
+// One board item's card fields: the board read asks for them on every listed item, and the
+// issue-side probe on an archived item the read cannot list, so both parse through parseNode.
+export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
+
 // The one fused board query: the project's identity and field schema, then its items
 // 100 per page, each carrying every fact the board rules judge a card on — Status and
 // the routing field off fieldValues, and state, labels, assignees, native blockers,
@@ -110,7 +114,7 @@ const STATUS_FIELD = 'Status';
 // resolve on this read. Without it both arrive as `number: null` and a just-added card
 // reads as never added (#572).
 export function boardQuery() {
-  return `query($endCursor: String) { ${BOARD_OWNER_TYPE}(login:"${BOARD_OWNER}") { login projectV2(number:${BOARD_PROJECT_NUMBER}) { id number closed fields(first:50) { totalCount nodes { ... on ProjectV2FieldCommon { name dataType } ... on ProjectV2SingleSelectField { options { name } } } } items(first:100, after:$endCursor) { totalCount pageInfo { hasNextPage endCursor } nodes { id content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } } } } } } }`;
+  return `query($endCursor: String) { ${BOARD_OWNER_TYPE}(login:"${BOARD_OWNER}") { login projectV2(number:${BOARD_PROJECT_NUMBER}) { id number closed fields(first:50) { totalCount nodes { ... on ProjectV2FieldCommon { name dataType } ... on ProjectV2SingleSelectField { options { name } } } } items(first:100, after:$endCursor) { totalCount pageInfo { hasNextPage endCursor } nodes { id ${BOARD_CARD_FIELDS} } } } } }`;
 }
 
 const RERUN = 'rerun the board read, and if it repeats inspect the GitHub Projects API response';
@@ -177,11 +181,12 @@ function fieldValue(fieldValues, name, cardId) {
   return matches[0].name ?? matches[0].text ?? null;
 }
 
-// One `nodes[]` entry from boardQuery → the flat raw item: Status, title and the
-// routing value off fieldValues, the issue's own facts off content. A draft card keeps
-// its `DraftIssue` typename with no number, and a content that did not resolve arrives
-// as `{}` — that is the distinction normalizeItem and isContentUnresolved read.
-function parseNode(node) {
+// One board item carrying BOARD_CARD_FIELDS (a boardQuery `nodes[]` entry or a probed archived
+// item) → the flat raw item: Status, title and the routing value off fieldValues, the issue's
+// own facts off content. A draft card keeps its `DraftIssue` typename with no number, and a
+// content that did not resolve arrives as `{}` — that is the distinction normalizeItem and
+// isContentUnresolved read.
+export function parseNode(node) {
   assertWholeConnection(node.fieldValues, 'fieldValues', `board item ${node.id}`);
   const fieldValues = node.fieldValues.nodes;
   const content = node.content ?? {};
