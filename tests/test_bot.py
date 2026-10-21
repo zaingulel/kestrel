@@ -870,7 +870,6 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(service.push_frame.await_args_list[0].args[0].text,
                                  "Stopped. Still finishing: pause. I won't undo anything.")
-                self.assertIsInstance(service.push_frame.await_args_list[1].args[0], LLMFullResponseEndFrame)
                 self.assertEqual(service.push_frame.await_count, 2)
                 completion = service.push_frame.await_args_list[-1].args[0]
                 self.assertIs(type(completion), LLMFullResponseEndFrame)
