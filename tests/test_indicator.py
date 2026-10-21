@@ -235,9 +235,33 @@ class StatusTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.write({**original, 'state': state})
                 self.assertEqual(self.read(), 'unavailable')
+        for near_miss in ('trouble-' + sentinel, 'trouble-unknown', 'trouble-stopped',
+                          'TROUBLE-MICROPHONE', 'trouble-'):
+            with self.subTest(near_miss=near_miss), tempfile.TemporaryDirectory() as home, \
+                    patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
+                runtime = Path(home) / 'runtime'
+                runtime.mkdir(mode=0o700)
+                publisher = status.IndicatorStatus(runtime)
+                publisher.set_state('trouble-microphone')
+                snapshot = runtime / 'kestrel/indicator.json'
+                before = snapshot.read_bytes()
+                errors = io.StringIO()
+                with redirect_stderr(errors):
+                    publisher.set_state(near_miss)
+                self.assertEqual(errors.getvalue().count('Microphone use unknown.'), 1)
+                self.assertEqual(snapshot.read_bytes(), before)
+                self.assertNotIn(sentinel, snapshot.read_text())
+                self.assertEqual(status.read_indicator(runtime, proc_root=self.proc), 'trouble-microphone')
         self.assertEqual(status._WIRE, {
             'starting': 'A', 'idle': 'I', 'listening': 'L', 'thinking': 'T', 'speaking': 'S',
             'trouble': 'B', 'not-running': 'N', 'unavailable': 'U', 'inactive': 'D', **causes})
+
+    def test_trouble_status_privacy_disclosure(self):
+        self.assertIn(
+            'In trouble, the fixed status names one verified cause from a closed list, or none; '
+            'failure text never enters the snapshot.',
+            (Path(__file__).resolve().parents[1] / 'README.md').read_text(),
+        )
 
 
 class StatusWireTests(unittest.TestCase):
