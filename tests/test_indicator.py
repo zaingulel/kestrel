@@ -214,6 +214,32 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(status.read_indicator(self.runtime, proc_root=self.proc), 'starting')
 
 
+    def test_trouble_causes_are_closed_fixed_status(self):
+        sentinel = 'PRIVATE CONVERSATION SENTINEL'
+        original = deepcopy(self.data)
+        causes = {'trouble-microphone': 'M', 'trouble-playback': 'P', 'trouble-recognition': 'R',
+                  'trouble-voice': 'V', 'trouble-engine': 'E', 'trouble-notes': 'O',
+                  'trouble-handover': 'H'}
+        with patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
+            self.process(100, 400)
+            publisher = status.IndicatorStatus(self.runtime)
+            for cause in causes:
+                with self.subTest(cause=cause):
+                    publisher.set_state(cause)
+                    self.assertEqual(status.read_indicator(self.runtime, proc_root=self.proc), cause)
+                    self.assertEqual(set(json.loads(self.file.read_text())), set(original))
+                    self.assertNotIn(sentinel, self.file.read_text())
+        self.process(100, 400)
+        for state in ('trouble-' + sentinel, 'trouble-unknown', 'trouble-stopped',
+                      'TROUBLE-MICROPHONE', 'trouble-'):
+            with self.subTest(state=state):
+                self.write({**original, 'state': state})
+                self.assertEqual(self.read(), 'unavailable')
+        self.assertEqual(status._WIRE, {
+            'starting': 'A', 'idle': 'I', 'listening': 'L', 'thinking': 'T', 'speaking': 'S',
+            'trouble': 'B', 'not-running': 'N', 'unavailable': 'U', 'inactive': 'D', **causes})
+
+
 class StatusWireTests(unittest.TestCase):
     def test_watcher_emits_only_states_and_exits_on_closed_pipe(self):
         command = [sys.executable, str(Path(status.__file__).resolve()), '--watch']
