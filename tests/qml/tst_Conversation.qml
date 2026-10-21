@@ -772,7 +772,7 @@ TestCase {
                 "native background must clear bottom and right window edges")
             compare(popup.delay, 400)
         }
-        const inactive = "Inactive. Microphone in use. Press Super + Shift + K to start."
+        const inactive = "Voice off. Microphone in use. Press Super + Shift + K to start."
         verify(service.acceptStatusChunk("D"))
         mouseMove(content, 1, content.height - 1)
         mouseMove(microphone, 10, microphone.height / 2)
@@ -840,7 +840,7 @@ TestCase {
         tryCompare(moveTooltip.item, "visible", false)
         mouseMove(microphone, 10, microphone.height / 2)
         tryCompare(microphoneTooltip.item, "opened", true)
-        compare(microphoneTooltip.item.text, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(microphoneTooltip.item.text, "Voice off. Microphone in use. Press Super + Shift + K to start.")
         compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
         verify(service.acceptStatusChunk("A"))
         tryCompare(microphoneTooltip.item, "text", "Starting. Microphone may be in use.")
@@ -905,7 +905,7 @@ TestCase {
         })
         verify(content !== null)
         verify(waitForRendering(content))
-        compare(textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start."), null,
+        compare(textWith(content, "Voice off. Microphone in use. Press Super + Shift + K to start."), null,
             "the passive header must not display the full microphone sentence")
         content.conversationAvailable = Qt.binding(function() { return service.conversationAvailable })
         content.glyphComponent = glyphDouble
@@ -923,10 +923,10 @@ TestCase {
         compare(containsMark(findChild(content, "conversationHeader")), false, "the header shows no state mark")
         const expected = [
             ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
-            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
+            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start."],
             ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
             ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
-            ["I", "Waiting", "󰍬", false, "Idle. Microphone in use."],
+            ["I", "Waiting", "󰍬", false, "Waiting. Microphone in use."],
             ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
             ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
             ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
@@ -1133,7 +1133,7 @@ TestCase {
         verify(inactiveStatus !== null && inactiveStatus.visible)
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
-        compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(inactiveStatus.Accessible.name, "Voice off. Microphone in use. Press Super + Shift + K to start.")
         fuzzyCompare(inactivePrompt.mapToItem(transcript.contentItem, 0, inactivePrompt.height / 2).y, transcript.height / 2, 0.5)
         content.focusComposer()
         verify(findChild(content, "composer").activeFocus)

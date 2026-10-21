@@ -241,7 +241,7 @@ TestCase {
             compare(service.conversationMessage, hint, wire)
             if (wire === "D") {
                 compare(service.state, "inactive")
-                compare(service.statusSentence, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+                compare(service.statusSentence, "Voice off. Microphone in use. Press Super + Shift + K to start.")
                 compare(service.conversationAvailable, true)
                 compare(service.turns.length, 0)
             }

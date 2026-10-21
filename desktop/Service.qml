@@ -12,10 +12,10 @@ Item {
 
     readonly property string statusSentence: ({
         "not-running": "Not running. Microphone released by Kestrel.",
-        "inactive": "Inactive. Microphone in use. Press Super + Shift + K to start.",
+        "inactive": "Voice off. Microphone in use. Press Super + Shift + K to start.",
         "starting": "Starting. Microphone may be in use.",
         "unavailable": "Status unavailable. Microphone use unknown.",
-        "idle": "Idle. Microphone in use.",
+        "idle": "Waiting. Microphone in use.",
         "listening": "Listening. Microphone in use.",
         "thinking": "Thinking. Microphone in use.",
         "speaking": "Speaking. Microphone in use.",
