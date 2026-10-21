@@ -648,7 +648,7 @@ TestCase {
         verify(service.acceptStatusChunk("L"))
         accept([])
         compare(ghost.visible, true)
-        compare(textWith(content, "Say something, or type below. Kestrel replies out loud."), null)
+        compare(textWith(content, "Say something, or type below."), null)
         content.motionEnabled = false
         compare(findChild(inflow, "listeningLoop").running, false)
         content.motionEnabled = true
@@ -1090,7 +1090,7 @@ TestCase {
         compare(transcript.Accessible.role, Accessible.Document)
         verify(service.acceptStatusChunk("D"))
         verify(waitForRendering(content))
-        const inactivePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
+        const inactivePrompt = textWith(content, "Press Super + Shift + K to talk, or type below.")
         const inactiveStatus = findChild(content, "microphoneStatus")
         verify(inactivePrompt !== null && inactivePrompt.visible)
         verify(inactiveStatus !== null && inactiveStatus.visible)
@@ -1117,8 +1117,9 @@ TestCase {
         compare(service.conversationAvailable, true)
         verify(service.acceptStatusChunk("I"))
         verify(waitForRendering(content))
-        const activePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
+        const activePrompt = textWith(content, "Say something, or type below.")
         verify(activePrompt !== null && activePrompt.visible)
+        compare(textWith(content, "Press Super + Shift + K to talk, or type below."), null)
         const literal = '<b>Literal text</b> https://example.invalid ' + "unbroken".repeat(80)
         const turns = [{speaker: "you", text: literal, state: "complete", source: "spoken"}]
         for (let i = 0; i < 18; i++) turns.push({speaker: "kestrel", text: "Literal reply " + i + ".", state: "complete"})
@@ -1171,7 +1172,7 @@ TestCase {
         tryVerify(function() { return transcript.atYEnd }, 5000, "composer shrink follows the live edge")
         editor.text = "one\ntwo\nthree\nfour\nfive\nsix"
         verify(waitForRendering(content))
-        tryVerify(function() { return transcript.atYEnd }, 5000, "composer growth follows only from the live edge")
+        verify(transcript.atYEnd, "composer growth follows only from the live edge")
         editor.clear()
         verify(waitForRendering(content))
         verify(transcript.atYEnd, "End: y=" + transcript.contentY + " height=" + transcript.contentHeight + " viewport=" + transcript.height + " focus=" + transcript.activeFocus)

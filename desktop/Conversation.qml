@@ -324,7 +324,10 @@ FocusScope {
         property bool followBottom: true
         property bool restoring: false
         onContentYChanged: if (!restoring) followBottom = atYEnd
-        onContentHeightChanged: {
+        onHeightChanged: followEnd()
+        onContentHeightChanged: followEnd()
+        // Pins the live edge when content grows or the viewport shrinks under a growing composer.
+        function followEnd() {
             if (followBottom) {
                 const previousRestoring = restoring
                 restoring = true
