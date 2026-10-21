@@ -55,6 +55,7 @@ Item {
         target: root.owner
         function onSubmitRequested(attemptId, payload) { root.startSubmit(attemptId, payload) }
         function onSubmitStopRequested(attemptId) { root.stopSubmit(attemptId) }
+        function onToggleRequested() { toggler.running = true }
     }
 
     Process {
@@ -84,6 +85,16 @@ Item {
             // A starting QProcess can still have PID zero; never signal its process group.
             if (sender.processId > 0) sender.signal(9)
         }
+    }
+
+    // The reply is never read: voice state comes from verified status, refusal from control.py's own notification attempt.
+    Process {
+        id: toggler
+        command: ["/usr/bin/python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/local.kestrel/control.py", "--toggle"]
+        stdout: SplitParser { splitMarker: "" }
+        stderr: SplitParser { splitMarker: "" }
+        onExited: root.owner.toggleExited()
+        onRunningChanged: if (!running) root.owner.toggleExited()
     }
 
     function start() {
@@ -238,5 +249,6 @@ Item {
         preference.running = false
         senderPayload = ""
         sender.running = false
+        toggler.running = false
     }
 }
