@@ -17,6 +17,7 @@ from time import monotonic
 
 import numpy as np
 from loguru import logger
+from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
@@ -31,6 +32,8 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
+
+_SPOKEN_NUMBERS = Normalizer(lang="en", operator="tn")
 
 ROOT = Path(__file__).parent
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
@@ -1582,10 +1585,10 @@ class VoxCPMTTS(TTSService):
             }
             if delivery == 'neutral':
                 prompt = dict(prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript)
-                synthesis_text = text
+                prefix = ''
             elif delivery in styles:
                 prompt = {}
-                synthesis_text = styles[delivery] + ' ' + text
+                prefix = styles[delivery] + ' '
             else:
                 raise RuntimeError('Invalid internal speech delivery')
             # Never overlap model calls, including a chunk still finishing after interruption.
@@ -1594,15 +1597,22 @@ class VoxCPMTTS(TTSService):
                     raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
                 if not allowed():
                     return
-                chunks = self.model.generate_streaming(
-                    text=synthesis_text, **prompt,
-                    reference_wav_path=str(self.preset.reference),
-                    inference_timesteps=10, max_len=400, retry_badcase=False,
-                )
+                chunks = None
+
+                def next_chunk():
+                    # Built in the owned next() worker, so cleanup observes normalization like model work.
+                    nonlocal chunks
+                    if chunks is None:
+                        chunks = self.model.generate_streaming(
+                            text=prefix + _SPOKEN_NUMBERS.normalize(text), **prompt,
+                            reference_wav_path=str(self.preset.reference),
+                            inference_timesteps=10, max_len=400, retry_badcase=False,
+                        )
+                    return next(chunks, None)
                 pending = None
                 try:
                     while True:
-                        pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
+                        pending = asyncio.create_task(asyncio.to_thread(next_chunk))
                         chunk = await asyncio.shield(pending)
                         if chunk is None or not allowed():
                             break
@@ -1626,7 +1636,8 @@ class VoxCPMTTS(TTSService):
                                 raise
                             finally:
                                 try:
-                                    await asyncio.to_thread(chunks.close)
+                                    if chunks is not None:
+                                        await asyncio.to_thread(chunks.close)
                                 except Exception as error:
                                     if next_error is not None:
                                         raise error from next_error
