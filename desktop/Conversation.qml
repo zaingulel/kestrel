@@ -146,7 +146,7 @@ FocusScope {
             id: headerRow
             objectName: "conversationHeader"
             width: parent.width
-            height: Math.max(30, titleColumn.height, closeButton.height)
+            height: Math.max(titleColumn.height, closeButton.height)
             Accessible.description: "Move: Super + left drag"
             HoverHandler { id: headerHover }
             Loader {
@@ -169,21 +169,9 @@ FocusScope {
                     item.visible = Qt.binding(function() { return microphoneHover.hovered })
                 }
             }
-            Marks {
-                objectName: "headerMark"
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: 25
-                height: 30
-                kind: root.currentState
-                ink: root.ink
-                troubleInk: root.troubleInk
-                motionEnabled: false
-            }
             Column {
                 id: titleColumn
-                x: 34
-                width: parent.width - x - 9 - closeButton.width
+                width: parent.width - 9 - closeButton.width
                 anchors.verticalCenter: parent.verticalCenter
                 Text {
                     id: titleText

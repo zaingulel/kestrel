@@ -477,7 +477,6 @@ TestCase {
                 compare(row.Accessible.name, (i < 2 ? "You: " : "Kestrel: ") + turns[i].text)
                 compare(row.Accessible.role, Accessible.StaticText)
             }
-            compare(findChild(content, "headerMark").motionEnabled, false)
             compare(textWith(content, "You"), null)
             compare(textWith(content, "Kestrel").objectName, "conversationTitle")
             compare(topRule.height, 1)
@@ -844,6 +843,7 @@ TestCase {
             verify(left >= 16 && left + item.width <= 304)
         }
         verify(label.contentWidth <= label.width)
+        compare(title.mapToItem(header, 0, 0).x, 0)
         content.tooltipComponent = null
         compare(microphoneTooltip.item, null)
         compare(moveTooltip.item, null)
@@ -875,8 +875,14 @@ TestCase {
         const glyph = findChild(content, "microphoneGlyph")
         const badge = findChild(content, "microphoneQuestion")
         const label = findChild(content, "conversationStatus")
-        const mark = findChild(content, "headerMark")
-        verify(microphone !== null && glyph !== null && badge !== null && label !== null && mark !== null)
+        verify(microphone !== null && glyph !== null && badge !== null && label !== null)
+        function containsMark(item) {
+            if (item.thinkingIndex !== undefined) return true
+            for (let i = 0; i < item.children.length; i++)
+                if (containsMark(item.children[i])) return true
+            return false
+        }
+        compare(containsMark(findChild(content, "conversationHeader")), false, "the header shows no state mark")
         const expected = [
             ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
             ["D", "Inactive", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
@@ -900,15 +906,10 @@ TestCase {
             compare(microphone.Accessible.focusable, false)
             compare(microphone.activeFocusOnTab, false)
             compare(glyph.item.Accessible.ignored, true)
-            compare(mark.motionEnabled, false)
-            compare(findChild(mark, "thinkingStep").running, false)
-            compare(findChild(mark, "listeningLoop").running, false)
-            compare(findChild(findChild(mark, "mark0"), "speakingLoop0").running, false)
             compare(textWith(content, row[4]), null)
             compare(textWith(content, "Move: Super + left drag"), null)
         }
         function unknown() {
-            verify(waitForRendering(content))
             compare(label.text, "Unavailable")
             compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
             compare(badge.visible, true)
