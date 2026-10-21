@@ -813,6 +813,14 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         model = Mock(generate_streaming=Mock(side_effect=chunks))
         voice = VoxCPMTTS(model, TEST_PRESET)
         for text, expected in [
+            ('Version 2.0.3 ships.', 'Version 2.0.3 ships.'),
+            ('Pay 1,5 now.', 'Pay 1,5 now.'),
+            ("Pay 1'000 now.", "Pay 1'000 now."),
+            ('Time 1:2:3 now.', 'Time 1:2:3 now.'),
+            ('Then ...18 left.', 'Then ...18 left.'),
+            ('PIN 0042 now.', 'PIN 0042 now.'),
+            ('PIN 0,042 now.', 'PIN 0,042 now.'),
+            ('Agent 007.', 'Agent 007.'),
             ('No. The answer is 18.', 'No. The answer is eighteen.'),
             ('Ms. Lee has 18.', 'Ms. Lee has eighteen.'),
             ('He said "18".', 'He said "eighteen".'),

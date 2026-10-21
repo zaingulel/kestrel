@@ -56,6 +56,14 @@ LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
 
 
+def _standalone_number(token: str, start: int, stop: int) -> bool:
+    """Whether a native numeric span is the token's whole quantity, not a compound, ellipsis or zero-padded code."""
+    whole = token[start:stop].lstrip('-').replace(',', '')
+    return not (any(character.isdigit() for character in token[:start] + token[stop:])
+                or token[start - 1:start] == '.'
+                or whole[:1] == '0' and whole[1:2].isdigit())
+
+
 def spoken_numbers(text: str) -> str:
     """Word WeText-classified cardinal, decimal and percent spans; every other character stays as written."""
     parts = []
@@ -75,14 +83,18 @@ def spoken_numbers(text: str) -> str:
                     start, stop = mapping.input_start, mapping.input_end
                     if not (0 <= start < stop <= len(token)) or start < previous_end or token[start:stop] != mapping.input_text:
                         raise ValueError('Inconsistent numeric source mapping')
+                    if not _standalone_number(token, start, stop):
+                        replacements = None
+                        break
                     source = token[start:stop]
                     words = _NUMBER_WORDS.number_to_words(source[:-1]) + ' percent' if percent else _NUMBER_WORDS.number_to_words(source)
                     replacements.extend((token[previous_end:start], words))
                     previous_end = stop
-                replacements.append(token[previous_end:])
-                token = ''.join(replacements)
+                if replacements is not None:
+                    replacements.append(token[previous_end:])
+                    token = ''.join(replacements)
             except Exception:
-                # Pure text conversion precedes model work: native RuntimeError/AssertionError or inconsistent-mapping ValueError.
+                # Any failure to read or word this text keeps the written form; it runs before model work.
                 logger.warning('Number reading unavailable; speaking the written form.')
         parts.append(token)
         end = match.end()
