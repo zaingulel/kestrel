@@ -3055,6 +3055,26 @@ class TroubleCauseTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(task, 5)
 
 
+class WholeConversationFixtureTests(unittest.TestCase):
+    def test_missing_delivery_startup_failure_restores_runtime(self):
+        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            result = unittest.TestResult()
+            with patch(f'{__name__}.ScriptedBrain', autospec=True) as brain, \
+                    patch(f'{__name__}.require_native_hermes'), \
+                    patch('speech.NemotronRecognizer', side_effect=RuntimeError('fixture-startup-canary')) as recognizer:
+                brain.return_value.close = Mock()
+                WholeConversationTests('test_missing_delivery_header_allows_next_turn').run(result)
+            self.assertEqual(result.testsRun, 1)
+            self.assertEqual(result.skipped, [])
+            self.assertEqual(result.failures, [])
+            self.assertEqual(len(result.errors), 1)
+            self.assertIn('RuntimeError: fixture-startup-canary', result.errors[0][1])
+            recognizer.assert_called_once_with()
+            brain.return_value.close.assert_called_once_with()
+            self.assertEqual(os.environ['XDG_RUNTIME_DIR'], runtime)
+            self.assertTrue(Path(runtime).is_dir())
+
+
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_brain_desktop_effect_after_reader_timeout_is_accounted(self):
         wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
@@ -8573,6 +8593,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(brain.requests, [])
 
     async def test_missing_delivery_header_allows_next_turn(self):
+        from desktop import conversation
         brain = ScriptedBrain([
             [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
             [({'content': ' \nPlain '}, None), ({'content': 'answer [deliv'}, None),
@@ -8587,65 +8608,63 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs['reference_wav_path'], '/fixture/british-male.wav')
             yield np.zeros(5760, dtype=np.float32)
 
-        with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
-            transport, spoken, committed, _, processes, close = await self.open_session(
-                brain, through_service=True, synthesis_chunks=finite_chunks,
-            )
-            channel = transport.service.channel
-            worker = channel.process
+        transport, spoken, committed, _, processes, close = await self.open_session(
+            brain, through_service=True, synthesis_chunks=finite_chunks,
+        )
+        channel = transport.service.channel
+        worker = channel.process
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Tell me something.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Plain answer stays clear.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Plain answer stays clear.')
+
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(conversation.address()), 1)
+        try:
+            snapshot = json.loads(await asyncio.wait_for(reader.readline(), 1))
+            self.assertEqual(snapshot['turns'], [
+                {'speaker': 'you', 'text': 'Tell me something.', 'state': 'complete', 'source': 'spoken'},
+                {'speaker': 'kestrel', 'text': 'Plain answer stays clear.', 'state': 'complete'},
+            ])
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-            await self.finish_user_turn(transport, 'Tell me something.')
-            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Plain answer stays clear.')
-            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Plain answer stays clear.')
-
-            address = '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode()).hexdigest()
-            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
-            try:
-                snapshot = json.loads(await asyncio.wait_for(reader.readline(), 1))
-                self.assertEqual(snapshot['turns'], [
-                    {'speaker': 'you', 'text': 'Tell me something.', 'state': 'complete', 'source': 'spoken'},
-                    {'speaker': 'kestrel', 'text': 'Plain answer stays clear.', 'state': 'complete'},
-                ])
-                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                await self.finish_user_turn(transport, 'And then?')
-                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'What happened next?')
-                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'What happened next?')
-                async with asyncio.timeout(5):
-                    while True:
-                        snapshot = json.loads(await reader.readline())
-                        if snapshot.get('turns', [])[-1:] == [
-                            {'speaker': 'kestrel', 'text': 'What happened next?', 'state': 'complete'},
-                        ]:
-                            break
-                self.assertEqual(snapshot['turns'][-2:], [
-                    {'speaker': 'you', 'text': 'And then?', 'state': 'complete', 'source': 'spoken'},
-                    {'speaker': 'kestrel', 'text': 'What happened next?', 'state': 'complete'},
-                ])
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-            self.assertEqual(len(brain.requests), 3, 'Preparation and two turns run without retry')
-            self.assertEqual([[(m['role'], m['content'].strip()) for m in request[2]['messages']
-                              if m['role'] != 'system'] for request in brain.requests], [
-                [('user', 'Hello.')],
-                [('user', 'Tell me something.')],
-                [('user', 'Tell me something.'), ('assistant', 'Plain answer stays clear.'), ('user', 'And then?')],
+            await self.finish_user_turn(transport, 'And then?')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'What happened next?')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'What happened next?')
+            async with asyncio.timeout(5):
+                while True:
+                    snapshot = json.loads(await reader.readline())
+                    if snapshot.get('turns', [])[-1:] == [
+                        {'speaker': 'kestrel', 'text': 'What happened next?', 'state': 'complete'},
+                    ]:
+                        break
+            self.assertEqual(snapshot['turns'][-2:], [
+                {'speaker': 'you', 'text': 'And then?', 'state': 'complete', 'source': 'spoken'},
+                {'speaker': 'kestrel', 'text': 'What happened next?', 'state': 'complete'},
             ])
-            self.assertEqual([call['text'] for call in synthesis], [
-                'Plain answer stays clear.',
-                '(Subtly curious and interested, natural conversational delivery) What happened next?',
-            ])
-            self.assertEqual(synthesis[0]['prompt_wav_path'], '/fixture/british-male.wav')
-            self.assertEqual(synthesis[0]['prompt_text'], 'British fixture.')
-            self.assertNotIn('prompt_wav_path', synthesis[1])
-            self.assertNotIn('prompt_text', synthesis[1])
-            self.assertEqual(len(processes), 1)
-            self.assertIs(channel.process, worker)
-            self.assertIsNone(worker.returncode)
-            self.assertIsNone(channel.failure)
-            self.assertIsNone(channel.failure_advisory)
-            await close()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        self.assertEqual(len(brain.requests), 3, 'Preparation and two turns run without retry')
+        self.assertEqual([[(m['role'], m['content'].strip()) for m in request[2]['messages']
+                          if m['role'] != 'system'] for request in brain.requests], [
+            [('user', 'Hello.')],
+            [('user', 'Tell me something.')],
+            [('user', 'Tell me something.'), ('assistant', 'Plain answer stays clear.'), ('user', 'And then?')],
+        ])
+        self.assertEqual([call['text'] for call in synthesis], [
+            'Plain answer stays clear.',
+            '(Subtly curious and interested, natural conversational delivery) What happened next?',
+        ])
+        self.assertEqual(synthesis[0]['prompt_wav_path'], '/fixture/british-male.wav')
+        self.assertEqual(synthesis[0]['prompt_text'], 'British fixture.')
+        self.assertNotIn('prompt_wav_path', synthesis[1])
+        self.assertNotIn('prompt_text', synthesis[1])
+        self.assertEqual(len(processes), 1)
+        self.assertIs(channel.process, worker)
+        self.assertIsNone(worker.returncode)
+        self.assertIsNone(channel.failure)
+        self.assertIsNone(channel.failure_advisory)
+        await close()
 
     async def test_brain_refusal_speaks_failure_without_retry(self):
         brain = ScriptedBrain([400])
