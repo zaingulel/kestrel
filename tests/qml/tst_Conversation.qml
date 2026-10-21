@@ -1306,13 +1306,18 @@ TestCase {
             "the trouble band sits directly below the header row")
         verify(bandTop + troubleBand.height + 9 <= advisory.mapToItem(content, 0, 0).y,
             "the trouble band sits above the placement band")
-        verify(transcript.y >= bandTop + troubleBand.height, "the trouble band sits above the transcript")
-        // Both advisories at host base size 28 fill the 640-high panel; the viewport checks below run with the placement band alone.
-        content.troubleAdvisory = ""
-        verify(waitForRendering(content))
-        const headerBottom = advisory.mapToItem(content, 0, 0).y + advisory.height
-        verify(transcript.y >= headerBottom && transcript.height > 0 && transcript.y + transcript.height <= 624,
-            "transcript y=" + transcript.y + " height=" + transcript.height + " header bottom=" + headerBottom)
+        // 58 is one scale-2 body line (42) plus the bubble's 16 vertical padding.
+        verify(transcript.height >= 58, "transcript height " + transcript.height)
+        const region = findChild(content, "headerAdvisories")
+        verify(region !== null)
+        const footer = findChild(content, "composerFooter")
+        verify(footer !== null)
+        function verifyAdvisoryGeometry(label) {
+            compare(transcript.y, region.mapToItem(content, 0, region.height).y + 12, label + ": transcript follows the advisory region")
+            compare(transcript.y + transcript.height, footer.mapToItem(content, 0, 0).y, label + ": transcript ends at the footer")
+            verify(region.clip && region.height < region.contentHeight, label + ": region " + region.height + " of " + region.contentHeight)
+        }
+        verifyAdvisoryGeometry("at rest")
         verify(transcript.activeFocus)
         keyClick(Qt.Key_Home)
         compare(transcript.contentY, 0)
@@ -1345,6 +1350,50 @@ TestCase {
         verify(editor.activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(transcript.activeFocus)
+
+        const uncertain = "Delivery could not be confirmed. Check the conversation before sending again; an action may already have run."
+        editor.text = "one\ntwo\nthree\nfour\nfive"
+        content.submissionOutcome = uncertain
+        verify(waitForRendering(content))
+        compare(findChild(content, "submissionNotice").text, uncertain)
+        verify(transcript.height >= 58, "worst-case transcript height " + transcript.height)
+        verifyAdvisoryGeometry("worst case")
+        const topRule = findChild(content, "advisoryTopRule")
+        const bottomRule = findChild(content, "advisoryBottomRule")
+        verify(topRule !== null && bottomRule !== null)
+        verify(bottomRule.visible && !topRule.visible)
+        compare(region.Accessible.name, longestAdvisory + " " + content.placementAdvisory)
+        verify(region.Accessible.focusable)
+        verify(troubleBand.Accessible.ignored && advisory.Accessible.ignored)
+        keyClick(Qt.Key_Backtab)
+        verify(region.activeFocus)
+        keyClick(Qt.Key_Home)
+        compare(region.contentY, 0)
+        keyClick(Qt.Key_Down)
+        compare(region.contentY, 42)
+        keyClick(Qt.Key_Escape)
+        compare(closeSpy.count, 9, "the advisory region does not accept Escape")
+        keyClick(Qt.Key_End)
+        compare(region.contentY, region.contentHeight - region.height)
+        const placementBottom = advisory.mapToItem(region, 0, advisory.height).y
+        verify(placementBottom > 0 && placementBottom <= region.height, "placement bottom " + placementBottom + " region " + region.height)
+        verify(topRule.visible && !bottomRule.visible)
+        keyClick(Qt.Key_Tab)
+        verify(transcript.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(region.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(close.activeFocus)
+        keyClick(Qt.Key_Tab)
+        verify(region.activeFocus)
+        editor.clear()
+        verify(waitForRendering(content))
+        verify(region.height > 59, "region grows with the footer: " + region.height)
+        verify(region.contentY + region.height <= region.contentHeight, "clamped contentY " + region.contentY)
+        content.troubleAdvisory = ""
+        verify(waitForRendering(content))
+        verify(transcript.activeFocus, "an unclipped region hands focus to the transcript")
+        verify(!region.Accessible.focusable)
         for (const invalid of [NaN, Infinity, -Infinity, 0, -2]) {
             content.textScale = invalid
             compare(sizes(), "14,16,12,16,16,12", "invalid text scale " + invalid + " falls back to 1")
