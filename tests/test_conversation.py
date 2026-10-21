@@ -7,6 +7,7 @@ import struct
 import sys
 import hashlib
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -90,6 +91,13 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                 await server.wait_closed()
                 await cleanup()
 
+            ambient_stderr = sys.stderr
+            diagnostic_streams = []
+
+            def emit_diagnostic():
+                diagnostic_streams.append(sys.stderr)
+                print('submit-stream-isolation: ambient diagnostic', file=sys.stderr)
+
             for malformed in (b'[]\n', b'1\n', b'{"version":true,"text":"private-cli-canary"}\n',
                               b'{"version":1,"text":""}\n', b'{"version":1,"text":"x"}\nextra'):
                 read_fd, write_fd = os.pipe()
@@ -98,15 +106,22 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                     outgoing.close()
                     stdin = Mock(buffer=incoming)
                     output, errors = io.StringIO(), io.StringIO()
-                    with (patch.object(control.sys, 'stdin', stdin), patch.object(control.sys, 'stdout', output),
-                          patch.object(control.sys, 'stderr', errors),
+                    with (patch.object(control, 'sys', SimpleNamespace(stdin=stdin, stderr=errors)),
+                          patch.object(sys, 'stdout', output),
                           patch.object(control.asyncio, 'open_unix_connection', AsyncMock()) as connect,
                           patch.object(control, 'notify_failure', AsyncMock()) as notify):
-                        self.assertEqual(await control.main(['--submit']), 1)
+                        handle = (asyncio.get_running_loop().call_soon(emit_diagnostic)
+                                  if malformed == b'[]\n' else None)
+                        try:
+                            self.assertEqual(await control.main(['--submit']), 1)
+                        finally:
+                            if handle is not None:
+                                handle.cancel()
                     self.assertEqual(output.getvalue(), '{"status":"invalid"}\n')
                     self.assertEqual(errors.getvalue(), '')
                     connect.assert_not_awaited()
                     notify.assert_not_awaited()
+            self.assertEqual(diagnostic_streams, [ambient_stderr])
 
     async def test_submit_wire_bounds_and_peer_refusal(self):
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
