@@ -518,6 +518,7 @@ TestCase {
     }
 
     function test_live_edge_and_invalid_feed() {
+        failOnWarning(/TypeError/)
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         const content = createTemporaryObject(conversationComponent, test, {
@@ -575,7 +576,9 @@ TestCase {
         compare(marks.kind, "thinking")
         compare(findChild(marks, "rippleDriver").running, true)
         const literal = '<b>Heard prefix</b>\nonly accepted text'
+        const thinkingMarks = marks
         accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
+        verify(marks === thinkingMarks, "the live marks persist, so thinking glides into speaking")
         compare(bubble.visible, true)
         compare(bubble.bottomLeftRadius, 0)
         compare(tail.y, bubble.y + bubble.height)
@@ -625,7 +628,12 @@ TestCase {
         compare(ghost.mapToItem(transcript.contentItem, 0, 0).x, transcript.width - 40)
         compare(ghost.Accessible.name, "Listening")
         compare(ghost.Accessible.role, Accessible.StaticText)
-        compare(inflow.feed, false)
+        compare(inflow.feed, true)
+        for (let i = 0; i < 3; i++) {
+            const bar = findChild(inflow, "mark" + i)
+            compare(bar.x, 10 + 8 * i)
+            compare(bar.width, 4)
+        }
         compare(findChild(inflow, "listenDriver").running, true)
         const path = findChild(content, "listeningGhostPath")
         compare(path.strokeWidth, 1.5)
@@ -687,6 +695,11 @@ TestCase {
         compare(textWith(content, "Say something, or type below."), null)
         content.motionEnabled = false
         compare(findChild(inflow, "listenDriver").running, false)
+        for (let i = 0; i < 3; i++) {
+            const bar = findChild(inflow, "mark" + i)
+            compare(bar.height, 16)
+            compare(bar.y, 5)
+        }
         content.motionEnabled = true
         content.announcementsEnabled = false
         compare(findChild(inflow, "listenDriver").running, false)

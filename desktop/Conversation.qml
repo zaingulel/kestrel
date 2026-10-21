@@ -25,6 +25,7 @@ FocusScope {
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
     property string placementAdvisory: ""
     property var displayedTurns: []
+    property int displayedCount: 0
     property string conversationSession: ""
     property bool announcementsEnabled: false
     property string announcementSession: ""
@@ -97,7 +98,11 @@ FocusScope {
         const follow = transcript.followBottom
         const previousY = transcript.contentY
         transcript.restoring = true
+        // Rows persist while the length holds, so live marks glide. Every row must find its turn:
+        // a shorter feed drops rows before the array shrinks, and a longer one grows the array first.
+        if (turns.length < displayedCount) displayedCount = turns.length
         displayedTurns = turns
+        displayedCount = turns.length
         // A baseline, a hidden panel or an unavailable session records terminal states silently.
         const silent = baselineRequired || !announcementsEnabled || conversationSession !== announcementSession
         const seen = seenTerminalStates
@@ -389,29 +394,29 @@ FocusScope {
                 lineHeightMode: Text.FixedHeight
             }
             Repeater {
-                model: root.displayedTurns
+                model: root.displayedCount
                 delegate: Item {
                     id: turnItem
-                    required property var modelData
                     required property int index
+                    readonly property var turn: root.displayedTurns[index]
                     objectName: "turnRow" + index
                     width: turnColumn.width
                     height: groupGap + bubble.height + (activeReply ? tail.height : 0) + (notice.length ? 4 + noticeRow.height : 0)
-                    readonly property bool owner: modelData.speaker === "you"
+                    readonly property bool owner: turn.speaker === "you"
                     readonly property bool activeReply: root.conversationAvailable && !owner
                         && index === root.displayedTurns.length - 1
-                        && (modelData.state === "thinking" || modelData.state === "speaking")
-                    readonly property bool spoken: owner && modelData.source === "spoken" && modelData.state === "complete"
+                        && (turn.state === "thinking" || turn.state === "speaking")
+                    readonly property bool spoken: owner && turn.source === "spoken" && turn.state === "complete"
                     readonly property int groupGap: index === 0 ? 0
-                        : root.displayedTurns[index - 1].speaker === modelData.speaker ? 4 : 14
+                        : root.displayedTurns[index - 1].speaker === turn.speaker ? 4 : 14
                     readonly property bool continuesSpeaker: index > 0
-                        && root.displayedTurns[index - 1].speaker === modelData.speaker
-                    readonly property string notice: modelData.state === "interrupted" ? "Reply interrupted."
-                        : modelData.state === "failed" ? "Reply could not be completed." : ""
+                        && root.displayedTurns[index - 1].speaker === turn.speaker
+                    readonly property string notice: turn.state === "interrupted" ? "Reply interrupted."
+                        : turn.state === "failed" ? "Reply could not be completed." : ""
                     Accessible.role: Accessible.StaticText
                     Accessible.name: (owner ? "You: " : "Kestrel: ")
-                        + modelData.text + (notice ? " " + notice : "")
-                    Accessible.description: spoken ? "Spoken message" : owner && modelData.source === "typed" ? "Typed message" : ""
+                        + turn.text + (notice ? " " + notice : "")
+                    Accessible.description: spoken ? "Spoken message" : owner && turn.source === "typed" ? "Typed message" : ""
                     Rectangle {
                         id: bubble
                         objectName: "turnBubble" + turnItem.index
@@ -419,7 +424,7 @@ FocusScope {
                         y: turnItem.groupGap
                         width: Math.min(parent.width - 56, Math.max(44, body.implicitWidth + 24,
                             turnItem.spoken ? provenance.width + 24 : 0))
-                        visible: !turnItem.activeReply || turnItem.modelData.text.length > 0
+                        visible: !turnItem.activeReply || turnItem.turn.text.length > 0
                         height: visible ? body.implicitHeight + 16 + (turnItem.spoken ? root.captionLineHeight + 4 : 0) : 0
                         color: turnItem.owner ? root.bubbleWash : root.bubbleTint
                         topLeftRadius: !turnItem.owner && turnItem.continuesSpeaker ? 4 : 14
@@ -433,7 +438,7 @@ FocusScope {
                             x: 12
                             y: 8
                             width: parent.width - 24
-                            text: turnItem.modelData.text
+                            text: turnItem.turn.text
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                             color: root.ink
@@ -492,7 +497,7 @@ FocusScope {
                             objectName: "turnLiveMarks" + turnItem.index
                             anchors.verticalCenter: parent.verticalCenter
                             feed: true
-                            kind: turnItem.modelData.state
+                            kind: turnItem.turn.state
                             ink: root.ink
                             troubleInk: root.troubleInk
                             motionEnabled: root.motionEnabled && root.announcementsEnabled && turnItem.activeReply
@@ -502,7 +507,7 @@ FocusScope {
                             objectName: "turnLiveWord" + turnItem.index
                             x: 40
                             anchors.verticalCenter: parent.verticalCenter
-                            text: turnItem.modelData.state === "speaking" ? "Speaking" : "Thinking"
+                            text: turnItem.turn.state === "speaking" ? "Speaking" : "Thinking"
                             textFormat: Text.PlainText
                             color: root.ink
                             font.family: "monospace"
@@ -522,7 +527,7 @@ FocusScope {
                         Accessible.ignored: true
                         Item {
                             id: failureSlot
-                            visible: turnItem.modelData.state === "failed"
+                            visible: turnItem.turn.state === "failed"
                             width: 25
                             height: root.captionLineHeight
                             // The mark ink (y 9 to 21 of its fixed 30-high frame) centres on the first caption line.
@@ -590,6 +595,7 @@ FocusScope {
                         objectName: "listeningGhostMark"
                         anchors.centerIn: parent
                         kind: "listening"
+                        feed: true
                         ink: root.ink
                         troubleInk: root.troubleInk
                         motionEnabled: root.motionEnabled && root.announcementsEnabled && root.listeningFeed
