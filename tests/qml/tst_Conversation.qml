@@ -835,6 +835,7 @@ TestCase {
         compare(glyph.width, 54)
         compare(badge.width, 32)
         compare(title.lineHeight, 40)
+        verify(service.acceptStatusChunk("D"))
         content.width = 320
         verify(waitForRendering(content))
         const label = findChild(content, "conversationStatus")
@@ -885,10 +886,10 @@ TestCase {
         compare(containsMark(findChild(content, "conversationHeader")), false, "the header shows no state mark")
         const expected = [
             ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
-            ["D", "Inactive", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
+            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
             ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
             ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
-            ["I", "Idle", "󰍬", false, "Idle. Microphone in use."],
+            ["I", "Waiting", "󰍬", false, "Idle. Microphone in use."],
             ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
             ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
             ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
@@ -898,6 +899,7 @@ TestCase {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
             compare(label.text, row[1])
+            compare(label.color, row[0] === "B" ? content.troubleInk : content.ink)
             compare(glyph.item.text, row[2])
             compare(badge.visible, row[3])
             compare(microphone.Accessible.name, row[4])
@@ -911,6 +913,7 @@ TestCase {
         }
         function unknown() {
             compare(label.text, "Unavailable")
+            compare(label.color, content.ink)
             compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
             compare(badge.visible, true)
             compare(microphone.Accessible.name, "Status unavailable. Microphone use unknown.")

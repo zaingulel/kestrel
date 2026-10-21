@@ -237,12 +237,13 @@ FocusScope {
                         objectName: "conversationStatus"
                         width: parent.width - microphoneSlot.width - parent.spacing
                         anchors.verticalCenter: parent.verticalCenter
-                        text: ({"not-running": "Not running", "inactive": "Inactive", "starting": "Starting",
-                            "unavailable": "Unavailable", "idle": "Idle", "listening": "Listening", "thinking": "Thinking",
+                        // No-break spaces keep each phrase whole, so the label wraps only after the middle dot.
+                        text: ({"not-running": "Not running", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "starting": "Starting",
+                            "unavailable": "Unavailable", "idle": "Waiting", "listening": "Listening", "thinking": "Thinking",
                             "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
-                        color: root.ink
+                        color: root.currentState === "trouble" ? root.troubleInk : root.ink
                         font.family: "monospace"
                         font.pixelSize: root.captionPixelSize
                         lineHeight: root.captionLineHeight
