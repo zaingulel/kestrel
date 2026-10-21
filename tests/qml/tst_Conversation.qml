@@ -81,10 +81,11 @@ TestCase {
         const service = createTemporaryObject(serviceComponent, test)
         const content = composerContent(service)
         const editor = findChild(content, "composer")
+        const voice = findChild(content, "toggleVoice")
         const send = findChild(content, "sendMessage")
         const close = findChild(content, "closeConversation")
         const transcript = findChild(content, "transcript")
-        verify(editor !== null && send !== null)
+        verify(editor !== null && voice !== null && send !== null)
         const requests = []
         service.submitRequested.connect(function(id, payload) { requests.push(JSON.parse(payload)) })
         content.focusComposer()
@@ -98,6 +99,8 @@ TestCase {
         keyClick(Qt.Key_Return)
         compare(requests.length, 0)
         keyClick(Qt.Key_Tab)
+        verify(voice.activeFocus, "the voice button follows the composer")
+        keyClick(Qt.Key_Tab)
         verify(close.activeFocus, "disabled Send is skipped")
         keyClick(Qt.Key_Tab)
         verify(transcript.activeFocus)
@@ -109,11 +112,15 @@ TestCase {
         compare(editor.text, "a\nb")
         verify(send.enabled)
         keyClick(Qt.Key_Tab)
+        verify(voice.activeFocus)
+        keyClick(Qt.Key_Tab)
         verify(send.activeFocus)
         keyClick(Qt.Key_Tab)
         verify(close.activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(send.activeFocus)
+        keyClick(Qt.Key_Backtab)
+        verify(voice.activeFocus)
         keyClick(Qt.Key_Backtab)
         verify(editor.activeFocus)
         compare(editor.text, "a\nb", "Tab never inserts a tab")
@@ -125,16 +132,16 @@ TestCase {
         compare(requests.length, 1, "pending cannot send twice")
         closeSpy.target = content
         closeSpy.clear()
-        for (const target of [editor, close, transcript]) {
+        for (const target of [editor, voice, close, transcript]) {
             target.forceActiveFocus()
             keyClick(Qt.Key_Escape)
         }
-        compare(closeSpy.count, 3)
+        compare(closeSpy.count, 4)
         service.finishSubmit(service.submitAttemptId, "busy")
         send.forceActiveFocus()
         verify(send.activeFocus)
         keyClick(Qt.Key_Escape)
-        compare(closeSpy.count, 4)
+        compare(closeSpy.count, 5)
         editor.forceActiveFocus()
         editor.clear()
         keyClick(Qt.Key_Space)
@@ -147,6 +154,7 @@ TestCase {
         const content = composerContent(service)
         const editor = findChild(content, "composer")
         const scroll = findChild(content, "composerScroll")
+        const voice = findChild(content, "toggleVoice")
         const send = findChild(content, "sendMessage")
         const transcript = findChild(content, "transcript")
         content.focusComposer()
@@ -182,7 +190,9 @@ TestCase {
                 tryVerify(function() { return editor.lineCount > 5 })
                 compare(scroll.height, fiveHeight, "wrapped visual lines also obey the cap")
                 tryVerify(cursorVisible)
-                verify(scroll.x + scroll.width + 9 <= send.x)
+                compare(scroll.x + scroll.width + 9, voice.x)
+                compare(voice.x + voice.width + 9, send.x)
+                compare(voice.y + voice.height, scroll.y + scroll.height)
                 compare(send.y + send.height, scroll.y + scroll.height)
                 verify(send.x + send.width <= content.width - 32)
                 verify(transcript.y + transcript.height <= findChild(content, "composerFooter").y)
@@ -838,7 +848,9 @@ TestCase {
         verify(content !== null)
         const microphoneTooltip = findChild(content, "microphoneTooltip")
         const moveTooltip = findChild(content, "headerMoveTooltip")
-        verify(microphoneTooltip !== null && moveTooltip !== null, "native tooltip injection must own both hover targets")
+        const voiceTooltip = findChild(content, "voiceTooltip")
+        verify(microphoneTooltip !== null && moveTooltip !== null && voiceTooltip !== null,
+            "native tooltip injection must own every hover target")
         const microphone = findChild(content, "microphoneStatus")
         const header = findChild(content, "conversationHeader")
         const title = findChild(content, "conversationTitle")
@@ -847,6 +859,7 @@ TestCase {
         const badge = findChild(content, "microphoneQuestion")
         compare(microphoneTooltip.item.parent, microphone)
         compare(moveTooltip.item.parent, header)
+        compare(voiceTooltip.item.parent, findChild(content, "toggleVoice"))
         compare(header.Accessible.description, "Move: Super + left drag")
         mouseMove(content, 1, 639)
         tryCompare(microphoneTooltip.item, "visible", false)
@@ -898,11 +911,151 @@ TestCase {
         content.tooltipComponent = null
         compare(microphoneTooltip.item, null)
         compare(moveTooltip.item, null)
-        tryCompare(test, "destroyedTooltips", destroyedBefore + 2)
+        compare(voiceTooltip.item, null)
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 3)
         content.tooltipComponent = tooltipDouble
-        verify(microphoneTooltip.item !== null && moveTooltip.item !== null)
+        verify(microphoneTooltip.item !== null && moveTooltip.item !== null && voiceTooltip.item !== null)
         content.destroy()
-        tryCompare(test, "destroyedTooltips", destroyedBefore + 4)
+        tryCompare(test, "destroyedTooltips", destroyedBefore + 6)
+    }
+
+    function voiceContent(service) {
+        const content = composerContent(service)
+        content.currentState = Qt.binding(function() { return service.state })
+        content.statusSentence = Qt.binding(function() { return service.statusSentence })
+        return content
+    }
+
+    function verifyColor(actual, expected, message) {
+        verify(Qt.colorEqual(actual, expected), message + ": " + actual + " is not " + expected)
+    }
+
+    function test_voice_button_follows_verified_status() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        const content = voiceContent(service)
+        const voice = findChild(content, "toggleVoice")
+        const badge = findChild(content, "voiceQuestion")
+        const composerFill = findChild(content, "composerScroll").background.color
+        const outline = "\u{F036E}"
+        const solid = "\u{F036C}"
+        const resting = "Start voice conversation"
+        const active = "End voice conversation"
+        const unconfirmed = "Start or end voice conversation"
+        verify(voice !== null && badge !== null)
+        function expectForm(row, name, filled, badged) {
+            compare(voice.Accessible.name, name, row)
+            compare(voice.Accessible.description, service.statusSentence, row)
+            compare(voice.checkable, false, row)
+            verifyColor(voice.background.color, filled ? "#7aa2f7" : composerFill, row + " fill")
+            compare(voice.background.border.width, 0, row)
+            compare(voice.contentItem.item.text, filled ? solid : outline, row)
+            verifyColor(voice.contentItem.item.color, filled ? "#1a1b26" : "#a9b1d6", row + " glyph")
+            compare(voice.contentItem.item.Accessible.ignored, true, row)
+            compare(badge.visible, badged, row)
+            compare(badge.Accessible.ignored, true, row)
+        }
+        for (const row of [
+            ["D", resting, false, false], ["N", resting, false, false],
+            ["I", active, true, false], ["L", active, true, false], ["T", active, true, false], ["S", active, true, false],
+            ["A", unconfirmed, false, true], ["U", unconfirmed, false, true],
+            ["B", unconfirmed, false, true], ["E", unconfirmed, false, true]
+        ]) {
+            verify(service.acceptStatusChunk(row[0]))
+            verify(waitForRendering(content))
+            expectForm(row[0], row[1], row[2], row[3])
+        }
+        verify(service.acceptStatusChunk("I"))
+        findChild(service, "statusExpiry").triggered()
+        expectForm("expiry", unconfirmed, false, true)
+        verify(service.acceptStatusChunk("I"))
+        service.watcherExited()
+        expectForm("watcherExited", unconfirmed, false, true)
+        verify(service.acceptStatusChunk("I"))
+        compare(service.acceptStatusChunk("I\n"), false)
+        expectForm("invalid chunk", unconfirmed, false, true)
+        verify(service.acceptStatusChunk("I"))
+        expectForm("recovered", active, true, false)
+
+        service.toggle()
+        compare(service.state, "idle", "a press never changes verified status")
+        expectForm("pressed from idle", unconfirmed, false, true)
+        service.toggleExited()
+        expectForm("exited", unconfirmed, false, true)
+        verify(service.acceptStatusChunk("D"))
+        expectForm("confirmed off", resting, false, false)
+
+        content.ink = "#4c4f69"
+        content.textScale = 2
+        verify(waitForRendering(content))
+        verifyColor(voice.contentItem.item.color, "#4c4f69", "ink follows the host")
+        compare(voice.contentItem.item.fontSize, 28)
+        content.ink = "#a9b1d6"
+        content.textScale = 1
+
+        content.currentState = "unrecognized"
+        expectForm("unrecognized", unconfirmed, false, true)
+
+        content.service = null
+        compare(voice.enabled, false)
+        verifyColor(voice.background.color, "transparent", "disabled fill")
+        compare(voice.background.border.width, 1.5)
+        verifyColor(voice.background.border.color, findChild(content, "sendMessage").background.border.color, "disabled rule")
+        verifyColor(voice.contentItem.item.color, "#99a9b1d6", "disabled glyph is ink at 0.6")
+        compare(voice.contentItem.item.text, outline)
+        compare(badge.visible, false)
+        compare(voice.Accessible.name, unconfirmed)
+    }
+
+    function test_voice_button_presses_once_target_and_tooltip() {
+        const service = createTemporaryObject(serviceComponent, test)
+        verify(service !== null)
+        verify(service.acceptStatusChunk("D"))
+        const content = voiceContent(service)
+        const voice = findChild(content, "toggleVoice")
+        const scroll = findChild(content, "composerScroll")
+        const send = findChild(content, "sendMessage")
+        const tooltip = findChild(content, "voiceTooltip")
+        verify(voice !== null && tooltip !== null)
+        let presses = 0
+        service.toggleRequested.connect(function() { presses++ })
+        verify(waitForRendering(content))
+        compare(voice.width, 40)
+        compare(voice.height, 40)
+        verify(voice.width >= 24 && voice.height >= 24, "WCAG 2.5.8 minimum target")
+        compare(scroll.x + scroll.width + 9, voice.x)
+        compare(voice.x + voice.width + 9, send.x)
+        compare(voice.y + voice.height, send.y + send.height)
+        compare(voice.background.radius, 10)
+
+        mouseMove(content, 1, 639)
+        tryCompare(tooltip.item, "visible", false)
+        mouseMove(voice, voice.width / 2, voice.height / 2)
+        tryCompare(tooltip.item, "opened", true)
+        compare(tooltip.item.parent, voice)
+        compare(tooltip.item.text, "Start voice conversation")
+        compare(presses, 0, "hover requests nothing")
+        voice.forceActiveFocus()
+        verify(voice.activeFocus)
+        compare(presses, 0, "focus requests nothing")
+
+        mouseClick(voice)
+        compare(presses, 1, "one click is one request")
+        mouseClick(voice)
+        keyClick(Qt.Key_Space)
+        keyClick(Qt.Key_Return)
+        keyClick(Qt.Key_Enter)
+        compare(presses, 1, "no press while the command runs")
+        service.toggleExited()
+        keyClick(Qt.Key_Return)
+        compare(presses, 2, "Return presses once")
+        service.toggleExited()
+        keyClick(Qt.Key_Enter)
+        compare(presses, 3, "Enter presses once")
+        service.toggleExited()
+        keyClick(Qt.Key_Space)
+        compare(presses, 4, "Space presses once")
+        verify(voice.activeFocus)
     }
 
     function test_microphone_icons_follow_verified_status() {
