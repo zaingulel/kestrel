@@ -88,6 +88,8 @@ TestCase {
         verify(editor !== null && voice !== null && send !== null)
         const requests = []
         service.submitRequested.connect(function(id, payload) { requests.push(JSON.parse(payload)) })
+        let toggles = 0
+        service.toggleRequested.connect(function() { toggles++ })
         content.focusComposer()
         verify(editor.activeFocus)
         compare(editor.Accessible.name, "Message Kestrel")
@@ -124,6 +126,7 @@ TestCase {
         keyClick(Qt.Key_Backtab)
         verify(editor.activeFocus)
         compare(editor.text, "a\nb", "Tab never inserts a tab")
+        compare(toggles, 0, "Tab never presses the voice button")
         keyClick(Qt.Key_Return)
         compare(requests.length, 1)
         compare(requests[0].text, "a\nb")

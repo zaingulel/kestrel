@@ -792,6 +792,7 @@ FocusScope {
             onClicked: root.service.toggle()
             Keys.onReturnPressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
             Keys.onEnterPressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
+            Keys.onSpacePressed: function(event) { if (!event.isAutoRepeat) root.service.toggle() }
             contentItem: Loader {
                 id: voiceGlyph
                 sourceComponent: root.glyphComponent
