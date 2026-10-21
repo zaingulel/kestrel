@@ -132,7 +132,7 @@ The status indicator is an accessible button named `Open panel` or `Close panel`
 | Listening | `Kestrel: listening to you. Microphone in use.` |
 | Thinking | `Kestrel: thinking about your message. Microphone in use.` |
 | Speaking | `Kestrel: speaking. Microphone in use.` |
-| Trouble | `Kestrel needs attention. Microphone in use.` |
+| Trouble | `Kestrel needs attention. Microphone in use.` plus the cause's advisory from [Trouble advisories](#trouble-advisories) |
 
 ### Conversation panel
 
@@ -140,7 +140,7 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 
 - **Placement.** First opening uses the focused monitor's bottom-right work area, accounting for reserved space, outer gaps and the native border. Later openings retain the actual dragged position within the compositor configuration lifetime. When the monitor or its work area changes, clamp a position only if it would leave the panel off screen. Preserve a deliberately partly off-screen drag when that work area has not changed. Compositor configuration reload resets placement; cross-reload or restart storage is not provided.
 - **Opening and closing.** The indicator and `Super + F12` toggle the panel. Opening focuses the composer at the draft end. The square `Close panel` button remains at least 33 by 33. That button, `Escape`, native window close or either toggle hides the panel and returns compositor focus to the prior window. These actions only hide or show the panel. `Super + Shift + K` starts or dismisses the voice conversation.
-- **Header.** A flexible title/status column and close button use the header tokens; the header has no state mark. Bold `Kestrel` sits above a passive microphone icon and wrapped caption-sized short label: `Not running`, `Voice off · Mic in use`, `Starting`, `Unavailable`, `Waiting`, `Listening`, `Thinking`, `Speaking`, or `Attention`; unknown keys use `Unavailable`. In `Voice off · Mic in use` every space except the one after the middle dot is a no-break space, so enlarged text wraps only after the dot. `Attention` uses trouble ink and every other label popup ink; the word carries the meaning. The full status sentence below is the static status group's accessible name and microphone target's accessible description and native tooltip, never visible body text. `Move: Super + left drag` belongs only to the header's accessible description and native tooltip. Its hover excludes close and the microphone target. Placement advisories remain visible in a separate wrapped band below the header, separated by 9.
+- **Header.** A flexible title/status column and close button use the header tokens; the header has no state mark. Bold `Kestrel` sits above a passive microphone icon and wrapped caption-sized short label: `Not running`, `Voice off · Mic in use`, `Starting`, `Unavailable`, `Waiting`, `Listening`, `Thinking`, `Speaking`, or `Attention`; unknown keys use `Unavailable`. In `Voice off · Mic in use` every space except the one after the middle dot is a no-break space, so enlarged text wraps only after the dot. `Attention` uses trouble ink and every other label popup ink; the word carries the meaning. The full status sentence below is the static status group's accessible name and microphone target's accessible description and native tooltip, never visible body text. `Move: Super + left drag` belongs only to the header's accessible description and native tooltip. Its hover excludes close and the microphone target. A trouble advisory sits directly below the header, separated by the header Column's 9 gap and styled like the placement band, above any placement advisory. Placement advisories remain visible in a separate wrapped band below the header, separated by 9.
 - **Header microphone.** The passive microphone uses host glyph `󰍬` for verified in-use states (inactive, idle, listening, thinking, speaking, trouble), `󰍭` only for verified not-running, and `󰍬` with a separate top-right `?` badge for starting or unavailable/unknown. Never derive microphone use from a reply. The microphone is not a button or keyboard stop. Panel injects native `OpticalGlyph` and `PanelToolTip` components from `qs.Ui` into the host-free Conversation. Glyph text, size and colour stay reactively bound; native tooltips retain the host's 400 ms delay, typography, colours, internal padding and border, bind parent/text/visibility to their hover target, and are destroyed with their Loader. In-panel tooltips hug their text up to the maximum width token and wrap without elision. They use Qt's in-window popup placement with the window edge margin token; Qt owns positioning and content-driven height. No passive click handler consumes move or scroll input.
 - **Conversation.** Quiet native monospace bubbles align Kestrel left and owner right, hug text within the width tokens and use the tint/wash roles. No visible speaker labels or read receipts; accessible names retain speaker prefixes. Text remains plain, preserves line breaks, wraps long words and scrolls vertically. Bubble width is `min(feed width - 56, max(44, text implicit width + 24, provenance width + 24))`. Body width is bubble width minus 24; height is text implicit height plus 16, adding a caption line and 4 gap only for finalized owner provenance. Kestrel bottom-left corner is 4 and consecutive Kestrel top-left is also 4, mirrored for owner. Only finalized spoken owner turns carry a caption-sized native microphone at bottom-right, tooltip and accessible description `Spoken message`. Typed owner turns omit that caption and use accessible description `Typed message`. Short feeds sit at the bottom; clipped top/bottom edges alone show the 1-pixel rule. Auto-follow only while already at the bottom; updates never jump away from earlier text being read. All entrances are still, including new turns and replayed history. The transcript remains read-only with no active links.
 - **Live edge.** Only the final Kestrel thinking/speaking row in a valid conversation owns the tint tail, attached flush below its left edge; its bubble bottom-left becomes 0. With no text there is only the standalone tail, never an empty placeholder bubble. The tail holds the feed marks in their larger geometry in its 40-wide slot, followed by the caption-sized word `Thinking` or `Speaking` in popup ink, vertically centred; the word is decorative and shows in both moving and still forms; still thinking shows its tall middle bar. Only `motionEnabled && announcementsEnabled` permits their loops and glides. A row keeps its live marks while the accepted feed keeps its length, so thinking turning to speaking glides; a feed of another length rebuilds its rows, which enter still. Listening shows a final right-aligned, unfilled dashed ghost holding the listening marks at feed scale, centred, only while the verified current state is listening and the feed is valid; its accessible name is `Listening`. Native ShapePath dash lengths are expressed in stroke-width units, `[4/1.5, 3/1.5]`, with a flat cap and the inset/radii above. Hide only the healthy empty advisory while this ghost is present. Never fabricate a transcript or announcement, word alignment, speculative text or timed sample replies.
@@ -160,9 +160,24 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 | Listening | `Listening. Microphone in use.` |
 | Thinking | `Thinking. Microphone in use.` |
 | Speaking | `Speaking. Microphone in use.` |
-| Trouble | `Kestrel needs attention. Microphone in use.` |
+| Trouble | `Kestrel needs attention. Microphone in use.` plus the cause's advisory from [Trouble advisories](#trouble-advisories) |
 
 Every pointer target is at least 24 by 24.
+
+### Trouble advisories
+
+In trouble, the status snapshot carries one of these wire letters, and the panel band and tooltip show its advisory. An advisory names a cause only when the service verified that cause; otherwise it says the cause is unknown.
+
+| Wire | State | Advisory |
+| --- | --- | --- |
+| B | `trouble` | `Cause unknown. Check the service log, then restart Kestrel.` |
+| M | `trouble-microphone` | `Microphone capture failed. Restart Kestrel.` |
+| P | `trouble-playback` | `Audio playback failed. Restart Kestrel.` |
+| R | `trouble-recognition` | `Speech recognition failed. Restart Kestrel.` |
+| V | `trouble-voice` | `Voice generation failed. Restart Kestrel.` |
+| E | `trouble-engine` | `Kestrel's engine is unavailable. Restart Kestrel.` |
+| O | `trouble-notes` | `Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.` |
+| H | `trouble-handover` | `A typed message could not reach the conversation. Restart Kestrel.` |
 
 ### Native accessibility and verification
 
