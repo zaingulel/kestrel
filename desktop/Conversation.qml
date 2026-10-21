@@ -18,8 +18,6 @@ FocusScope {
     readonly property color bubbleTint: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.10))
     readonly property color bubbleWash: Qt.tint(flatBackground, Qt.rgba(accentInk.r, accentInk.g, accentInk.b, 0.20))
     readonly property color edgeRule: Qt.tint(flatBackground, Qt.rgba(ink.r, ink.g, ink.b, 0.20))
-    readonly property string microphoneAppearance: currentState === "not-running" ? "off"
-        : ["inactive", "idle", "listening", "thinking", "speaking", "trouble"].indexOf(currentState) !== -1 ? "on" : "unknown"
     property bool motionEnabled: false
     property var turns: []
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
@@ -212,56 +210,20 @@ FocusScope {
                     id: microphoneStatus
                     objectName: "microphoneStatus"
                     width: parent.width
-                    spacing: 5
                     Accessible.role: Accessible.StaticText
                     Accessible.name: root.statusSentence
                     Accessible.description: root.statusSentence
                     Accessible.focusable: false
                     HoverHandler { id: microphoneHover }
-                    Item {
-                        id: microphoneSlot
-                        width: Math.max(24, root.bodyLineHeight + root.captionPixelSize / 2)
-                        height: width
-                        Loader {
-                            objectName: "microphoneGlyph"
-                            anchors.fill: parent
-                            sourceComponent: root.glyphComponent
-                            onLoaded: {
-                                item.anchors.fill = item.parent
-                                item.text = Qt.binding(function() { return root.microphoneAppearance === "off" ? "󰍭" : "󰍬" })
-                                item.fontSize = Qt.binding(function() { return root.bodyPixelSize })
-                                item.color = Qt.binding(function() { return root.ink })
-                                item.Accessible.ignored = true
-                            }
-                        }
-                        Rectangle {
-                            objectName: "microphoneQuestion"
-                            anchors.right: parent.right
-                            anchors.top: parent.top
-                            width: root.captionLineHeight
-                            height: width
-                            radius: width / 2
-                            color: root.flatBackground
-                            visible: root.microphoneAppearance === "unknown"
-                            Accessible.ignored: true
-                            Text {
-                                anchors.centerIn: parent
-                                text: "?"
-                                textFormat: Text.PlainText
-                                color: root.ink
-                                font.family: "monospace"
-                                font.pixelSize: root.captionPixelSize
-                            }
-                        }
-                    }
                     Text {
                         objectName: "conversationStatus"
-                        width: parent.width - microphoneSlot.width - parent.spacing
-                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
                         // No-break spaces keep each phrase whole, so the label wraps only after the middle dot.
-                        text: ({"not-running": "Not running", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "starting": "Starting",
-                            "unavailable": "Unavailable", "idle": "Waiting", "listening": "Listening", "thinking": "Thinking",
-                            "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
+                        text: ({"not-running": "Not\u00a0running\u00a0· Mic\u00a0released", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use",
+                            "starting": "Starting\u00a0· Mic\u00a0in\u00a0use?", "unavailable": "Unavailable\u00a0· Mic\u00a0in\u00a0use?",
+                            "idle": "Waiting\u00a0· Mic\u00a0in\u00a0use", "listening": "Listening\u00a0· Mic\u00a0in\u00a0use",
+                            "thinking": "Thinking\u00a0· Mic\u00a0in\u00a0use", "speaking": "Speaking\u00a0· Mic\u00a0in\u00a0use",
+                            "trouble": "Attention\u00a0· Mic\u00a0in\u00a0use"})[root.currentState] || "Unavailable\u00a0· Mic\u00a0in\u00a0use?"
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         color: root.currentState === "trouble" ? root.troubleInk : root.ink

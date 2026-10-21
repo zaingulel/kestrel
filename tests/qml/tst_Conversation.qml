@@ -658,15 +658,11 @@ TestCase {
         compare(outline.height, 24.5)
         compare(outline.topLeftRadius, 9.25)
         compare(outline.bottomRightRadius, 3.25)
-        compare(findChild(content, "microphoneGlyph").item.text, "󰍬")
         verify(service.acceptStatusChunk("D"))
         compare(ghost.visible, false)
         compare(tail.visible, true, "microphone activity is independent of accepted reply activity")
-        compare(findChild(content, "microphoneQuestion").visible, false)
         service.watcherExited()
         compare(tail.visible, true)
-        compare(findChild(content, "microphoneGlyph").item.text, "󰍬", "missing status must never claim release")
-        compare(findChild(content, "microphoneQuestion").visible, true)
         for (const state of ["interrupted", "failed", "complete"]) {
             accept([earlier, {speaker: "kestrel", text: state === "complete" ? "Finished." : "", state: state}])
             compare(tail.visible, false)
@@ -855,8 +851,6 @@ TestCase {
         const header = findChild(content, "conversationHeader")
         const title = findChild(content, "conversationTitle")
         const close = findChild(content, "closeConversation")
-        const glyph = findChild(content, "microphoneGlyph")
-        const badge = findChild(content, "microphoneQuestion")
         compare(microphoneTooltip.item.parent, microphone)
         compare(moveTooltip.item.parent, header)
         compare(voiceTooltip.item.parent, findChild(content, "toggleVoice"))
@@ -870,11 +864,8 @@ TestCase {
         compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
         verify(service.acceptStatusChunk("A"))
         tryCompare(microphoneTooltip.item, "text", "Starting. Microphone may be in use.")
-        compare(glyph.item.text, "󰍬")
-        compare(badge.visible, true)
         verify(service.acceptStatusChunk("N"))
-        tryCompare(glyph.item, "text", "󰍭")
-        compare(microphoneTooltip.item.text, "Not running. Microphone released by Kestrel.")
+        tryCompare(microphoneTooltip.item, "text", "Not running. Microphone released by Kestrel.")
         mouseMove(title, title.width / 2, title.height / 2)
         tryCompare(moveTooltip.item, "opened", true)
         compare(moveTooltip.item.text, "Move: Super + left drag")
@@ -891,12 +882,6 @@ TestCase {
         content.ink = "#4c4f69"
         content.textScale = 2
         verify(waitForRendering(content))
-        compare(glyph.item.color, "#4c4f69")
-        compare(glyph.item.fontSize, 28)
-        compare(glyph.item.width, glyph.width)
-        compare(glyph.item.height, glyph.height)
-        compare(glyph.width, 54)
-        compare(badge.width, 32)
         compare(title.lineHeight, 40)
         verify(service.acceptStatusChunk("D"))
         content.width = 320
@@ -1058,7 +1043,7 @@ TestCase {
         verify(voice.activeFocus)
     }
 
-    function test_microphone_icons_follow_verified_status() {
+    function test_header_words_follow_verified_status() {
         const service = createTemporaryObject(serviceComponent, test)
         verify(service !== null)
         verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "header-session", turns: []}) + "\n"))
@@ -1075,38 +1060,38 @@ TestCase {
         compare(textWith(content, "Voice off. Microphone in use. Press Super + Shift + K to start."), null,
             "the passive header must not display the full microphone sentence")
         content.conversationAvailable = Qt.binding(function() { return service.conversationAvailable })
-        content.glyphComponent = glyphDouble
         const microphone = findChild(content, "microphoneStatus")
-        const glyph = findChild(content, "microphoneGlyph")
-        const badge = findChild(content, "microphoneQuestion")
         const label = findChild(content, "conversationStatus")
-        verify(microphone !== null && glyph !== null && badge !== null && label !== null)
+        verify(microphone !== null && label !== null)
+        compare(findChild(content, "microphoneGlyph"), null, "the header shows no microphone icon")
+        compare(findChild(content, "microphoneQuestion"), null, "the header shows no unconfirmed badge")
+        compare(label.width, microphone.width)
         compare(findChild(findChild(content, "conversationHeader"), "mark0"), null, "the header shows no state mark")
         const trouble = "Kestrel needs attention. Microphone in use. "
         const expected = [
-            ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel.", "ink", ""],
-            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start.", "ink", ""],
-            ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use.", "ink", ""],
-            ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown.", "ink", ""],
-            ["I", "Waiting", "󰍬", false, "Waiting. Microphone in use.", "ink", ""],
-            ["L", "Listening", "󰍬", false, "Listening. Microphone in use.", "ink", ""],
-            ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use.", "ink", ""],
-            ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use.", "ink", ""],
-            ["B", "Attention", "󰍬", false, trouble + "Cause unknown. Check the service log, then restart Kestrel.", "trouble",
+            ["N", "Not\u00a0running\u00a0· Mic\u00a0released", "Not running. Microphone released by Kestrel.", "ink", ""],
+            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "Voice off. Microphone in use. Press Super + Shift + K to start.", "ink", ""],
+            ["A", "Starting\u00a0· Mic\u00a0in\u00a0use?", "Starting. Microphone may be in use.", "ink", ""],
+            ["U", "Unavailable\u00a0· Mic\u00a0in\u00a0use?", "Status unavailable. Microphone use unknown.", "ink", ""],
+            ["I", "Waiting\u00a0· Mic\u00a0in\u00a0use", "Waiting. Microphone in use.", "ink", ""],
+            ["L", "Listening\u00a0· Mic\u00a0in\u00a0use", "Listening. Microphone in use.", "ink", ""],
+            ["T", "Thinking\u00a0· Mic\u00a0in\u00a0use", "Thinking. Microphone in use.", "ink", ""],
+            ["S", "Speaking\u00a0· Mic\u00a0in\u00a0use", "Speaking. Microphone in use.", "ink", ""],
+            ["B", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Cause unknown. Check the service log, then restart Kestrel.", "trouble",
                 "Cause unknown. Check the service log, then restart Kestrel."],
-            ["M", "Attention", "󰍬", false, trouble + "Microphone capture failed. Restart Kestrel.", "trouble",
+            ["M", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Microphone capture failed. Restart Kestrel.", "trouble",
                 "Microphone capture failed. Restart Kestrel."],
-            ["P", "Attention", "󰍬", false, trouble + "Audio playback failed. Restart Kestrel.", "trouble",
+            ["P", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Audio playback failed. Restart Kestrel.", "trouble",
                 "Audio playback failed. Restart Kestrel."],
-            ["R", "Attention", "󰍬", false, trouble + "Speech recognition failed. Restart Kestrel.", "trouble",
+            ["R", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Speech recognition failed. Restart Kestrel.", "trouble",
                 "Speech recognition failed. Restart Kestrel."],
-            ["V", "Attention", "󰍬", false, trouble + "Voice generation failed. Restart Kestrel.", "trouble",
+            ["V", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Voice generation failed. Restart Kestrel.", "trouble",
                 "Voice generation failed. Restart Kestrel."],
-            ["E", "Attention", "󰍬", false, trouble + "Kestrel's engine is unavailable. Restart Kestrel.", "trouble",
+            ["E", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Kestrel's engine is unavailable. Restart Kestrel.", "trouble",
                 "Kestrel's engine is unavailable. Restart Kestrel."],
-            ["O", "Attention", "󰍬", false, trouble + "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.", "trouble",
+            ["O", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.", "trouble",
                 "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel."],
-            ["H", "Attention", "󰍬", false, trouble + "A typed message could not reach the conversation. Restart Kestrel.", "trouble",
+            ["H", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "A typed message could not reach the conversation. Restart Kestrel.", "trouble",
                 "A typed message could not reach the conversation. Restart Kestrel."]
         ]
         const band = findChild(content, "troubleAdvisory")
@@ -1115,26 +1100,31 @@ TestCase {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
             compare(label.text, row[1], row[0])
-            compare(label.color, row[5] === "trouble" ? content.troubleInk : content.ink, row[0])
-            compare(glyph.item.text, row[2])
-            compare(badge.visible, row[3])
-            compare(microphone.Accessible.name, row[4])
-            compare(microphone.Accessible.description, row[4])
+            compare(label.color, row[3] === "trouble" ? content.troubleInk : content.ink, row[0])
+            compare(microphone.Accessible.name, row[2])
+            compare(microphone.Accessible.description, row[2])
             compare(microphone.Accessible.role, Accessible.StaticText)
             compare(microphone.Accessible.focusable, false)
             compare(microphone.activeFocusOnTab, false)
-            compare(glyph.item.Accessible.ignored, true)
-            compare(textWith(content, row[4]), null)
+            compare(textWith(content, row[2]), null)
             compare(textWith(content, "Move: Super + left drag"), null)
-            compare(band.text, row[6], row[0])
-            compare(band.visible, row[6] !== "", row[0])
+            compare(band.text, row[4], row[0])
+            compare(band.visible, row[4] !== "", row[0])
         }
+        content.width = 320
+        content.textScale = 2
+        for (const row of expected) {
+            verify(service.acceptStatusChunk(row[0]))
+            verify(waitForRendering(content))
+            verify(label.lineCount <= 2, row[0] + " wraps to " + label.lineCount + " lines")
+            verify(label.contentWidth <= label.width, row[0] + " overflows its column")
+        }
+        content.width = 448
+        content.textScale = 1
         function unknown() {
             compare(band.visible, false)
-            compare(label.text, "Unavailable")
+            compare(label.text, "Unavailable · Mic in use?")
             compare(label.color, content.ink)
-            compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
-            compare(badge.visible, true)
             compare(microphone.Accessible.name, "Status unavailable. Microphone use unknown.")
         }
         verify(service.acceptStatusChunk("I"))
