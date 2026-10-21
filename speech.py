@@ -15,8 +15,10 @@ import wave
 from pathlib import Path
 from time import monotonic
 
+import inflect
 import numpy as np
 from loguru import logger
+from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
@@ -31,6 +33,9 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
+
+_ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
+_NUMBER_WORDS = inflect.engine()
 
 ROOT = Path(__file__).parent
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
@@ -49,6 +54,52 @@ LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
 LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
+
+
+def _standalone_number(token: str, start: int, stop: int) -> bool:
+    """Whether a native numeric span is the token's whole quantity, not a compound, ellipsis or zero-padded code."""
+    whole = token[start:stop].lstrip('-').replace(',', '')
+    return not (any(character.isdigit() for character in token[:start] + token[stop:])
+                or token[start - 1:start] == '.'
+                or whole[:1] == '0' and whole[1:2].isdigit())
+
+
+def spoken_numbers(text: str) -> str:
+    """Word WeText-classified cardinal, decimal and percent spans; every other character stays as written."""
+    parts = []
+    end = 0
+    for match in re.finditer(r'\S+', text):
+        parts.append(text[end:match.start()])
+        token = match.group()
+        if any(character.isdigit() for character in token) and not any(character.isalpha() for character in token):
+            try:
+                result = _ENGLISH_NORMALIZER.normalize_with_mapping(token)
+                replacements = []
+                previous_end = 0
+                for mapping in sorted(result.mappings, key=lambda mapping: mapping.input_start):
+                    percent = mapping.token_type == 'measure' and mapping.input_text.endswith('%')
+                    if mapping.kind != 'replace' or not (mapping.token_type in ('cardinal', 'decimal') or percent):
+                        continue
+                    start, stop = mapping.input_start, mapping.input_end
+                    if not (0 <= start < stop <= len(token)) or start < previous_end or token[start:stop] != mapping.input_text:
+                        raise ValueError('Inconsistent numeric source mapping')
+                    if not _standalone_number(token, start, stop):
+                        replacements = None
+                        break
+                    source = token[start:stop]
+                    words = _NUMBER_WORDS.number_to_words(source[:-1]) + ' percent' if percent else _NUMBER_WORDS.number_to_words(source)
+                    replacements.extend((token[previous_end:start], words))
+                    previous_end = stop
+                if replacements is not None:
+                    replacements.append(token[previous_end:])
+                    token = ''.join(replacements)
+            except Exception:
+                # Any failure to read or word this text keeps the written form; it runs before model work.
+                logger.warning('Number reading unavailable; speaking the written form.')
+        parts.append(token)
+        end = match.end()
+    parts.append(text[end:])
+    return ''.join(parts)
 
 
 @dataclass(eq=False)
@@ -1582,10 +1633,10 @@ class VoxCPMTTS(TTSService):
             }
             if delivery == 'neutral':
                 prompt = dict(prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript)
-                synthesis_text = text
+                prefix = ''
             elif delivery in styles:
                 prompt = {}
-                synthesis_text = styles[delivery] + ' ' + text
+                prefix = styles[delivery] + ' '
             else:
                 raise RuntimeError('Invalid internal speech delivery')
             # Never overlap model calls, including a chunk still finishing after interruption.
@@ -1594,15 +1645,22 @@ class VoxCPMTTS(TTSService):
                     raise RuntimeError('Voice generation cleanup failed. Restart Kestrel.')
                 if not allowed():
                     return
-                chunks = self.model.generate_streaming(
-                    text=synthesis_text, **prompt,
-                    reference_wav_path=str(self.preset.reference),
-                    inference_timesteps=10, max_len=400, retry_badcase=False,
-                )
+                chunks = None
+
+                def next_chunk():
+                    # Built in the owned next() worker, so cleanup observes normalization like model work.
+                    nonlocal chunks
+                    if chunks is None:
+                        chunks = self.model.generate_streaming(
+                            text=prefix + spoken_numbers(text), **prompt,
+                            reference_wav_path=str(self.preset.reference),
+                            inference_timesteps=10, max_len=400, retry_badcase=False,
+                        )
+                    return next(chunks, None)
                 pending = None
                 try:
                     while True:
-                        pending = asyncio.create_task(asyncio.to_thread(next, chunks, None))
+                        pending = asyncio.create_task(asyncio.to_thread(next_chunk))
                         chunk = await asyncio.shield(pending)
                         if chunk is None or not allowed():
                             break
@@ -1626,7 +1684,8 @@ class VoxCPMTTS(TTSService):
                                 raise
                             finally:
                                 try:
-                                    await asyncio.to_thread(chunks.close)
+                                    if chunks is not None:
+                                        await asyncio.to_thread(chunks.close)
                                 except Exception as error:
                                     if next_error is not None:
                                         raise error from next_error

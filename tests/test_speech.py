@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import threading
 import unittest
@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from loguru import logger
+from wetext.alignment import NormalizationMapping, NormalizationResult
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
@@ -757,6 +758,138 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             else:
                 self.assertEqual(call.kwargs["prompt_wav_path"], str(TEST_PRESET.reference))
                 self.assertEqual(call.kwargs["prompt_text"], TEST_PRESET.transcript)
+
+    async def test_numeric_reply_is_spoken_as_words_and_heard_as_written(self):
+        started = asyncio.Event()
+        finished = asyncio.Event()
+        frames = []
+
+        class Sink(FrameProcessor):
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                frames.append(frame)
+                if isinstance(frame, StartFrame):
+                    started.set()
+                if isinstance(frame, LLMFullResponseEndFrame):
+                    finished.set()
+                await self.push_frame(frame, direction)
+
+        def chunks(**kwargs):
+            yield np.zeros(4800, dtype=np.float32)
+
+        model = Mock(generate_streaming=Mock(side_effect=chunks))
+        voice = VoxCPMTTS(model, TEST_PRESET)
+        worker = PipelineWorker(
+            Pipeline([voice, Sink()]),
+            enable_rtvi=False, idle_timeout_secs=None,
+        )
+        runner = WorkerRunner(handle_sigint=False)
+        await runner.add_workers(worker)
+        running = asyncio.create_task(runner.run())
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            await worker.queue_frames([
+                LLMFullResponseStartFrame(), LLMTextFrame('The answer is 18.'),
+                LLMFullResponseEndFrame(),
+            ])
+            await asyncio.wait_for(finished.wait(), 5)
+            self.assertEqual([call.kwargs['text'] for call in model.generate_streaming.call_args_list],
+                             ['The answer is eighteen.'])
+            self.assertEqual([frame.text for frame in frames if isinstance(frame, TTSTextFrame)],
+                             ['The answer is 18.'])
+            audio = next(frame for frame in frames if isinstance(frame, TTSAudioRawFrame) and frame.audio)
+            self.assertEqual(audio.conversation_text_start, 'The answer is 18.')
+            await worker.queue_frame(EndFrame())
+            await running
+        finally:
+            if not running.done():
+                await worker.cancel()
+                await running
+
+    async def test_numeric_forms_keep_their_meaning_in_speech(self):
+        def chunks(**kwargs):
+            yield np.zeros(4800, dtype=np.float32)
+
+        model = Mock(generate_streaming=Mock(side_effect=chunks))
+        voice = VoxCPMTTS(model, TEST_PRESET)
+        for text, expected in [
+            ('Version 2.0.3 ships.', 'Version 2.0.3 ships.'),
+            ('Pay 1,5 now.', 'Pay 1,5 now.'),
+            ("Pay 1'000 now.", "Pay 1'000 now."),
+            ('Time 1:2:3 now.', 'Time 1:2:3 now.'),
+            ('Then ...18 left.', 'Then ...18 left.'),
+            ('PIN 0042 now.', 'PIN 0042 now.'),
+            ('PIN 0,042 now.', 'PIN 0,042 now.'),
+            ('Agent 007.', 'Agent 007.'),
+            ('No. The answer is 18.', 'No. The answer is eighteen.'),
+            ('Ms. Lee has 18.', 'Ms. Lee has eighteen.'),
+            ('He said "18".', 'He said "eighteen".'),
+            ('He said "yes".', 'He said "yes".'),
+            ('It is 18  now.', 'It is eighteen  now.'),
+            ('The 1990s ran 24/7.', 'The 1990s ran 24/7.'),
+            ('ID-18 and v2.0 stay.', 'ID-18 and v2.0 stay.'),
+            ('It costs 1,000 or 12,000.', 'It costs one thousand or twelve thousand.'),
+            ('It rose 35%.', 'It rose thirty-five percent.'),
+            ('It is 3.5 now.', 'It is three point five now.'),
+            ('It fell to -18.', 'It fell to minus eighteen.'),
+            ('Eighteen already.', 'Eighteen already.'),
+            ('Version `18` ships.', 'Version `eighteen` ships.'),
+        ]:
+            with self.subTest(text=text):
+                frames = [frame async for frame in voice.run_tts(text, 'turn')]
+                self.assertEqual(model.generate_streaming.call_args.kwargs['text'], expected)
+                self.assertEqual(len(frames), 1)
+        voice._conversation_audio_contexts['expressive'] = speech.ConversationAudioContext(
+            None, delivery='gently_pleased')
+        frames = [frame async for frame in voice.run_tts('The answer is 18.', 'expressive')]
+        self.assertEqual(model.generate_streaming.call_args.kwargs['text'],
+                         '(Gently pleased, with a subtle smile in the voice) The answer is eighteen.')
+        self.assertEqual(len(frames), 1)
+
+    async def test_number_reading_failure_speaks_written_form_without_refusal(self):
+        corrupt = NormalizationResult(
+            input_text='18.', output_text='nineteen.', mappings=(NormalizationMapping(
+                kind='replace', token_type='cardinal', input_start=0, input_end=2,
+                output_start=0, output_end=8, input_text='19', output_text='nineteen'),))
+        for fault, text in [('native failure', 'Your #1 pick.'), ('corrupt mapping', 'The answer is 18.')]:
+            with self.subTest(fault=fault):
+                def chunks(**kwargs):
+                    yield np.zeros(4800, dtype=np.float32)
+
+                model = Mock(generate_streaming=Mock(side_effect=chunks))
+                voice = VoxCPMTTS(model, TEST_PRESET)
+                warnings = []
+                sink = logger.add(lambda message: warnings.append(message.record['message']), level='WARNING')
+                try:
+                    boundary = patch('wetext.Normalizer.normalize_with_mapping', return_value=corrupt) if fault == 'corrupt mapping' else nullcontext()
+                    with boundary:
+                        frames = [frame async for frame in voice.run_tts(text, 'turn')]
+                    self.assertEqual(len(frames), 1)
+                    self.assertEqual(model.generate_streaming.call_count, 1)
+                    self.assertEqual(model.generate_streaming.call_args.kwargs['text'], text)
+                    self.assertFalse(voice.generation_cleanup_failed)
+                    self.assertEqual(warnings, ['Number reading unavailable; speaking the written form.'])
+                    frames = [frame async for frame in voice.run_tts('Another 18.', 'turn')]
+                    self.assertEqual(len(frames), 1)
+                    self.assertEqual(model.generate_streaming.call_count, 2)
+                    self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Another eighteen.')
+                    self.assertFalse(voice.generation_cleanup_failed)
+                    self.assertEqual(warnings, ['Number reading unavailable; speaking the written form.'])
+                finally:
+                    logger.remove(sink)
+
+    async def test_model_creation_failure_preserves_error_and_refuses_further_speech(self):
+        failure = RuntimeError('Model creation failed before generator creation')
+        model = Mock(generate_streaming=Mock(side_effect=failure))
+        voice = VoxCPMTTS(model, TEST_PRESET)
+        with self.assertRaises(RuntimeError) as observed:
+            _ = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
+        self.assertIs(observed.exception, failure)
+        self.assertEqual(model.generate_streaming.call_count, 1)
+        self.assertTrue(voice.generation_cleanup_failed)
+        with self.assertRaisesRegex(RuntimeError, 'Voice generation cleanup failed'):
+            _ = [frame async for frame in voice.run_tts('Another reply.', 'turn')]
+        self.assertEqual(model.generate_streaming.call_count, 1)
 
     async def test_two_sentences_finish_before_the_response_ends(self):
         started = asyncio.Event()
