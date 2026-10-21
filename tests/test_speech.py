@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import threading
 import unittest
@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from loguru import logger
+from wetext.alignment import NormalizationMapping, NormalizationResult
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
@@ -812,9 +813,17 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         model = Mock(generate_streaming=Mock(side_effect=chunks))
         voice = VoxCPMTTS(model, TEST_PRESET)
         for text, expected in [
-            ('It rose 35%.', 'It rose thirty five percent.'),
+            ('No. The answer is 18.', 'No. The answer is eighteen.'),
+            ('Ms. Lee has 18.', 'Ms. Lee has eighteen.'),
+            ('He said "18".', 'He said "eighteen".'),
+            ('He said "yes".', 'He said "yes".'),
+            ('It is 18  now.', 'It is eighteen  now.'),
+            ('The 1990s ran 24/7.', 'The 1990s ran 24/7.'),
+            ('ID-18 and v2.0 stay.', 'ID-18 and v2.0 stay.'),
+            ('It costs 1,000 or 12,000.', 'It costs one thousand or twelve thousand.'),
+            ('It rose 35%.', 'It rose thirty-five percent.'),
             ('It is 3.5 now.', 'It is three point five now.'),
-            ('It fell to -18.', 'It fell to negative eighteen.'),
+            ('It fell to -18.', 'It fell to minus eighteen.'),
             ('Eighteen already.', 'Eighteen already.'),
             ('Version `18` ships.', 'Version `eighteen` ships.'),
         ]:
@@ -829,19 +838,50 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                          '(Gently pleased, with a subtle smile in the voice) The answer is eighteen.')
         self.assertEqual(len(frames), 1)
 
-    async def test_normalization_failure_preserves_error_and_refuses_further_speech(self):
-        model = Mock()
+    async def test_number_reading_failure_speaks_written_form_without_refusal(self):
+        corrupt = NormalizationResult(
+            input_text='18.', output_text='nineteen.', mappings=(NormalizationMapping(
+                kind='replace', token_type='cardinal', input_start=0, input_end=2,
+                output_start=0, output_end=8, input_text='19', output_text='nineteen'),))
+        for fault, text in [('native failure', 'Your #1 pick.'), ('corrupt mapping', 'The answer is 18.')]:
+            with self.subTest(fault=fault):
+                def chunks(**kwargs):
+                    yield np.zeros(4800, dtype=np.float32)
+
+                model = Mock(generate_streaming=Mock(side_effect=chunks))
+                voice = VoxCPMTTS(model, TEST_PRESET)
+                warnings = []
+                sink = logger.add(lambda message: warnings.append(message.record['message']), level='WARNING')
+                try:
+                    boundary = patch('wetext.Normalizer.normalize_with_mapping', return_value=corrupt) if fault == 'corrupt mapping' else nullcontext()
+                    with boundary:
+                        frames = [frame async for frame in voice.run_tts(text, 'turn')]
+                    self.assertEqual(len(frames), 1)
+                    self.assertEqual(model.generate_streaming.call_count, 1)
+                    self.assertEqual(model.generate_streaming.call_args.kwargs['text'], text)
+                    self.assertFalse(voice.generation_cleanup_failed)
+                    self.assertEqual(warnings, ['Number reading unavailable; speaking the written form.'])
+                    frames = [frame async for frame in voice.run_tts('Another 18.', 'turn')]
+                    self.assertEqual(len(frames), 1)
+                    self.assertEqual(model.generate_streaming.call_count, 2)
+                    self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Another eighteen.')
+                    self.assertFalse(voice.generation_cleanup_failed)
+                    self.assertEqual(warnings, ['Number reading unavailable; speaking the written form.'])
+                finally:
+                    logger.remove(sink)
+
+    async def test_model_creation_failure_preserves_error_and_refuses_further_speech(self):
+        failure = RuntimeError('Model creation failed before generator creation')
+        model = Mock(generate_streaming=Mock(side_effect=failure))
         voice = VoxCPMTTS(model, TEST_PRESET)
-        failure = RuntimeError('Numeric normalization failed before model generation')
-        with patch('wetext.Normalizer.normalize', side_effect=failure):
-            with self.assertRaises(RuntimeError) as observed:
-                _ = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
+        with self.assertRaises(RuntimeError) as observed:
+            _ = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
         self.assertIs(observed.exception, failure)
-        model.generate_streaming.assert_not_called()
+        self.assertEqual(model.generate_streaming.call_count, 1)
         self.assertTrue(voice.generation_cleanup_failed)
         with self.assertRaisesRegex(RuntimeError, 'Voice generation cleanup failed'):
             _ = [frame async for frame in voice.run_tts('Another reply.', 'turn')]
-        model.generate_streaming.assert_not_called()
+        self.assertEqual(model.generate_streaming.call_count, 1)
 
     async def test_two_sentences_finish_before_the_response_ends(self):
         started = asyncio.Event()
