@@ -1083,9 +1083,6 @@ class NativeHermesTests(unittest.TestCase):
                 worker.begin()
                 events = worker.request([{'role': 'user', 'content': 'Remember the existing notes.'}])
                 self.assertEqual(events, [{'error': 'Hermes did not complete the reply.'}])
-                self.assertNotIn('done', {key for event in events for key in event})
-                self.assertNotIn('False success nonce-916.', ''.join(event.get('text', '') for event in events))
-                self.assertEqual(len(brain.requests), 10)
                 self.assertEqual([body.get('stream', False) for _, _, body in brain.requests],
                                  [True] * 9 + [False])
                 results = [message for message in brain.requests[-1][2]['messages']
@@ -1128,7 +1125,6 @@ class NativeHermesTests(unittest.TestCase):
                 {'delivery': 'neutral'}, {'text': 'Desktop observed and notes saved nonce-923.'},
                 {'done': True},
             ])
-            self.assertEqual(len(brain.requests), 9)
             self.assertEqual([body.get('stream', False) for _, _, body in brain.requests], [True] * 9)
             results = [message for message in brain.requests[-1][2]['messages'] if message['role'] == 'tool']
             self.assertEqual([message['tool_call_id'] for message in results],
@@ -1898,7 +1894,7 @@ class NativeHermesTests(unittest.TestCase):
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=False, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
-            quiet_mode=True, max_tokens=180,
+            quiet_mode=True, max_tokens=180, max_iterations=9,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
