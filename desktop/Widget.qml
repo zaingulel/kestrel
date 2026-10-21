@@ -13,10 +13,10 @@ BarWidget {
     readonly property bool panelOpen: bar?.shell?.isPluginOpen("local.kestrel") ?? false
     readonly property string tooltipText: ({
         "not-running": "Kestrel is not running. It is not holding the microphone.",
-        "inactive": "Inactive. Microphone in use. Press Super + Shift + K to start.",
+        "inactive": "Voice off. Microphone in use. Press Super + Shift + K to start.",
         "starting": "Starting. Microphone may be in use.",
         "unavailable": "Status unavailable. Microphone use unknown.",
-        "idle": "Kestrel: idle. Microphone in use. Waiting for you to speak.",
+        "idle": "Kestrel: waiting for you to speak. Microphone in use.",
         "listening": "Kestrel: listening to you. Microphone in use.",
         "thinking": "Kestrel: thinking about your message. Microphone in use.",
         "speaking": "Kestrel: speaking. Microphone in use.",

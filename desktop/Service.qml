@@ -12,10 +12,10 @@ Item {
 
     readonly property string statusSentence: ({
         "not-running": "Not running. Microphone released by Kestrel.",
-        "inactive": "Inactive. Microphone in use. Press Super + Shift + K to start.",
+        "inactive": "Voice off. Microphone in use. Press Super + Shift + K to start.",
         "starting": "Starting. Microphone may be in use.",
         "unavailable": "Status unavailable. Microphone use unknown.",
-        "idle": "Idle. Microphone in use.",
+        "idle": "Waiting. Microphone in use.",
         "listening": "Listening. Microphone in use.",
         "thinking": "Thinking. Microphone in use.",
         "speaking": "Speaking. Microphone in use.",
@@ -23,7 +23,18 @@ Item {
     })[state]
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
-    readonly property string conversationMessage: conversationValue.message
+    readonly property string conversationMessage: !conversationValue.available ? conversationValue.message
+        : conversationValue.turns.length ? "" : ({
+        "not-running": "Start Kestrel to talk or type.",
+        "inactive": "Press Super + Shift + K to talk, or type below.",
+        "starting": "Kestrel is starting. Wait to talk or type.",
+        "unavailable": "Voice status unknown.",
+        "idle": "Say something, or type below.",
+        "listening": "Say something, or type below.",
+        "thinking": "Say something, or type below.",
+        "speaking": "Say something, or type below.",
+        "trouble": "Kestrel needs attention. Check the service log."
+    })[state]
     readonly property string conversationSession: conversationValue.session
     readonly property string placementAdvisory: placementValue.advisory
 
@@ -214,7 +225,6 @@ Item {
         conversationValue.session = record.session
         conversationValue.turns = record.turns
         conversationValue.available = true
-        conversationValue.message = record.turns.length ? "" : "Say something, or type below. Kestrel replies out loud."
         conversationExpiry.restart()
         return true
     }

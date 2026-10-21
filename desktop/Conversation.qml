@@ -146,7 +146,7 @@ FocusScope {
             id: headerRow
             objectName: "conversationHeader"
             width: parent.width
-            height: Math.max(30, titleColumn.height, closeButton.height)
+            height: Math.max(titleColumn.height, closeButton.height)
             Accessible.description: "Move: Super + left drag"
             HoverHandler { id: headerHover }
             Loader {
@@ -169,21 +169,9 @@ FocusScope {
                     item.visible = Qt.binding(function() { return microphoneHover.hovered })
                 }
             }
-            Marks {
-                objectName: "headerMark"
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: 25
-                height: 30
-                kind: root.currentState
-                ink: root.ink
-                troubleInk: root.troubleInk
-                motionEnabled: false
-            }
             Column {
                 id: titleColumn
-                x: 34
-                width: parent.width - x - 9 - closeButton.width
+                width: parent.width - 9 - closeButton.width
                 anchors.verticalCenter: parent.verticalCenter
                 Text {
                     id: titleText
@@ -249,12 +237,13 @@ FocusScope {
                         objectName: "conversationStatus"
                         width: parent.width - microphoneSlot.width - parent.spacing
                         anchors.verticalCenter: parent.verticalCenter
-                        text: ({"not-running": "Not running", "inactive": "Inactive", "starting": "Starting",
-                            "unavailable": "Unavailable", "idle": "Idle", "listening": "Listening", "thinking": "Thinking",
+                        // No-break spaces keep each phrase whole, so the label wraps only after the middle dot.
+                        text: ({"not-running": "Not running", "inactive": "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "starting": "Starting",
+                            "unavailable": "Unavailable", "idle": "Waiting", "listening": "Listening", "thinking": "Thinking",
                             "speaking": "Speaking", "trouble": "Attention"})[root.currentState] || "Unavailable"
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
-                        color: root.ink
+                        color: root.currentState === "trouble" ? root.troubleInk : root.ink
                         font.family: "monospace"
                         font.pixelSize: root.captionPixelSize
                         lineHeight: root.captionLineHeight
@@ -335,7 +324,10 @@ FocusScope {
         property bool followBottom: true
         property bool restoring: false
         onContentYChanged: if (!restoring) followBottom = atYEnd
-        onContentHeightChanged: {
+        onHeightChanged: followEnd()
+        onContentHeightChanged: followEnd()
+        // Pins the live edge when content grows or the viewport shrinks under a growing composer.
+        function followEnd() {
             if (followBottom) {
                 const previousRestoring = restoring
                 restoring = true
@@ -381,7 +373,8 @@ FocusScope {
         Column {
             id: turnColumn
             width: transcript.width
-            y: Math.max(0, transcript.height - height)
+            // With no turns the column holds only the hint, centred; turns and the listening ghost rest at the bottom.
+            y: Math.max(0, root.displayedTurns.length || root.listeningFeed ? transcript.height - height : (transcript.height - height) / 2)
             Text {
                 width: parent.width
                 visible: text.length > 0
@@ -403,7 +396,7 @@ FocusScope {
                     required property int index
                     objectName: "turnRow" + index
                     width: turnColumn.width
-                    height: groupGap + bubble.height + (activeReply ? 26 : 0) + (notice.length ? 4 + noticeRow.height : 0)
+                    height: groupGap + bubble.height + (activeReply ? tail.height : 0) + (notice.length ? 4 + noticeRow.height : 0)
                     readonly property bool owner: modelData.speaker === "you"
                     readonly property bool activeReply: root.conversationAvailable && !owner
                         && index === root.displayedTurns.length - 1
@@ -486,23 +479,37 @@ FocusScope {
                         objectName: "turnTail" + turnItem.index
                         x: bubble.x
                         y: bubble.y + bubble.height
-                        width: 40
-                        height: 26
+                        width: 40 + Math.ceil(liveWord.implicitWidth) + 10
+                        height: Math.max(26, root.captionLineHeight + 10)
                         visible: turnItem.activeReply
                         color: root.bubbleTint
                         topLeftRadius: bubble.visible ? 0 : 10
-                        topRightRadius: bubble.visible ? 0 : 10
+                        topRightRadius: bubble.visible && bubble.width >= width ? 0 : 10
                         bottomRightRadius: 10
                         bottomLeftRadius: 4
                         Accessible.ignored: true
                         Marks {
                             objectName: "turnLiveMarks" + turnItem.index
-                            anchors.centerIn: parent
+                            anchors.verticalCenter: parent.verticalCenter
                             feed: true
                             kind: turnItem.modelData.state
                             ink: root.ink
                             troubleInk: root.troubleInk
                             motionEnabled: root.motionEnabled && root.announcementsEnabled && turnItem.activeReply
+                        }
+                        Text {
+                            id: liveWord
+                            objectName: "turnLiveWord" + turnItem.index
+                            x: 40
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: turnItem.modelData.state === "speaking" ? "Speaking" : "Thinking"
+                            textFormat: Text.PlainText
+                            color: root.ink
+                            font.family: "monospace"
+                            font.pixelSize: root.captionPixelSize
+                            lineHeight: root.captionLineHeight
+                            lineHeightMode: Text.FixedHeight
+                            Accessible.ignored: true
                         }
                     }
                     Row {
@@ -513,20 +520,26 @@ FocusScope {
                         width: parent.width - 4
                         spacing: 5
                         Accessible.ignored: true
-                        Marks {
-                            id: warningIcon
-                            objectName: "turnFailure" + turnItem.index
+                        Item {
+                            id: failureSlot
                             visible: turnItem.modelData.state === "failed"
                             width: 25
-                            height: 30
-                            kind: "trouble"
-                            ink: root.ink
-                            troubleInk: root.troubleInk
-                            motionEnabled: false
+                            height: root.captionLineHeight
+                            // The mark ink (y 9 to 21 of its fixed 30-high frame) centres on the first caption line.
+                            Marks {
+                                objectName: "turnFailure" + turnItem.index
+                                anchors.centerIn: parent
+                                width: 25
+                                height: 30
+                                kind: "trouble"
+                                ink: root.ink
+                                troubleInk: root.troubleInk
+                                motionEnabled: false
+                            }
                         }
                         Text {
                             objectName: "turnNotice" + turnItem.index
-                            width: parent.width - (warningIcon.visible ? warningIcon.width + parent.spacing : 0)
+                            width: parent.width - (failureSlot.visible ? failureSlot.width + parent.spacing : 0)
                             text: turnItem.notice
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap

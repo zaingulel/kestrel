@@ -477,7 +477,6 @@ TestCase {
                 compare(row.Accessible.name, (i < 2 ? "You: " : "Kestrel: ") + turns[i].text)
                 compare(row.Accessible.role, Accessible.StaticText)
             }
-            compare(findChild(content, "headerMark").motionEnabled, false)
             compare(textWith(content, "You"), null)
             compare(textWith(content, "Kestrel").objectName, "conversationTitle")
             compare(topRule.height, 1)
@@ -537,6 +536,7 @@ TestCase {
         let tail = null
         let marks = null
         let bubble = null
+        let word = null
         function accept(turns) {
             verify(service.acceptConversationChunk(JSON.stringify({version: 2, session: "live-session", turns: turns}) + "\n"))
             tryCompare(content, "displayedTurns", service.turns)
@@ -544,6 +544,7 @@ TestCase {
             tail = findChild(content, "turnTail1")
             marks = findChild(content, "turnLiveMarks1")
             bubble = findChild(content, "turnBubble1")
+            word = findChild(content, "turnLiveWord1")
         }
         const earlier = {speaker: "kestrel", text: "Earlier", state: "thinking"}
         verify(service.acceptStatusChunk("T"))
@@ -554,7 +555,16 @@ TestCase {
         verify(tail !== null && marks !== null)
         compare(findChild(content, "turnTail0").visible, false, "only the final accepted reply is active")
         compare(tail.visible, true)
-        compare(tail.width, 40)
+        verify(word !== null)
+        compare(word.text, "Thinking")
+        compare(word.font.pixelSize, 12)
+        compare(word.lineHeight, 16)
+        compare(word.x, 40)
+        compare(tail.width, 40 + Math.ceil(word.implicitWidth) + 10)
+        compare(word.y + word.height / 2, tail.height / 2)
+        compare(word.Accessible.ignored, true)
+        compare(marks.x, 0)
+        compare(marks.y, 0)
         compare(tail.height, 26)
         compare(tail.topLeftRadius, 10)
         compare(tail.topRightRadius, 10)
@@ -575,6 +585,7 @@ TestCase {
         compare(findChild(content, "turnText1").text, literal)
         compare(findChild(content, "turnText1").textFormat, Text.PlainText)
         compare(marks.kind, "speaking")
+        compare(word.text, "Speaking")
         function loops(running) {
             for (let i = 0; i < 3; i++)
                 compare(findChild(findChild(marks, "mark" + i), "speakingLoop" + i).running, running)
@@ -582,6 +593,8 @@ TestCase {
         loops(true)
         content.motionEnabled = false
         loops(false)
+        compare(word.visible, true)
+        compare(word.text, "Speaking")
         content.motionEnabled = true
         loops(true)
         content.announcementsEnabled = false
@@ -590,6 +603,17 @@ TestCase {
         content.visible = true
         content.announcementsEnabled = true
         loops(true)
+        content.textScale = 2
+        verify(waitForRendering(content))
+        compare(tail.height, 42)
+        compare(word.font.pixelSize, 24)
+        compare(word.y + word.height / 2, 21)
+        compare(findChild(content, "turnRow1").height, 4 + bubble.height + 42)
+        content.textScale = 1
+        verify(waitForRendering(content))
+        accept([earlier, {speaker: "kestrel", text: "Hi", state: "speaking"}])
+        compare(tail.topRightRadius, 10)
+        compare(tail.topLeftRadius, 0)
         const ghost = findChild(content, "listeningGhost")
         const inflow = findChild(content, "listeningGhostMark")
         verify(ghost !== null && inflow !== null)
@@ -643,13 +667,24 @@ TestCase {
                 compare(failure.kind, "trouble")
                 compare(failure.troubleInk, content.troubleInk)
                 compare(failure.motionEnabled, false)
+                if (state === "failed") {
+                    const square = findChild(failure, "mark2")
+                    compare(findChild(failure, "troubleStem").mapToItem(notice, 0, 0).y, 2)
+                    compare(square.mapToItem(notice, 0, square.height).y, 14)
+                }
                 verify(findChild(content, "turnRow1").Accessible.name.indexOf(notice.text) !== -1)
             } else compare(notice.visible, false)
         }
+        const engineAdvisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+        accept([earlier, {speaker: "kestrel", text: engineAdvisory, state: "failed"}])
+        compare(findChild(content, "turnText1").text, engineAdvisory)
+        compare(bubble.visible, true)
+        compare(findChild(content, "turnNotice1").parent.y, bubble.y + bubble.height + 4)
         verify(service.acceptStatusChunk("L"))
         accept([])
         compare(ghost.visible, true)
-        compare(textWith(content, "Say something, or type below. Kestrel replies out loud."), null)
+        compare(ghost.mapToItem(transcript.contentItem, 0, ghost.height).y, transcript.height)
+        compare(textWith(content, "Say something, or type below."), null)
         content.motionEnabled = false
         compare(findChild(inflow, "listeningLoop").running, false)
         content.motionEnabled = true
@@ -667,6 +702,7 @@ TestCase {
             const advisory = textWith(content, message)
             verify(advisory !== null && advisory.visible)
             compare(advisory.horizontalAlignment, Text.AlignHCenter)
+            fuzzyCompare(advisory.mapToItem(transcript.contentItem, 0, advisory.height / 2).y, transcript.height / 2, 0.5)
         }
         accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
         findChild(service, "conversationExpiry").triggered()
@@ -736,7 +772,7 @@ TestCase {
                 "native background must clear bottom and right window edges")
             compare(popup.delay, 400)
         }
-        const inactive = "Inactive. Microphone in use. Press Super + Shift + K to start."
+        const inactive = "Voice off. Microphone in use. Press Super + Shift + K to start."
         verify(service.acceptStatusChunk("D"))
         mouseMove(content, 1, content.height - 1)
         mouseMove(microphone, 10, microphone.height / 2)
@@ -804,7 +840,7 @@ TestCase {
         tryCompare(moveTooltip.item, "visible", false)
         mouseMove(microphone, 10, microphone.height / 2)
         tryCompare(microphoneTooltip.item, "opened", true)
-        compare(microphoneTooltip.item.text, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(microphoneTooltip.item.text, "Voice off. Microphone in use. Press Super + Shift + K to start.")
         compare(moveTooltip.item.visible, false, "microphone hover excludes the move tooltip")
         verify(service.acceptStatusChunk("A"))
         tryCompare(microphoneTooltip.item, "text", "Starting. Microphone may be in use.")
@@ -836,6 +872,7 @@ TestCase {
         compare(glyph.width, 54)
         compare(badge.width, 32)
         compare(title.lineHeight, 40)
+        verify(service.acceptStatusChunk("D"))
         content.width = 320
         verify(waitForRendering(content))
         const label = findChild(content, "conversationStatus")
@@ -844,6 +881,7 @@ TestCase {
             verify(left >= 16 && left + item.width <= 304)
         }
         verify(label.contentWidth <= label.width)
+        compare(title.mapToItem(header, 0, 0).x, 0)
         content.tooltipComponent = null
         compare(microphoneTooltip.item, null)
         compare(moveTooltip.item, null)
@@ -867,7 +905,7 @@ TestCase {
         })
         verify(content !== null)
         verify(waitForRendering(content))
-        compare(textWith(content, "Inactive. Microphone in use. Press Super + Shift + K to start."), null,
+        compare(textWith(content, "Voice off. Microphone in use. Press Super + Shift + K to start."), null,
             "the passive header must not display the full microphone sentence")
         content.conversationAvailable = Qt.binding(function() { return service.conversationAvailable })
         content.glyphComponent = glyphDouble
@@ -875,14 +913,20 @@ TestCase {
         const glyph = findChild(content, "microphoneGlyph")
         const badge = findChild(content, "microphoneQuestion")
         const label = findChild(content, "conversationStatus")
-        const mark = findChild(content, "headerMark")
-        verify(microphone !== null && glyph !== null && badge !== null && label !== null && mark !== null)
+        verify(microphone !== null && glyph !== null && badge !== null && label !== null)
+        function containsMark(item) {
+            if (item.thinkingIndex !== undefined) return true
+            for (let i = 0; i < item.children.length; i++)
+                if (containsMark(item.children[i])) return true
+            return false
+        }
+        compare(containsMark(findChild(content, "conversationHeader")), false, "the header shows no state mark")
         const expected = [
             ["N", "Not running", "󰍭", false, "Not running. Microphone released by Kestrel."],
-            ["D", "Inactive", "󰍬", false, "Inactive. Microphone in use. Press Super + Shift + K to start."],
+            ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "󰍬", false, "Voice off. Microphone in use. Press Super + Shift + K to start."],
             ["A", "Starting", "󰍬", true, "Starting. Microphone may be in use."],
             ["U", "Unavailable", "󰍬", true, "Status unavailable. Microphone use unknown."],
-            ["I", "Idle", "󰍬", false, "Idle. Microphone in use."],
+            ["I", "Waiting", "󰍬", false, "Waiting. Microphone in use."],
             ["L", "Listening", "󰍬", false, "Listening. Microphone in use."],
             ["T", "Thinking", "󰍬", false, "Thinking. Microphone in use."],
             ["S", "Speaking", "󰍬", false, "Speaking. Microphone in use."],
@@ -892,6 +936,7 @@ TestCase {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
             compare(label.text, row[1])
+            compare(label.color, row[0] === "B" ? content.troubleInk : content.ink)
             compare(glyph.item.text, row[2])
             compare(badge.visible, row[3])
             compare(microphone.Accessible.name, row[4])
@@ -900,16 +945,12 @@ TestCase {
             compare(microphone.Accessible.focusable, false)
             compare(microphone.activeFocusOnTab, false)
             compare(glyph.item.Accessible.ignored, true)
-            compare(mark.motionEnabled, false)
-            compare(findChild(mark, "thinkingStep").running, false)
-            compare(findChild(mark, "listeningLoop").running, false)
-            compare(findChild(findChild(mark, "mark0"), "speakingLoop0").running, false)
             compare(textWith(content, row[4]), null)
             compare(textWith(content, "Move: Super + left drag"), null)
         }
         function unknown() {
-            verify(waitForRendering(content))
             compare(label.text, "Unavailable")
+            compare(label.color, content.ink)
             compare(glyph.item.text, "󰍬", "unknown use must never cross out the microphone")
             compare(badge.visible, true)
             compare(microphone.Accessible.name, "Status unavailable. Microphone use unknown.")
@@ -1086,13 +1127,14 @@ TestCase {
         compare(transcript.Accessible.role, Accessible.Document)
         verify(service.acceptStatusChunk("D"))
         verify(waitForRendering(content))
-        const inactivePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
+        const inactivePrompt = textWith(content, "Press Super + Shift + K to talk, or type below.")
         const inactiveStatus = findChild(content, "microphoneStatus")
         verify(inactivePrompt !== null && inactivePrompt.visible)
         verify(inactiveStatus !== null && inactiveStatus.visible)
         verify(inactivePrompt.mapToItem(content, 0, 0).y >= transcript.y)
         verify(inactivePrompt.contentWidth <= inactivePrompt.width)
-        compare(inactiveStatus.Accessible.name, "Inactive. Microphone in use. Press Super + Shift + K to start.")
+        compare(inactiveStatus.Accessible.name, "Voice off. Microphone in use. Press Super + Shift + K to start.")
+        fuzzyCompare(inactivePrompt.mapToItem(transcript.contentItem, 0, inactivePrompt.height / 2).y, transcript.height / 2, 0.5)
         content.focusComposer()
         verify(findChild(content, "composer").activeFocus)
         keyClick(Qt.Key_Tab)
@@ -1113,8 +1155,9 @@ TestCase {
         compare(service.conversationAvailable, true)
         verify(service.acceptStatusChunk("I"))
         verify(waitForRendering(content))
-        const activePrompt = textWith(content, "Say something, or type below. Kestrel replies out loud.")
+        const activePrompt = textWith(content, "Say something, or type below.")
         verify(activePrompt !== null && activePrompt.visible)
+        compare(textWith(content, "Press Super + Shift + K to talk, or type below."), null)
         const literal = '<b>Literal text</b> https://example.invalid ' + "unbroken".repeat(80)
         const turns = [{speaker: "you", text: literal, state: "complete", source: "spoken"}]
         for (let i = 0; i < 18; i++) turns.push({speaker: "kestrel", text: "Literal reply " + i + ".", state: "complete"})
@@ -1167,7 +1210,7 @@ TestCase {
         tryVerify(function() { return transcript.atYEnd }, 5000, "composer shrink follows the live edge")
         editor.text = "one\ntwo\nthree\nfour\nfive\nsix"
         verify(waitForRendering(content))
-        tryVerify(function() { return transcript.atYEnd }, 5000, "composer growth follows only from the live edge")
+        verify(transcript.atYEnd, "composer growth follows only from the live edge")
         editor.clear()
         verify(waitForRendering(content))
         verify(transcript.atYEnd, "End: y=" + transcript.contentY + " height=" + transcript.contentHeight + " viewport=" + transcript.height + " focus=" + transcript.activeFocus)
@@ -1202,6 +1245,10 @@ TestCase {
         content.textScale = 2
         verify(waitForRendering(content))
         compare(sizes(), "28,32,24,32,32,24", "host base size 28 doubles the token sizes")
+        const failure = findChild(content, "turnFailure20")
+        const square = findChild(failure, "mark2")
+        compare(findChild(failure, "troubleStem").mapToItem(findChild(content, "turnNotice20"), 0, 0).y, 10)
+        compare(square.mapToItem(findChild(content, "turnNotice20"), 0, square.height).y, 22)
         const advisory = textWith(content, content.placementAdvisory)
         for (const item of [status, advisory, findChild(content, "turnText0"), findChild(content, "turnNotice20")]) {
             const left = item.mapToItem(content, 0, 0).x
