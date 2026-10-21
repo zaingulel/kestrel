@@ -2969,6 +2969,92 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
 
+class TroubleCauseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trouble_names_its_first_verified_cause(self):
+        from desktop import status as status_module
+        from types import SimpleNamespace
+        sentinel = 'PRIVATE FAILURE SENTINEL'
+        voice_failure = 'Voice generation cleanup failed. Restart Kestrel.'
+
+        def transport(failure=None, close=None):
+            return SimpleNamespace(failure=failure, close=close or AsyncMock())
+
+        def finished_pipeline(manager, error=None):
+            manager.pipeline = asyncio.get_running_loop().create_future()
+            if error is None:
+                manager.pipeline.set_result(None)
+            else:
+                manager.pipeline.set_exception(error)
+            manager.admission = asyncio.Event()
+            manager.admission.set()
+
+        def failed_transport(manager, failure):
+            manager.transport = transport(failure)
+            manager.failed_transport()
+
+        def microphone(manager):
+            failed_transport(manager, speech.LAPTOP_CAPTURE_FAILURE)
+
+        def playback(manager):
+            failed_transport(manager, speech.LAPTOP_PLAYBACK_FAILURE)
+
+        def recognition(manager):
+            manager.transport = transport()
+            manager.recognizer.failure = sentinel
+            finished_pipeline(manager)
+
+        def voice(manager):
+            manager.transport = transport()
+            manager.voice = SimpleNamespace(generation_cleanup_failed=True)
+            manager.lifecycle_changed = True
+
+        def exceptional_pipeline(manager):
+            manager.transport = transport()
+            finished_pipeline(manager, RuntimeError(sentinel))
+
+        def unexplained_close(manager):
+            manager.transport = transport(close=AsyncMock(side_effect=RuntimeError(sentinel)))
+            manager.lifecycle_changed = True
+
+        def microphone_then_voice(manager):
+            manager.voice = SimpleNamespace(generation_cleanup_failed=True)
+            microphone(manager)
+
+        for name, arrange, expected, failure in (
+            ('microphone', microphone, 'trouble-microphone', None),
+            ('playback', playback, 'trouble-playback', None),
+            ('recognition behind a finished pipeline', recognition, 'trouble-recognition', None),
+            ('voice', voice, 'trouble-voice', None),
+            ('exceptional pipeline completion', exceptional_pipeline, 'trouble', None),
+            ('unexplained close failure', unexplained_close, 'trouble', None),
+            ('first verified cause wins', microphone_then_voice, 'trouble-microphone', voice_failure),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as runtime:
+                status = bot.IndicatorStatus(Path(runtime))
+                manager = bot.VoiceConversations(status=status, conversation=Mock(spec=bot.ConversationFeed))
+                published = asyncio.Queue()
+                native_set = status.set_state
+
+                def observe(state):
+                    native_set(state)
+                    published.put_nowait(state)
+
+                status.set_state = observe
+                arrange(manager)
+                task = asyncio.create_task(manager.run())
+                try:
+                    first_two = [await asyncio.wait_for(published.get(), 5) for _ in range(2)]
+                    self.assertEqual(first_two, ['inactive', expected])
+                    self.assertEqual(status_module.read_indicator(Path(runtime)), expected)
+                    self.assertNotIn(sentinel.encode(), (Path(runtime) / 'kestrel/indicator.json').read_bytes())
+                    if failure is not None:
+                        self.assertEqual(manager.failure, failure)
+                finally:
+                    manager.closed = True
+                    manager.changed.set()
+                    await asyncio.wait_for(task, 5)
+
+
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_brain_desktop_effect_after_reader_timeout_is_accounted(self):
         wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
@@ -4683,7 +4769,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             deadline = await asyncio.wait_for(deadlines.get(), 5)
             await asyncio.wait_for(handover_waiting.wait(), 5)
             deadline.reschedule(asyncio.get_running_loop().time())
-            await service.state('trouble')
+            await service.state('trouble-handover')
             self.assertEqual(manager.conversation.turns[-2], {
                 'speaker': 'you', 'text': 'Handover cannot finish', 'state': 'complete', 'source': 'typed',
             })
@@ -5198,7 +5284,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         if mode == 'held_close_failure':
                             with self.assertRaisesRegex(RuntimeError, 'generation cleanup failed'):
                                 await asyncio.wait_for(asyncio.shield(cleanup), 5)
-                            await service.state('trouble')
+                            await service.state('trouble-voice')
                             self.assertTrue(old_voice.generation_cleanup_failed)
                         else:
                             await asyncio.wait_for(asyncio.shield(cleanup), 5)
@@ -5221,7 +5307,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertLess(events.index(('closed', 'Old reply.')), events.index(('model', 'Fresh reply.')))
                         else:
                             self.assertEqual(await service.toggle(), 'unavailable', 'Failed cleanup must refuse activation')
-                            self.assertEqual(manager.status._state, 'trouble')
+                            self.assertEqual(manager.status._state, 'trouble' if mode == 'watchdog' else 'trouble-voice')
                             self.assertEqual(len(transport.sessions), 1)
                             self.assertIs(manager.cleanup, cleanup, 'Late completion retains the original cleanup owner')
                             self.assertEqual(events, [('model', 'Old reply.'), ('closed', 'Old reply.')])
@@ -5823,7 +5909,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(service.manager.voice.generation_cleanup_failed)
                             attempted = list(attempts)
                             self.assertEqual(await service.toggle(), 'inactive')
-                            await service.state('trouble')
+                            await service.state('trouble-voice')
                             self.assertEqual(await service.toggle(), 'unavailable')
                             self.assertEqual(attempts, attempted)
                             self.assertEqual(len(transport.sessions), 1)
@@ -6140,7 +6226,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             manager = service.manager
                             self.assertTrue(manager.voice.generation_cleanup_failed)
                             self.assertEqual(await service.toggle(), 'inactive')
-                            await service.state('trouble')
+                            await service.state('trouble-voice')
                             self.assertEqual(manager.failure, 'Voice generation cleanup failed. Restart Kestrel.')
                             self.assertTrue(manager.cleanup.done())
                             self.assertFalse(manager.admission.is_set())
@@ -6207,7 +6293,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                                     snapshot = json.loads((Path(runtime) / 'kestrel/indicator.json').read_text())
                                     self.assertEqual(voice.generation_cleanup_failed, failing)
-                                    self.assertEqual(snapshot['state'], 'trouble' if failing else 'idle',
+                                    self.assertEqual(snapshot['state'], 'trouble-voice' if failing else 'idle',
                                                      'A failed native voice cannot appear ready after a local turn')
                                     self.assertEqual(output_events, [], 'No audio means no native speaking event')
                                     self.assertTrue(committed.empty())
@@ -6223,10 +6309,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                     if failing:
                                         if index == 0:
                                             first_fault = next((position for position, transition in enumerate(transitions)
-                                                                if transition == ('trouble', True)), None)
+                                                                if transition == ('trouble-voice', True)), None)
                                             self.assertIsNotNone(first_fault, 'Native voice failure must publish trouble')
                                         if first_fault is not None:
-                                            self.assertTrue(all(state == 'trouble'
+                                            self.assertTrue(all(state == 'trouble-voice'
                                                                 for state, _ in transitions[first_fault:]), transitions)
                             self.assertEqual(len(attempts), 1 if failing else 2)
                             self.assertEqual(brain.requests, [])
@@ -6234,7 +6320,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         if voice.generation_cleanup_failed:
                             self.assertEqual(await service.toggle(), 'inactive')
-                            await service.state('trouble')
+                            await service.state('trouble-voice')
                             self.assertEqual(await service.toggle(), 'unavailable')
                             self.assertEqual(len(attempts), 1)
                         await close()
@@ -6408,7 +6494,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(output.generation_done.wait(), 5)
                     self.assertEqual(current(), 'speaking', 'Failure advisory uses real output events')
                     output.write_gate.set()
-                    await state('trouble')
+                    await state('trouble-engine')
                     self.assertIn("couldn't get a complete reply", await asyncio.wait_for(spoken.get(), 5))
                     for phrase in ('repeat that', 'what can i say'):
                         while not changes.empty():
@@ -6419,7 +6505,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await self.finish_user_turn(transport, phrase)
                         await state('speaking')
                         output.write_gate.set()
-                        await state('trouble')
+                        await state('trouble-engine')
                     for phrase in ('stop', 'cancel', 'mute'):
                         while not changes.empty():
                             changes.get_nowait()
@@ -6434,7 +6520,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         barrier = DataFrame()
                         await transport.input().queue_frame(barrier)
                         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
-                        self.assertEqual(current(), 'trouble', 'Engine trouble survives local turns')
+                        self.assertEqual(current(), 'trouble-engine', 'Engine trouble survives local turns')
                     self.assertEqual(len(brain.requests), 1)
                     self.assertFalse(transport.llm.local_actions.tasks)
                 finally:
@@ -7599,7 +7685,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             expected_advisory=notes_advisory,
                         )
                     self.assertTrue(channel.failure)
-                    await service.state('trouble')
+                    await service.state('trouble-engine' if failure == 'prepare' else 'trouble-notes')
                     self.assertIsNotNone(channel.process.returncode)
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
@@ -7632,7 +7718,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(brain.requests), 1)
                         self.assertEqual([event for kind, event in events if kind == 'write'], writes,
                                          'Sticky engine failure must not retry preparation, begin or ordinary messages')
-                        await service.state('trouble')
+                        await service.state('trouble-engine' if failure == 'prepare' else 'trouble-notes')
                     if failure != 'prepare':
                         self.assertEqual((notes / 'MEMORY.md').read_bytes(), b'\xffinvalid note nonce-811')
                 finally:
@@ -8639,7 +8725,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': first_reply, 'state': 'failed'})
                     async with asyncio.timeout(5):
                         while (state := await changes.get()) != 'idle':
-                            self.assertNotEqual(state, 'trouble')
+                            self.assertFalse(state.startswith('trouble'), state)
                     self.assertIsNone(channel.failure)
                     self.assertIsNone(channel.failure_advisory)
                     self.assertEqual(len(processes), 1)
