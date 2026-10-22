@@ -3292,7 +3292,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             muted = True
             return ''
 
-        with patch.object(bot, 'TRIAL_TURN_TIMEOUT', 1):
+        with patch.object(bot, 'TURN_TIMEOUT', 1):
             transport, spoken, committed, interrupted, processes, close = await self.open_session(
                 None, wire=wire, local_command=command,
             )
@@ -9124,7 +9124,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_engine_turn_timeout_speaks_failure_and_reaps_worker(self):
         for interrupt, deep in ((False, False), (False, True), (True, False), (True, True)):
-            with self.subTest(interrupted=interrupt, deep=deep), patch.object(bot, 'TRIAL_TURN_TIMEOUT', 1, create=True):
+            with self.subTest(interrupted=interrupt, deep=deep), patch.object(bot, 'TURN_TIMEOUT', 1, create=True):
                 wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
                         "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
                         "print('{\"session_ready\":true}', flush=True); sys.stdin.readline(); "

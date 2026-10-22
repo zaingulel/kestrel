@@ -37,7 +37,7 @@ REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Chec
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
 
 
-def trial_deeper_thought_requested(text: str) -> bool:
+def deeper_thought_requested(text: str) -> bool:
     text = text.strip()
     prefix = 'think more deeply about '
     return text.lower().startswith(prefix) and bool(text[len(prefix):].strip())
@@ -537,7 +537,7 @@ def main(*, base_url=BONSAI_URL):
             def construct_agent(*, memory):
                 built = AIAgent(
                     base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
-                    model='bonsai-2-9b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
+                    model='bonsai-2-27b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
                     session_db=None, fallback_model=None, save_trajectories=False,
                     # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
@@ -685,7 +685,7 @@ def main(*, base_url=BONSAI_URL):
                         for event in delivery.feed(text):
                             emit(event)
 
-                    deep = trial_deeper_thought_requested(messages[-1]['content'])
+                    deep = deeper_thought_requested(messages[-1]['content'])
                     agent.reasoning_config = {'enabled': True, 'effort': 'medium'} if deep else {'enabled': False}
                     agent.max_tokens = 16384 if deep else 180
                     template = {'enable_thinking': deep}

@@ -56,7 +56,7 @@ class ScriptedBrain:
                     self.end_headers()
                     self.wfile.write(json.dumps({
                         'id': 'scripted', 'object': 'chat.completion', 'created': 0,
-                        'model': 'bonsai-2-9b', 'choices': [{'index': 0, 'message': {
+                        'model': 'bonsai-2-27b', 'choices': [{'index': 0, 'message': {
                             'role': 'assistant', **reply}, 'finish_reason': 'stop'}],
                     }).encode())
                     return
@@ -67,7 +67,7 @@ class ScriptedBrain:
                         self.end_headers()
                         self.wfile.write(json.dumps({
                             'id': 'scripted', 'object': 'chat.completion', 'created': 0,
-                            'model': 'bonsai-2-9b', 'choices': [{'index': 0, 'message': {
+                            'model': 'bonsai-2-27b', 'choices': [{'index': 0, 'message': {
                                 'role': 'assistant', 'content': reply}, 'finish_reason': 'stop'}],
                         }).encode())
                         return
@@ -76,7 +76,7 @@ class ScriptedBrain:
                 self.end_headers()
                 for delta, finish in reply:
                     chunk = {'id': 'scripted', 'object': 'chat.completion.chunk', 'created': 0,
-                             'model': 'bonsai-2-9b',
+                             'model': 'bonsai-2-27b',
                              'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
@@ -576,13 +576,13 @@ class HermesWorkerTests(unittest.TestCase):
         import hermes_worker
         for text in ('Think more deeply about the sum.', '  THINK MORE DEEPLY ABOUT x  '):
             with self.subTest(text=text):
-                self.assertTrue(hermes_worker.trial_deeper_thought_requested(text))
+                self.assertTrue(hermes_worker.deeper_thought_requested(text))
         for text in ('Think more deeply about ', 'Think more deeply about',
                      '"Think more deeply about x"', 'Do not think more deeply about x',
                      'Earlier I said Think more deeply about x', 'Please Think more deeply about x',
                      'Think more deeply about   '):
             with self.subTest(text=text):
-                self.assertFalse(hermes_worker.trial_deeper_thought_requested(text))
+                self.assertFalse(hermes_worker.deeper_thought_requested(text))
 
     def test_memory_storage_refuses_unsafe_notes_without_repair(self):
         require_native_hermes()
@@ -2437,7 +2437,7 @@ class NativeHermesTests(unittest.TestCase):
                 os.umask(original_umask)
         run_agent.AIAgent.assert_called_once_with(
             base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
-            api_mode='chat_completions', model='bonsai-2-9b', enabled_toolsets=[],
+            api_mode='chat_completions', model='bonsai-2-27b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=False, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
@@ -2779,8 +2779,8 @@ class BonsaiStartupTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         shutil.copyfile(ROOT / 'run-brain.sh', root / 'run-brain.sh')
-        prism = root / '.runtime/tools/bonsai-prism-b10777-e3de715'
-        server = prism / 'cuda-12.8/llama-prism-b10777-e3de715/llama-server'
+        prism = root / '.runtime/tools/bonsai-prism-b10787-73bfe6c'
+        server = prism / 'cuda-12.8/llama-prism-b10787-73bfe6c/llama-server'
         server.parent.mkdir(parents=True)
         server.write_text(
             '#!/usr/bin/python3\n'
@@ -2800,20 +2800,23 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         observed = json.loads(result.stdout)
         self.assertEqual(observed['arguments'], [
-            '-m', str(root / '.runtime/models/bonsai-2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf'),
-            '--alias', 'bonsai-2-9b', '--host', '127.0.0.1', '--port', '8080',
-            '-ngl', '99', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
-            '--fit', 'off', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
+            '-m', str(root / '.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf'),
+            '--alias', 'bonsai-2-27b', '--host', '127.0.0.1', '--port', '8080',
+            '--gpu-layers', 'all', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
+            '--fit', 'off', '--kv-offload', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
             '--no-context-shift', '--no-webui', '--no-slots', '--no-agent', '--no-ui-mcp-proxy',
-            '--cors-origins', 'http://127.0.0.1:8080', '--reasoning', 'off', '--temp', '0.4',
+            '--cors-origins', 'http://127.0.0.1:8080', '--jinja', '--reasoning', 'auto',
+            '--reasoning-format', 'deepseek', '--chat-template-kwargs', '{"enable_thinking":false}',
+            '--temp', '0.4',
             '--top-p', '0.8', '--top-k', '20', '--min-p', '0', '--presence-penalty', '1.5',
             '--repeat-penalty', '1', '--repeat-last-n', '64', '-lv', '3',
         ])
-        libraries = root / '.runtime/voice-venv/lib/python3.12/site-packages/nvidia'
         self.assertEqual(observed['environment'], {
             'HOME': str(root), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
-            'LD_LIBRARY_PATH': ':'.join(str(libraries / name / 'lib') for name in
-                                      ('cuda_runtime', 'cublas', 'cuda_nvrtc', 'nvjitlink')),
+            'LD_LIBRARY_PATH': ':'.join((
+                str(root / '.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/llama-prism-b10787-73bfe6c'),
+                str(root / '.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64'),
+            )),
         })
         self.assertEqual(observed['cwd'], str(prism))
 
