@@ -6,6 +6,8 @@ Item {
     property string kind: "unavailable"
     required property color ink
     required property color troubleInk
+    required property color flatBackground
+    property bool seeThrough: false
     property bool motionEnabled: false
     property bool feed: false
 
@@ -16,12 +18,32 @@ Item {
         onTriggered: phase = (phase + frameTime * 1000 / period) % 1
     }
 
+    // Faint is the lowest opacity from 0.6, in hundredths, at which the ink over the opaque flat background measures at
+    // least 3 to 1 (WCAG 1.4.11); each channel is taken one 8-bit step in the direction that brings the mark's luminance
+    // nearer the background's, as far as rendering rounds; a see-through ground is unknown, so faint is then full opacity.
+    readonly property real faintOpacity: {
+        if (seeThrough) return 1
+        const luminance = rgb => rgb.map(v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
+            .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0)
+        const base = [flatBackground.r, flatBackground.g, flatBackground.b]
+        const full = [ink.r, ink.g, ink.b]
+        const baseLuminance = luminance(base)
+        for (let step = 60; step < 100; step++) {
+            const blend = base.map((b, i) => b + (full[i] - b) * step / 100)
+            const nudge = luminance(blend) < baseLuminance ? 1 / 255 : -1 / 255
+            const markLuminance = luminance(blend.map(v => Math.min(1, Math.max(0, v + nudge))))
+            if ((Math.max(markLuminance, baseLuminance) + 0.05) / (Math.min(markLuminance, baseLuminance) + 0.05) >= 3)
+                return step / 100
+        }
+        return 1
+    }
+
     // A kind without an entry, unavailable included, keeps the base (unavailable) form.
     readonly property var form: Object.assign({h: [4, 8, 12], lift: 0, spread: 0, hollow: 0, alarm: 0, opacity: 1, listen: 0, think: 0, speak: 0}, ({
-        "not-running": {h: [2, 2, 2], spread: 1, opacity: 0.6},
-        "inactive": {h: [6, 6, 6], hollow: 1, opacity: 0.6},
+        "not-running": {h: [2, 2, 2], spread: 1, opacity: faintOpacity},
+        "inactive": {h: [6, 6, 6], hollow: 1, opacity: faintOpacity},
         "starting": {h: [6, 6, 6], hollow: 1},
-        "idle": {h: [6, 6, 6], opacity: 0.6},
+        "idle": {h: [6, 6, 6], opacity: faintOpacity},
         "listening": {h: [12, 12, 12]},
         "thinking": {h: [6, 12, 6]},
         "speaking": {h: [12, 6, 12]},
