@@ -56,6 +56,7 @@ from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
+TRIAL_TURN_TIMEOUT = 1800
 MUTE_TIMEOUT = 5
 VOLUME_TIMEOUT = 5
 DESKTOP_TIMEOUT = 5
@@ -790,7 +791,7 @@ class HermesRequestChannel:
     async def _exchange(self, request, output, *, admitted, desktop=None):
         advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
         try:
-            async with asyncio.timeout(ENGINE_TIMEOUT):
+            async with asyncio.timeout(TRIAL_TURN_TIMEOUT if 'messages' in request else ENGINE_TIMEOUT):
                 if not admitted():
                     return
                 self.process.stdin.write(json.dumps(request).encode() + b'\n')

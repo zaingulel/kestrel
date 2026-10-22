@@ -3185,6 +3185,88 @@ class WholeConversationFixtureTests(unittest.TestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trial_deep_reply_is_private_and_stoppable(self):
+        blocked, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def deep_reply():
+            yield {'reasoning_content': 'STRUCTURED-PRIVATE-CANARY.'}, None
+            yield {'content': '[delivery:neutral] <thi'}, None
+            yield {'content': 'nk>PRIVATE-CANARY. '}, None
+            yield {'content': '</think>Answer.'}, None
+            yield {'content': ' Unheard pending'}, None
+            blocked.set()
+            if not release.wait(45):
+                raise AssertionError('Deep reply was never released')
+            yield {'tool_calls': [{'index': 0, 'id': 'late-mute', 'type': 'function',
+                                  'function': {'name': 'mute', 'arguments': '{}'}}]}, None
+            yield {}, 'tool_calls'
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.', deep_reply(),
+            '[delivery:neutral] Unheard continuation.', '[delivery:neutral] Next.',
+        ])
+        self.addCleanup(brain.close)
+        local = AsyncMock(side_effect=AssertionError('Stopped turn dispatched a desktop action'))
+        native_events = []
+        transport, spoken, committed, interrupted, processes, close = await self.open_session(
+            brain, through_service=True, native_audio=True, tts_model=None,
+            local_command=local, native_events=native_events,
+        )
+        service = transport.service
+        _, _, context = service.manager.ingress
+        prompt = 'Think more deeply about this answer.'
+        try:
+            transport.capture.stdout.feed_data(bytes(640))
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, prompt)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Answer.')
+            self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
+            reader = transport.llm.channel.reader
+            interrupted.clear()
+            transport.capture.stdout.feed_data(bytes(640))
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await asyncio.wait_for(interrupted.wait(), 5)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Answer.')
+            await self.finish_user_turn(transport, 'stop')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertFalse(reader.done(), 'Stop must finish before accepted generation drains')
+            self.assertTrue(spoken.empty())
+            self.assertEqual(transport.llm.last_spoken_reply, 'Answer.')
+            before = sum(len(data) for child in service.audio_children for data in child.writes)
+            transport.capture.stdout.feed_data(bytes(640))
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Next ordinary answer.')
+            release.set()
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Next.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Next.')
+            self.assertGreater(sum(len(data) for child in service.audio_children for data in child.writes), before)
+            local.assert_not_awaited()
+            synthesis = [item.args[0] for item in service.model.stream.call_args_list]
+            self.assertEqual(synthesis, ['Hello.', 'Answer.', 'Next.'])
+            self.assertEqual(transport.llm.last_spoken_reply, 'Next.')
+            for visible in (native_events, synthesis, context.get_messages(), service.manager.conversation.turns):
+                self.assertNotIn('PRIVATE', json.dumps(visible))
+            for visible in (synthesis, context.get_messages(), service.manager.conversation.turns):
+                self.assertNotIn('Unheard', json.dumps(visible))
+            self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': prompt},
+                {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'kestrel-desktop-0', 'type': 'function',
+                    'function': {'name': 'mute', 'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': 'kestrel-desktop-0',
+                 'content': '{"confirmed": false, "attempted": false, "reason": "stopped"}'},
+                {'role': 'assistant', 'content': 'Answer.'},
+                {'role': 'user', 'content': 'Next ordinary answer.'},
+            ])
+            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [180, 16384, 16384, 180])
+            self.assertTrue(any('tool_call' in event for kind, event in native_events if kind == 'read'))
+            self.assertTrue(any(child.writes for child in service.audio_children if child.stdin is not None))
+            self.assertTrue(spoken.empty())
+        finally:
+            release.set()
+            await close()
+        self.assertTrue(all(process.returncode is not None for process, _ in processes))
+
     async def test_brain_desktop_effect_after_reader_timeout_is_accounted(self):
         wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
                 "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
@@ -3210,7 +3292,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             muted = True
             return ''
 
-        with patch.object(bot, 'ENGINE_TIMEOUT', 1):
+        with patch.object(bot, 'TRIAL_TURN_TIMEOUT', 1):
             transport, spoken, committed, interrupted, processes, close = await self.open_session(
                 None, wire=wire, local_command=command,
             )
@@ -9041,8 +9123,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(home.exists())
 
     async def test_engine_turn_timeout_speaks_failure_and_reaps_worker(self):
-        for interrupt in (False, True):
-            with self.subTest(interrupted=interrupt), patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
+        for interrupt, deep in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(interrupted=interrupt, deep=deep), patch.object(bot, 'TRIAL_TURN_TIMEOUT', 1, create=True):
                 wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
                         "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
                         "print('{\"session_ready\":true}', flush=True); sys.stdin.readline(); "
@@ -9062,7 +9144,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(interrupted.wait(), 5)
                         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'One fact.')
                     context = await self.assert_failed_reply(
-                        transport, spoken, committed, 'Answer while the engine is hung.',
+                        transport, spoken, committed, ('Think more deeply about the hung answer.' if deep
+                                                       else 'Answer while the engine is hung.'),
                         expected_advisory="I couldn't reach Kestrel's engine. Restart Kestrel and try again.",
                     )
                     self.assertNotIn('Unheard continuation', context)
