@@ -1,19 +1,29 @@
 # kestrel
 A local conversation prototype for Omarchy, with speech and the Bonsai brain on the laptop.
 
-Bonsai 2 9B runs through the pinned Prism CUDA 12.8 server on the NVIDIA RTX 5080 laptop, with a 64,000-token context and F16 (16-bit floating-point) key and value caches. Hermes uses model alias `bonsai-2-9b` at `http://127.0.0.1:8080/v1`. No Ally connection is needed.
+Bonsai 2 27B runs through the pinned Prism CUDA 12.8 server on the NVIDIA RTX 5080 laptop, with a 64,000-token context and F16 (16-bit floating-point) key and value caches. Hermes uses model alias `bonsai-2-27b` at `http://127.0.0.1:8080/v1`. No Ally connection is needed.
 
 Bonsai uses the laptop's NVIDIA RTX 5080. Speech recognition and default Phonon voice generation use its CPU (central processing unit); explicit VoxCPM2 selection uses the GPU (graphics processing unit):
 
 | Component | Model directory | Runtime |
 | --- | --- | --- |
-| Bonsai 2 9B, conversation | `.runtime/models/bonsai-2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf` | `.runtime/tools/bonsai-prism-b10777-e3de715/cuda-12.8/llama-prism-b10777-e3de715/llama-server` |
+| Bonsai 2 27B, conversation | `.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf` | `.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/llama-prism-b10787-73bfe6c/llama-server` |
 | [Nemotron Speech Streaming English 0.6B](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b), Q8 CPU speech to text | `.runtime/models/nemotron-q8` | `.runtime/voice-venv` with the pinned native CPU library |
 | [Phonon 31M English](https://huggingface.co/gradium/phonon-31m-en/blob/541f5752bc3c79583068bb205bfda5eb39aaa08a/README.md), q8 CPU text to speech, public `default` voice | `.runtime/models/phonon-31m-en-q8` | `.runtime/voice-venv` with `ptts==0.4.0` |
 | [VoxCPM2](https://github.com/OpenBMB/VoxCPM), explicit GPU text-to-speech rollback | `.runtime/models/voxcpm2` | `.runtime/voice-venv` |
 | Hey Kestrel, local wake phrase | `.runtime/wakeword/hey_kestrel.tflite` | `.runtime/wakeword/venv` |
 
 The voice environment uses project-local Python 3.12, `ptts==0.4.0`, CUDA-enabled PyTorch 2.11 and Transformers 4.57. Phonon uses its native CPU runtime; VoxCPM2 retains the CUDA stack for explicit rollback. Recognition runs a standard-library worker in that voice interpreter, loading the pinned Q8 model through the native CPU library under `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu`. It needs no separate Python dependency environment. The worker pins the recognition model's size and SHA-256 hash; [Phonon assets](#phonon-assets-and-package) have their own fixed pins. Existing VoxCPM2 model revisions are recorded in `.runtime/models/manifest.json` and voice package versions in `.runtime/voice-installed.txt`. Keep the old GPU (graphics processing unit) recognition assets and `.runtime/asr-venv` intact; startup does not download or repair recognition assets. Runtime files are excluded from Git.
+
+Provision the brain assets into the existing stable checkout's ignored `.runtime/models/` and `.runtime/tools/` directories. Use the immutable sources below and verify both size and SHA-256 before extraction or execution. Keep existing assets, refuse unexpected destinations, and inspect archive members before extracting: paths and library links must remain inside the new destination, with no traversal, cycles, hardlinks or special files. New directories are mode `0700`, data files `0600` and executable binaries `0700`.
+
+| Asset and licence | Immutable source | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| Bonsai 2 27B PQ2_0, Apache 2.0 | [Model revision b072e1d3b35a0a630cece372c2127528e0994386](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/b072e1d3b35a0a630cece372c2127528e0994386/Ternary-Bonsai-2-27B-PQ2_0.gguf) | 7206168928 | `3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1` |
+| Prism CUDA 12.8 archive, MIT | [prism-b10787-73bfe6c](https://github.com/PrismML-Eng/llama.cpp/releases/download/prism-b10787-73bfe6c/llama-prism-b10787-73bfe6c-bin-linux-cuda-12.8-x64.tar.gz) | 208658605 | `f61ac818da2c8cddc47d75c955b6f5bf821738138760842dd50413c5181cdfe1` |
+| Matching CUDA runtime archive, retain bundled licence notices | [b11815 CUDA 12.8 libraries](https://github.com/ggml-org/llama.cpp/releases/download/b11815/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64.tar.gz) | 594377568 | `b26946028fda3195d858f2e0cdb6763cc6572dfad860ff5741b2e95f0eba5384` |
+
+Prism's source commit is `73bfe6cc485554822f80c473a3c0c4f25e80f41b`, pinned by [Bonsai demo backend support](https://github.com/PrismML-Eng/Bonsai-demo/blob/294035ef0d42faec196a49b6a32401d5f1129c58/BACKEND-SUPPORT.md). Extract Prism under `.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/` and the CUDA runtime under `.runtime/tools/cudart-b11815-cuda-12.8/`, preserving each archive's inner directory. The launcher sets `LD_LIBRARY_PATH` to those two runtime directories only. It pins full CUDA layer offload, one slot, 64,000 tokens, F16 key/value caches, flash attention, batch 256/microbatch 128, no automatic fit or context shift, and the loopback endpoint restrictions. Startup downloads or repairs nothing.
 
 Conversation runs through a direct Hermes Agent 0.22.2 child process, started by `bot.py` through `hermes_worker.py`. The checkout owns `.runtime/hermes-0.22.2/source`, its interpreter at `.runtime/hermes-0.22.2/venv/bin/python`, and the interpreter's backing files under `.runtime/hermes-0.22.2/managed`. The source must be at exact release commit `d923a5eb487a17c0a68801bba9ef0f56c81040a8`, with no tracked changes. Before importing the engine, readiness checks that identity and requires `run_agent` to resolve to that source's `run_agent.py`. The release reports package metadata `0.0.0`, which does not identify the reviewed source. These checks establish release identity, not cryptographic attestation of the dependency environment. Kestrel's private conversation-history adaptation is release-specific; upgrades require native compatibility checks. A missing interpreter or refused identity requires reinstalling the pinned source and recreating its environment from the upstream frozen lock with Python 3.14.7 and `HERMES_RUNTIME_DIR` set to the owned `managed` directory, then restarting Kestrel. Keep the interpreter backing in that owned layout, outside disposable temporary folders. Preparing a trial checkout does not upgrade the installed production services.
 
@@ -41,23 +51,70 @@ To install a fresh pinned Hermes runtime, first provide Git, `/usr/bin/python`, 
 
 The managed Python backing and runtime home stay under this checkout-owned directory. Preparing a trial runtime does not authorise deploying it or restarting production.
 
-Run service installation commands from the stable checkout at `~/Projects/zaingulel/kestrel`. The tracked user units use that path, so do not install them from a trial checkout. They require the ignored model assets and environments, including the manually provisioned [Phonon package and assets](#phonon-assets-and-package) for the default selection; the launchers do not download or repair them. Inspect and save any existing installed unit definitions before replacing them. Stop any existing transient Kestrel service and brain before installing these units.
+### Retained service installation
+
+The base user units are installed from the stable checkout at `~/Projects/zaingulel/kestrel`. Save their effective definitions and all existing drop-ins before installation. The launchers require the provisioned assets above, the voice environments and the [Phonon package and assets](#phonon-assets-and-package).
+
+```sh
+systemctl --user cat kestrel-brain.service kestrel-voice.service
+systemctl --user show kestrel-brain.service kestrel-voice.service -p WorkingDirectory -p ExecStart -p ExecStartPost -p Environment -p DropInPaths -p StandardOutput
+```
+
+A retained installation is an exact export of a reviewed full Git commit at `~/.local/share/kestrel/bonsai-27b-<full-commit>/`. Create that directory exclusively, then export with `git archive <full-commit>` and native `tar` extraction; a job worktree and `/run` overrides are temporary. Keep the installation when cleaning up its source job.
+
+Its `.runtime` must be a real current-owner directory, mode `0700`. Link only the existing stable `bin`, `cache`, `python`, `asr-venv`, `voice-venv`, `models`, `voices`, `tools` and `hermes-0.22.2` dependency/asset directories. Copy the admitted [wake runtime](#wake-phrase-assets) as real private files. Notes, traces, logs, samples and temporary Hermes homes remain separate from shared dependency links.
+
+Before migrating notes or traces, stop voice and verify its brain, audio children and listener have exited. Admit the source stores with their existing [notes](#automatic-local-notes) and [trace](#local-conversation-traces) ownership, type, mode and link rules before reading any content. Refuse unsafe originals without repairing them. Copy admitted stores with no-follow reads into separate real private directories, preserve the originals, and validate destination admission. Keep notes mode `0700`/`0600` and traces mode `0700`/`0600`; do not merge another installation's stores. Pre-create the retained `.runtime/brain-server.log` and `.runtime/voice-server.log` privately with mode `0600`.
+
+The base units can be installed with these existing commands while services are stopped:
 
 ```sh
 install -Dm644 systemd/kestrel-brain.service ~/.config/systemd/user/kestrel-brain.service
 install -Dm644 systemd/kestrel-voice.service ~/.config/systemd/user/kestrel-voice.service
-systemctl --user daemon-reload
-systemctl --user enable --now kestrel-voice.service
 ```
 
-The tracked units above use the stable checkout. A retained installation override can select another voice checkout and its voice log destination. Inspect the effective installation before using shortcut or relative storage paths:
+Select the retained snapshot with persistent `~/.config/systemd/user/kestrel-brain.service.d/zz-bonsai-27b.conf` and `~/.config/systemd/user/kestrel-voice.service.d/zz-bonsai-27b.conf`. Create them exclusively, preserving existing drop-ins. Replace `<full-commit>` below with the reviewed commit; retain exact ownership copies and the prior definition bytes for rollback.
+
+Brain drop-in:
+
+```ini
+[Service]
+WorkingDirectory=%h/.local/share/kestrel/bonsai-27b-<full-commit>
+ExecStart=
+ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash %h/.local/share/kestrel/bonsai-27b-<full-commit>/run-brain.sh
+ExecStartPost=
+ExecStartPost=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} /usr/bin/bash %h/.local/share/kestrel/bonsai-27b-<full-commit>/check-brain-ready.sh
+StandardOutput=append:%h/.local/share/kestrel/bonsai-27b-<full-commit>/.runtime/brain-server.log
+StandardError=inherit
+```
+
+Voice drop-in:
+
+```ini
+[Service]
+WorkingDirectory=%h/.local/share/kestrel/bonsai-27b-<full-commit>
+ExecStart=
+ExecStart=%h/.local/share/kestrel/bonsai-27b-<full-commit>/run-voice.sh
+Environment=KESTREL_TTS_MODEL=phonon KESTREL_VOICE=irish-female KESTREL_MANAGED_BRAIN=1
+StandardOutput=append:%h/.local/share/kestrel/bonsai-27b-<full-commit>/.runtime/voice-server.log
+StandardError=inherit
+```
+
+Read back every effective property and drop-in after `systemctl --user daemon-reload`. Both working directories, launchers, the brain readiness command and logs must resolve to the retained snapshot; CPU voice settings and existing service lifetime/kill settings must remain intact. Refuse unexpected later overrides or paths into a job worktree or `/run`.
 
 ```sh
-systemctl --user show kestrel-voice.service -p WorkingDirectory -p ExecStart -p DropInPaths
-systemctl --user cat kestrel-voice.service
+systemctl --user daemon-reload
+systemctl --user cat kestrel-brain.service kestrel-voice.service
+systemctl --user show kestrel-brain.service kestrel-voice.service -p WorkingDirectory -p ExecStart -p ExecStartPost -p Environment -p DropInPaths -p StandardOutput
+systemctl --user enable --now kestrel-voice.service
+systemctl --user status kestrel-brain.service kestrel-voice.service
 ```
 
-Use the effective `WorkingDirectory` as the active voice checkout: its `run-voice.sh`, `desktop/control.py`, plugin directory `desktop/`, notes `.runtime/hermes-memory/` and traces `.runtime/hermes-traces/` belong together. For a retained installation, keep these paths and `.runtime/voice-server.log` in that checkout; inspect `StandardOutput` in the installed unit and drop-ins for the actual voice log destination. The brain unit retains its own checkout and `.runtime/brain-server.log`. Keep the retained installation and its private storage when cleaning up a job worktree.
+Startup leaves conversation inactive. Verify the actual Bonsai alias, 64,000-token context, CUDA/F16 placement, CPU speech and local readiness before activation; `/health` alone does not establish model identity. Restart once with `systemctl --user restart kestrel-voice.service` and repeat effective-path/readiness/inactive checks. This verifies a service restart; graphical-login and reboot behaviour require their own observation.
+
+For rollback, stop voice first and verify both units, owned children, socket and graphics allocation have released. Use `cmp` against saved owned copies before removing only this installation's exact `zz-bonsai-27b.conf` files with `rm -i`; restore captured prior definition bytes, preserving unrelated drop-ins. Run `systemctl --user daemon-reload`, repeat `cat`/`show` above, and restore the recorded prior active state with `systemctl --user start kestrel-voice.service` only when it was previously active and voice is intended. Preserve installation snapshots and private owner stores.
+
+Use the effective voice `WorkingDirectory` for its notes `.runtime/hermes-memory/` and traces `.runtime/hermes-traces/`. Inspect `StandardOutput` and the drop-ins for actual log destinations. The unchanged root-main GUI plugin and shortcut may remain at `~/Projects/zaingulel/kestrel/desktop` when `Panel.qml`, `Conversation.qml`, `Service.qml`, `NativeInputs.qml`, `control.py`, `status.py` and `conversation.py` are byte-identical to the retained installation. This preserves the local control protocol; otherwise use matching reviewed interface files before enabling controls.
 
 The enabled voice service starts at graphical login after reboot and waits for the desktop session environment before launching voice. This also starts microphone use, including during speech startup. It first starts Bonsai and waits for a successful HTTP (Hypertext Transfer Protocol) 200 response from `/health`, bounded by the brain's 130-second startup allowance. The readiness command ignores curl configuration and proxies, discards the response body and refuses redirects. Managed readiness also verifies that the main process identifier (PID) supplied by systemd owns the listening socket at `127.0.0.1:8080`, using installed `lsof` and coreutils `timeout`. Missing, invalid or mismatched ownership refuses readiness. This verifies HTTP readiness and socket ownership at startup, not model identity. Before creating Hermes, managed voice checks that its owned `kestrel-brain.service` is active. Failed or unavailable status leaves local controls available but sends neither preparation nor user conversation to the port; an ordinary turn receives the engine-failure advice. Ownership and unit status are startup snapshots, not ongoing server identity verification; they do not prevent a later local takeover. Neither service restarts automatically.
 
@@ -96,6 +153,14 @@ The wake detector uses its own real, checkout-owned `.runtime/wakeword/venv` wit
 Missing or refused assets, worker failure, invalid results or overloaded frame delivery disable wake detection for that service lifetime and log: **Wake phrase unavailable. Press Super + Shift + K to start. Check the service log and restart Kestrel.** The shortcut remains available when cleanup succeeds. Uncertain recorder or detector cleanup refuses new activation; inspect the service log and restart Kestrel.
 
 Automated production-worker evidence covers the accepted private recording and equal-length silence. It does not establish real microphone reliability or rejection of ordinary conversation or television. Those require a separate owner-present trial.
+
+### Thinking for one answer
+
+Ordinary replies use thinking off. Begin the current request with **Think more deeply about** followed by a nonempty question to enable thinking for that answer, including its tool rounds. Matching ignores case and surrounding whitespace; quoted, negated, embedded or historical uses do not enable it. The next ordinary request returns to thinking off, including after a failed deep answer. The accepted request text remains unchanged in visible conversation history.
+
+Ordinary requests initially allow 180 output tokens; explicit deep requests initially allow 16,384 with medium reasoning effort. Native within-turn continuations can increase a later call's allowance, so these are initial per-call settings rather than hard total-turn output budgets. Recognized reasoning delimiters and private structured fields are filtered before visible delivery; malformed reasoning content refuses the answer. See the [local conversation trace rules](#local-conversation-traces) for diagnostic contents and retention.
+
+The worker exchange for an accepted brain turn is bounded to 1,800 seconds, including long-history prefill, in either thinking mode. Hermes worker startup, fixed preparation and fresh-session begin each use a 45-second bound. The separate brain-service startup allowance is 130 seconds. These bounds supervise failures; they are not response-time promises. [Stop or cancel](#stop-or-cancel) keeps its existing output suppression and accepted-work accounting while native generation drains.
 
 ### Start and end a conversation
 
@@ -312,9 +377,9 @@ The optional `local.kestrel` Omarchy plugin in `desktop/` displays Kestrel's sta
 
 The panel header shows a short state word with no icon and the verified microphone use, such as `Listening · Mic in use`, `Not running · Mic released` or `Starting · Mic in use?`. Its full truthful microphone status remains available through the native tooltip and accessibility metadata. The header tooltip gives `Move: Super + left drag`. Kestrel bubbles sit left and owner bubbles right. Only spoken owner messages carry the small microphone identifying `Spoken message`; typed messages have no microphone caption. Short feeds rest at the bottom, and an empty transcript shows a centred hint for the current state. Only the live reply tail, which names its state in a small word, and the listening ghost can animate, following the native motion preference; history and new turns appear without entrance animation. Reply marks follow the accepted feed, while the header words and voice button follow the separate verified service status. Interrupted and failed empty replies retain their notices.
 
-The voice button beside **Send message** starts or ends voice exactly like **Super + Shift + K**: it runs `control.py --toggle` from the installed plugin directory, so install the plugin from the same voice checkout as the shortcut. A filled microphone means verified voice on and names the button **End voice conversation**; an outline microphone means voice off and **Start voice conversation**. While status is starting, in trouble or unknown, and from a press until the next status update, a question badge marks it **Start or end voice conversation**. A press while the previous press's command is still running is ignored; once that command ends, the next press is sent as the shortcut would send it. Refusal, a missing service or an unconfirmed reply attempts the shortcut's native notification; the button never retries and never reads its state from the reply.
+The voice button beside **Send message** starts or ends voice exactly like **Super + Shift + K**: it runs `control.py --toggle` from the installed plugin directory, so keep the plugin and shortcut control sources byte-identical to the active voice installation as described above. A filled microphone means verified voice on and names the button **End voice conversation**; an outline microphone means voice off and **Start voice conversation**. While status is starting, in trouble or unknown, and from a press until the next status update, a question badge marks it **Start or end voice conversation**. A press while the previous press's command is still running is ignored; once that command ends, the next press is sent as the shortcut would send it. Refusal, a missing service or an unconfirmed reply attempts the shortcut's native notification; the button never retries and never reads its state from the reply.
 
-For keyboard access, first verify `Super + Shift + K` and `Super + F12` are unused in all compositor submaps. These are installation instructions, not a claim that either binding is installed or verified. The example below uses the default stable checkout. For a retained installation override, use the effective voice checkout from the service inspection above for both the `local.kestrel` plugin target and the absolute `desktop/control.py` path. Add these bindings to `~/.config/hypr/bindings.lua`, preserving existing bindings:
+For keyboard access, first verify `Super + Shift + K` and `Super + F12` are unused in all compositor submaps. These are installation instructions, not a claim that either binding is installed or verified. The example below uses the default stable checkout. For a retained installation override, the unchanged root-main plugin and shortcut paths can stay in place after the interface-byte comparison above; otherwise use the effective voice checkout for both paths. Add these bindings to `~/.config/hypr/bindings.lua`, preserving existing bindings:
 
 ```lua
 o.bind("SUPER + SHIFT + K", "Kestrel start or end conversation", "/usr/bin/python3 /home/zain/Projects/zaingulel/kestrel/desktop/control.py --toggle")
@@ -414,7 +479,7 @@ Editing or deleting notes does not rewrite retained diagnostic traces, service l
 
 Conversation traces stay on this laptop until you delete them; Kestrel never uploads them or uses them as later conversation memory.
 
-Each Hermes worker creates a fresh `.runtime/hermes-traces/session-*/events.jsonl` in its checkout. These ignored native diagnostic records can contain full conversation payloads, system context, preparation turns, memory and desktop tool payloads, including calls, arguments and results, and generated text that was never heard. They are not audio recordings or an exact record of what was spoken. They survive worker shutdown and removal of its temporary Hermes home, including failed sessions. Kestrel never reads them back into the brain or prunes them automatically. Disk use grows until you remove them; never commit or publish them.
+Each Hermes worker creates a fresh `.runtime/hermes-traces/session-*/events.jsonl` in its checkout. These ignored native diagnostic records can contain full conversation payloads, system context, model reasoning, preparation turns, memory and desktop tool payloads, including calls, arguments and results, and generated text that was never heard. They are not audio recordings or an exact record of what was spoken. They survive worker shutdown and removal of its temporary Hermes home, including failed sessions. Kestrel never reads them back into the brain or prunes them automatically. Disk use grows until you remove them; never commit or publish them.
 
 The trace root and each session directory belong to the current user with mode `0700`; each events file has mode `0600`. The trace root's parent must be a real directory owned by the current user without group or world write access. Kestrel refuses unsafe existing paths, symlinks and preexisting plugin-configuration entries without repairing or replacing them. Other processes running as your account can still read these files. This is application configuration isolation, not an operating-system sandbox.
 

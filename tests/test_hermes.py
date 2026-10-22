@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -47,6 +47,19 @@ class ScriptedBrain:
                     self.end_headers()
                     self.wfile.write(b'{"error":{"message":"scripted refusal"}}')
                     return
+                if isinstance(reply, dict):
+                    if body.get('stream', False) is not False:
+                        self.send_error(500, 'Complete fixture requires streaming off')
+                        raise AssertionError('Complete fixture requires streaming off')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        'id': 'scripted', 'object': 'chat.completion', 'created': 0,
+                        'model': 'bonsai-2-27b', 'choices': [{'index': 0, 'message': {
+                            'role': 'assistant', **reply}, 'finish_reason': 'stop'}],
+                    }).encode())
+                    return
                 self.send_response(200)
                 if isinstance(reply, str):
                     if not body.get('stream'):
@@ -54,7 +67,7 @@ class ScriptedBrain:
                         self.end_headers()
                         self.wfile.write(json.dumps({
                             'id': 'scripted', 'object': 'chat.completion', 'created': 0,
-                            'model': 'bonsai-2-9b', 'choices': [{'index': 0, 'message': {
+                            'model': 'bonsai-2-27b', 'choices': [{'index': 0, 'message': {
                                 'role': 'assistant', 'content': reply}, 'finish_reason': 'stop'}],
                         }).encode())
                         return
@@ -63,7 +76,7 @@ class ScriptedBrain:
                 self.end_headers()
                 for delta, finish in reply:
                     chunk = {'id': 'scripted', 'object': 'chat.completion.chunk', 'created': 0,
-                             'model': 'bonsai-2-9b',
+                             'model': 'bonsai-2-27b',
                              'choices': [{'index': 0, 'delta': delta, 'finish_reason': finish}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
                     self.wfile.flush()
@@ -81,12 +94,12 @@ class ScriptedBrain:
 
 
 class WorkerProcess:
-    def __init__(self, home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None):
+    def __init__(self, home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None, non_streaming=False):
         import hermes_worker
         self.home = home
         self.stderr = (home / 'worker-stderr.txt').open('w+')
         self.process = subprocess.Popen(
-            self.command(home, brain, synthetic_default_home=synthetic_default_home, trace_root=trace_root, memory_root=memory_root),
+            self.command(home, brain, synthetic_default_home=synthetic_default_home, trace_root=trace_root, memory_root=memory_root, non_streaming=non_streaming),
             env=hermes_worker.child_environment(home),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
         )
@@ -95,7 +108,7 @@ class WorkerProcess:
         self.buffer = b''
 
     @staticmethod
-    def command(home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None):
+    def command(home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None, non_streaming=False):
         # Test-only containment observes even caught attempts, before permitting only this provider.
         bootstrap = '''
 import json, pathlib, sys
@@ -130,6 +143,12 @@ def observed_scaffold(directory):
     if not observing:
         observing = True
         from run_agent import AIAgent
+        if NON_STREAMING_FIXTURE:
+            original_run = AIAgent.run_conversation
+            def non_streaming_run(self, *args, **kwargs):
+                self._disable_streaming = True
+                return original_run(self, *args, **kwargs)
+            AIAgent.run_conversation = non_streaming_run
         original_review = AIAgent._spawn_background_review
         def observed_review(self, *args, **kwargs):
             with (home / 'review-attempts.jsonl').open('a') as output:
@@ -155,7 +174,7 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
       if len(sys.argv) > 5 else nullcontext()):
     import hermes_worker
     hermes_worker.main(base_url=sys.argv[4])
-'''.replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
+'''.replace('NON_STREAMING_FIXTURE', repr(non_streaming)).replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
     'MEMORY_FIXTURE', repr(str(memory_root if memory_root is not None else home / 'notes')))
         command = [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
                    str(brain.server.server_port), brain.url]
@@ -229,13 +248,13 @@ def require_native_hermes():
 
 
 @contextmanager
-def native_worker(replies, *, synthetic_default_home=None, memory_root=None):
+def native_worker(replies, *, synthetic_default_home=None, memory_root=None, non_streaming=False):
     require_native_hermes()
     brain = ScriptedBrain(replies)
     try:
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
             home = Path(directory).resolve()
-            worker = WorkerProcess(home, brain, synthetic_default_home=synthetic_default_home, memory_root=memory_root)
+            worker = WorkerProcess(home, brain, synthetic_default_home=synthetic_default_home, memory_root=memory_root, non_streaming=non_streaming)
             try:
                 yield worker, brain
             finally:
@@ -250,6 +269,321 @@ def native_worker(replies, *, synthetic_default_home=None, memory_root=None):
 
 
 class HermesWorkerTests(unittest.TestCase):
+    def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
+        import hermes_worker
+        registry_module = ModuleType('tools.registry')
+        registry_module.registry = registry or Mock()
+        turn_failure_copy = ModuleType('agent.turn_failure_copy')
+        turn_failure_copy.is_max_iteration_handoff = lambda result: False
+        promotion = ModuleType('agent.reasoning_promotion')
+        promotion.answer_in_reasoning_capability = lambda built: reasoning_capability
+        run_agent, relay_runtime, native = (ModuleType(name) for name in
+                                           ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
+        relay_runtime.get_runtime = Mock(return_value=Mock())
+        native.AtofExporterConfig = Mock
+        native.AtofExporterMode = Mock(Append='append')
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            home.chmod(0o700)
+            def exporter(config):
+                event_file = Path(config.output_directory) / config.filename
+                event_file.touch(mode=0o600)
+                return Mock(path=str(event_file))
+            native.AtofExporter = exporter
+            def construct(**kwargs):
+                (home / 'memories').mkdir(mode=0o700, exist_ok=True)
+                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+                agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
+                agent._memory_store = object()
+                agent._memory_manager = None
+                return agent
+            run_agent.AIAgent = Mock(side_effect=construct)
+            requests = '{"begin":true}\n' + ''.join(json.dumps({'messages': [{'role': 'user', 'content': text}]}) + '\n'
+                                                    for text in prompts)
+            output = StringIO()
+            cwd, mask = os.getcwd(), os.umask(0o077)
+            try:
+                with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
+                         'nemo_relay': native, 'tools.registry': registry_module,
+                         'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion}),
+                      patch.dict(os.environ, HERMES_HOME=str(home)),
+                      patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
+                      patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
+                      patch.object(hermes_worker, 'validate_hermes_source'),
+                      patch.object(hermes_worker, 'validate_local_configuration'),
+                      patch('sys.stdin', TextIOWrapper(BytesIO(requests.encode()))), patch('sys.stdout', output)):
+                    self.assertEqual(hermes_worker.main(), expected_status)
+            finally:
+                os.chdir(cwd)
+                os.umask(mask)
+            return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_final_reasoning_refuses_empty_reply(self):
+        agent = Mock()
+        agent._stream_writer_lock = threading.Lock()
+        agent._reset_stream_delivery_tracking = Mock()
+        for name in ('_stream_think_scrubber', '_fire_stream_delta', '_get_transport'):
+            setattr(agent, name, Mock())
+        agent._stream_context_scrubber.flush.return_value = ''
+        agent._stream_writer_superseded.return_value = False
+        normalizer = Mock(side_effect=lambda response, **kwargs: SimpleNamespace(**vars(response)))
+        transport = SimpleNamespace(normalize_response=normalizer)
+        agent._get_transport.return_value = transport
+        cases = iter(('complete', 'tool only', 'nonstring', 'reasoning only', 'empty', 'unmatched', 'reset'))
+        settings = []
+        def run(text, **kwargs):
+            case = next(cases)
+            settings.append((agent.reasoning_config.copy(), agent.max_tokens))
+            if case == 'tool only':
+                response = agent._get_transport().normalize_response(SimpleNamespace(content=None, tool_calls=['mute']))
+                self.assertIsNone(response.content)
+                self.assertEqual(response.tool_calls, ['mute'])
+            elif case == 'nonstring':
+                agent._get_transport().normalize_response(SimpleNamespace(content=['PRIVATE-CANARY']))
+            final = {'complete': '<think>PRIVATE-CANARY.</think>[delivery:neutral] Complete.',
+                     'tool only': '[delivery:neutral] Observed.', 'reasoning only': '<think>PRIVATE-CANARY.</think>',
+                     'empty': '', 'unmatched': '[delivery:neutral] <think>PRIVATE-CANARY.',
+                     'reset': '[delivery:neutral] Reset.'}[case]
+            return {'completed': True, 'final_response': final}
+        agent.run_conversation.side_effect = run
+        events = self.worker_main(agent, ['Think more deeply about the answer.'] * 6 + ['Ordinary.'])
+        self.assertEqual(events, [
+            {'ready': True}, {'session_ready': True}, {'delivery': 'neutral'}, {'text': 'Complete.'}, {'done': True},
+            {'delivery': 'neutral'}, {'text': 'Observed.'}, {'done': True},
+            {'error': 'Hermes returned unsafe reasoning markup. Try again.'},
+            {'error': 'Hermes returned an empty reply.'}, {'error': 'Hermes returned an empty reply.'},
+            {'error': 'Hermes returned unsafe reasoning markup. Try again.'},
+            {'delivery': 'neutral'}, {'text': 'Reset.'}, {'done': True},
+        ])
+        self.assertNotIn('PRIVATE', json.dumps(events))
+        self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 180)])
+        self.assertIs(transport.normalize_response, normalizer)
+
+    def test_native_filter_lifecycle(self):
+        import hermes_worker
+        registry = Mock()
+        registered = {}
+        registry.register.side_effect = lambda **kwargs: registered.update({kwargs['name']: kwargs['handler']})
+        agent = Mock()
+        agent._stream_writer_lock = threading.Lock()
+        agent._reset_stream_delivery_tracking = Mock()
+        lock_observations = []
+        def observe_lock(operation):
+            acquired = agent._stream_writer_lock.acquire(blocking=False)
+            if acquired:
+                agent._stream_writer_lock.release()
+            lock_observations.append((operation, acquired))
+        def reset_delivery():
+            observe_lock('reset')
+            self.assertIsInstance(agent._stream_think_scrubber, hermes_worker.ReplyReasoningFilter)
+            self.assertEqual(agent._stream_think_scrubber.flush(), '')
+        original_reset = agent._reset_stream_delivery_tracking
+        original_reset.side_effect = reset_delivery
+        context = Mock()
+        context.feed.side_effect = lambda text: text.replace('CONTEXT-CANARY', '')
+        context.flush.return_value = ''
+        def flush_context():
+            observe_lock('context flush')
+            return context.flush.return_value
+        context.flush.side_effect = flush_context
+        agent._stream_context_scrubber = context
+        agent._stream_writer_superseded.return_value = False
+        agent._stream_needs_break = True
+        agent._stream_think_scrubber = Mock()
+        agent._fire_stream_delta = Mock()
+        agent._get_transport = Mock()
+        original_scrubber = agent._stream_think_scrubber
+        original_fire = agent._fire_stream_delta
+        callbacks = []
+        agent._deliver_to_stream_callbacks.side_effect = lambda text: callbacks[-1](text)
+        def native_fire(text):
+            observe_lock('native delivery')
+            if text == '[delivery:neutral] Native failure.':
+                raise RuntimeError('synthetic native delivery failure')
+            if not agent._stream_writer_superseded():
+                callbacks[-1](context.feed(agent._stream_think_scrubber.feed(text)))
+        original_fire.side_effect = native_fire
+        class Transport:
+            def normalize_response(self, response, **kwargs):
+                return SimpleNamespace(**vars(response))
+        first, second = Transport(), Transport()
+        current = [first]
+        get = agent._get_transport
+        get.side_effect = lambda mode=None: current[0]
+        original_get = get
+        runs = []
+        def run(text, **kwargs):
+            callbacks.append(kwargs['stream_callback'])
+            reader = agent._stream_think_scrubber
+            self.assertIsInstance(reader, hermes_worker.ReplyReasoningFilter)
+            reader.reset()  # Native new-turn setup uses this same instance.
+            agent._reset_stream_delivery_tracking()
+            agent._stream_needs_break = True
+            runs.append((agent.max_tokens, agent.reasoning_config.copy(), agent.request_overrides.copy()))
+            if text == 'Think more deeply about failure.':
+                try:
+                    agent._fire_stream_delta('[delivery:neutral] Native failure.')
+                except RuntimeError:
+                    pass  # Native callback dispatch can swallow the error.
+                self.assertIs(agent._stream_think_scrubber, reader)
+                calls = original_fire.call_count
+                with self.assertRaises(RuntimeError):
+                    agent._fire_stream_delta('PRIVATE-CANARY recovery')
+                self.assertEqual(original_fire.call_count, calls)
+                with self.assertRaises(RuntimeError):
+                    reader.feed('<thi>PRIVATE-CANARY.')
+                for _ in range(2):
+                    with self.assertRaises(RuntimeError):
+                        reader.flush()
+                with self.assertRaises(RuntimeError):
+                    registered['mute']({})
+                with self.assertRaises(RuntimeError):
+                    callbacks[-1]('PRIVATE-CANARY recovery')
+                with self.assertRaises(RuntimeError):
+                    agent._get_transport().normalize_response(SimpleNamespace(content='recovery'))
+                return {'completed': True, 'final_response': '[delivery:neutral] recovery'}
+            agent._stream_writer_superseded.return_value = True
+            # Native delivery rejects and accounts for stale chunks before filtering.
+            calls = original_fire.call_count
+            agent._fire_stream_delta('<think>SUPERSEDED-CANARY')
+            self.assertEqual(original_fire.call_count, calls + 1)
+            self.assertEqual(reader.active, '')
+            self.assertEqual(reader.pending, '')
+            self.assertTrue(agent._stream_needs_break)
+            agent._stream_writer_superseded.return_value = False
+            self.assertEqual([reader.flush() for _ in range(4)], ['', '', '', ''])
+            agent._fire_stream_delta('<think>PRIVATE-CANARY.</think>')
+            self.assertTrue(agent._stream_needs_break)
+            transport = agent._get_transport('chat_completions')
+            message = SimpleNamespace(content='<think>PRIVATE-CANARY.</think>', tool_calls=['tool'],
+                                      reasoning='STRUCTURED-PRIVATE-CANARY', usage={'tokens': 3})
+            normalized = transport.normalize_response(message)
+            self.assertEqual(normalized.content, '')
+            self.assertEqual(message.content, '<think>PRIVATE-CANARY.</think>')
+            self.assertEqual((normalized.tool_calls, normalized.reasoning, normalized.usage),
+                             (['tool'], 'STRUCTURED-PRIVATE-CANARY', {'tokens': 3}))
+            current[0] = second
+            agent._get_transport()
+            self.assertNotIn('normalize_response', vars(first))
+            # Completed objects can also be replayed through the raw-content writer.
+            agent._fire_stream_delta('<think>PRIVATE-CANARY.</think>[delivery:neutral] CONTEXT-CANARYAnswer<')
+            context.flush.return_value = ' context tail'
+            agent._get_transport().normalize_response(SimpleNamespace(content='[delivery:neutral] Answer<'))
+            context.flush.return_value = ''
+            callbacks[-1]('')
+            return {'completed': True, 'final_response': '[delivery:neutral] Answer< context tail'}
+        agent.run_conversation.side_effect = run
+        events = self.worker_main(agent, ['Think more deeply about success.', 'Think more deeply about failure.', 'Again.'], registry)
+        self.assertTrue(lock_observations)
+        for operation, acquired in lock_observations:
+            self.assertFalse(acquired, operation + ' must exclude the native writer lock')
+        self.assertEqual(events, [
+            {'ready': True}, {'session_ready': True}, {'delivery': 'neutral'}, {'text': 'Answer'},
+            {'text': '<'}, {'text': ' context tail'}, {'done': True},
+            {'error': 'Hermes returned unsafe reasoning markup. Try again.'},
+            {'delivery': 'neutral'}, {'text': 'Answer'}, {'text': '<'}, {'text': ' context tail'}, {'done': True},
+        ])
+        self.assertNotIn('PRIVATE', json.dumps(events))
+        self.assertFalse(any('tool_call' in event for event in events))
+        self.assertEqual([item[0] for item in runs], [16384, 16384, 180])
+        self.assertEqual([item[1] for item in runs],
+                         [{'enabled': True, 'effort': 'medium'}] * 2 + [{'enabled': False}])
+        self.assertEqual([item[2] for item in runs], [
+            {'temperature': 0.4, 'extra_body': {'chat_template_kwargs': {
+                'enable_thinking': True, 'reasoning_effort': 'medium'}, 'reasoning_format': 'deepseek'}},
+            {'temperature': 0.4, 'extra_body': {'chat_template_kwargs': {
+                'enable_thinking': True, 'reasoning_effort': 'medium'}, 'reasoning_format': 'deepseek'}},
+            {'temperature': 0.4, 'extra_body': {'chat_template_kwargs': {
+                'enable_thinking': False}, 'reasoning_format': 'deepseek'}},
+        ])
+        self.assertIs(agent._stream_think_scrubber, original_scrubber)
+        self.assertIs(agent._get_transport, original_get)
+        self.assertIs(agent._fire_stream_delta, original_fire)
+        self.assertIs(agent._reset_stream_delivery_tracking, original_reset)
+        self.assertNotIn('normalize_response', vars(first))
+        self.assertNotIn('normalize_response', vars(second))
+
+        refused_agent = Mock()
+        refusal = self.worker_main(refused_agent, ['Hello.'], reasoning_capability=True, expected_status=1)
+        self.assertEqual(refusal, [{'error': 'Hermes reasoning configuration is unsafe. Check the pinned Hermes configuration, then restart Kestrel.'}])
+        refused_agent.close.assert_called_once_with()
+        refused_agent.run_conversation.assert_not_called()
+        refused_agent._get_transport.assert_not_called()
+
+    def test_reasoning_filter(self):
+        import hermes_worker
+        names = ('think', 'thinking', 'reasoning', 'thought', 'REASONING_SCRATCHPAD',
+                 '思考', '反思', '推理', '推敲')
+        cases = [('Before<' + name.swapcase() + '>PRIVATE-CANARY.</' + name + '>After',
+                  'BeforeAfter') for name in names]
+        cases += [('[delivery:neutral] <think>PRIVATE-CANARY.</think>Answer.',
+                   '[delivery:neutral] Answer.'),
+                  ('<think>PRIVATE-CANARY.</think>[delivery:neutral] Answer.',
+                   '[delivery:neutral] Answer.'),
+                  ('a<think>x</think>b<thought>y</thought>c', 'abc'),
+                  ('3 < 5 <= <3 <b> <thing> <thinker> <<b> </other>',
+                   '3 < 5 <= <3 <b> <thing> <thinker> <<b> </other>'),
+                  ('tail<', 'tail<'), ('tail</', 'tail</')]
+        for raw, expected in cases:
+            chunks = [[raw[:split], raw[split:]] for split in range(len(raw) + 1)]
+            chunks.append(list(raw))
+            for parts in chunks:
+                with self.subTest(raw=raw, parts=parts):
+                    reader = hermes_worker.ReplyReasoningFilter()
+                    visible = ''
+                    for part in parts:
+                        visible += reader.feed(part)
+                        self.assertNotIn('PRIVATE', visible)
+                        self.assertEqual(reader.last_hidden, '')
+                        self.assertTrue(expected.startswith(visible))
+                    visible += reader.flush()
+                    self.assertEqual(visible, expected)
+                    self.assertEqual(reader.flush(), '')
+                    reader.reset()
+                    self.assertEqual(reader.feed('fresh'), 'fresh')
+        reader = hermes_worker.ReplyReasoningFilter()
+        self.assertEqual([reader.feed(part) for part in
+                          ('[delivery:neutral] <thi', 'nk>PRIVATE-CANARY. ', '</think>Answer.')],
+                         ['[delivery:neutral] ', '', 'Answer.'])
+        for raw in ('<thi>', '<think attr>', '<think/>', '<think', '<t', '</t',
+                    '<think>PRIVATE-CANARY.', '<think><thought>x</thought></think>',
+                    '<think>x</thought>', '</think>', '<thi<', '<thi!>'):
+            with self.subTest(invalid=raw):
+                reader = hermes_worker.ReplyReasoningFilter()
+                with self.assertRaisesRegex(RuntimeError, '^Hermes returned unsafe reasoning markup. Try again.$'):
+                    reader.feed(raw)
+                    reader.flush()
+                self.assertTrue(reader.failed)
+                for operation in (lambda: reader.feed('later'), reader.flush, reader.reset):
+                    with self.assertRaises(RuntimeError):
+                        operation()
+        for raw in (None, 7, {}, []):
+            with self.assertRaises(RuntimeError):
+                hermes_worker.ReplyReasoningFilter().feed(raw)
+        for pending in ('<', '</', '<thi', '<think>'):
+            reader = hermes_worker.ReplyReasoningFilter()
+            reader.feed(pending)
+            with self.assertRaises(RuntimeError):
+                reader.reset()
+        reader = hermes_worker.ReplyReasoningFilter()
+        reader.feed('<think>')
+        reader.feed('PRIVATE-CANARY.' * 100000)
+        self.assertLessEqual(sum(len(value) for value in vars(reader).values() if isinstance(value, str)), 32)
+        self.assertEqual(reader.feed('</think>done'), 'done')
+        self.assertEqual(reader.flush(), '')
+
+    def test_deeper_thought_prefix(self):
+        import hermes_worker
+        for text in ('Think more deeply about the sum.', '  THINK MORE DEEPLY ABOUT x  '):
+            with self.subTest(text=text):
+                self.assertTrue(hermes_worker.deeper_thought_requested(text))
+        for text in ('Think more deeply about ', 'Think more deeply about',
+                     '"Think more deeply about x"', 'Do not think more deeply about x',
+                     'Earlier I said Think more deeply about x', 'Please Think more deeply about x',
+                     'Think more deeply about   '):
+            with self.subTest(text=text):
+                self.assertFalse(hermes_worker.deeper_thought_requested(text))
+
     def test_memory_storage_refuses_unsafe_notes_without_repair(self):
         require_native_hermes()
         bootstrap = r'''import io, json, os, pathlib, stat, sys, tempfile, unittest
@@ -515,9 +849,17 @@ print('private storage matrix passed')
         registry_module.registry = Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
+        promotion = ModuleType('agent.reasoning_promotion')
+        promotion.answer_in_reasoning_capability = lambda built: False
         run_agent, relay_runtime, native = (ModuleType(name) for name in
                                            ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
         agent = Mock()
+        agent._stream_writer_lock = threading.Lock()
+        agent._reset_stream_delivery_tracking = Mock()
+        for name in ('_stream_think_scrubber', '_fire_stream_delta', '_get_transport'):
+            setattr(agent, name, Mock())
+        agent._stream_context_scrubber = None
+        agent._stream_writer_superseded.return_value = False
         agent.run_conversation.side_effect = [
             {'completed': True, 'final_response': '[delivery:reassuring]\nFirst.'},
             {'completed': True, 'final_response': '[delivery:neutral]\nSecond.'},
@@ -550,7 +892,8 @@ print('private storage matrix passed')
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
                                                 'nemo_relay': native, 'tools.registry': registry_module,
-                                                'agent.turn_failure_copy': turn_failure_copy}),
+                                                'agent.turn_failure_copy': turn_failure_copy,
+                                                'agent.reasoning_promotion': promotion}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
                       patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
@@ -581,8 +924,8 @@ print('private storage matrix passed')
         from hermes_worker import child_environment
 
         bootstrap = '''
-import json, pathlib, sys
-from types import ModuleType
+import json, pathlib, sys, threading
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 sys.path.insert(0, sys.argv[1])
 import hermes_worker
@@ -614,6 +957,8 @@ relay_runtime = ModuleType('agent.relay_runtime')
 relay_runtime.get_runtime = Mock(return_value=None if case == 'missing runtime' else runtime)
 turn_failure_copy = ModuleType('agent.turn_failure_copy')
 turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
+promotion = ModuleType('agent.reasoning_promotion')
+promotion.answer_in_reasoning_capability = lambda built: False
 exporter = Mock(spec=['path', 'register', 'force_flush', 'deregister', 'shutdown'])
 exporter.force_flush.side_effect = flush
 exporter.deregister.side_effect = lambda name: calls.append('deregister ' + name)
@@ -635,7 +980,14 @@ def create_exporter(config):
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
 agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users',
-                   '_fire_stream_delta', '_repair_tool_call', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
+                   '_fire_stream_delta', '_stream_think_scrubber', '_get_transport',
+                   '_stream_context_scrubber', '_stream_writer_superseded', '_repair_tool_call', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
+for name in ('_stream_think_scrubber', '_fire_stream_delta', '_get_transport'):
+    setattr(agent, name, Mock())
+agent._stream_context_scrubber = None
+agent._stream_writer_superseded.return_value = False
+agent._stream_writer_lock = threading.Lock()
+agent._reset_stream_delivery_tracking = Mock()
 agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
 if case == 'tool surface':
     agent.valid_tool_names.add('tool_search')
@@ -665,7 +1017,7 @@ else:
 try:
     with (patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                     'agent.relay_runtime': relay_runtime,
-                                    'agent.turn_failure_copy': turn_failure_copy,
+                                    'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
                                     'tools.registry': registry_module}),
           patch.object(hermes_worker, 'validate_hermes_source')):
         status = hermes_worker.main()
@@ -843,6 +1195,8 @@ raise SystemExit(status)
                     relay_runtime.get_runtime = Mock(return_value=runtime)
                     turn_failure_copy = ModuleType('agent.turn_failure_copy')
                     turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
+                    promotion = ModuleType('agent.reasoning_promotion')
+                    promotion.answer_in_reasoning_capability = lambda built: False
                     native = ModuleType('nemo_relay')
                     native.AtofExporterConfig = Mock
                     native.AtofExporterMode = Mock(Append='append')
@@ -883,7 +1237,7 @@ raise SystemExit(status)
                         with (patch.dict(os.environ, HERMES_HOME=str(home_setting)),
                               patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                         'agent.relay_runtime': relay_runtime,
-                                                        'agent.turn_failure_copy': turn_failure_copy,
+                                                        'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
                                                         'tools.registry': registry_module}),
                               patch.object(hermes_worker, 'validate_hermes_source'),
                               patch.object(hermes_worker, 'create_trace_directory', return_value=session,
@@ -1074,6 +1428,77 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
+    def test_complete_response_reasoning_stays_private(self):
+        replies = [
+            {'content': '<think>INLINE-PRIVATE-CANARY.</think>[delivery:neutral] Complete.',
+             'reasoning_content': 'STRUCTURED-PRIVATE-CANARY.'},
+            {'content': '[delivery:neutral] <think>PRIVATE-CANARY.'},
+            {'content': '[delivery:neutral] Reset.'},
+        ]
+        with native_worker(replies, non_streaming=True) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = [worker.request([{'role': 'user', 'content': prompt}]) for prompt in
+                      ('Think more deeply about the answer.', 'Think more deeply about malformed.', 'Ordinary.')]
+            self.assertEqual(events, [
+                [{'delivery': 'neutral'}, {'text': 'Complete.'}, {'done': True}],
+                [{'error': 'Hermes returned unsafe reasoning markup. Try again.'}],
+                [{'delivery': 'neutral'}, {'text': 'Reset.'}, {'done': True}],
+            ])
+            self.assertNotIn('PRIVATE', json.dumps(events))
+            self.assertEqual(len(brain.requests), 3)
+            self.assertEqual([r[2].get('stream', False) for r in brain.requests], [False, False, False])
+            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [16384, 16384, 180])
+            self.assertEqual([r[2]['chat_template_kwargs']['enable_thinking'] for r in brain.requests],
+                             [True, True, False])
+
+    def test_thinking_is_one_answer_and_reasoning_stays_private(self):
+        tool = {'tool_calls': [{'index': 0, 'id': 'volume-trial', 'type': 'function',
+                               'function': {'name': 'set_volume', 'arguments': '{"percent":30}'}}]}
+        replies = [
+            [({'content': '[delivery:neutral] <thi'}, None),
+             ({'content': 'nk>PRIVATE-CANARY. '}, None),
+             ({'content': '</think>3 < 5 and <thing>.'}, None), ({}, 'stop')],
+            [({'reasoning_content': 'STRUCTURED-PRIVATE-CANARY.'}, None),
+             ({'content': '<think>INLINE-PRIVATE-CANARY.</think>'}, None), (tool, None), ({}, 'tool_calls')],
+            [({'content': '<think>PRIVATE-CANARY.</think>[delivery:neutral] '}, None),
+             ({'content': 'Done.'}, None), ({}, 'stop')],
+            '[delivery:neutral] Ordinary.',
+            [({'content': '[delivery:neutral] <thi'}, None),
+             ({'content': '>PRIVATE-CANARY.'}, None), (tool, None), ({}, 'tool_calls')],
+            '[delivery:neutral] Reset.',
+        ]
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = []
+            for prompt in ('Hello.', 'Think more deeply about volume.', 'Next.',
+                           'Think more deeply about bad markup.', 'Again.'):
+                answer = worker.request([{'role': 'user', 'content': prompt}],
+                                        results=[b'{"tool_result":"Observed volume 30 percent."}\n'])
+                self.assertNotIn('PRIVATE', json.dumps(answer))
+                events.append(answer)
+            self.assertEqual(events[0], [{'delivery': 'neutral'}, {'text': '3 < 5 and <thing>.'}, {'done': True}])
+            self.assertEqual(events[1], [{'tool_call': {'name': 'set_volume', 'arguments': {'percent': 30}}},
+                                         {'delivery': 'neutral'}, {'text': 'Done.'}, {'done': True}])
+            self.assertEqual(events[2], [{'delivery': 'neutral'}, {'text': 'Ordinary.'}, {'done': True}])
+            self.assertEqual(events[3][-1], {'error': 'Hermes returned unsafe reasoning markup. Try again.'})
+            self.assertFalse(any('tool_call' in event or 'text' in event for event in events[3]))
+            self.assertEqual(events[4], [{'delivery': 'neutral'}, {'text': 'Reset.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 6)
+            for (_, _, body), deep in zip(brain.requests, (False, True, True, False, True, False)):
+                self.assertTrue(body['stream'])
+                self.assertEqual(body['temperature'], 0.4)
+                self.assertEqual(body['max_tokens'], 16384 if deep else 180)
+                self.assertEqual(body['reasoning_effort'], 'medium' if deep else 'none')
+                self.assertEqual(body['reasoning_format'], 'deepseek')
+                self.assertEqual(body['chat_template_kwargs'],
+                                 {'enable_thinking': True, 'reasoning_effort': 'medium'} if deep
+                                 else {'enable_thinking': False})
+                self.assertEqual({t['function']['name'] for t in body['tools']},
+                                 {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+            self.assertEqual(brain.requests[1][2]['messages'][-1]['content'], 'Think more deeply about volume.')
+
     def test_iteration_budget_ends_invalid_memory_loop_as_incomplete_turn(self):
         calls = [[({'tool_calls': [{'index': 0, 'id': f'invalid-{index}', 'type': 'function',
                    'function': {'name': 'memory', 'arguments': '{"target":"memory"}'}}]}, None),
@@ -1144,10 +1569,13 @@ class NativeHermesTests(unittest.TestCase):
         relay_runtime.get_runtime = Mock(return_value=Mock())
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=True)
+        promotion = ModuleType('agent.reasoning_promotion')
+        promotion.answer_in_reasoning_capability = lambda built: False
         native = ModuleType('nemo_relay')
         native.AtofExporterConfig = Mock
         native.AtofExporterMode = Mock(Append='append')
         agent = Mock()
+        agent._stream_writer_lock = threading.Lock()
 
         def capped_turn(*args, stream_callback, **kwargs):
             stream_callback('[deliv')
@@ -1177,7 +1605,7 @@ class NativeHermesTests(unittest.TestCase):
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'tools.registry': registry_module,
                                               'agent.relay_runtime': relay_runtime,
-                                              'agent.turn_failure_copy': turn_failure_copy,
+                                              'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
                                               'nemo_relay': native}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
@@ -1510,6 +1938,14 @@ class NativeHermesTests(unittest.TestCase):
         for text in invalid:
             replies.extend((tool(), [({'content': text}, None), ({}, 'stop')]))
         replies.append([({'content': '[delivery:neutral] Fresh.'}, None), ({}, 'stop')])
+        reasoning_chunks = (
+            ('<thi', 'nk>PRIVATE-CANARY.\n</think>', '[', 'delivery:neutral] Valid.'),
+            ('\n', '[delivery:neutral] No.'),
+            ('<think>PRIVATE-CANARY.</think>', '\n', '[delivery:neutral] No.'),
+            ('\n<thi', 'nk>PRIVATE-CANARY.</think>[delivery:neutral] No.'),
+        )
+        for chunks in reasoning_chunks:
+            replies.extend((tool(), [({'content': text}, None) for text in chunks] + [({}, 'stop')]))
         with native_worker(replies) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             worker.begin()
@@ -1544,6 +1980,12 @@ class NativeHermesTests(unittest.TestCase):
                            'callback': '\n\nUntagged after note.'}, observations)
             for text in invalid[:2]:
                 self.assertIn({'fragment': text, 'pending': True, 'callback': '\n\n' + text}, observations)
+            for index, chunks in enumerate(reasoning_chunks):
+                events = worker.request([{'role': 'user', 'content': 'Reasoning before a strict header.'}])
+                self.assertEqual(events, ([{'delivery': 'neutral'}, {'text': 'Valid.'}, {'done': True}]
+                                          if index == 0 else [{'error': DELIVERY_ERROR}]), chunks)
+                self.assertNotIn('PRIVATE', json.dumps(events))
+            self.assertEqual(len(brain.requests), 21)
 
     def test_preparation_and_background_review_have_no_memory_authority(self):
         from hermes_worker import MEMORY_REPLY_REMINDER
@@ -1955,6 +2397,8 @@ class NativeHermesTests(unittest.TestCase):
         relay_runtime.get_runtime.return_value.managed_execution_enabled.return_value = True
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
+        promotion = ModuleType('agent.reasoning_promotion')
+        promotion.answer_in_reasoning_capability = lambda built: False
         native = ModuleType('nemo_relay')
         native.AtofExporterConfig = Mock
         native.AtofExporterMode = Mock(Append='append')
@@ -1980,7 +2424,7 @@ class NativeHermesTests(unittest.TestCase):
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                 'agent.relay_runtime': relay_runtime,
-                                                'agent.turn_failure_copy': turn_failure_copy,
+                                                'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
                                                 'tools.registry': registry_module}),
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
@@ -1993,7 +2437,7 @@ class NativeHermesTests(unittest.TestCase):
                 os.umask(original_umask)
         run_agent.AIAgent.assert_called_once_with(
             base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
-            api_mode='chat_completions', model='bonsai-2-9b', enabled_toolsets=[],
+            api_mode='chat_completions', model='bonsai-2-27b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=False, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
@@ -2335,8 +2779,8 @@ class BonsaiStartupTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         shutil.copyfile(ROOT / 'run-brain.sh', root / 'run-brain.sh')
-        prism = root / '.runtime/tools/bonsai-prism-b10777-e3de715'
-        server = prism / 'cuda-12.8/llama-prism-b10777-e3de715/llama-server'
+        prism = root / '.runtime/tools/bonsai-prism-b10787-73bfe6c'
+        server = prism / 'cuda-12.8/llama-prism-b10787-73bfe6c/llama-server'
         server.parent.mkdir(parents=True)
         server.write_text(
             '#!/usr/bin/python3\n'
@@ -2356,20 +2800,23 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         observed = json.loads(result.stdout)
         self.assertEqual(observed['arguments'], [
-            '-m', str(root / '.runtime/models/bonsai-2-9b/Ternary-Bonsai-2-9B-PQ2_0.gguf'),
-            '--alias', 'bonsai-2-9b', '--host', '127.0.0.1', '--port', '8080',
-            '-ngl', '99', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
-            '--fit', 'off', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
+            '-m', str(root / '.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf'),
+            '--alias', 'bonsai-2-27b', '--host', '127.0.0.1', '--port', '8080',
+            '--gpu-layers', 'all', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
+            '--fit', 'off', '--kv-offload', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
             '--no-context-shift', '--no-webui', '--no-slots', '--no-agent', '--no-ui-mcp-proxy',
-            '--cors-origins', 'http://127.0.0.1:8080', '--reasoning', 'off', '--temp', '0.4',
+            '--cors-origins', 'http://127.0.0.1:8080', '--jinja', '--reasoning', 'auto',
+            '--reasoning-format', 'deepseek', '--chat-template-kwargs', '{"enable_thinking":false}',
+            '--temp', '0.4',
             '--top-p', '0.8', '--top-k', '20', '--min-p', '0', '--presence-penalty', '1.5',
             '--repeat-penalty', '1', '--repeat-last-n', '64', '-lv', '3',
         ])
-        libraries = root / '.runtime/voice-venv/lib/python3.12/site-packages/nvidia'
         self.assertEqual(observed['environment'], {
             'HOME': str(root), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
-            'LD_LIBRARY_PATH': ':'.join(str(libraries / name / 'lib') for name in
-                                      ('cuda_runtime', 'cublas', 'cuda_nvrtc', 'nvjitlink')),
+            'LD_LIBRARY_PATH': ':'.join((
+                str(root / '.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/llama-prism-b10787-73bfe6c'),
+                str(root / '.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64'),
+            )),
         })
         self.assertEqual(observed['cwd'], str(prism))
 

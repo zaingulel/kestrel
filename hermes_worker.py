@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import NamedTuple
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
@@ -29,8 +30,89 @@ ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
 TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five desktop tools. '
                       'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
+ORDINARY_MAX_TOKENS = 180
+ORDINARY_REASONING_ENABLED = False
+GENERATION_TEMPERATURE = 0.4
 DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
+REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
+REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
+                                 'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+
+
+def deeper_thought_requested(text: str) -> bool:
+    text = text.strip()
+    prefix = 'think more deeply about '
+    return text.lower().startswith(prefix) and bool(text[len(prefix):].strip())
+
+
+class ReplyReasoningFilter:
+    names = ('think', 'thinking', 'reasoning', 'thought', 'reasoning_scratchpad',
+             '思考', '反思', '推理', '推敲')
+
+    def __init__(self):
+        self.active = ''
+        self.pending = ''
+        self.failed = False
+        self.last_hidden = ''
+
+    def refuse(self):
+        self.failed = True
+        raise RuntimeError(REASONING_ERROR)
+
+    def feed(self, text: str) -> str:
+        if self.failed or not isinstance(text, str):
+            self.refuse()
+        visible = []
+        for char in text:
+            if not self.pending:
+                if char == '<':
+                    self.pending = char
+                elif not self.active:
+                    visible.append(char)
+                continue
+            previous = self.pending
+            self.pending += char
+            closing = self.pending.startswith('</')
+            start = 2 if closing else 1
+            name = self.pending[start:].lower()
+            if self.pending == '</':
+                continue
+            if name.endswith('>') and name[:-1] in self.names:
+                tag = name[:-1]
+                if closing:
+                    if self.active != tag:
+                        self.refuse()
+                    self.active = ''
+                else:
+                    if self.active:
+                        self.refuse()
+                    self.active = tag
+                self.pending = ''
+            elif any((tag + '>').startswith(name) for tag in self.names):
+                continue
+            else:
+                if len(previous) > start and not (char.isalnum() or char == '_'):
+                    self.refuse()
+                if char == '<':
+                    if not self.active:
+                        visible.append(previous)
+                    self.pending = '<'
+                else:
+                    if not self.active:
+                        visible.append(self.pending)
+                    self.pending = ''
+        return ''.join(visible)
+
+    def flush(self) -> str:
+        if self.failed or self.active or self.pending not in ('', '<', '</'):
+            self.refuse()
+        tail, self.pending = self.pending, ''
+        return tail
+
+    def reset(self) -> None:
+        if self.failed or self.active or self.pending:
+            self.refuse()
 
 
 class DesktopToolSchema(NamedTuple):
@@ -393,13 +475,23 @@ def main(*, base_url=BONSAI_URL):
             from tools.registry import registry
             from agent.relay_runtime import get_runtime
             from agent.turn_failure_copy import is_max_iteration_handoff
+            from agent.reasoning_promotion import answer_in_reasoning_capability
             import nemo_relay
 
             bridge_failed = False
+            privacy_failed = False
+            reasoning_filter = None
+
+            def check_privacy():
+                nonlocal privacy_failed
+                if privacy_failed or reasoning_filter is not None and reasoning_filter.failed:
+                    privacy_failed = True
+                    raise RuntimeError(REASONING_ERROR)
 
             def desktop_handler(name):
                 def handle(args):
                     nonlocal bridge_failed
+                    check_privacy()
                     if bridge_failed:
                         return 'Kestrel desktop bridge failed'
                     emit({'tool_call': {'name': name, 'arguments': args}})
@@ -448,12 +540,13 @@ def main(*, base_url=BONSAI_URL):
             def construct_agent(*, memory):
                 built = AIAgent(
                     base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
-                    model='bonsai-2-9b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
+                    model='bonsai-2-27b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
                     session_db=None, fallback_model=None, save_trajectories=False,
                     # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
-                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180, max_iterations=9,
-                    reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
+                    checkpoints_enabled=False, quiet_mode=True, max_tokens=ORDINARY_MAX_TOKENS, max_iterations=9,
+                    reasoning_config={'enabled': ORDINARY_REASONING_ENABLED},
+                    request_overrides={'temperature': GENERATION_TEMPERATURE},
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
@@ -466,7 +559,7 @@ def main(*, base_url=BONSAI_URL):
                     return None
 
                 built._repair_tool_call = exact_repair
-                refusal = None
+                refusal = REASONING_CONFIGURATION_ERROR if answer_in_reasoning_capability(built) else None
                 if memory:
                     if (built.valid_tool_names != {'memory', *DESKTOP_TOOLS}
                             or {tool['function']['name'] for tool in built.tools} != {'memory', *DESKTOP_TOOLS}):
@@ -504,6 +597,8 @@ def main(*, base_url=BONSAI_URL):
                     break
                 tracing_failed = False
                 bridge_failed = False
+                privacy_failed = False
+                reasoning_filter = None
                 try:
                     request = json.loads(line)
                     if not isinstance(request, dict):
@@ -587,35 +682,147 @@ def main(*, base_url=BONSAI_URL):
 
                     def delta(text):
                         nonlocal streamed
+                        check_privacy()
                         if bridge_failed:
                             return
                         streamed = True
                         for event in delivery.feed(text):
                             emit(event)
 
-                    # Pinned native tool rounds insert a display separator before the first header.
+                    deep = deeper_thought_requested(messages[-1]['content'])
+                    agent.reasoning_config = {'enabled': True, 'effort': 'medium'} if deep else {'enabled': ORDINARY_REASONING_ENABLED}
+                    agent.max_tokens = 16384 if deep else ORDINARY_MAX_TOKENS
+                    template = {'enable_thinking': deep}
+                    if deep:
+                        template['reasoning_effort'] = 'medium'
+                    agent.request_overrides = {'temperature': GENERATION_TEMPERATURE, 'extra_body': {
+                        'chat_template_kwargs': template, 'reasoning_format': 'deepseek'}}
+                    reasoning_filter = ReplyReasoningFilter()
+                    originals = {name: (name in vars(agent), getattr(agent, name)) for name in
+                                 ('_stream_think_scrubber', '_get_transport', '_fire_stream_delta',
+                                  '_reset_stream_delivery_tracking')}
+                    native_get_transport = agent._get_transport
                     native_fire_stream_delta = agent._fire_stream_delta
+                    native_reset_stream_delivery = agent._reset_stream_delivery_tracking
+                    # Native receives filtered text and must not parse it a second time.
+                    visible_scrubber = SimpleNamespace(feed=lambda text: text, last_hidden='')
+                    wrapped_transport = None
+                    normalizer = None
+                    normalizer_owned = False
+
+                    def restore_normalizer():
+                        if wrapped_transport is not None:
+                            if normalizer_owned:
+                                wrapped_transport.normalize_response = normalizer
+                            else:
+                                del wrapped_transport.normalize_response
+
+                    def sanitize_content(content):
+                        if content is None:
+                            return None
+                        clean = ReplyReasoningFilter()
+                        return clean.feed(content) + clean.flush()
+
+                    def finish_stream():
+                        with agent._stream_writer_lock:
+                            check_privacy()
+                            tail = reasoning_filter.flush()
+                            context = agent._stream_context_scrubber
+                            tails = [context.feed(tail) if tail and context is not None else tail]
+                            if context is not None:
+                                tails.append(context.flush())
+                            for safe in tails:
+                                if safe and not agent._stream_writer_superseded():
+                                    agent._deliver_to_stream_callbacks(safe)
+                                    agent._record_streamed_assistant_text(safe)
+
+                    def reset_stream_delivery_tracking():
+                        # Exclude writer claims and resets during the identity swap.
+                        # Saved native delivery/reset calls do not acquire this lock.
+                        with agent._stream_writer_lock:
+                            native_reset_stream_delivery()
+
+                    def get_transport(api_mode=None):
+                        nonlocal wrapped_transport, normalizer, normalizer_owned
+                        transport = native_get_transport(api_mode)
+                        if transport is not wrapped_transport:
+                            restore_normalizer()
+                            wrapped_transport = transport
+                            normalizer = transport.normalize_response
+                            normalizer_owned = 'normalize_response' in vars(transport)
+
+                            def normalize_response(response, **kwargs):
+                                nonlocal privacy_failed
+                                try:
+                                    check_privacy()
+                                    normalized = normalizer(response, **kwargs)
+                                    # Sanitize before native final-response regex handling.
+                                    normalized.content = sanitize_content(normalized.content)
+                                    # Flush tails before native callbacks unbind.
+                                    finish_stream()
+                                    return normalized
+                                except Exception:
+                                    privacy_failed = True
+                                    reasoning_filter.failed = True
+                                    raise RuntimeError(REASONING_ERROR) from None
+
+                            transport.normalize_response = normalize_response
+                        return transport
 
                     def fire_stream_delta(text: str) -> None:
-                        if (not agent._stream_writer_superseded() and agent._stream_needs_break
-                                and not delivery.failed and delivery.delivery is None
-                                and not delivery.prefix and isinstance(text, str) and text.startswith('[')):
-                            agent._stream_needs_break = False
-                        native_fire_stream_delta(text)
+                        nonlocal privacy_failed
+                        with agent._stream_writer_lock:
+                            try:
+                                check_privacy()
+                                if agent._stream_writer_superseded():
+                                    native_fire_stream_delta(text)
+                                    return
+                                # Native delivery trims newlines and inserts tool separators.
+                                visible = reasoning_filter.feed(text)
+                                if not visible:
+                                    return
+                                if delivery.delivery is None and not delivery.prefix and visible[0].isspace():
+                                    delivery.leading_whitespace = True
+                                if (agent._stream_needs_break and not delivery.failed
+                                        and delivery.delivery is None and not delivery.prefix
+                                        and not delivery.leading_whitespace and visible.startswith('[')):
+                                    agent._stream_needs_break = False
+                                agent._stream_think_scrubber = visible_scrubber
+                                try:
+                                    native_fire_stream_delta(visible)
+                                finally:
+                                    agent._stream_think_scrubber = reasoning_filter
+                            except Exception:
+                                privacy_failed = True
+                                raise RuntimeError(REASONING_ERROR) from None
 
+                    agent._stream_think_scrubber = reasoning_filter
+                    agent._get_transport = get_transport
                     agent._fire_stream_delta = fire_stream_delta
+                    agent._reset_stream_delivery_tracking = reset_stream_delivery_tracking
                     try:
                         result = agent.run_conversation(
                             messages[-1]['content'], system_message=SYSTEM_PROMPT,
                             conversation_history=history, stream_callback=delta,
                         )
+                        check_privacy()
+                        finish_stream()
+                        if isinstance(result, dict):
+                            result['final_response'] = sanitize_content(result.get('final_response'))
                     finally:
-                        agent._fire_stream_delta = native_fire_stream_delta
+                        with agent._stream_writer_lock:
+                            restore_normalizer()
+                            for name, (owned, original) in originals.items():
+                                if owned:
+                                    setattr(agent, name, original)
+                                else:
+                                    delattr(agent, name)
                         try:
                             exporter.force_flush()
                         except Exception:
                             tracing_failed = True
                             raise RuntimeError(TRACE_FAILURE_ERROR) from None
+                    check_privacy()
                     if bridge_failed:
                         raise RuntimeError('Kestrel desktop bridge failed')
                     if (not delivery.failed
