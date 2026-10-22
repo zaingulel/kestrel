@@ -700,6 +700,7 @@ def main(*, base_url=BONSAI_URL):
                     native_get_transport = agent._get_transport
                     native_fire_stream_delta = agent._fire_stream_delta
                     native_reset_stream_delivery = agent._reset_stream_delivery_tracking
+                    # Native receives filtered text and must not parse it a second time.
                     visible_scrubber = SimpleNamespace(feed=lambda text: text, last_hidden='')
                     wrapped_transport = None
                     normalizer = None
@@ -732,6 +733,8 @@ def main(*, base_url=BONSAI_URL):
                                     agent._record_streamed_assistant_text(safe)
 
                     def reset_stream_delivery_tracking():
+                        # Exclude writer claims and resets during the identity swap.
+                        # Saved native delivery/reset calls do not acquire this lock.
                         with agent._stream_writer_lock:
                             native_reset_stream_delivery()
 
@@ -768,6 +771,7 @@ def main(*, base_url=BONSAI_URL):
                             try:
                                 check_privacy()
                                 if agent._stream_writer_superseded():
+                                    native_fire_stream_delta(text)
                                     return
                                 # Native delivery trims newlines and inserts tool separators.
                                 visible = reasoning_filter.feed(text)

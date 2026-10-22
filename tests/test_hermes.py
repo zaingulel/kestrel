@@ -443,8 +443,10 @@ class HermesWorkerTests(unittest.TestCase):
                     agent._get_transport().normalize_response(SimpleNamespace(content='recovery'))
                 return {'completed': True, 'final_response': '[delivery:neutral] recovery'}
             agent._stream_writer_superseded.return_value = True
-            # Superseded writers are refused before filtering or native delivery.
+            # Native delivery rejects and accounts for stale chunks before filtering.
+            calls = original_fire.call_count
             agent._fire_stream_delta('<think>SUPERSEDED-CANARY')
+            self.assertEqual(original_fire.call_count, calls + 1)
             self.assertEqual(reader.active, '')
             self.assertEqual(reader.pending, '')
             self.assertTrue(agent._stream_needs_break)
@@ -1573,6 +1575,7 @@ class NativeHermesTests(unittest.TestCase):
         native.AtofExporterConfig = Mock
         native.AtofExporterMode = Mock(Append='append')
         agent = Mock()
+        agent._stream_writer_lock = threading.Lock()
 
         def capped_turn(*args, stream_callback, **kwargs):
             stream_callback('[deliv')
