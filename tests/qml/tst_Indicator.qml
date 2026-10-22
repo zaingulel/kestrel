@@ -333,4 +333,28 @@ TestCase {
         verify(flat !== null)
         compare(flat.opacity, 1, "ink that cannot reach 3 to 1 is shown at full opacity")
     }
+
+    // The wallpapers are the colours measured behind a transparent bar on Latte and Tokyo Night; the bar background the
+    // host reports is not what shows there.
+    function test_faint_marks_go_full_on_a_see_through_bar() {
+        for (const see of [
+            {name: "Latte", ink: "#4c4f69", bar: "#eff1f5", ground: "#ffd5cb"},
+            {name: "Tokyo Night", ink: "#a9b1d6", bar: "#1a1b26", ground: "#60399b"}
+        ]) {
+            const surface = createTemporaryObject(surfaceComponent, this, {color: see.ground})
+            const marks = createTemporaryObject(marksComponent, surface,
+                {ink: see.ink, flatBackground: see.bar, seeThrough: true, kind: "listening"})
+            verify(marks !== null)
+            for (const kind of ["not-running", "inactive", "idle"]) {
+                marks.kind = kind
+                compare(marks.opacity, 1, see.name + " " + kind + " opacity on a see-through bar")
+                const faint = renderedContrast(surface, see)
+                verify(faint >= 3, see.name + " " + kind + " measures " + faint.toFixed(3) + " to 1 on the wallpaper")
+            }
+            if (see.name === "Latte") {
+                marks.seeThrough = false
+                compare(marks.opacity, 0.64, "an opaque bar keeps the faint rule")
+            }
+        }
+    }
 }

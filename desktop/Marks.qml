@@ -7,6 +7,7 @@ Item {
     required property color ink
     required property color troubleInk
     required property color flatBackground
+    property bool seeThrough: false
     property bool motionEnabled: false
     property bool feed: false
 
@@ -18,8 +19,10 @@ Item {
     }
 
     // Faint is the lowest opacity from 0.6, in hundredths, at which the ink over the opaque flat background measures at
-    // least 3 to 1 (WCAG 1.4.11); each channel is taken one 8-bit step nearer the background, as far as rendering rounds.
+    // least 3 to 1 (WCAG 1.4.11); each channel is taken one 8-bit step nearer the background, as far as rendering rounds;
+    // a see-through ground is unknown, so faint is then full opacity.
     readonly property real faintOpacity: {
+        if (seeThrough) return 1
         const luminance = rgb => rgb.map(v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
             .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0)
         const base = [flatBackground.r, flatBackground.g, flatBackground.b]
