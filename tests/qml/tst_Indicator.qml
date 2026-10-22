@@ -33,11 +33,13 @@ TestCase {
     })
 
     // Latte and Tokyo Night are the design system's reference bar palettes; Rose Pine's installed colors.toml is where
-    // the one-step rounding allowance lifts faint from 0.65 to 0.66. Faint values are hand-worked from WCAG 2.2.
+    // the one-step rounding allowance lifts faint from 0.65 to 0.66, and Mixed channels is a pair whose channels move in
+    // opposite directions. Faint values are hand-worked from WCAG 2.2.
     readonly property var palettes: [
         {name: "Latte", ink: "#4c4f69", ground: "#eff1f5", faint: 0.64},
         {name: "Tokyo Night", ink: "#a9b1d6", ground: "#1a1b26", faint: 0.6},
-        {name: "Rose Pine", ink: "#575279", ground: "#faf4ed", faint: 0.66}
+        {name: "Rose Pine", ink: "#575279", ground: "#faf4ed", faint: 0.66},
+        {name: "Mixed channels", ink: "#4b0e69", ground: "#108c2f", faint: 0.91}
     ]
 
     function bar(marks, i) {
