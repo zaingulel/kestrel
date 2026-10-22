@@ -1618,7 +1618,7 @@ class VoiceConversations:
         if self.tts_model == 'phonon':
             self.model = await asyncio.to_thread(load_phonon)
             self.voice_factory = partial(PhononTTS, self.model, generation_lock=self.generation_lock)
-            logger.info('Kestrel speech provider: Phonon 31M English q8 CPU, public voice default.')
+            logger.info('Kestrel speech provider: Phonon 31M English q8 CPU, public voice Bryony.')
         else:
             torch.set_num_threads(4)
             self.model = await asyncio.to_thread(

@@ -51,11 +51,36 @@ PHONON_ASSETS = {
 }
 
 
+PHONON_VOICE = 'bryony'
+PHONON_BRYONY_ASSET = (
+    'phonon-bryony-gfP44RlHwr2kEwk7.safetensors', 256136,
+    'bcc207a73b7885e45b49ab633d3377a10158292e3a7cef9cd6764ad107f1cb9b',
+)
+
+
 def load_phonon():
-    """Admit the pinned local checkpoint before native code can resolve any assets."""
-    advice = 'Phonon assets are invalid. Restore the pinned local Phonon assets and restart Kestrel.'
+    """Admit the pinned local checkpoint and Bryony before native loading."""
+    advice = ('Phonon assets are invalid. Restore the pinned local Phonon assets, including '
+              'the Bryony file phonon-bryony-gfP44RlHwr2kEwk7.safetensors, and restart Kestrel.')
+
+    def verify(source, size, digest):
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
+            raise RuntimeError(advice)
+        checksum = hashlib.sha256()
+        remaining = size
+        while remaining:
+            block = source.read(min(65536, remaining))
+            if not block:
+                raise RuntimeError(advice)
+            checksum.update(block)
+            remaining -= len(block)
+        if source.read(1) or checksum.hexdigest() != digest:
+            raise RuntimeError(advice)
+
     try:
-        directory = (ROOT / '.runtime/models').resolve(strict=True) / 'phonon-31m-en-q8'
+        models = (ROOT / '.runtime/models').resolve(strict=True)
+        directory = models / 'phonon-31m-en-q8'
         if not stat.S_ISDIR(directory.lstat().st_mode) or {p.name for p in directory.iterdir()} != set(PHONON_ASSETS):
             raise RuntimeError(advice)
         for name, (size, digest) in PHONON_ASSETS.items():
@@ -63,34 +88,32 @@ def load_phonon():
             if not stat.S_ISREG(asset.lstat().st_mode):
                 raise RuntimeError(advice)
             with os.fdopen(os.open(asset, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
-                metadata = os.fstat(source.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
-                    raise RuntimeError(advice)
-                checksum = hashlib.sha256()
-                remaining = size
-                while remaining:
-                    block = source.read(min(65536, remaining))
-                    if not block:
-                        raise RuntimeError(advice)
-                    checksum.update(block)
-                    remaining -= len(block)
-                if source.read(1) or checksum.hexdigest() != digest:
-                    raise RuntimeError(advice)
+                verify(source, size, digest)
+        name, size, digest = PHONON_BRYONY_ASSET
+        asset = models / name
+        if not stat.S_ISREG(asset.lstat().st_mode):
+            raise RuntimeError(advice)
+        with os.fdopen(os.open(asset, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+            verify(source, size, digest)
+            runtime_advice = ('Phonon is unavailable. Restore ptts 0.4.0 and the pinned local assets, '
+                              'including Bryony, then restart Kestrel.')
+            try:
+                import ptts
+
+                if getattr(ptts, '__version__', None) != '0.4.0':
+                    raise RuntimeError(runtime_advice)
+                ptts.set_num_threads(4)
+                model = ptts.TTS(str(directory), lang='en', quant='q8', device='cpu')
+                if model.sample_rate != 24000 or 'default' not in model.voices:
+                    raise RuntimeError(runtime_advice)
+                model.add_voice(PHONON_VOICE, f'/proc/self/fd/{source.fileno()}')
+                if PHONON_VOICE not in model.voices:
+                    raise RuntimeError(runtime_advice)
+                return model
+            except Exception as error:
+                raise RuntimeError(runtime_advice) from error
     except OSError as error:
         raise RuntimeError(advice) from error
-    runtime_advice = 'Phonon is unavailable. Restore ptts 0.4.0 and the pinned local assets, then restart Kestrel.'
-    try:
-        import ptts
-
-        if getattr(ptts, '__version__', None) != '0.4.0':
-            raise RuntimeError(runtime_advice)
-        ptts.set_num_threads(4)
-        model = ptts.TTS(str(directory), lang='en', quant='q8', device='cpu')
-        if model.sample_rate != 24000 or 'default' not in model.voices:
-            raise RuntimeError(runtime_advice)
-        return model
-    except Exception as error:
-        raise RuntimeError(runtime_advice) from error
 
 
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
@@ -1781,7 +1804,7 @@ class VoxCPMTTS(ConversationTTS):
 
 class PhononTTS(ConversationTTS):
     def __init__(self, model, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
-        super().__init__(model, settings=TTSSettings(model="Phonon 31M q8", voice='default', language=None),
+        super().__init__(model, settings=TTSSettings(model="Phonon 31M q8", voice=PHONON_VOICE, language=None),
                          generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
 
     def _generate_chunks(self, text: str, *, delivery: str):
@@ -1789,7 +1812,7 @@ class PhononTTS(ConversationTTS):
             raise RuntimeError('Invalid internal speech delivery')
         native = None
         try:
-            native = self.model.stream(spoken_numbers(text), voice='default', seed=1234)
+            native = self.model.stream(spoken_numbers(text), voice=PHONON_VOICE, seed=1234)
             if native.sample_rate != 24000:
                 raise RuntimeError('Phonon stream audio must be 24000 Hz')
             resampler = soxr.ResampleStream(24000, 48000, 1, dtype='float32', quality='HQ')
