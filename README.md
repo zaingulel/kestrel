@@ -100,7 +100,7 @@ StandardOutput=append:%h/.local/share/kestrel/bonsai-27b-<full-commit>/.runtime/
 StandardError=inherit
 ```
 
-Read back every effective property and drop-in after `systemctl --user daemon-reload`. Both working directories, launchers, the brain readiness command and logs must resolve to the retained snapshot; CPU voice settings and existing service lifetime/kill settings must remain intact. A temporary `zz-105-trial.conf` can override persistent configuration: remove only exact owned temporary files after comparison with their saved copies and verification of the replacements. Refuse unexpected later overrides or paths into a job worktree or `/run`.
+Read back every effective property and drop-in after `systemctl --user daemon-reload`. Both working directories, launchers, the brain readiness command and logs must resolve to the retained snapshot; CPU voice settings and existing service lifetime/kill settings must remain intact. Refuse unexpected later overrides or paths into a job worktree or `/run`.
 
 ```sh
 systemctl --user daemon-reload
@@ -158,7 +158,7 @@ Automated production-worker evidence covers the accepted private recording and e
 
 Ordinary replies use thinking off. Begin the current request with **Think more deeply about** followed by a nonempty question to enable thinking for that answer, including its tool rounds. Matching ignores case and surrounding whitespace; quoted, negated, embedded or historical uses do not enable it. The next ordinary request returns to thinking off, including after a failed deep answer. The accepted request text remains unchanged in visible conversation history.
 
-Ordinary requests initially allow 180 output tokens; explicit deep requests initially allow 16,384 with medium reasoning effort. Native within-turn continuations can increase a later call's allowance, so these are initial per-call settings rather than hard total-turn output budgets. Recognized reasoning delimiters and private structured fields are filtered before visible delivery; malformed reasoning content refuses the answer. Private [diagnostic traces](#local-conversation-traces) can still retain native reasoning fields.
+Ordinary requests initially allow 180 output tokens; explicit deep requests initially allow 16,384 with medium reasoning effort. Native within-turn continuations can increase a later call's allowance, so these are initial per-call settings rather than hard total-turn output budgets. Recognized reasoning delimiters and private structured fields are filtered before visible delivery; malformed reasoning content refuses the answer. See the [local conversation trace rules](#local-conversation-traces) for diagnostic contents and retention.
 
 The worker exchange for an accepted brain turn is bounded to 1,800 seconds, including long-history prefill, in either thinking mode. Hermes worker startup, fixed preparation and fresh-session begin each use a 45-second bound. The separate brain-service startup allowance is 130 seconds. These bounds supervise failures; they are not response-time promises. [Stop or cancel](#stop-or-cancel) keeps its existing output suppression and accepted-work accounting while native generation drains.
 
@@ -479,7 +479,7 @@ Editing or deleting notes does not rewrite retained diagnostic traces, service l
 
 Conversation traces stay on this laptop until you delete them; Kestrel never uploads them or uses them as later conversation memory.
 
-Each Hermes worker creates a fresh `.runtime/hermes-traces/session-*/events.jsonl` in its checkout. These ignored native diagnostic records can contain full conversation payloads, system context, preparation turns, memory and desktop tool payloads, including calls, arguments and results, and generated text that was never heard. They are not audio recordings or an exact record of what was spoken. They survive worker shutdown and removal of its temporary Hermes home, including failed sessions. Kestrel never reads them back into the brain or prunes them automatically. Disk use grows until you remove them; never commit or publish them.
+Each Hermes worker creates a fresh `.runtime/hermes-traces/session-*/events.jsonl` in its checkout. These ignored native diagnostic records can contain full conversation payloads, system context, model reasoning, preparation turns, memory and desktop tool payloads, including calls, arguments and results, and generated text that was never heard. They are not audio recordings or an exact record of what was spoken. They survive worker shutdown and removal of its temporary Hermes home, including failed sessions. Kestrel never reads them back into the brain or prunes them automatically. Disk use grows until you remove them; never commit or publish them.
 
 The trace root and each session directory belong to the current user with mode `0700`; each events file has mode `0600`. The trace root's parent must be a real directory owned by the current user without group or world write access. Kestrel refuses unsafe existing paths, symlinks and preexisting plugin-configuration entries without repairing or replacing them. Other processes running as your account can still read these files. This is application configuration isolation, not an operating-system sandbox.
 
