@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// merge-watch.mjs — waits on GitHub, reading only, for one pull request to merge or stop, or, with `--draft`, for a
-// pull request to open on one job branch.
+// merge-watch.mjs — waits on GitHub, reading only, for one pull request to merge or stop, or, with `--draft`, for an
+// origin-owned pull request to open on one job branch.
 // With a pull request number: exit 0 only when merged; 1 when closed, a required check failed, the merge is blocked,
 // the required set is unknown, a pull request state, check or workflow run reply is unreadable, or `gh` failed.
-// With `--draft job/<issue>`: exit 0 once exactly one pull request is open on that branch, printing its number; 1 when
-// more than one is, the pull request list is unreadable, or `gh` failed.
-// Exit 2 on a bad argument, before any `gh` call. The reason is always the last line of output.
+// With `--draft job/<issue>`: exit 0 once exactly one origin-owned pull request is open on that branch, printing its
+// number; 1 for foreign or unreadable provenance, multiple pull requests, or a failed read.
+// Exit 2 on a bad argument, before any external read. The reason is always the last line of output.
 // The watch uses the probe-free `runGh`, so a `gh` failure makes no further read.
 // Run: node scripts/merge-watch.mjs <pull-request-number>
 //      node scripts/merge-watch.mjs --draft job/<issue-number>
 
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -25,7 +26,11 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
   if (args.length === 1 && /^[1-9]\d*$/.test(args[0])) {
     watched = watchMerge({ pr: args[0], ...seams });
   } else if (args.length === 2 && args[0] === '--draft' && /^job\/[1-9]\d*$/.test(args[1])) {
-    watched = watchDraft({ head: args[1], ...seams });
+    watched = watchDraft({
+      head: args[1],
+      gitExec: dependencies.gitExec ?? ((gitArgs) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: 'pipe' })),
+      ...seams,
+    });
   } else {
     output.error(USAGE);
     return 2;

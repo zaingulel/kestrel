@@ -1,10 +1,10 @@
 {
   "canonical": "zaingulel/fabraik",
   "release": {
-    "tag": "v0.3.2",
-    "id": 419608794,
-    "assetId": 662640137,
-    "digest": "sha256:80b46b964f8c2764ec501d37f7ab1370f56b2e3426981579ffa48b3fbcf3922d"
+    "tag": "v0.3.4",
+    "id": 420486879,
+    "assetId": 665223427,
+    "digest": "sha256:822c25cf1d3669f66ff008dcf96782e74f0c151a6dfd7361b2eda7ebbf2d2f0d"
   },
   "entries": [
     {
@@ -145,7 +145,7 @@
     },
     {
       "path": ".agents/skills/resume/SKILL.md",
-      "sha256": "6750ea56491c2674edd76f306083401a5f1f84e598cb18547dcf3ea01b5fcc55"
+      "sha256": "4ab158cd4ba40e3cac35d4d0a7a5ca9efb5ef7f8a78387b98bce9c18bcd0bc29"
     },
     {
       "path": ".agents/skills/retro/SKILL.md",
@@ -565,7 +565,7 @@
     },
     {
       "path": ".claude/skills/resume/SKILL.md",
-      "sha256": "6750ea56491c2674edd76f306083401a5f1f84e598cb18547dcf3ea01b5fcc55"
+      "sha256": "4ab158cd4ba40e3cac35d4d0a7a5ca9efb5ef7f8a78387b98bce9c18bcd0bc29"
     },
     {
       "path": ".claude/skills/retro/SKILL.md",
@@ -737,7 +737,7 @@
     },
     {
       "path": "docs/AI-WORKFLOW-runtimes.md",
-      "sha256": "92c9b0755a883dbd667a34e55e993d2bb5096d908742841a5ee7eb59b0dcd90f"
+      "sha256": "2bd6f5d8f9a2ad4485e3cefd325d51e8c528af6a994a768460a07273150c1ecc"
     },
     {
       "path": "docs/AI-WORKFLOW-seats.md",
@@ -918,11 +918,11 @@
     },
     {
       "path": "scripts/lib/merge-watch.mjs",
-      "sha256": "3ad306426c67b1ed3b51adc7ea65e7b1707bc1b32f7038eee31b82a600d414d1"
+      "sha256": "e6289019660257569c1a9acd13bae7954b8802b83f4de886d21ce9a7c371db98"
     },
     {
       "path": "scripts/lib/merge-watch.test.mjs",
-      "sha256": "ef86e3b0d2a1d8032837d07f6ffe53fc08d5cce9834814748a8be039826a117f"
+      "sha256": "fc097c4d5e89451dfc066f7d7b578e85b3983bdb2550b0716856a414588d8058"
     },
     {
       "path": "scripts/lib/posix-shell.mjs",
@@ -938,11 +938,11 @@
     },
     {
       "path": "scripts/lib/prepush.test.mjs",
-      "sha256": "4598237c7a1d955aeeaae4facc88ca88f3ef397ccdd655f7046e83d3d78545fd"
+      "sha256": "6de8226c06e41df3bc59056a38550280324095144e08f23ac0aeff08e5971a33"
     },
     {
       "path": "scripts/lib/run-log.test.mjs",
-      "sha256": "0e6ce2ffdb2a675581b39e96778968ffde50ed5200f89740abf95875a474474f"
+      "sha256": "4fc53bd42aadc1ca94b934dd9b1009c8e619cf01eb59844cdcb28c511212570d"
     },
     {
       "path": "scripts/lib/runtimes.mjs",
@@ -1002,15 +1002,15 @@
     },
     {
       "path": "scripts/lib/workflow-contract.test.mjs",
-      "sha256": "1bc49d364b3b85c2bdb2b17538ec133bb31146aedbb6d4ec46d854e662399c22"
+      "sha256": "f927eae9cbdde769110781076272a33f7d4ff017a9ead66ddc31a4657524bbd4"
     },
     {
       "path": "scripts/merge-watch.mjs",
-      "sha256": "b6536e6dce38ca5667853b210c09ad47008900da59400389debd0edd77bdf8a7"
+      "sha256": "924cd69e0c614b3caf1181cf626f936dc813eff3f8f392672864cf69262bbcd6"
     },
     {
       "path": "scripts/run-log.mjs",
-      "sha256": "e46adc03797e979679efa2b2996c5047e42943827e12c3619d1deefb854df35c"
+      "sha256": "5ceefa255cf935a8059fdbe009a4ec916a4ea6c58c8bb268e20c92ddc895b20c"
     },
     {
       "path": "scripts/sweep-scope-check.mjs",

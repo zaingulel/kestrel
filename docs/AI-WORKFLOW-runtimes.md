@@ -83,10 +83,15 @@ card, waits for its draft with `node scripts/merge-watch.mjs --draft job/<issue>
 and the cloud session plans, builds, reviews and opens the draft pull request under that claim. Every review runs in
 the cloud on Claude seats and the pull request body declares it, so no Codex review follows at delivery. A fix made
 after the review of the final tree gets a review scoped to it before the draft opens, and the body names the commit the
-last review covered, which delivery checks against the branch before it goes on. A card whose local session parks or
-ends before the draft opens keeps its claim, and the next session offers its delivery first. Only a card that takes the
-pull request route is built this way: a change the direct route to `main` admits is built locally. Codex has no cloud
-build.
+last review covered. Discovery scopes its reads to origin and accepts only one open pull request owned by origin on
+that exact job branch. Local takeover resolves origin's identity anew and checks provenance in the same unscoped
+GitHub CLI context used by readiness and merge, then checks the reviewed commit against the fetched branch. This
+refuses a conflicting `GH_REPO` or default repository even when commit and body were copied from the intended draft.
+The admitted repository identifier and job branch stay fixed. Entering the worktree or later changing working
+directory, GitHub CLI environment, authentication, configuration or default repository requires validation again
+before the next readiness or merge action. A card whose local session parks or ends before the draft opens keeps its
+claim, and the next session offers its delivery first. Only a card that takes the pull request route is built this way:
+a change the direct route to `main` admits is built locally. Codex has no cloud build.
 
 | Step | Where it runs | The card's column after it |
 |---|---|---|
@@ -94,7 +99,7 @@ build.
 | Plan, build, review, and a review scoped to any fix made after the review of the final tree | The cloud session | In progress |
 | Draft pull request whose body names the commit the last review covered | The cloud session | In progress |
 | Wait for the draft, then the owner's confirmation that the cloud session has stopped | The local session that gave the start message, or the next session, whose work-pick offers the card first | In progress |
-| Reviewed commit checked against the branch, convergence checks again, visual work, push authorisation | The same local session | Awaiting push |
+| Origin and provenance in the delivery context verified, reviewed commit checked against the branch, convergence checks again, visual work, push authorisation | The same local session | Awaiting push |
 | Push, ready, auto-merge | The same local session | In review |
 | Merge | The board's own Item closed workflow | Done |
 
@@ -108,7 +113,7 @@ build.
 | Codex seats and cross-family review | None: there is no Codex command line, and the reviews run on Claude seats, declared in the pull request body | Not run |
 | Convergence checks | Run; the body quotes the receipts | Run again, since the receipts stay on the cloud machine |
 | Visual verification | Not run | Run |
-| Reviewed commit | Named in the body on a `Reviewed commit:` line, once a review has covered every commit | Read from the draft; delivery stops and the owner is told where it is missing or is not the branch's head |
+| Provenance and reviewed commit | Named in the body on a `Reviewed commit:` line, once a review has covered every commit | Origin identity, exact job branch and open state verified in the delivery context; reviewed commit checked against the fetched head, with validation repeated on worktree or context changes |
 
 ## What the factory carries, what setup chooses and what stays yours
 
@@ -218,12 +223,17 @@ in the settings file stands apart from push authorisation too.
   the owner.
 - **The local session ends before the draft opens.** The card keeps its `Claude Code cloud` claim in its column, and the
   next session's work-pick offers its delivery first: waiting for the draft, or delivering it once it is open.
-- **The wait for the draft stops without one.** It exits non-zero with its reason as the last line, whether more than
-  one pull request is open on the branch, the reply cannot be read or `gh` failed; the session tells the owner and waits
-  again on the owner's say.
-- **A draft names no reviewed commit, or one that is not its branch's head.** Delivery stops and the owner is told. A
-  draft a cloud session opened before the review of the final tree is finished on the local route, its reviews
-  included; a branch that moved after its last review is not delivered as reviewed.
+- **The wait for the draft stops without one.** Foreign or unknown provenance, multiple pull requests, unreadable
+  replies or failed reads exit non-zero with the reason last; the session tells the owner and waits again on the
+  owner's say.
+- **Origin uses an SSH host alias.** Explicit origin URL lookups require a real GitHub host that `gh` resolves
+  directly; an alias may work in Git but fail here, so stop and ask the owner for a directly resolvable origin instead
+  of retrying the apparent network error.
+- **Takeover selects a foreign or unknown pull request.** Delivery stops, including when a conflicting GitHub CLI
+  context selects a copied commit and body. The unfinished-review fallback requires verified provenance.
+- **A verified draft names no reviewed commit, or one that is not its branch's head.** Delivery stops and the owner is
+  told. With verified provenance, a draft opened before the review of the final tree may be finished on the local route
+  on the owner's say, its reviews included; a branch that moved after its last review is not delivered as reviewed.
 
 ## Key files
 

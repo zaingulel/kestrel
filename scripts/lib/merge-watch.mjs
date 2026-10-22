@@ -1,6 +1,6 @@
 // merge-watch.mjs — watches one pull request until it merges or can no longer merge unattended, or waits for one to open on a branch.
 //
-// Read-only: every `gh` call reads pull request state, branch protection, rulesets, checks or workflow runs.
+// Read-only: every `gh` call reads repository identity, pull request state, branch protection, rulesets, checks or workflow runs.
 // `gh pr checks --required` lists a check only once GitHub has created its run, so the full
 // required set is read first, from the base branch's classic protection and every page of its
 // rules; a required name the checks have not listed yet counts as `unreported`. So does a failed
@@ -10,7 +10,7 @@
 // required-check list that is not a list of names, a pull request state or merge state it does not know,
 // a required check without a known bucket, or a workflow run or run list without the fields the
 // watch compares. There is no wall-clock cap: the caller's runtime waits on the process itself.
-// The draft wait reads only the open pull requests on its branch, at the same interval, with the same stops.
+// The draft wait binds its branch and repository provenance to origin, at the same interval, with the same stops.
 
 export const WATCH_INTERVAL_MS = 30_000;
 
@@ -143,14 +143,26 @@ export async function watchMerge({ pr, ghExec, sleep }) {
   }
 }
 
-// Resolves to { exitCode, reason }: 0 with the number once exactly one pull request is open on `head`, 1 for every
-// other stop. An empty list keeps the wait going.
-export async function watchDraft({ head, ghExec, sleep }) {
+// Resolves to { exitCode, reason }: 0 with the number once exactly one origin-owned pull request is open on `head`,
+// 1 for every other stop. An empty list keeps the wait going.
+export async function watchDraft({ head, gitExec, ghExec, sleep }) {
   try {
+    const origin = gitExec(['remote', 'get-url', 'origin']).trim();
+    if (!origin || /[\r\n]/.test(origin)) {
+      return { exitCode: 1, reason: 'unreadable origin remote URL' };
+    }
+    const repository = JSON.parse(ghExec(['repo', 'view', '--json', 'id', '--', origin]));
+    if (!repository || Array.isArray(repository) || typeof repository.id !== 'string' || !repository.id || /\s/.test(repository.id)) {
+      return { exitCode: 1, reason: `unreadable origin repository: ${JSON.stringify(repository)}` };
+    }
     for (;;) {
-      const open = JSON.parse(ghExec(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number']));
+      const open = JSON.parse(ghExec(['pr', 'list', '--repo', origin, '--head', head, '--state', 'open', '--json', 'number,state,headRefName,headRepository,isCrossRepository']));
       if (!Array.isArray(open) || !open.every((pr) => Number.isInteger(pr?.number) && pr.number > 0)) {
         return { exitCode: 1, reason: `unreadable pull request list: ${JSON.stringify(open)}` };
+      }
+      if (!open.every((pr) => pr.state === 'OPEN' && pr.headRefName === head
+        && pr.headRepository?.id === repository.id && pr.isCrossRepository === false)) {
+        return { exitCode: 1, reason: `foreign or unverified pull request on ${head}: ${JSON.stringify(open)}` };
       }
       if (open.length === 1) return { exitCode: 0, reason: String(open[0].number) };
       if (open.length > 1) {
