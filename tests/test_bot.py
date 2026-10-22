@@ -2183,6 +2183,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop('KESTREL_VOICE', None)
+        os.environ['KESTREL_TTS_MODEL'] = 'voxcpm2'
         runtime = self.voices / 'runtime'
         runtime.mkdir(mode=0o700)
         os.environ['XDG_RUNTIME_DIR'] = str(runtime)
@@ -2257,7 +2258,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     def startup_service(self):
         return hermes_service()
 
-    async def run_bot(self):
+    async def run_bot(self, *, activations=1):
         from desktop import control
         manager = bot.VoiceConversations(status=bot.IndicatorStatus(), conversation=bot.ConversationFeed())
         command = control.ConversationControl(manager.toggle)
@@ -2266,9 +2267,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             await manager.prepare()
             self.assertEqual(await control.toggle(), 'starting')
             manager.lifecycle_changed = False
-            await manager.activate()
-            if manager.pipeline is not None:
-                await manager.pipeline
+            for index in range(activations):
+                await manager.activate()
+                if manager.pipeline is not None:
+                    await manager.pipeline
+                if index + 1 < activations:
+                    await manager.finish_conversation()
         finally:
             try:
                 await manager.close()
@@ -2607,6 +2611,101 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / (name + '.wav')))
                     self.assertEqual(item.kwargs['reference_wav_path'], str(self.voices / (name + '.wav')))
                     self.assertEqual(item.kwargs['prompt_text'], transcript)
+
+    async def test_phonon_default_and_explicit_vox_selection(self):
+        for selection in (None, 'phonon', 'voxcpm2'):
+            with self.subTest(selection=selection):
+                if selection is None:
+                    os.environ.pop('KESTREL_TTS_MODEL', None)
+                else:
+                    os.environ['KESTREL_TTS_MODEL'] = selection
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                streams = []
+
+                def stream(text, *, voice, seed):
+                    self.assertEqual((voice, seed), ('default', 1234))
+                    native = Mock(sample_rate=24000, close=Mock())
+                    native.__iter__ = Mock(return_value=iter([np.zeros(2400, dtype=np.float32)]))
+                    streams.append(native)
+                    return native
+
+                phonon = Mock(stream=Mock(side_effect=stream))
+                self.voice.generate_streaming.reset_mock()
+                locks = []
+
+                async def conversation(recognition, voice, **kwargs):
+                    expected = speech.VoxCPMTTS if selection == 'voxcpm2' else speech.PhononTTS
+                    self.assertIs(recognition, stt)
+                    self.assertIsInstance(voice, expected)
+                    self.assertIs(voice.model, self.voice if selection == 'voxcpm2' else phonon)
+                    locks.append(voice._generation_lock)
+                    # A later environment edit cannot switch an already prepared service.
+                    os.environ['KESTREL_TTS_MODEL'] = 'unknown'
+                    voice._conversation_reply_token = kwargs['llm']._indicator_reply
+                    await voice.on_turn_context_created('reply')
+                    await voice.create_audio_context('reply')
+                    frames = [frame async for frame in voice.run_tts('Reply.', 'reply')]
+                    self.assertTrue(any(frame.audio for frame in frames))
+
+                with (
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'NemotronRecognizer', return_value=stt),
+                    patch.object(bot, 'load_phonon', return_value=phonon, create=True) as load,
+                    patch.object(bot, 'run_conversation', side_effect=conversation),
+                    patch.object(bot.torch, 'set_num_threads'),
+                ):
+                    bot.VoxCPM.from_pretrained.reset_mock()
+                    await self.run_bot(activations=2)
+                    stt.load.assert_awaited_once_with(self.reference_pcm)
+                    self.assertEqual(len(locks), 2)
+                    self.assertIs(locks[0], locks[1])
+                    if selection == 'voxcpm2':
+                        load.assert_not_called()
+                        bot.VoxCPM.from_pretrained.assert_called_once_with(
+                            str(bot.ROOT / '.runtime/models/voxcpm2'), load_denoiser=False,
+                            optimize=False, device='cuda', local_files_only=True,
+                        )
+                        self.assertEqual(self.voice.generate_streaming.call_count, 3)
+                    else:
+                        load.assert_called_once_with()
+                        bot.VoxCPM.from_pretrained.assert_not_called()
+                        self.assertEqual([item.args[0] for item in phonon.stream.call_args_list],
+                                         ['Hello.', 'Reply.', 'Reply.'])
+                        for native in streams:
+                            native.close.assert_called_once_with()
+
+        for selection in ('', 'unknown', 'Phonon'):
+            with self.subTest(invalid=selection), patch.dict(os.environ, KESTREL_TTS_MODEL=selection):
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                with (
+                    patch.object(bot, 'NemotronRecognizer', return_value=stt),
+                    patch.object(bot, 'load_phonon', create=True) as load,
+                    patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+                ):
+                    bot.VoxCPM.from_pretrained.reset_mock()
+                    with self.assertRaisesRegex(RuntimeError, 'KESTREL_TTS_MODEL'):
+                        await self.run_bot()
+                    load.assert_not_called()
+                    bot.VoxCPM.from_pretrained.assert_not_called()
+                    stt.load.assert_not_awaited()
+                    conversation.assert_not_awaited()
+
+        for failure in ('load', 'synthesis'):
+            with self.subTest(phonon_failure=failure), patch.dict(os.environ, KESTREL_TTS_MODEL='phonon'):
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                model = Mock(stream=Mock(side_effect=RuntimeError('native synthesis failed')))
+                with (
+                    patch.object(bot, 'NemotronRecognizer', return_value=stt),
+                    patch.object(bot, 'load_phonon', create=True, return_value=model,
+                                 side_effect=RuntimeError('Phonon assets unavailable') if failure == 'load' else None),
+                    patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
+                ):
+                    bot.VoxCPM.from_pretrained.reset_mock()
+                    with self.assertRaisesRegex(RuntimeError, 'Phonon'):
+                        await self.run_bot()
+                    bot.VoxCPM.from_pretrained.assert_not_called()
+                    conversation.assert_not_awaited()
+                    stt.close.assert_awaited_once()
 
     async def test_voice_weights_are_prepared_once_per_service_lifetime(self):
         stt = Mock(load=AsyncMock(), close=AsyncMock())
@@ -3668,7 +3767,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
                            admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
-                           production_turn_strategies=False, wake_wire=None):
+                           production_turn_strategies=False, wake_wire=None, tts_model='voxcpm2'):
         if brain is not None:
             require_native_hermes()
         from desktop import control, status as status_module
@@ -3696,6 +3795,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         environment.start()
         bindings.append(environment)
         self.addCleanup(environment.stop)
+        if tts_model is None:
+            os.environ.pop('KESTREL_TTS_MODEL', None)
+        else:
+            os.environ['KESTREL_TTS_MODEL'] = tts_model
         proc_home = tempfile.TemporaryDirectory(prefix='kestrel-proc-test-')
         self.addCleanup(proc_home.cleanup)
         proc_root = Path(proc_home.name)
@@ -3731,7 +3834,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(kwargs['prompt_text'], 'British fixture.')
                 yield np.zeros(4800, dtype=np.float32)
 
-        model = Mock(generate_streaming=chunks)
+        if tts_model in (None, 'phonon'):
+            def stream(text, *, voice, seed):
+                self.assertEqual((voice, seed), ('default', 1234))
+                native = Mock(sample_rate=24000, close=Mock())
+                native.__iter__ = Mock(return_value=iter([np.zeros(2400, dtype=np.float32)]))
+                return native
+
+            model = Mock(stream=Mock(side_effect=stream))
+        else:
+            model = Mock(generate_streaming=chunks)
         native_stt = speech.NemotronSTT
 
         def new_stt(recognizer, *, admitted, input_epoch=None):
@@ -4047,6 +4159,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, 'LaptopAudioTransport', side_effect=new_transport),
             patch.object(supplied_channel, 'prepare', side_effect=prepare),
             patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
+            patch.object(bot, 'load_phonon', return_value=model),
             patch.object(bot, 'load_voice_preset', return_value=preset),
             *([] if production_turn_strategies else [patch.object(bot, 'UserTurnStrategies', side_effect=lambda **kwargs: ExternalUserTurnStrategies())]),
             patch.object(bot, 'SileroVADAnalyzer', return_value=None),
@@ -4083,6 +4196,50 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         frame.input_epoch = getattr(transport.service.manager, 'input_epoch', 0)
         await transport.input().queue_frame(frame)
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    async def test_phonon_typed_reply_preserves_inactive_microphone(self):
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nTyped reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nFresh reply.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, native_audio=True, tts_model=None,
+        )
+        service = handle.service
+        self.assertEqual(await service.submit('Typed question'), 'accepted')
+        typed = await asyncio.wait_for(service.started.get(), 5)
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Typed reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Typed reply.')
+        self.assertIsInstance(service.manager.voice, speech.PhononTTS)
+        self.assertIs(service.manager.voice.model, service.model)
+        service.recognizer.load.assert_awaited_once_with(bytes(9600))
+        self.assertIsNone(typed.capture)
+        self.assertFalse(service.manager.desired_active)
+        self.assertEqual(service.manager.status._state, 'inactive')
+        self.assertTrue(all(child.stdin is not None for child in service.audio_children if not child.wake_capture))
+        pcm = b''.join(data for child in service.audio_children for data in child.writes)
+        self.assertTrue(pcm)
+        self.assertEqual(len(pcm) % 2, 0)
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'Typed question'}])
+        self.assertEqual(await service.toggle(), 'starting')
+        fresh = await asyncio.wait_for(service.started.get(), 5)
+        self.assertIsNotNone(fresh.capture)
+        self.assertEqual(service.manager.conversation.turns, [])
+        self.assertIsNone(fresh.llm.last_spoken_reply)
+        self.assertIsInstance(service.manager.voice, speech.PhononTTS)
+        self.assertIs(service.manager.voice.model, service.model)
+        await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(fresh, 'Fresh voice question')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
+        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                         [{'role': 'user', 'content': 'Fresh voice question'}])
+        self.assertEqual([item.args[0] for item in service.model.stream.call_args_list],
+                         ['Hello.', 'Typed reply.', 'Fresh reply.'])
+        await close()
 
     async def test_typed_inactive_preserves_voice_and_context(self):
         brain = ScriptedBrain([

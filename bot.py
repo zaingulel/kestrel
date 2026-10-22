@@ -49,8 +49,8 @@ from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
 from hermes_worker import DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, MEMORY_ERROR, child_environment, valid_desktop_arguments
 from speech import (
-    ConversationSynthesisFailedFrame, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
-    NemotronRecognizer, NemotronSTT, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_voice_preset,
+    ConversationSynthesisFailedFrame, ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
+    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_phonon, load_voice_preset,
 )
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
@@ -1451,6 +1451,8 @@ class VoiceConversations:
         self.local_actions = LocalActions()
         self.generation_lock = asyncio.Lock()
         self.model = None
+        self.tts_model = None
+        self.voice_factory = None
         self.preset = None
         self.desired_active = False
         self.changed = asyncio.Event()
@@ -1606,20 +1608,30 @@ class VoiceConversations:
             self.llm.revoke()
 
     async def prepare(self):
+        self.tts_model = os.environ.get('KESTREL_TTS_MODEL', 'phonon')
+        if self.tts_model not in ('phonon', 'voxcpm2'):
+            raise RuntimeError('Invalid KESTREL_TTS_MODEL. Select phonon or voxcpm2 and restart Kestrel.')
         self.preset = load_voice_preset(os.environ.get('KESTREL_VOICE', 'irish-female'))
         self.channel.preparation = asyncio.create_task(self.channel.prepare())
         await self.recognizer.load(self.preset.pcm)
-        torch.set_num_threads(4)
-        self.model = await asyncio.to_thread(
-            VoxCPM.from_pretrained, str(ROOT / '.runtime/models/voxcpm2'),
-            load_denoiser=False, optimize=False, device='cuda', local_files_only=True,
-        )
-        voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock)
+        if self.tts_model == 'phonon':
+            self.model = await asyncio.to_thread(load_phonon)
+            self.voice_factory = partial(PhononTTS, self.model, generation_lock=self.generation_lock)
+            logger.info('Kestrel speech provider: Phonon 31M English q8 CPU, public voice default.')
+        else:
+            torch.set_num_threads(4)
+            self.model = await asyncio.to_thread(
+                VoxCPM.from_pretrained, str(ROOT / '.runtime/models/voxcpm2'),
+                load_denoiser=False, optimize=False, device='cuda', local_files_only=True,
+            )
+            self.voice_factory = partial(VoxCPMTTS, self.model, self.preset, generation_lock=self.generation_lock)
+            logger.info('Kestrel speech provider: VoxCPM2 CUDA, selected local reference voice.')
+        voice = self.voice_factory()
         has_audio = False
         async for frame in voice.run_tts('Hello.', 'warmup'):
             has_audio |= bool(frame.audio)
         if not has_audio:
-            raise RuntimeError('VoxCPM preparation produced no audio')
+            raise RuntimeError(f'{self.tts_model} preparation produced no audio')
         self.prepared = True
 
     async def activate(self, *, capture_enabled=True):
@@ -1648,7 +1660,7 @@ class VoiceConversations:
                 adapter.refresh_indicator()
 
         self.session_ready.add_done_callback(readiness_finished)
-        self.voice = VoxCPMTTS(self.model, self.preset, generation_lock=self.generation_lock, admitted=admitted, reply_admitted=self.llm.owns_request)
+        self.voice = self.voice_factory(admitted=admitted, reply_admitted=self.llm.owns_request)
         await self.transport.open()
         if self.transport.capture is not None:
             self.capture_owner = self.status.remember_owner(self.transport.capture.pid)
@@ -1847,7 +1859,7 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
-async def run_conversation(stt, voice: VoxCPMTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
+async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
