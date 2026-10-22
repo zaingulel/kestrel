@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import NamedTuple
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
@@ -31,6 +32,8 @@ TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five deskt
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
 REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
+REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
+                                 'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
 
 
@@ -552,7 +555,7 @@ def main(*, base_url=BONSAI_URL):
                     return None
 
                 built._repair_tool_call = exact_repair
-                refusal = REASONING_ERROR if answer_in_reasoning_capability(built) else None
+                refusal = REASONING_CONFIGURATION_ERROR if answer_in_reasoning_capability(built) else None
                 if memory:
                     if (built.valid_tool_names != {'memory', *DESKTOP_TOOLS}
                             or {tool['function']['name'] for tool in built.tools} != {'memory', *DESKTOP_TOOLS}):
@@ -682,7 +685,7 @@ def main(*, base_url=BONSAI_URL):
                         for event in delivery.feed(text):
                             emit(event)
 
-                    deep = not preparing and trial_deeper_thought_requested(messages[-1]['content'])
+                    deep = trial_deeper_thought_requested(messages[-1]['content'])
                     agent.reasoning_config = {'enabled': True, 'effort': 'medium'} if deep else {'enabled': False}
                     agent.max_tokens = 16384 if deep else 180
                     template = {'enable_thinking': deep}
@@ -692,9 +695,12 @@ def main(*, base_url=BONSAI_URL):
                         'chat_template_kwargs': template, 'reasoning_format': 'deepseek'}}
                     reasoning_filter = ReplyReasoningFilter()
                     originals = {name: (name in vars(agent), getattr(agent, name)) for name in
-                                 ('_stream_think_scrubber', '_get_transport', '_fire_stream_delta')}
+                                 ('_stream_think_scrubber', '_get_transport', '_fire_stream_delta',
+                                  '_reset_stream_delivery_tracking')}
                     native_get_transport = agent._get_transport
                     native_fire_stream_delta = agent._fire_stream_delta
+                    native_reset_stream_delivery = agent._reset_stream_delivery_tracking
+                    visible_scrubber = SimpleNamespace(feed=lambda text: text, last_hidden='')
                     wrapped_transport = None
                     normalizer = None
                     normalizer_owned = False
@@ -713,16 +719,21 @@ def main(*, base_url=BONSAI_URL):
                         return clean.feed(content) + clean.flush()
 
                     def finish_stream():
-                        check_privacy()
-                        tail = reasoning_filter.flush()
-                        context = agent._stream_context_scrubber
-                        tails = [context.feed(tail) if tail and context is not None else tail]
-                        if context is not None:
-                            tails.append(context.flush())
-                        for safe in tails:
-                            if safe and not agent._stream_writer_superseded():
-                                agent._deliver_to_stream_callbacks(safe)
-                                agent._record_streamed_assistant_text(safe)
+                        with agent._stream_writer_lock:
+                            check_privacy()
+                            tail = reasoning_filter.flush()
+                            context = agent._stream_context_scrubber
+                            tails = [context.feed(tail) if tail and context is not None else tail]
+                            if context is not None:
+                                tails.append(context.flush())
+                            for safe in tails:
+                                if safe and not agent._stream_writer_superseded():
+                                    agent._deliver_to_stream_callbacks(safe)
+                                    agent._record_streamed_assistant_text(safe)
+
+                    def reset_stream_delivery_tracking():
+                        with agent._stream_writer_lock:
+                            native_reset_stream_delivery()
 
                     def get_transport(api_mode=None):
                         nonlocal wrapped_transport, normalizer, normalizer_owned
@@ -738,7 +749,9 @@ def main(*, base_url=BONSAI_URL):
                                 try:
                                     check_privacy()
                                     normalized = normalizer(response, **kwargs)
+                                    # Sanitize before native final-response regex handling.
                                     normalized.content = sanitize_content(normalized.content)
+                                    # Flush tails before native callbacks unbind.
                                     finish_stream()
                                     return normalized
                                 except Exception:
@@ -749,22 +762,36 @@ def main(*, base_url=BONSAI_URL):
                             transport.normalize_response = normalize_response
                         return transport
 
-                    # Native tool rounds insert a display separator before the first visible header.
                     def fire_stream_delta(text: str) -> None:
                         nonlocal privacy_failed
-                        try:
-                            check_privacy()
-                            if (not agent._stream_writer_superseded() and agent._stream_needs_break
-                                    and not delivery.failed and delivery.delivery is None and not delivery.prefix):
-                                agent._stream_needs_break = False
-                            native_fire_stream_delta(text)
-                        except Exception:
-                            privacy_failed = True
-                            raise RuntimeError(REASONING_ERROR) from None
+                        with agent._stream_writer_lock:
+                            try:
+                                check_privacy()
+                                if agent._stream_writer_superseded():
+                                    return
+                                # Native delivery trims newlines and inserts tool separators.
+                                visible = reasoning_filter.feed(text)
+                                if not visible:
+                                    return
+                                if delivery.delivery is None and not delivery.prefix and visible[0].isspace():
+                                    delivery.leading_whitespace = True
+                                if (agent._stream_needs_break and not delivery.failed
+                                        and delivery.delivery is None and not delivery.prefix
+                                        and not delivery.leading_whitespace and visible.startswith('[')):
+                                    agent._stream_needs_break = False
+                                agent._stream_think_scrubber = visible_scrubber
+                                try:
+                                    native_fire_stream_delta(visible)
+                                finally:
+                                    agent._stream_think_scrubber = reasoning_filter
+                            except Exception:
+                                privacy_failed = True
+                                raise RuntimeError(REASONING_ERROR) from None
 
                     agent._stream_think_scrubber = reasoning_filter
                     agent._get_transport = get_transport
                     agent._fire_stream_delta = fire_stream_delta
+                    agent._reset_stream_delivery_tracking = reset_stream_delivery_tracking
                     try:
                         result = agent.run_conversation(
                             messages[-1]['content'], system_message=SYSTEM_PROMPT,
@@ -775,16 +802,13 @@ def main(*, base_url=BONSAI_URL):
                         if isinstance(result, dict):
                             result['final_response'] = sanitize_content(result.get('final_response'))
                     finally:
-                        restore_normalizer()
-                        for name, (owned, original) in originals.items():
-                            if owned:
-                                setattr(agent, name, original)
-                            else:
-                                delattr(agent, name)
-                        agent.reasoning_config = {'enabled': False}
-                        agent.max_tokens = 180
-                        agent.request_overrides = {'temperature': 0.4, 'extra_body': {
-                            'chat_template_kwargs': {'enable_thinking': False}, 'reasoning_format': 'deepseek'}}
+                        with agent._stream_writer_lock:
+                            restore_normalizer()
+                            for name, (owned, original) in originals.items():
+                                if owned:
+                                    setattr(agent, name, original)
+                                else:
+                                    delattr(agent, name)
                         try:
                             exporter.force_flush()
                         except Exception:
