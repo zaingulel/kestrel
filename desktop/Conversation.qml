@@ -519,6 +519,7 @@ FocusScope {
                             kind: turnItem.turn.state
                             ink: root.ink
                             troubleInk: root.troubleInk
+                            flatBackground: root.bubbleTint
                             motionEnabled: root.motionEnabled && root.announcementsEnabled && turnItem.activeReply
                         }
                         Text {
@@ -558,6 +559,7 @@ FocusScope {
                                 kind: "trouble"
                                 ink: root.ink
                                 troubleInk: root.troubleInk
+                                flatBackground: root.flatBackground
                                 motionEnabled: false
                             }
                         }
@@ -617,6 +619,7 @@ FocusScope {
                         feed: true
                         ink: root.ink
                         troubleInk: root.troubleInk
+                        flatBackground: root.flatBackground
                         motionEnabled: root.motionEnabled && root.announcementsEnabled && root.listeningFeed
                     }
                 }

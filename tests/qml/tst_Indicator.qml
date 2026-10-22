@@ -11,10 +11,15 @@ TestCase {
 
     Component {
         id: marksComponent
-        Desktop.Marks { ink: "white"; troubleInk: "orange" }
+        Desktop.Marks { ink: "white"; troubleInk: "orange"; flatBackground: "black" }
     }
 
-    // Still forms at indicator scale, from docs/DESIGN-SYSTEM.md "The three marks".
+    Component {
+        id: surfaceComponent
+        Rectangle { width: 25; height: 30 }
+    }
+
+    // Still forms at indicator scale, from docs/DESIGN-SYSTEM.md "The three marks"; white ink on black keeps faint at its 0.6 floor.
     readonly property var forms: ({
         "not-running": {h: [2, 2, 2], y: [14, 14, 14], widths: [6, 6, 3], opacity: 0.6},
         "inactive": {h: [6, 6, 6], y: [12, 12, 12], hollow: true, opacity: 0.6},
@@ -26,6 +31,14 @@ TestCase {
         "speaking": {h: [12, 6, 12], y: [9, 12, 9]},
         "trouble": {h: [6, 6, 7], y: [12, 12, 9], trouble: true}
     })
+
+    // Latte and Tokyo Night are the design system's reference bar palettes; Rose Pine's installed colors.toml is where
+    // the one-step rounding allowance lifts faint from 0.65 to 0.66. Faint values are hand-worked from WCAG 2.2.
+    readonly property var palettes: [
+        {name: "Latte", ink: "#4c4f69", ground: "#eff1f5", faint: 0.64},
+        {name: "Tokyo Night", ink: "#a9b1d6", ground: "#1a1b26", faint: 0.6},
+        {name: "Rose Pine", ink: "#575279", ground: "#faf4ed", faint: 0.66}
+    ]
 
     function bar(marks, i) {
         const found = findChild(marks, "mark" + i)
@@ -104,6 +117,23 @@ TestCase {
             const border = mark.border.color
             return [mark.height, mark.y, border.r, border.g, border.b, border.a]
         })
+    }
+
+    // WCAG 2.2 relative luminance of one rendered 8-bit pixel.
+    function luminance(image, x, y) {
+        return [image.red(x, y), image.green(x, y), image.blue(x, y)].map(function(v) {
+            const c = v / 255
+            return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+        }).reduce(function(sum, c, i) { return sum + c * [0.2126, 0.7152, 0.0722][i] }, 0)
+    }
+
+    // Pixel (5, 14) is inked in every still form; (1, 1) is bare surface.
+    function renderedContrast(surface, palette) {
+        const image = grabImage(surface)
+        verify(Qt.colorEqual(image.pixel(1, 1), palette.ground), palette.name + " surface renders its ground")
+        const mark = luminance(image, 5, 14)
+        const bare = luminance(image, 1, 1)
+        return (Math.max(mark, bare) + 0.05) / (Math.min(mark, bare) + 0.05)
     }
 
     function test_all_state_shapes() {
@@ -281,5 +311,26 @@ TestCase {
         marks.kind = "thinking"
         compare(heights(marks), [6, 6, 6], "entering thinking starts from idle")
         compare(driver(marks, "rippleDriver").running, true)
+    }
+
+    function test_faint_marks_reach_contrast_and_stay_quieter() {
+        for (const palette of palettes) {
+            const surface = createTemporaryObject(surfaceComponent, this, {color: palette.ground})
+            const marks = createTemporaryObject(marksComponent, surface,
+                {ink: palette.ink, flatBackground: palette.ground, kind: "listening"})
+            verify(marks !== null)
+            const active = renderedContrast(surface, palette)
+            for (const kind of ["not-running", "inactive", "idle"]) {
+                marks.kind = kind
+                const faint = renderedContrast(surface, palette)
+                verify(faint >= 3, palette.name + " " + kind + " measures " + faint.toFixed(3) + " to 1")
+                verify(faint < active, palette.name + " " + kind + " " + faint.toFixed(3)
+                    + " is quieter than listening " + active.toFixed(3))
+                compare(marks.opacity, palette.faint, palette.name + " " + kind + " opacity")
+            }
+        }
+        const flat = createTemporaryObject(marksComponent, this, {ink: "#808080", flatBackground: "#808080", kind: "idle"})
+        verify(flat !== null)
+        compare(flat.opacity, 1, "ink that cannot reach 3 to 1 is shown at full opacity")
     }
 }

@@ -38,6 +38,10 @@ BarWidget {
         motionEnabled: root.service ? root.service.motionEnabled : false
         ink: Color.flatColor(Color.pick("bar.text", Color.foreground), Color.foreground)
         troubleInk: Color.flatColor(Color.pick("bar.active", Color.urgent), Color.urgent)
+        flatBackground: {
+            const flat = Color.flatColor(Color.pick("bar.background", Color.background), Color.background)
+            return Qt.rgba(flat.r, flat.g, flat.b, 1)
+        }
     }
     MouseArea {
         id: hover
