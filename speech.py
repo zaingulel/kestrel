@@ -37,6 +37,8 @@ from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 
+from hermes_worker import DELIVERY_LABELS
+
 _ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
 _NUMBER_WORDS = inflect.engine()
 
@@ -1783,7 +1785,7 @@ class PhononTTS(ConversationTTS):
                          generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
 
     def _generate_chunks(self, text: str, *, delivery: str):
-        if delivery not in ('neutral', 'curious', 'gently_pleased', 'reassuring'):
+        if delivery not in DELIVERY_LABELS:
             raise RuntimeError('Invalid internal speech delivery')
         native = None
         try:

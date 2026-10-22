@@ -399,7 +399,6 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                     native.TTS.assert_not_called()
                 self.assertFalse(any('catalog' in call[0] or 'clone' in call[0] for call in native.mock_calls))
 
-
     async def test_public_default_resamples_and_closes(self):
         import soxr
 
@@ -438,7 +437,6 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                 actual = np.frombuffer(b''.join(frame.audio for frame in frames), dtype='<i2').astype(np.int32)
                 self.assertEqual(len(actual), 48000)
                 np.testing.assert_allclose(actual, expected, rtol=0, atol=2)
-
 
     async def test_invalid_audio_refuses_output(self):
         for fault, rate, chunks in (
@@ -490,7 +488,6 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'Invalid internal speech delivery'):
             _ = [frame async for frame in voice.run_tts('Refuse invalid delivery.', 'invalid')]
         model.stream.assert_not_called()
-
 
     async def test_cancel_waits_for_native_close_before_reuse(self):
         for outcome in ('clean', 'close failure'):
@@ -591,7 +588,6 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                     for task in tasks:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
-
 
 
 class VoiceTests(unittest.IsolatedAsyncioTestCase):
@@ -2178,7 +2174,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             prepared.set()
 
         with (tempfile.TemporaryDirectory() as runtime,
-              patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
+              patch.dict(os.environ, XDG_RUNTIME_DIR=runtime, KESTREL_TTS_MODEL='voxcpm2'),
               patch.object(speech.asyncio, "create_subprocess_exec", spawn),
               patch.object(bot, "LaptopAudioTransport", return_value=transport),
               patch.object(bot, "NemotronSTT", return_value=stt),

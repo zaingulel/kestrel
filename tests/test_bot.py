@@ -2650,7 +2650,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch.object(bot, 'NemotronSTT', return_value=stt),
                     patch.object(bot, 'NemotronRecognizer', return_value=stt),
-                    patch.object(bot, 'load_phonon', return_value=phonon, create=True) as load,
+                    patch.object(bot, 'load_phonon', return_value=phonon) as load,
                     patch.object(bot, 'run_conversation', side_effect=conversation),
                     patch.object(bot.torch, 'set_num_threads'),
                 ):
@@ -2679,7 +2679,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 stt = Mock(load=AsyncMock(), close=AsyncMock())
                 with (
                     patch.object(bot, 'NemotronRecognizer', return_value=stt),
-                    patch.object(bot, 'load_phonon', create=True) as load,
+                    patch.object(bot, 'load_phonon') as load,
                     patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
                 ):
                     bot.VoxCPM.from_pretrained.reset_mock()
@@ -2696,7 +2696,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 model = Mock(stream=Mock(side_effect=RuntimeError('native synthesis failed')))
                 with (
                     patch.object(bot, 'NemotronRecognizer', return_value=stt),
-                    patch.object(bot, 'load_phonon', create=True, return_value=model,
+                    patch.object(bot, 'load_phonon', return_value=model,
                                  side_effect=RuntimeError('Phonon assets unavailable') if failure == 'load' else None),
                     patch.object(bot, 'run_conversation', new_callable=AsyncMock) as conversation,
                 ):

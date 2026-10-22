@@ -133,7 +133,7 @@ If the engine or note initialization is unavailable, an activated conversation k
 
 `KESTREL_TTS_MODEL` selects the speech model once at startup: an absent setting selects `phonon`; the only explicit values are `phonon` and `voxcpm2`. Blank or unknown values refuse startup. A failed model load or warmup stops preparation with advice; Kestrel never silently switches providers. These are setup instructions, not evidence that a retained installation has been upgraded.
 
-Phonon uses the fixed local English 31M q8 checkpoint on the CPU with four runtime threads, the public `default` voice and seed 1234. It receives spoken text without private reference audio, the reference transcript or VoxCPM2's expressive synthesis instructions. Internal reply delivery labels do not select Phonon voices or conditioning. Kestrel is instructed to ask useful follow-ups as separate sentences; occasional unnecessary follow-ups remain a limitation.
+Phonon uses the fixed local English 31M q8 checkpoint on the CPU with four runtime threads, the public `default` voice and seed 1234. The verified configuration is Linux x86-64 on this laptop using the pinned manylinux wheel; other CPU configurations are unverified. It receives spoken text without private reference audio, the reference transcript or VoxCPM2's expressive synthesis instructions. Internal reply delivery labels do not select Phonon voices or conditioning. Kestrel is instructed to ask useful follow-ups as separate sentences; occasional unnecessary follow-ups remain a limitation.
 
 `KESTREL_VOICE` independently selects the local reference preset. Its default remains `irish-female`; `british-male` and the original `kestrel` reference remain available. This reference is still validated and used for recognition warmup with either speech model, so keep its WAV and transcript even with Phonon. It conditions generated speech only when VoxCPM2 is selected; selecting an Irish reference does not make Phonon's public voice Irish.
 
@@ -143,7 +143,7 @@ For explicit VoxCPM2 rollback with the British reference in a foreground termina
 KESTREL_TTS_MODEL=voxcpm2 KESTREL_VOICE=british-male ./run-voice.sh
 ```
 
-For the user service, inspect the [effective installation](#kestrel) and its existing overrides first. Run `systemctl --user edit kestrel-voice.service` and set:
+For the user service, inspect the effective installation described above and its existing overrides first. Run `systemctl --user edit kestrel-voice.service` and set:
 
 ```ini
 [Service]
