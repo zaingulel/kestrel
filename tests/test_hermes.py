@@ -269,14 +269,14 @@ def native_worker(replies, *, synthetic_default_home=None, memory_root=None, non
 
 
 class HermesWorkerTests(unittest.TestCase):
-    def trial_main(self, agent, prompts, registry=None):
+    def trial_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
         registry_module.registry = registry or Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = lambda result: False
         promotion = ModuleType('agent.reasoning_promotion')
-        promotion.answer_in_reasoning_capability = lambda built: False
+        promotion.answer_in_reasoning_capability = lambda built: reasoning_capability
         run_agent, relay_runtime, native = (ModuleType(name) for name in
                                            ('run_agent', 'agent.relay_runtime', 'nemo_relay'))
         relay_runtime.get_runtime = Mock(return_value=Mock())
@@ -312,7 +312,7 @@ class HermesWorkerTests(unittest.TestCase):
                       patch.object(hermes_worker, 'validate_hermes_source'),
                       patch.object(hermes_worker, 'validate_local_configuration'),
                       patch('sys.stdin', TextIOWrapper(BytesIO(requests.encode()))), patch('sys.stdout', output)):
-                    self.assertEqual(hermes_worker.main(), 0)
+                    self.assertEqual(hermes_worker.main(), expected_status)
             finally:
                 os.chdir(cwd)
                 os.umask(mask)
@@ -462,6 +462,13 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertIs(agent._fire_stream_delta, original_fire)
         self.assertNotIn('normalize_response', vars(first))
         self.assertNotIn('normalize_response', vars(second))
+
+        refused_agent = Mock()
+        refusal = self.trial_main(refused_agent, ['Hello.'], reasoning_capability=True, expected_status=1)
+        self.assertEqual(refusal, [{'error': 'Hermes returned unsafe reasoning markup. Try again.'}])
+        refused_agent.close.assert_called_once_with()
+        refused_agent.run_conversation.assert_not_called()
+        refused_agent._get_transport.assert_not_called()
 
     def test_trial_reasoning_filter(self):
         import hermes_worker
@@ -1398,7 +1405,9 @@ class NativeHermesTests(unittest.TestCase):
         tool = {'tool_calls': [{'index': 0, 'id': 'volume-trial', 'type': 'function',
                                'function': {'name': 'set_volume', 'arguments': '{"percent":30}'}}]}
         replies = [
-            '[delivery:neutral] 3 < 5 and <thing>.',
+            [({'content': '[delivery:neutral] <thi'}, None),
+             ({'content': 'nk>PRIVATE-CANARY. '}, None),
+             ({'content': '</think>3 < 5 and <thing>.'}, None), ({}, 'stop')],
             [({'reasoning_content': 'STRUCTURED-PRIVATE-CANARY.'}, None),
              ({'content': '<think>INLINE-PRIVATE-CANARY.</think>'}, None), (tool, None), ({}, 'tool_calls')],
             [({'content': '<think>PRIVATE-CANARY.</think>[delivery:neutral] '}, None),
