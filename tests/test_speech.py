@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import hashlib
 import json
 import os
 import signal
@@ -321,6 +322,276 @@ class RecognitionTests(unittest.IsolatedAsyncioTestCase):
                 service = self.service(response)
                 with self.assertRaisesRegex(RuntimeError, message):
                     [frame async for frame in service.run_stt(b"audio")]
+
+
+class PhononTests(unittest.IsolatedAsyncioTestCase):
+    @contextmanager
+    def assets(self):
+        with tempfile.TemporaryDirectory() as home:
+            root = Path(home)
+            directory = root / 'shared-models' / 'phonon-31m-en-q8'
+            directory.mkdir(parents=True)
+            (root / '.runtime').mkdir()
+            (root / '.runtime/models').symlink_to(directory.parent, target_is_directory=True)
+            contents = {name: name.encode() for name in (
+                'config.json', 'tokenizer.json', 'model.q8.gguf', 'default-voice.safetensors')}
+            for name, data in contents.items():
+                (directory / name).write_bytes(data)
+            pins = {name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in contents.items()}
+            with patch.object(speech, 'ROOT', root), patch.object(speech, 'PHONON_ASSETS', pins):
+                yield directory, contents
+
+    async def test_pinned_assets_refuse_before_native_load(self):
+        self.assertEqual(speech.PHONON_ASSETS, {
+            'config.json': (4634, 'b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85'),
+            'tokenizer.json': (277967, '691a00068fa7b989f2f3e5ae5daa2d1a5bb319f2d5360deafcfb19a8bb6e7936'),
+            'model.q8.gguf': (64512352, 'a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae'),
+            'default-voice.safetensors': (256136, 'f739e8c4c76ee7f92e7c94a82002748c8cd22e99582ac49f7b9b94cd63786e18'),
+        })
+        for fault in ('missing', 'short', 'long', 'digest', 'symlink', 'directory', 'unexpected'):
+            with self.subTest(fault=fault), self.assets() as (directory, contents):
+                asset = directory / 'model.q8.gguf'
+                if fault == 'missing':
+                    asset.unlink()
+                elif fault == 'short':
+                    asset.write_bytes(b'')
+                elif fault == 'long':
+                    asset.write_bytes(contents[asset.name] + b'x')
+                elif fault == 'digest':
+                    asset.write_bytes(b'x' * len(contents[asset.name]))
+                elif fault == 'symlink':
+                    asset.unlink()
+                    asset.symlink_to(directory / 'config.json')
+                elif fault == 'directory':
+                    asset.unlink()
+                    asset.mkdir()
+                else:
+                    (directory / 'voices').mkdir()
+                native = Mock(__version__='0.4.0')
+                with patch.dict(sys.modules, {'ptts': native}):
+                    with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estore'):
+                        speech.load_phonon()
+                native.TTS.assert_not_called()
+        with self.assets() as (directory, _):
+            model = Mock(sample_rate=24000, voices=['default'])
+            native = Mock(__version__='0.4.0', TTS=Mock(return_value=model))
+            with patch.dict(sys.modules, {'ptts': native}):
+                self.assertIs(speech.load_phonon(), model)
+            native.TTS.assert_called_once_with(str(directory), lang='en', quant='q8', device='cpu')
+            native.set_num_threads.assert_called_once_with(4)
+
+    async def test_runtime_and_default_voice_refuse_before_stream(self):
+        for fault in ('missing package', 'version', 'missing version', 'rate', 'default', 'native load'):
+            with self.subTest(fault=fault), self.assets():
+                model = Mock(sample_rate=22050 if fault == 'rate' else 24000,
+                             voices=[] if fault == 'default' else ['default'])
+                native = Mock(__version__='0.3.0' if fault == 'version' else '0.4.0',
+                              TTS=Mock(return_value=model))
+                if fault == 'missing version':
+                    del native.__version__
+                if fault == 'native load':
+                    native.TTS.side_effect = ValueError('native load refused')
+                with patch.dict(sys.modules, {'ptts': None if fault == 'missing package' else native}):
+                    with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estore'):
+                        speech.load_phonon()
+                model.stream.assert_not_called()
+                if fault in ('missing package', 'version', 'missing version'):
+                    native.TTS.assert_not_called()
+                self.assertFalse(any('catalog' in call[0] or 'clone' in call[0] for call in native.mock_calls))
+
+
+    async def test_public_default_resamples_and_closes(self):
+        import soxr
+
+        n = np.arange(24000)
+        waveform = (0.2 * np.sin(2 * np.pi * 440 * n / 24000)
+                    + 0.1 * np.sin(2 * np.pi * 6100 * n / 24000)).astype(np.float32)
+        expected = (np.clip(soxr.resample(waveform, 24000, 48000, quality='HQ'), -1, 1)
+                    * 32767).astype('<i2').astype(np.int32)
+
+        class NativeStream:
+            sample_rate = 24000
+
+            def __init__(self):
+                self.chunks = iter(np.split(waveform, [1, 32, 541, 1538, 5634, 13825]))
+                self.close = Mock()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.chunks)
+
+        for delivery in ('neutral', 'curious', 'gently_pleased', 'reassuring'):
+            with self.subTest(delivery=delivery):
+                stream = NativeStream()
+                model = Mock(sample_rate=24000, voices=['default'], stream=Mock(return_value=stream))
+                voice = speech.PhononTTS(model)
+                self.assertIsInstance(voice, speech.ConversationTTS)
+                voice._conversation_audio_contexts['turn'] = speech.ConversationAudioContext(None, delivery=delivery)
+                frames = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
+                model.stream.assert_called_once_with('The answer is eighteen.', voice='default', seed=1234)
+                stream.close.assert_called_once_with()
+                self.assertTrue(all(isinstance(frame, TTSAudioRawFrame) and frame.sample_rate == 48000
+                                    and frame.num_channels == 1 and frame.context_id == 'turn' for frame in frames))
+                self.assertEqual(frames[0].conversation_text_start, 'The answer is 18.')
+                actual = np.frombuffer(b''.join(frame.audio for frame in frames), dtype='<i2').astype(np.int32)
+                self.assertEqual(len(actual), 48000)
+                np.testing.assert_allclose(actual, expected, rtol=0, atol=2)
+
+
+    async def test_invalid_audio_refuses_output(self):
+        for fault, rate, chunks in (
+            ('stream rate', 22050, [np.zeros(2400, dtype=np.float32)]),
+            ('rank', 24000, [np.zeros((2400, 1), dtype=np.float32)]),
+            ('dtype', 24000, [np.zeros(2400, dtype=np.float64)]),
+            ('type', 24000, [[0.0] * 2400]),
+            ('NaN', 24000, [np.full(2400, np.nan, dtype=np.float32)]),
+            ('infinity', 24000, [np.full(2400, np.inf, dtype=np.float32)]),
+            ('empty chunk', 24000, [np.empty(0, dtype=np.float32)]),
+            ('empty stream', 24000, []),
+            ('native exception', 24000, []),
+            ('stream creation', 24000, []),
+        ):
+            with self.subTest(fault=fault):
+                class NativeStream:
+                    sample_rate = rate
+                    close = Mock()
+
+                    def __iter__(self):
+                        if fault == 'native exception':
+                            raise ValueError('native failed')
+                        return iter(chunks)
+
+                stream = NativeStream()
+                model = Mock(sample_rate=24000, voices=['default'], stream=Mock(return_value=stream))
+                if fault == 'stream creation':
+                    model.stream.side_effect = ValueError('native stream failed')
+                voice = speech.PhononTTS(model)
+                context = speech.ConversationAudioContext(object())
+                voice._conversation_audio_contexts['invalid'] = context
+                voice.push_frame = AsyncMock()
+                emitted = []
+                with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estart'):
+                    async for frame in voice.run_tts('Refuse corrupt output.', 'invalid'):
+                        emitted.append(frame)
+                self.assertEqual(emitted, [])
+                voice.push_frame.assert_awaited_once()
+                failure = voice.push_frame.call_args.args[0]
+                self.assertIsInstance(failure, speech.ConversationSynthesisFailedFrame)
+                self.assertIs(failure.context, context)
+                if fault == 'stream creation':
+                    stream.close.assert_not_called()
+                else:
+                    stream.close.assert_called_once_with()
+        model = Mock(sample_rate=24000, voices=['default'])
+        voice = speech.PhononTTS(model)
+        voice._conversation_audio_contexts['invalid'] = speech.ConversationAudioContext(None, delivery='unknown')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid internal speech delivery'):
+            _ = [frame async for frame in voice.run_tts('Refuse invalid delivery.', 'invalid')]
+        model.stream.assert_not_called()
+
+
+    async def test_cancel_waits_for_native_close_before_reuse(self):
+        for outcome in ('clean', 'close failure'):
+            with self.subTest(cleanup=outcome):
+                loop = asyncio.get_running_loop()
+                next_entered, close_entered, queued_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                release_next, release_close = threading.Event(), threading.Event()
+                events, streams, tasks = [], [], []
+
+                class NativeStream:
+                    sample_rate = 24000
+
+                    def __init__(self, text):
+                        self.text = text
+                        self.count = 0
+                        self.closes = 0
+
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        self.count += 1
+                        if self.text == 'old' and self.count == 2:
+                            loop.call_soon_threadsafe(next_entered.set)
+                            if not release_next.wait(5):
+                                raise AssertionError('Native next was never released')
+                        if self.count > (2 if self.text == 'old' else 1):
+                            raise StopIteration
+                        return np.full(4096, 0.1, dtype=np.float32)
+
+                    def close(self):
+                        self.closes += 1
+                        if self.text == 'old':
+                            loop.call_soon_threadsafe(close_entered.set)
+                            if not release_close.wait(5):
+                                raise AssertionError('Native close was never released')
+                        events.append((self.text, 'closed'))
+                        if self.text == 'old' and outcome == 'close failure':
+                            raise RuntimeError('native close refused')
+
+                def generate(text, *, voice, seed):
+                    self.assertEqual((voice, seed), ('default', 1234))
+                    events.append((text, 'start'))
+                    stream = NativeStream(text)
+                    streams.append(stream)
+                    return stream
+
+                model = Mock(sample_rate=24000, voices=['default'], stream=Mock(side_effect=generate))
+                lock = asyncio.Lock()
+                old_voice = speech.PhononTTS(model, generation_lock=lock)
+                new_voice = speech.PhononTTS(model, generation_lock=lock) if outcome == 'clean' else old_voice
+
+                async def consume(voice, text):
+                    if text == 'new':
+                        queued_entered.set()
+                    return [frame async for frame in voice.run_tts(text, text)]
+
+                old = asyncio.create_task(consume(old_voice, 'old'))
+                tasks.append(old)
+                try:
+                    await asyncio.wait_for(next_entered.wait(), 5)
+                    old.cancel()
+                    new = asyncio.create_task(consume(new_voice, 'new'))
+                    tasks.append(new)
+                    await asyncio.wait_for(queued_entered.wait(), 5)
+                    self.assertTrue(lock.locked())
+                    self.assertFalse(old.done())
+                    self.assertNotIn(('new', 'start'), events)
+                    release_next.set()
+                    await asyncio.wait_for(close_entered.wait(), 5)
+                    old.cancel()
+                    await asyncio.sleep(0)
+                    old.cancel()
+                    await asyncio.sleep(0)
+                    self.assertFalse(old.done(), 'Repeated cancellation cannot abandon native close')
+                    self.assertTrue(lock.locked())
+                    self.assertNotIn(('new', 'start'), events)
+                    release_close.set()
+                    if outcome == 'clean':
+                        with self.assertRaises(asyncio.CancelledError):
+                            await old
+                        frames = await new
+                        self.assertTrue(frames)
+                        self.assertLess(events.index(('old', 'closed')), events.index(('new', 'start')))
+                        self.assertFalse(old_voice.generation_cleanup_failed)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'Phonon native cleanup failed'):
+                            await old
+                        self.assertTrue(old_voice.generation_cleanup_failed)
+                        with self.assertRaisesRegex(RuntimeError, 'Voice generation cleanup failed'):
+                            await new
+                        self.assertNotIn(('new', 'start'), events)
+                    self.assertEqual(streams[0].closes, 1)
+                    self.assertFalse(lock.locked())
+                finally:
+                    release_next.set()
+                    release_close.set()
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
 
 
 class VoiceTests(unittest.IsolatedAsyncioTestCase):
