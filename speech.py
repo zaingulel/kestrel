@@ -4,10 +4,12 @@ import asyncio
 from asyncio import sleep
 import base64
 import io
+import hashlib
 import json
 import os
 import re
 from dataclasses import dataclass, field
+import stat
 import subprocess
 import sys
 import threading
@@ -17,6 +19,7 @@ from time import monotonic
 
 import inflect
 import numpy as np
+import soxr
 from loguru import logger
 from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
@@ -34,10 +37,62 @@ from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 
+from hermes_worker import DELIVERY_LABELS
+
 _ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
 _NUMBER_WORDS = inflect.engine()
 
 ROOT = Path(__file__).parent
+PHONON_ASSETS = {
+    'config.json': (4634, 'b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85'),
+    'tokenizer.json': (277967, '691a00068fa7b989f2f3e5ae5daa2d1a5bb319f2d5360deafcfb19a8bb6e7936'),
+    'model.q8.gguf': (64512352, 'a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae'),
+    'default-voice.safetensors': (256136, 'f739e8c4c76ee7f92e7c94a82002748c8cd22e99582ac49f7b9b94cd63786e18'),
+}
+
+
+def load_phonon():
+    """Admit the pinned local checkpoint before native code can resolve any assets."""
+    advice = 'Phonon assets are invalid. Restore the pinned local Phonon assets and restart Kestrel.'
+    try:
+        directory = (ROOT / '.runtime/models').resolve(strict=True) / 'phonon-31m-en-q8'
+        if not stat.S_ISDIR(directory.lstat().st_mode) or {p.name for p in directory.iterdir()} != set(PHONON_ASSETS):
+            raise RuntimeError(advice)
+        for name, (size, digest) in PHONON_ASSETS.items():
+            asset = directory / name
+            if not stat.S_ISREG(asset.lstat().st_mode):
+                raise RuntimeError(advice)
+            with os.fdopen(os.open(asset, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+                metadata = os.fstat(source.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size != size:
+                    raise RuntimeError(advice)
+                checksum = hashlib.sha256()
+                remaining = size
+                while remaining:
+                    block = source.read(min(65536, remaining))
+                    if not block:
+                        raise RuntimeError(advice)
+                    checksum.update(block)
+                    remaining -= len(block)
+                if source.read(1) or checksum.hexdigest() != digest:
+                    raise RuntimeError(advice)
+    except OSError as error:
+        raise RuntimeError(advice) from error
+    runtime_advice = 'Phonon is unavailable. Restore ptts 0.4.0 and the pinned local assets, then restart Kestrel.'
+    try:
+        import ptts
+
+        if getattr(ptts, '__version__', None) != '0.4.0':
+            raise RuntimeError(runtime_advice)
+        ptts.set_num_threads(4)
+        model = ptts.TTS(str(directory), lang='en', quant='q8', device='cpu')
+        if model.sample_rate != 24000 or 'default' not in model.voices:
+            raise RuntimeError(runtime_advice)
+        return model
+    except Exception as error:
+        raise RuntimeError(runtime_advice) from error
+
+
 # Standard JSON, which PipeWire accepts, so the runtime boundary test can parse it.
 ECHO_REMOVAL_CONFIG = "echo-removal.conf"
 ECHO_REMOVAL_MICROPHONE = "kestrel-microphone"
@@ -1502,16 +1557,15 @@ class SpeechAdvisoryFrame(LLMTextFrame):
     """Fixed application speech that generated syntax cannot suppress."""
 
 
-class VoxCPMTTS(TTSService):
-    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+class ConversationTTS(TTSService):
+    def __init__(self, model, *, settings: TTSSettings, generation_lock=None, admitted=lambda: True, reply_admitted=None):
         super().__init__(
             sample_rate=48000, push_start_frame=True, push_stop_frames=True,
-            settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
+            settings=settings,
         )
         self.model = model
         self.admitted = admitted
         self.reply_admitted = reply_admitted
-        self.preset = preset
         self._generation_lock = generation_lock if generation_lock is not None else asyncio.Lock()
         self.generation_cleanup_failed = False
         self._spoken_reply = SpokenReplyText()
@@ -1626,19 +1680,6 @@ class VoxCPMTTS(TTSService):
 
         text_started = False
         try:
-            styles = {
-                'curious': '(Subtly curious and interested, natural conversational delivery)',
-                'gently_pleased': '(Gently pleased, with a subtle smile in the voice)',
-                'reassuring': '(Warm, gentle and reassuring, speaking calmly)',
-            }
-            if delivery == 'neutral':
-                prompt = dict(prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript)
-                prefix = ''
-            elif delivery in styles:
-                prompt = {}
-                prefix = styles[delivery] + ' '
-            else:
-                raise RuntimeError('Invalid internal speech delivery')
             # Never overlap model calls, including a chunk still finishing after interruption.
             async with self._generation_lock:
                 if self.generation_cleanup_failed:
@@ -1651,11 +1692,7 @@ class VoxCPMTTS(TTSService):
                     # Built in the owned next() worker, so cleanup observes normalization like model work.
                     nonlocal chunks
                     if chunks is None:
-                        chunks = self.model.generate_streaming(
-                            text=prefix + spoken_numbers(text), **prompt,
-                            reference_wav_path=str(self.preset.reference),
-                            inference_timesteps=10, max_len=400, retry_badcase=False,
-                        )
+                        chunks = self._generate_chunks(text, delivery=delivery)
                     return next(chunks, None)
                 pending = None
                 try:
@@ -1694,7 +1731,7 @@ class VoxCPMTTS(TTSService):
                             self.generation_cleanup_failed = True
                             raise
 
-                    # Pipecat can cancel again during terminal cleanup. The real GPU work
+                    # Pipecat can cancel again during terminal cleanup. The native work
                     # and its close operation must finish before this lock can be released.
                     cleanup = asyncio.create_task(finish_generation())
                     cancelled = False
@@ -1713,3 +1750,69 @@ class VoxCPMTTS(TTSService):
             if context is not None and context.reply_token is not None:
                 await self.push_frame(ConversationSynthesisFailedFrame(context=context))
             raise
+
+
+class VoxCPMTTS(ConversationTTS):
+    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+        super().__init__(model, settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
+                         generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
+        self.preset = preset
+
+    def _generate_chunks(self, text: str, *, delivery: str):
+        styles = {
+            'curious': '(Subtly curious and interested, natural conversational delivery)',
+            'gently_pleased': '(Gently pleased, with a subtle smile in the voice)',
+            'reassuring': '(Warm, gentle and reassuring, speaking calmly)',
+        }
+        if delivery == 'neutral':
+            prompt = dict(prompt_wav_path=str(self.preset.reference), prompt_text=self.preset.transcript)
+            prefix = ''
+        elif delivery in styles:
+            prompt = {}
+            prefix = styles[delivery] + ' '
+        else:
+            raise RuntimeError('Invalid internal speech delivery')
+        return self.model.generate_streaming(
+            text=prefix + spoken_numbers(text), **prompt,
+            reference_wav_path=str(self.preset.reference),
+            inference_timesteps=10, max_len=400, retry_badcase=False,
+        )
+
+
+class PhononTTS(ConversationTTS):
+    def __init__(self, model, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+        super().__init__(model, settings=TTSSettings(model="Phonon 31M q8", voice='default', language=None),
+                         generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
+
+    def _generate_chunks(self, text: str, *, delivery: str):
+        if delivery not in DELIVERY_LABELS:
+            raise RuntimeError('Invalid internal speech delivery')
+        native = None
+        try:
+            native = self.model.stream(spoken_numbers(text), voice='default', seed=1234)
+            if native.sample_rate != 24000:
+                raise RuntimeError('Phonon stream audio must be 24000 Hz')
+            resampler = soxr.ResampleStream(24000, 48000, 1, dtype='float32', quality='HQ')
+            has_audio = False
+            for chunk in native:
+                if (not isinstance(chunk, np.ndarray) or chunk.ndim != 1
+                        or chunk.dtype != np.float32 or not np.isfinite(chunk).all()):
+                    raise RuntimeError('Phonon returned invalid audio')
+                converted = resampler.resample_chunk(chunk)
+                if converted.size:
+                    has_audio = True
+                    yield converted
+            tail = resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
+            if tail.size:
+                has_audio = True
+                yield tail
+            if not has_audio:
+                raise RuntimeError('Phonon produced no audio')
+        except Exception as error:
+            raise RuntimeError('Phonon synthesis failed. Restore the pinned runtime and assets, then restart Kestrel.') from error
+        finally:
+            if native is not None:
+                try:
+                    native.close()
+                except Exception as error:
+                    raise RuntimeError('Phonon native cleanup failed. Restart Kestrel.') from error
