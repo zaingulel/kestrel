@@ -41,7 +41,7 @@ Kestrel defines no colour of its own. It binds the native host's reactive `Color
 
 - A background role and the tooltip border are composed with the theme's alpha companion key where the theme sets one, and are fully opaque otherwise: `bar.background-alpha`, `popups.background-alpha`, `tooltip.background-alpha` and `tooltip.border-alpha`.
 - Native palette bindings update when the host applies a theme through its shell interface. Kestrel does not parse theme files or watch `theme.name`.
-- Resting marks use their text role at 0.6 opacity. Conversation bubbles add only these derived opaque roles: Kestrel tint is ink at 10% over the flattened popup background; owner wash is accent at 20% over that background; scroll-edge rule is ink at 20% over it. Flatten the resolved popup role with the host fallback and force its alpha to 1 before composition. Both bubbles use popup ink text, never accent-filled messages or derived state colours. The voice button's question badge and the on-accent glyphs of Send and the active voice button use this flat background. The composer and the resting voice button use the Kestrel tint; disabled Send and voice button are transparent with a rule-colour outline and ink at 0.6 opacity. Reference palettes for verification are Tokyo Night background `#1a1b26`, ink `#a9b1d6`, accent `#7aa2f7`, and Latte `#eff1f5`, `#4c4f69`, `#1e66f5`; production remains bound to host roles.
+- Faint resting marks use their text role at the faint opacity [The three marks](#the-three-marks) defines, over the flat bar background: the resolved bar background role with the host fallback, its alpha forced to 1. Conversation bubbles add only these derived opaque roles: Kestrel tint is ink at 10% over the flattened popup background; owner wash is accent at 20% over that background; scroll-edge rule is ink at 20% over it. Flatten the resolved popup role with the host fallback and force its alpha to 1 before composition. Both bubbles use popup ink text, never accent-filled messages or derived state colours. The voice button's question badge and the on-accent glyphs of Send and the active voice button use this flat background. The composer and the resting voice button use the Kestrel tint; disabled Send and voice button are transparent with a rule-colour outline and ink at 0.6 opacity. Reference palettes for verification are Tokyo Night background `#1a1b26`, ink `#a9b1d6`, accent `#7aa2f7`, and Latte `#eff1f5`, `#4c4f69`, `#1e66f5`; production remains bound to host roles.
 - State is never carried by colour alone. Bar active marks trouble only; every other indicator state uses bar text.
 - The desktop supplies the window border, the font family (`monospace`) and the window opacity. The panel draws no border of its own.
 
@@ -104,15 +104,17 @@ The indicator's slot is 25 wide and the full bar height. Every state draws the s
 
 | State | Still form, bar heights left to right | Motion |
 | --- | --- | --- |
-| Not running | 2, 2, 2, the first two widened to 6 so the three join into one 15 by 2 line, at 0.6 opacity | None |
-| Inactive | 6, 6, 6, outlined with 1-pixel strokes, at 0.6 opacity | None |
+| Not running | 2, 2, 2, the first two widened to 6 so the three join into one 15 by 2 line, faint | None |
+| Inactive | 6, 6, 6, outlined with 1-pixel strokes, faint | None |
 | Starting | 6, 6, 6, outlined with 1-pixel strokes | None |
 | Status unavailable | 4, 8, 12, rising | None |
-| Idle | 6, 6, 6, at 0.6 opacity | None |
+| Idle | 6, 6, 6, faint | None |
 | Listening | 12, 12, 12 | All three together, each `9 + 3 cos(2 pi p)` on one 1600 ms phase |
 | Thinking | 6, 12, 6 | A ripple: bar `i` is `8 + 4 cos(2 pi (p + (1 - i) / 3))` on one 840 ms phase, so the crest moves one bar right every 280 ms |
 | Speaking | 12, 6, 12 | Each bar on its own phase, repeating every 420, 520 and 610 ms: the outer bars `8 + 4 cos(2 pi p)`, the middle bar `9 - 3 cos(2 pi p)` |
 | Trouble | 6, 6, then a 7 high bar raised 2.5 above a 3 by 3 dot whose top is 3 below centre: an exclamation mark, all in bar active | None |
+
+Faint is the lowest opacity from 0.6 to 1, in steps of 0.01, at which the mark's ink over the flat background beneath it measures at least 3 to 1 against that background, the [non-text contrast](https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html) minimum. Each colour channel is taken one 8-bit step nearer the background, because rendering can round that far. Where even full ink stays under 3 to 1, faint is full opacity and the form alone tells the state apart. The indicator's flat background is the bar background from [Colour](#colour); where a theme makes the bar translucent or transparent, the desktop behind it is not measured. On the reference palettes faint is 0.64 on Latte and 0.6 on Tokyo Night.
 
 Any other value shows the status unavailable form. A form the table does not call outlined or faint is solid at full opacity in its ink. A moving state's still form is its motion at phase 0; the motion is added as its difference from that form, scaled by a weight that glides between 0 and 1, so motion fades in and out from the form on screen. The bars mark state, never measured sound level.
 
