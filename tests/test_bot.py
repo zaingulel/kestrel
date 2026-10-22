@@ -3185,7 +3185,7 @@ class WholeConversationFixtureTests(unittest.TestCase):
 
 
 class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_trial_deep_reply_is_private_and_stoppable(self):
+    async def test_deep_reply_is_private_and_stoppable(self):
         blocked, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
         def deep_reply():
@@ -9124,7 +9124,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_engine_turn_timeout_speaks_failure_and_reaps_worker(self):
         for interrupt, deep in ((False, False), (False, True), (True, False), (True, True)):
-            with self.subTest(interrupted=interrupt, deep=deep), patch.object(bot, 'TURN_TIMEOUT', 1, create=True):
+            with self.subTest(interrupted=interrupt, deep=deep), patch.object(bot, 'TURN_TIMEOUT', 1):
                 wire = ("import json, sys; print('{\"ready\":true}', flush=True); "
                         "assert json.loads(sys.stdin.readline()) == {'begin': True}; "
                         "print('{\"session_ready\":true}', flush=True); sys.stdin.readline(); "

@@ -269,7 +269,7 @@ def native_worker(replies, *, synthetic_default_home=None, memory_root=None, non
 
 
 class HermesWorkerTests(unittest.TestCase):
-    def trial_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
+    def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
         registry_module.registry = registry or Mock()
@@ -318,7 +318,7 @@ class HermesWorkerTests(unittest.TestCase):
                 os.umask(mask)
             return [json.loads(line) for line in output.getvalue().splitlines()]
 
-    def test_trial_final_reasoning_refuses_empty_reply(self):
+    def test_final_reasoning_refuses_empty_reply(self):
         agent = Mock()
         agent._stream_writer_lock = threading.Lock()
         agent._reset_stream_delivery_tracking = Mock()
@@ -346,7 +346,7 @@ class HermesWorkerTests(unittest.TestCase):
                      'reset': '[delivery:neutral] Reset.'}[case]
             return {'completed': True, 'final_response': final}
         agent.run_conversation.side_effect = run
-        events = self.trial_main(agent, ['Think more deeply about the answer.'] * 6 + ['Ordinary.'])
+        events = self.worker_main(agent, ['Think more deeply about the answer.'] * 6 + ['Ordinary.'])
         self.assertEqual(events, [
             {'ready': True}, {'session_ready': True}, {'delivery': 'neutral'}, {'text': 'Complete.'}, {'done': True},
             {'delivery': 'neutral'}, {'text': 'Observed.'}, {'done': True},
@@ -359,7 +359,7 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 180)])
         self.assertIs(transport.normalize_response, normalizer)
 
-    def test_trial_native_filter_lifecycle(self):
+    def test_native_filter_lifecycle(self):
         import hermes_worker
         registry = Mock()
         registered = {}
@@ -473,7 +473,7 @@ class HermesWorkerTests(unittest.TestCase):
             callbacks[-1]('')
             return {'completed': True, 'final_response': '[delivery:neutral] Answer< context tail'}
         agent.run_conversation.side_effect = run
-        events = self.trial_main(agent, ['Think more deeply about success.', 'Think more deeply about failure.', 'Again.'], registry)
+        events = self.worker_main(agent, ['Think more deeply about success.', 'Think more deeply about failure.', 'Again.'], registry)
         self.assertTrue(lock_observations)
         for operation, acquired in lock_observations:
             self.assertFalse(acquired, operation + ' must exclude the native writer lock')
@@ -504,13 +504,13 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertNotIn('normalize_response', vars(second))
 
         refused_agent = Mock()
-        refusal = self.trial_main(refused_agent, ['Hello.'], reasoning_capability=True, expected_status=1)
+        refusal = self.worker_main(refused_agent, ['Hello.'], reasoning_capability=True, expected_status=1)
         self.assertEqual(refusal, [{'error': 'Hermes reasoning configuration is unsafe. Check the pinned Hermes configuration, then restart Kestrel.'}])
         refused_agent.close.assert_called_once_with()
         refused_agent.run_conversation.assert_not_called()
         refused_agent._get_transport.assert_not_called()
 
-    def test_trial_reasoning_filter(self):
+    def test_reasoning_filter(self):
         import hermes_worker
         names = ('think', 'thinking', 'reasoning', 'thought', 'REASONING_SCRATCHPAD',
                  '思考', '反思', '推理', '推敲')
@@ -572,7 +572,7 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertEqual(reader.feed('</think>done'), 'done')
         self.assertEqual(reader.flush(), '')
 
-    def test_trial_deeper_thought_prefix(self):
+    def test_deeper_thought_prefix(self):
         import hermes_worker
         for text in ('Think more deeply about the sum.', '  THINK MORE DEEPLY ABOUT x  '):
             with self.subTest(text=text):
@@ -1428,7 +1428,7 @@ hermes_worker.main()
 
 
 class NativeHermesTests(unittest.TestCase):
-    def test_trial_complete_response_reasoning_stays_private(self):
+    def test_complete_response_reasoning_stays_private(self):
         replies = [
             {'content': '<think>INLINE-PRIVATE-CANARY.</think>[delivery:neutral] Complete.',
              'reasoning_content': 'STRUCTURED-PRIVATE-CANARY.'},
@@ -1452,7 +1452,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual([r[2]['chat_template_kwargs']['enable_thinking'] for r in brain.requests],
                              [True, True, False])
 
-    def test_trial_thinking_is_one_answer_and_reasoning_stays_private(self):
+    def test_thinking_is_one_answer_and_reasoning_stays_private(self):
         tool = {'tool_calls': [{'index': 0, 'id': 'volume-trial', 'type': 'function',
                                'function': {'name': 'set_volume', 'arguments': '{"percent":30}'}}]}
         replies = [

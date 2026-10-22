@@ -30,6 +30,9 @@ ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
 TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five desktop tools. '
                       'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
+ORDINARY_MAX_TOKENS = 180
+ORDINARY_REASONING_ENABLED = False
+GENERATION_TEMPERATURE = 0.4
 DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
 REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
 REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
@@ -541,8 +544,9 @@ def main(*, base_url=BONSAI_URL):
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
                     session_db=None, fallback_model=None, save_trajectories=False,
                     # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
-                    checkpoints_enabled=False, quiet_mode=True, max_tokens=180, max_iterations=9,
-                    reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
+                    checkpoints_enabled=False, quiet_mode=True, max_tokens=ORDINARY_MAX_TOKENS, max_iterations=9,
+                    reasoning_config={'enabled': ORDINARY_REASONING_ENABLED},
+                    request_overrides={'temperature': GENERATION_TEMPERATURE},
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
@@ -686,12 +690,12 @@ def main(*, base_url=BONSAI_URL):
                             emit(event)
 
                     deep = deeper_thought_requested(messages[-1]['content'])
-                    agent.reasoning_config = {'enabled': True, 'effort': 'medium'} if deep else {'enabled': False}
-                    agent.max_tokens = 16384 if deep else 180
+                    agent.reasoning_config = {'enabled': True, 'effort': 'medium'} if deep else {'enabled': ORDINARY_REASONING_ENABLED}
+                    agent.max_tokens = 16384 if deep else ORDINARY_MAX_TOKENS
                     template = {'enable_thinking': deep}
                     if deep:
                         template['reasoning_effort'] = 'medium'
-                    agent.request_overrides = {'temperature': 0.4, 'extra_body': {
+                    agent.request_overrides = {'temperature': GENERATION_TEMPERATURE, 'extra_body': {
                         'chat_template_kwargs': template, 'reasoning_format': 'deepseek'}}
                     reasoning_filter = ReplyReasoningFilter()
                     originals = {name: (name in vars(agent), getattr(agent, name)) for name in
