@@ -36,7 +36,7 @@ BarWidget {
         anchors.fill: parent
         kind: root.currentState
         motionEnabled: root.service ? root.service.motionEnabled : false
-        ink: Color.flatColor(Color.pick("bar.text", Color.foreground), Color.foreground)
+        ink: root.bar?.transparent ? root.bar.barForeground : Color.flatColor(Color.pick("bar.text", Color.foreground), Color.foreground)
         troubleInk: Color.flatColor(Color.pick("bar.active", Color.urgent), Color.urgent)
         seeThrough: root.bar?.transparent ?? false
         flatBackground: {
