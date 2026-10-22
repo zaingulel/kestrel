@@ -608,9 +608,9 @@ branch. Two issues may run in parallel only when their files are disjoint.
 
 Move the card to `Awaiting push`: `node scripts/board-move.mjs <issue> "Awaiting push"`. Write the pull request
 body with the vendored `pr` skill: read `.agents/skills/pr/SKILL.md`, fill `.github/pull_request_template.md` as
-the body under the Which template wins rule below, and show it to the owner with the screenshot.
-The owner still sees that same filled body in chat, with the review line at tier `document`; on the direct
-route section 8 describes, that shown body becomes the squash commit's message, since there is no pull request
+the body under the Which template wins rule below, and show its chat presentation to the owner with the screenshot.
+The owner still sees that same filled body's information in chat, with the review line at tier `document`; on the direct
+route section 8 describes, the filled body becomes the squash commit's message, since there is no pull request
 to hold it. The job's own `Closes #<issue>` line is the only closing word in a pull request body or a
 direct-route commit message: GitHub closes, as completed, any issue whose link follows close, fix or resolve in any
 tense, another repository's `owner/repo#N` included. Every other mention, such as the
@@ -619,6 +619,8 @@ from directly before its link. The owner's yes, or any instruction to push, cove
 push, the draft pull request, the comments that request the external review where the add-on is on, repairs on the same
 branch, rebasing onto `main`, marking ready, and the auto-merge. Nothing in section 8 stops to ask again; a public comment there is delivery, not a new
 action. Push only after it.
+
+**Chat presentation.** Use the filled body's sections, labels and order, with each disclosure summary as an ordinary Markdown heading followed by its complete contents. Omit HTML disclosure tags and template comments. Keep every required approval detail, review outcome and screenshot; copy test receipts verbatim into fenced `text` blocks. Put the approval question after the body, outside every code fence. Keep the GitHub body in the repository template's format.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
 the two differ, `.github/pull_request_template.md` wins: it decides which sections and lines the body has, their
@@ -644,7 +646,7 @@ On the direct route: settle the convergence checks exactly as step 1 names on `<
 that receipt ran on, and those receipts replace any the approved body quoted for an earlier head; fill that body's
 `Carried from:`, `Changed paths:` and `Carried receipts:` lines as that rule says, and nothing else in that body
 changes. Then squash the job with `git reset --soft <origin-main>` and `git commit` into one commit whose
-message is the pull-request title, a blank line, the same filled body shown to the owner with its review line and
+message is the pull-request title, a blank line, the same filled body the owner approved with its review line and
 receipts so replaced, a blank line, `Closes #<issue>`, and the attribution lines. Before pushing, confirm `git
 rev-parse HEAD^{tree}` equals `git rev-parse <head>^{tree}`, so the pushed commit carries exactly the content the
 receipts checked; a mismatch stops the route and the checks are settled again. Then push with `git push origin
@@ -819,10 +821,12 @@ and tells the owner.
    node scripts/merge-watch.mjs --draft job/<issue>
    ```
 
-   It only reads GitHub. It exits 0 once a pull request is open on `job/<issue>`, printing that pull request's number
-   as the last line of output, and otherwise exits non-zero with its reason as the last line: more than one pull
-   request open there, a reply it cannot read, or a `gh` failure. A wait that exits non-zero or is refused is told to
-   the owner with what it printed, and the wait runs again on the owner's say. Where the owner reports that the cloud
+   It reads origin and GitHub without writing. It resolves origin's repository identity and explicitly scopes each
+   discovery read to origin. It exits 0 only for exactly one open pull request owned by that repository on
+   `job/<issue>`, printing its number last. Foreign, unknown or inconsistent provenance, multiple pull requests,
+   unreadable replies and failed reads exit non-zero with the reason last. A wait that exits non-zero or is refused is
+   told to the owner with what it printed. For an apparent connection error, first check origin against step 5's
+   directly resolvable URL requirement. The wait runs again on the owner's say. Where the owner reports that the cloud
    session stopped without opening a draft, the session ends the wait, tells the owner whether `job/<issue>` exists,
    and leaves the card as it is until the owner says. A session that parks or ends before the draft opens leaves the
    card in its column under its claim. The next session's work-pick then offers the card's delivery first, above the
@@ -831,25 +835,51 @@ and tells the owner.
    where no other session still waits on it.
 5. **Delivery, locally.** Once the draft is open, the session asks the owner to confirm that every cloud session
    started under the claim has stopped, as "Releasing a cloud claim" describes, and on that confirmation carries the
-   card through this step in the same session, unasked. It runs `git fetch --no-prune origin job/<issue>`, then reads
-   the draft, with `<pr>` its number typed as a literal:
+   card through this step in the same session, unasked. Every takeover, including resumed delivery or an owner-supplied
+   pull request number, verifies provenance anew. Read origin:
 
    ```sh
-   gh pr view <pr> --json headRefOid,body --jq '.headRefOid, (.body | splits("\r?\n") | select(startswith("Reviewed commit:")))'
+   git remote get-url origin
    ```
 
-   Delivery goes on only where the read exits 0 and prints exactly two lines: the draft's head, the same commit
-   `git rev-parse origin/job/<issue>` prints, then `Reviewed commit: ` followed by that commit. Otherwise the session
-   stops and tells the owner what the read printed. A draft with no such line was opened before the review of the final
-   tree and, on the owner's say, is finished on the local route, its reviews included; any other output means the
-   branch is not the commit its last review covered. It creates and enters its worktree with the command of "3. Start the job" for
-   its runtime, with `origin/job/<issue>` in place of the recorded commit, runs `npm ci`, and settles each convergence
-   check under the Receipt reuse rule, which finds no receipt on this machine and runs it. It drives any visual work and
-   continues at "7. Push authorisation"; it runs no review of the other family. In "8. Deliver" step 1 the push is
-   `git push --force-with-lease origin job/<issue>`. After that step's rebase the job's base is `origin/main` itself,
-   equal to `git merge-base HEAD origin/main`, and the eligibility check uses it as `<origin-main>`. Where that check
-   would choose the direct route, the session stops and tells the owner, as the opening of this section says; otherwise
-   the draft already exists, so `gh pr create` is skipped, and the card moves to `In review`.
+   Require exit 0 and one nonempty URL line. The URL must name a real GitHub host that `gh` resolves directly: an SSH
+   host alias may work in Git but fail here, so stop and ask the owner for a directly resolvable origin instead of
+   retrying the apparent network error. Substitute that literal URL for `<origin-url>` in this separate command:
+
+   ```sh
+   gh repo view --json id -- "<origin-url>"
+   ```
+
+   Require exit 0 and a JSON object whose `id` is a nonempty string with no whitespace; otherwise stop and tell the
+   owner. Retain that repository identifier and the approved card's exact `job/<issue>` branch for this job. A later
+   context change never redefines either. Run `git fetch --no-prune origin job/<issue>`, then read the pull request,
+   with `<pr>`, `<repository-id>` and `<issue>` replaced by their admitted literal values:
+
+   ```sh
+   gh pr view <pr> --json state,headRefName,headRepository,isCrossRepository,headRefOid,body --jq 'if .state == "OPEN" and .isCrossRepository == false and .headRepository.id == "<repository-id>" and .headRefName == "job/<issue>" then .headRefOid, (.body | splits("\r?\n") | select(startswith("Reviewed commit:"))) else error("unverified pull request provenance") end'
+   ```
+
+   This read deliberately uses the same unscoped GitHub CLI context as the later readiness and merge commands, so a
+   conflicting `GH_REPO` or default repository is refused. Delivery goes on only where the read exits 0 and prints
+   exactly two lines: the pull request's head, the same commit `git rev-parse origin/job/<issue>` prints, then
+   `Reviewed commit: ` followed by that commit. Otherwise stop and tell the owner what the read printed. Foreign or
+   unknown provenance always stops delivery and cannot use the unfinished-review fallback. Only after provenance and
+   the fetched head are verified may a draft with no such line be finished on the local route on the owner's say, its reviews included;
+   any other output means the branch is not the commit its last review covered.
+
+   Create and enter the worktree with the command of "3. Start the job" for the runtime, with `origin/job/<issue>` in
+   place of the recorded commit. In that worktree, repeat the origin lookup and identity resolution above, require
+   the same retained repository identifier, and repeat the fetch, unscoped pull request read and commit checks before
+   continuing. Repeat that validation after any later change to working directory, GitHub CLI environment,
+   authentication, configuration or default repository, before the next readiness or merge action. A failed identity,
+   provenance or commit check stops delivery and is told to the owner.
+
+   Run `npm ci`, and settle each convergence check under the Receipt reuse rule, which finds no receipt on this machine
+   and runs it. Drive any visual work and continue at "7. Push authorisation"; run no review of the other family.
+   In "8. Deliver" step 1 the push is `git push --force-with-lease origin job/<issue>`. After that step's rebase the job's
+   base is `origin/main` itself, equal to `git merge-base HEAD origin/main`, and the eligibility check uses it as
+   `<origin-main>`. Where that check would choose the direct route, stop and tell the owner, as the opening of this
+   section says; otherwise the draft already exists, so `gh pr create` is skipped, and the card moves to `In review`.
 
 **Releasing a cloud claim.** A cloud session that has passed its admission keeps building, pushing and opening its draft
 whatever its claim then says: rewriting the claim stops no running session. A session that moves a card whose newest

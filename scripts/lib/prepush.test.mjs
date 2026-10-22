@@ -160,7 +160,7 @@ esac
       executable(join(bin, 'node'), `#!/bin/sh
 printf 'node\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$*" "$PWD" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_NAMESPACE" "$NODE_TEST_CONTEXT" "$GIT_TRACE_PACKET$GIT_TRACE2_EVENT" >> "$CALLS"
 case "$*" in
-  "--test scripts/lib/*.test.mjs"|"--test --test-concurrency=2 scripts/lib/*.test.mjs") exit "\${SCRIPT_STATUS:-0}" ;;
+  "--test --test-concurrency=2 scripts/lib/*.test.mjs") exit "\${SCRIPT_STATUS:-0}" ;;
   *) exit 91 ;;
 esac
 `);

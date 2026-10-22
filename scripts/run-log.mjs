@@ -22,10 +22,12 @@
 // Child start/completion are UTC; elapsedMs uses a monotonic clock and excludes Git snapshots.
 // RUN_LOG_RERUN_REASON is explicit caller context, never inferred from the log.
 // Importing the module runs nothing: `main` returns `{ exitCode, signal }`, and only the command line exits or
-// re-raises the signal, so a caller in the same process is never killed.
+// re-raises the signal, so a caller in the same process is never killed. A signal Node ignores, such as SIGPIPE,
+// survives the re-raise, so the command line then exits with 128 plus the signal number instead.
 
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { constants } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -148,6 +150,9 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
 // Both sides through realpath: Node loads a symlinked entry by its real path, and a mismatch would exit 0 with no receipt. An entry that is not a file, such as standard input, is never this module.
 if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   const { exitCode, signal } = main();
-  if (signal) process.kill(process.pid, signal);
+  if (signal) {
+    process.kill(process.pid, signal);
+    process.exit(128 + constants.signals[signal]);
+  }
   process.exit(exitCode);
 }

@@ -445,6 +445,22 @@ test('command receipt contract', async (t) => {
     });
   });
 
+  // The child is a shell, not Node: Node ignores its own SIGPIPE, so a Node child could never be killed by it.
+  await t.test('a child SIGPIPE, which Node ignores, is logged and exits with shell status 141', { skip: NO_POSIX_SIGNALS }, () => {
+    withDir((dir) => {
+      const result = spawnSync('/bin/sh', [
+        '-c',
+        '"$1" "$2" signal -- /bin/sh -c \'kill -PIPE $$\'; exit $?',
+        'run-log-test',
+        process.execPath,
+        SCRIPT,
+      ], { cwd: dir, encoding: 'utf8', env: envWithPath(dir) });
+      assert.equal(result.status, 141, result.stderr);
+      const [line] = logLines(dir, 'detached.md');
+      assert.match(line, /\| signal \| .* \| killed by SIGPIPE \| .* \| head=unknown tree=unknown$/);
+    });
+  });
+
   await t.test('receipt preserves exact argument boundaries and Markdown safety', () => {
     withDir((dir) => {
       const command = [

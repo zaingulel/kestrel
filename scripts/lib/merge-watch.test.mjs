@@ -3,11 +3,11 @@
 //
 // Polling scenarios run `main` with an in-memory ghExec and a recording sleep that returns at once. The pull-request
 // form's argument contract and terminal success/failure cases run the real command as a subprocess with the same fake
-// replies. The draft wait runs in-process only: it shares the command's process wiring, which those cases prove.
+// replies. The draft wait also has one positive and one negative process case in fresh Git repositories.
 //
-// Recurring cost: no subprocess or disk state for polling or the draft wait; CLI wire proofs start Node for the
-// command and each faked gh call, with no network. Removal condition: retire with scripts/merge-watch.mjs, and the
-// draft-wait tests with its `--draft` mode.
+// Recurring cost: no subprocess or disk state for in-memory polling; CLI wire proofs start Node for the command and
+// each faked gh call, with no network. Only the two draft wire cases initialize Git repositories.
+// Removal condition: retire with scripts/merge-watch.mjs, and the draft-wait tests with its `--draft` mode.
 
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -28,6 +28,14 @@ function scenarioReply(args, scenario) {
   const refuse = (why) => [99, 'fake gh: ' + why + ': ' + args.join(' ')];
   const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
   if (args.includes('--jq')) return refuse('the fake applies no --jq');
+  if (scenario.draft) {
+    // This function is serialized into fake-gh, so its command oracle cannot use the outer test constants.
+    const expectedRepo = ['repo', 'view', '--json', 'id', '--', scenario.draft.origin];
+    const expectedList = ['pr', 'list', '--repo', scenario.draft.origin, '--head', 'job/7', '--state', 'open', '--json', 'number,state,headRefName,headRepository,isCrossRepository'];
+    if (JSON.stringify(args) === JSON.stringify(expectedRepo)) return [0, '{"id":"R_origin"}'];
+    if (JSON.stringify(args) === JSON.stringify(expectedList)) return scenario.draft.reply;
+    return refuse('draft read was not bound to origin');
+  }
   const step = (n) => scenario.steps[Math.min(n, scenario.steps.length) - 1];
   if (args[0] === 'pr') {
     if (!args.includes('7')) return refuse('<pr> was not passed');
@@ -86,9 +94,10 @@ const MERGED = { view: view('MERGED', 'CLEAN'), checks: checks({ test: 'pass', '
 // split across the two sources so dropping either read shows. The rules come as two pages, the ruleset's checks on
 // page two so reading page one alone shows; `extraRules` joins page two. `branch` or `rules` replaces that read's
 // reply, and `base` the base-branch read's. `actions` maps a path under `actions/` to its reply.
-function createScenario(steps, { classic = ['test'], ruled = ['sweep-scope'], extraRules = [], base, branch, rules, actions = {} } = {}) {
+function createScenario(steps, { classic = ['test'], ruled = ['sweep-scope'], extraRules = [], base, branch, rules, actions = {}, draft } = {}) {
   return {
     steps,
+    draft,
     n: 0,
     actions,
     base: base ?? [0, JSON.stringify({ baseRefName: 'trunk' })],
@@ -124,12 +133,13 @@ function callKind([group, command, ...rest]) {
   return 'other';
 }
 
-// Reads only: `pr view`, `pr checks`, or an `api` GET carrying no method, field or body flag.
+// Reads only: pull request/repository queries, or an `api` GET carrying no method, field or body flag.
 function assertReadOnly(calls) {
   const writeFlag = /^(-X|--method|-f|--raw-field|-F|--field|--input)(=|$)|^-[XfF]./;
   for (const call of calls) {
     const [group, command] = call;
-    const read = (group === 'pr' && (command === 'view' || command === 'checks'))
+    const read = (group === 'pr' && (command === 'view' || command === 'checks' || command === 'list'))
+      || (group === 'repo' && command === 'view')
       || (group === 'api' && !call.some((arg) => writeFlag.test(arg)));
     assert.ok(read, `the watch must only read GitHub state, but called: gh ${call.join(' ')}`);
   }
@@ -159,10 +169,17 @@ async function watch(steps, options) {
 
 function runCli(args, steps = [MERGED], options) {
   const dir = writeScenario(steps, options);
+  if (options?.draft) {
+    for (const gitArgs of [['init', '--quiet'], ['remote', 'add', 'origin', options.draft.origin]]) {
+      const setup = spawnSync('git', gitArgs, { cwd: dir, encoding: 'utf8' });
+      assert.equal(setup.status, 0, setup.stderr || setup.error?.message);
+    }
+  }
   const run = spawnSync(process.execPath, [CLI, ...args], {
+    ...(options?.draft ? { cwd: dir } : {}),
     encoding: 'utf8',
     timeout: 30_000,
-    env: fakeGh.env({ MERGE_WATCH_SCENARIO: dir }),
+    env: fakeGh.env({ MERGE_WATCH_SCENARIO: dir, ...(options?.draft ? { GH_REPO: 'foreign/elsewhere' } : {}) }),
   });
   const calls = readCalls(dir);
   rmSync(dir, { recursive: true, force: true });
@@ -541,15 +558,29 @@ test('the watch only ever reads GitHub state', async () => {
   }
 });
 
-const DRAFT_LIST = ['pr', 'list', '--head', 'job/7', '--state', 'open', '--json', 'number'];
+const DRAFT_ORIGIN = 'git@github.com:owner/repo.git';
+const DRAFT_REPO = ['repo', 'view', '--json', 'id', '--', DRAFT_ORIGIN];
+const DRAFT_LIST = ['pr', 'list', '--repo', DRAFT_ORIGIN, '--head', 'job/7', '--state', 'open', '--json', 'number,state,headRefName,headRepository,isCrossRepository'];
+const draftPr = (overrides = {}) => ({ number: 12, state: 'OPEN', headRefName: 'job/7', headRepository: { id: 'R_origin' }, isCrossRepository: false, ...overrides });
 
-// Runs the draft wait in-process: each gh call takes the next reply and the last repeats; a sleep past the twentieth
-// means the wait never stopped.
-async function waitDraft(replies, args = ['--draft', 'job/7']) {
+// Draft-list calls advance replies and the last repeats; repository lookup has its own reply. A sleep past the
+// twentieth means the wait never stopped.
+async function waitDraft(replies, args = ['--draft', 'job/7'], { origin = DRAFT_ORIGIN + '\n', repository = [0, '{"id":"R_origin"}'] } = {}) {
   const calls = [];
+  const gitCalls = [];
+  let reads = 0;
+  const gitExec = (call) => {
+    gitCalls.push(call);
+    if (origin instanceof Error) throw origin;
+    return origin;
+  };
   const ghExec = (call) => {
     calls.push(call);
-    const [code, body] = replies[Math.min(calls.length, replies.length) - 1];
+    let reply;
+    if (call[0] === 'repo') reply = repository;
+    else if (call[0] === 'pr' && call[1] === 'list') reply = replies[Math.min(++reads, replies.length) - 1];
+    else throw new Error('unexpected gh call: ' + call.join(' '));
+    const [code, body] = reply;
     if (code === 0) return body + '\n';
     throw Object.assign(new Error(body), { status: code, stdout: '', stderr: body + '\n' });
   };
@@ -560,23 +591,23 @@ async function waitDraft(replies, args = ['--draft', 'job/7']) {
     sleeps.push(ms);
     if (sleeps.length > 20) throw new Error('the draft wait did not stop');
   };
-  const status = await main(args, { ghExec, output, sleep });
-  return { status, lines, last: lines.at(-1), sleeps, calls };
+  const status = await main(args, { gitExec, ghExec, output, sleep });
+  return { status, lines, last: lines.at(-1), sleeps, calls, gitCalls };
 }
 
 test('the draft wait reads only the open pull requests on its branch, keeps waiting while there are none, and exits 0 printing the number once one opens', async () => {
-  const run = await waitDraft([[0, '[]'], [0, '[]'], [0, '[{"number":12}]']]);
+  const run = await waitDraft([[0, '[]'], [0, '[]'], [0, JSON.stringify([draftPr()])]]);
   assert.equal(run.status, 0);
   assert.equal(run.last, '12');
-  assert.equal(run.sleeps.length, 2);
-  assert.deepEqual(run.calls, [DRAFT_LIST, DRAFT_LIST, DRAFT_LIST]);
+  assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST, DRAFT_LIST, DRAFT_LIST]);
+  assert.deepEqual(run.sleeps, [30_000, 30_000]);
 });
 
 test('the draft wait exits 1 the moment gh fails, with the gh error as its last line and no read after it', async () => {
   const run = await waitDraft([[0, '[]'], [1, 'error connecting to api.github.com']]);
   assert.equal(run.status, 1);
   assert.equal(run.last, 'error connecting to api.github.com');
-  assert.equal(run.calls.length, 2);
+  assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST, DRAFT_LIST]);
   assert.equal(run.sleeps.length, 1);
 });
 
@@ -586,7 +617,7 @@ test('the draft wait exits 1 without waiting on a pull request list it cannot re
     assert.equal(run.status, 1, body);
     assert.equal(run.last, `unreadable pull request list: ${body}`);
     assert.equal(run.sleeps.length, 0, body);
-    assert.equal(run.calls.length, 1, body);
+    assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST], body);
   }
   const garbled = await waitDraft([[0, 'not json']]);
   assert.equal(garbled.status, 1);
@@ -595,7 +626,7 @@ test('the draft wait exits 1 without waiting on a pull request list it cannot re
 });
 
 test('the draft wait exits 1 naming each number when more than one pull request is open on its branch', async () => {
-  const run = await waitDraft([[0, '[{"number":12},{"number":13}]']]);
+  const run = await waitDraft([[0, JSON.stringify([draftPr(), draftPr({ number: 13 })])]]);
   assert.equal(run.status, 1);
   assert.equal(run.last, 'more than one open pull request on job/7: 12 13');
   assert.equal(run.sleeps.length, 0);
@@ -611,5 +642,72 @@ test('the draft wait exits 2 with its usage before any gh call unless given exac
     assert.equal(run.status, 2, JSON.stringify(args));
     assert.deepEqual(run.lines, [USAGE], JSON.stringify(args));
     assert.deepEqual(run.calls, [], JSON.stringify(args));
+    assert.deepEqual(run.gitCalls, [], JSON.stringify(args));
+  }
+});
+
+test('ANTI-REGRESSION: cloud drafts require origin repository and exact job branch', async () => {
+  const invalidRows = [
+    ['a fork copying the commit and body', draftPr({ headRepository: { id: 'R_fork' }, isCrossRepository: true, headRefOid: 'copied', body: 'copied' })],
+    ['wrong branch', draftPr({ headRefName: 'job/8' })],
+    ['foreign repository with a false fork flag', draftPr({ headRepository: { id: 'R_foreign' } })],
+    ['true fork flag', draftPr({ isCrossRepository: true })],
+    ['nonboolean fork flag', draftPr({ isCrossRepository: 'false' })],
+    ['missing fork flag', draftPr({ isCrossRepository: undefined })],
+    ['missing repository', draftPr({ headRepository: undefined })],
+    ['null repository', draftPr({ headRepository: null })],
+    ['malformed repository', draftPr({ headRepository: 'R_origin' })],
+    ['missing repository id', draftPr({ headRepository: {} })],
+    ['malformed repository id', draftPr({ headRepository: { id: 7 } })],
+    ['non-open state', draftPr({ state: 'CLOSED' })],
+  ];
+  for (const [label, pr] of invalidRows) {
+    for (const rows of [[pr], [draftPr(), pr], [pr, draftPr()]]) {
+      const run = await waitDraft([[0, JSON.stringify(rows)], [0, JSON.stringify([draftPr()])]]);
+      assert.equal(run.status, 1, label);
+      assert.equal(run.last, `foreign or unverified pull request on job/7: ${JSON.stringify(rows)}`, label);
+      assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST], label + ': no read after refusal');
+      assert.deepEqual(run.sleeps, [], label);
+    }
+  }
+  for (const body of ['null', '[]', '{}', '{"id":""}', '{"id":7}', '{"id":"R origin"}', 'not json']) {
+    const run = await waitDraft([[0, JSON.stringify([draftPr()])]], undefined, { repository: [0, body] });
+    assert.equal(run.status, 1, body);
+    assert.ok(run.last.trim(), body);
+    assert.deepEqual(run.calls, [DRAFT_REPO], body + ': no list after refusal');
+    assert.deepEqual(run.sleeps, [], body);
+  }
+  for (const origin of ['', '\n', 'first\nsecond\n', new Error('origin unavailable')]) {
+    const run = await waitDraft([[0, JSON.stringify([draftPr()])]], undefined, { origin });
+    assert.equal(run.status, 1, String(origin));
+    assert.ok(run.last.trim());
+    assert.deepEqual(run.calls, []);
+    assert.deepEqual(run.sleeps, []);
+  }
+  const unreadable = await waitDraft([[0, 'not json'], [0, JSON.stringify([draftPr()])]]);
+  assert.equal(unreadable.status, 1);
+  assert.deepEqual(unreadable.calls, [DRAFT_REPO, DRAFT_LIST]);
+  assert.deepEqual(unreadable.sleeps, []);
+  const unavailable = await waitDraft([], undefined, { repository: [1, 'repository unavailable'] });
+  assert.equal(unavailable.status, 1);
+  assert.equal(unavailable.last, 'repository unavailable');
+  assert.deepEqual(unavailable.calls, [DRAFT_REPO]);
+  const valid = await waitDraft([[0, JSON.stringify([draftPr()])]]);
+  assert.equal(valid.status, 0);
+  assert.equal(valid.last, '12');
+  assert.deepEqual(valid.gitCalls, [['remote', 'get-url', 'origin']]);
+  assert.deepEqual(valid.calls, [DRAFT_REPO, DRAFT_LIST]);
+});
+
+test('ANTI-REGRESSION: cloud draft CLI binds reads to origin', () => {
+  for (const [label, pr, status] of [
+    ['origin pull request', draftPr(), 0],
+    ['fork copying content', draftPr({ headRepository: { id: 'R_fork' }, isCrossRepository: true, headRefOid: 'copied', body: 'copied' }), 1],
+  ]) {
+    const run = runCli(['--draft', 'job/7'], [], { draft: { origin: DRAFT_ORIGIN, reply: [0, JSON.stringify([pr])] } });
+    assert.equal(run.status, status, label + ': ' + run.stdout + run.stderr);
+    assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST], label + ': exact origin reads and no read after refusal');
+    if (status === 0) assert.equal(run.lastOut, '12');
+    else assert.equal(run.lastOut, `foreign or unverified pull request on job/7: ${JSON.stringify([pr])}`);
   }
 });

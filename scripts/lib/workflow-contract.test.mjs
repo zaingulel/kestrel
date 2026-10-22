@@ -344,6 +344,17 @@ test('the resume deliver step carries exactly the merge-watch command', () => {
   );
 });
 
+// Pins native command facts only; fresh semantic review assesses the takeover policy.
+test('cloud takeover carries the origin provenance commands', () => {
+  const cloud = RESUME.slice(RESUME.indexOf('## Cloud build\n'), RESUME.indexOf('## Parking\n'));
+  const commands = shellBlocks(cloud).map((block) => block.body);
+  assert.ok(commands.includes('git remote get-url origin'));
+  assert.ok(commands.includes('gh repo view --json id -- "<origin-url>"'));
+  assert.deepEqual(commands.filter((command) => command.startsWith('gh pr view ')), [
+    `gh pr view <pr> --json state,headRefName,headRepository,isCrossRepository,headRefOid,body --jq 'if .state == "OPEN" and .isCrossRepository == false and .headRepository.id == "<repository-id>" and .headRefName == "job/<issue>" then .headRefOid, (.body | splits("\\r?\\n") | select(startswith("Reviewed commit:"))) else error("unverified pull request provenance") end'`,
+  ]);
+});
+
 // Splits markdown into the blocks a session copies into a shell and the prose around them. A block is a fence tagged
 // `sh`, `bash` or `shell` or untagged, or an indented code block: a run of lines indented four spaces or a tab that
 // follows a blank line. A fence tagged with any other language is skipped; prose keeps every other line, with each
