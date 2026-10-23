@@ -101,13 +101,13 @@ session restart or user-turn retry. Known preparation, begin and note-preflight 
 controls/help and an on-request engine advisory without a native retry; uncertain cleanup separately refuses
 reactivation. Timeout cases also assert worker exit and owned-home removal.
 [NativeHermesTests](../tests/test_hermes.py) exercises the installed worker's JSON-lines boundary: tool-free,
-note-free preparation; exactly native memory plus `mute`, `set_volume`, `pause_media`, `next_track` and
-`focus_workspace` on accepted turns; eager tool configuration without search helpers; desktop bridge results
+note-free preparation; exactly native memory plus `mute`, `set_volume`, `pause_media`, `next_track`, `focus_workspace`, `open_app` and
+`take_screenshot` on accepted turns; eager tool configuration without search helpers; desktop bridge results
 and native history records; refusal of fuzzy desktop names, malformed bridge results, arbitrary-file,
 terminal, session-search and other unsolicited tools; isolated configuration/environment; and attempted
 network destinations limited to the controlled provider. Its
 `test_production_worker_entrypoint_becomes_ready_without_a_turn` observes worker startup and clean exit with
-closed standard input, without a conversation or inference; worker readiness alone is not session readiness.
+closed standard input, without a conversation or inference; worker readiness alone is not session readiness. The native suite also proves that the provider-facing system prompt begins with Kestrel's identity and carries no engine name or web address.
 
 Native memory evidence uses scripted provider tool calls and exact file/readback observations for persistence,
 private modes, native budgets/format, fresh snapshots within and across workers, and operator edits/deletion.

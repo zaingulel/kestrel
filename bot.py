@@ -522,8 +522,12 @@ LOCAL_TOOLS = {
 }
 
 
-BRIDGED_TOOL_KEYS = {'mute': 'mute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track', 'focus_workspace': 'workspace'}
-BRIDGED_SUBJECTS = frozenset(LOCAL_TOOLS[BRIDGED_TOOL_KEYS[name]].subject for name in DESKTOP_TOOLS)
+BRIDGED_TOOL_KEYS = {'mute': 'mute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track',
+                     'focus_workspace': 'workspace', 'open_app': 'open app', 'take_screenshot': 'take a screenshot'}
+# Exact app launches and screenshots stay outside stop accounting, as README's stop section says.
+EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'volume', 'pause music', 'next track', 'workspace'))
+APP_LOOKUP_ADVISORY = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
+APP_MATCH_ADVISORY = "I couldn't find exactly one installed app with that name, so I didn't open anything."
 
 NUMBER_BASE_WORDS = (
     'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
@@ -544,6 +548,11 @@ NUMBER_WORDS = {
 }
 
 
+HELP_INTRO = "I can talk with you, answer general knowledge questions and keep short notes between conversations."
+HELP_PHRASES = "You can also say repeat that, stop, that's all, or what can I say."
+HELP_LIMITS = "I have no internet or live information, and I can't see what's on your screen."
+
+
 def capability_help() -> str:
     free = []
     ask = []
@@ -553,13 +562,15 @@ def capability_help() -> str:
         elif tool.permission == PermissionTier.ASK:
             ask.append(tool.spoken)
     if not free and not ask:
-        return "No local tools are available. Check Kestrel's setup."
-    message = ('You can say: ' + '; '.join(free) + '.' if free else
-               'No local tools are available without permission.')
-    if ask:
-        return (message + ' Permission required: ' + '; '.join(ask)
-                + ". These tools aren't available by voice yet.")
-    return message + ' None of these tools needs permission first.'
+        tools = "No local tools are available. Check Kestrel's setup."
+    elif ask:
+        message = ('You can say: ' + '; '.join(free) + '.' if free else
+                   'No local tools are available without permission.')
+        tools = (message + ' Permission required: ' + '; '.join(ask)
+                 + ". These tools aren't available by voice yet.")
+    else:
+        tools = 'You can say: ' + '; '.join(free) + '. None of these tools needs permission first.'
+    return f'{HELP_INTRO} {tools} {HELP_PHRASES} {HELP_LIMITS}'
 
 
 def free_tool(key, *arguments) -> LocalTool | None:
@@ -573,6 +584,10 @@ def local_result_message(tool, result) -> str | None:
     return (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
             f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
             if not result.confirmed else None)
+
+
+def effect_observed(result) -> bool:
+    return result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
 
 
 def brain_result(confirmed, attempted, reason) -> str:
@@ -890,8 +905,7 @@ class LocalActions:
                 return None
             if observe is not None:
                 observe(result)
-        confirmed = result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
-        if not confirmed:
+        if not effect_observed(result):
             logger.error(f'{tool.subject.title()} could not be confirmed: {result.reason}')
             if isinstance(result, AudioResult):
                 await notify_audio_failure(tool.subject, command=self.command)
@@ -923,14 +937,14 @@ class TypedTurnStopStrategy(BaseUserTurnStopStrategy):
 class ActionOutcome:
     subject: str
     reporter: object
-    result: AudioResult | DesktopResult | None = None
+    result: AudioResult | DesktopResult | AppLaunchResult | None = None
 
 
 def stop_account(outcomes) -> str | None:
     sections = []
     for label, predicate in (
-        ('Done', lambda result: result is not None and result.confirmed),
-        ("Couldn't confirm", lambda result: result is not None and result.attempted and not result.confirmed),
+        ('Done', lambda result: result is not None and effect_observed(result)),
+        ("Couldn't confirm", lambda result: result is not None and result.attempted and not effect_observed(result)),
         ('Still finishing', lambda result: result is None),
     ):
         subjects = list(dict.fromkeys(item.subject for item in outcomes if predicate(item.result)))
@@ -1223,7 +1237,7 @@ class HermesLLMService(LLMService):
             if self.channel.output is output and self.owns_request(token):
                 output.put_nowait({'advisory': text})
 
-        if not valid_desktop_arguments(name, arguments):
+        if not valid_desktop_arguments(name, arguments) or name == 'open_app' and not valid_app_text(arguments['name'], 1024):
             turn.closed = True
             advise("I couldn't use that request, so I didn't do it.")
             return brain_result(False, False, 'invalid arguments')
@@ -1237,22 +1251,34 @@ class HermesLLMService(LLMService):
 
         if turn.closed:
             return record(brain_result(False, False, 'turn closed'))
-        tool = free_tool(BRIDGED_TOOL_KEYS[name], *(arguments[argument] for argument in DESKTOP_TOOLS[name].bounds))
+        tool = free_tool(BRIDGED_TOOL_KEYS[name],
+                         *(() if name == 'open_app' else (arguments[key] for key in DESKTOP_TOOLS[name].bounds)))
         if tool is None:
             turn.closed = True
             advise("That needs permission, which isn't available by voice yet, so I didn't do it.")
             return record(brain_result(False, False, 'permission required'))
+        if name == 'open_app':
+            try:
+                tool = await resolve_app_tool(arguments['name'], command=self.local_actions.command)
+            except (ValueError, RuntimeError, OSError, TimeoutError):
+                turn.closed = True
+                advise(APP_LOOKUP_ADVISORY)
+                return record(brain_result(False, False, 'app lookup failed'))
+            if tool is None:
+                turn.closed = True
+                advise(APP_MATCH_ADVISORY)
+                return record(brain_result(False, False, 'no unique installed app'))
         result = await self.run_shared(
             tool, epoch=turn.epoch, reporter=token,
-            finished=lambda result: record(brain_result(result.confirmed, result.attempted, result.reason)),
+            finished=lambda result: record(brain_result(effect_observed(result), result.attempted, result.reason)),
         )
         if result is None:
             reason = 'stopped' if turn.epoch != self.stop_epoch else 'conversation ended'
             return record(brain_result(False, False, reason))
-        if not result.confirmed:
+        if not effect_observed(result):
             turn.closed = True
             advise(local_result_message(tool, result))
-        return brain_result(result.confirmed, result.attempted, result.reason)
+        return brain_result(effect_observed(result), result.attempted, result.reason)
 
     def revoke(self):
         self.channel.detach(self.output)
@@ -1301,7 +1327,7 @@ class HermesLLMService(LLMService):
             self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
             remove_original()
             self.outcomes = [item for item in self.outcomes
-                             if item.result is None or item.result.confirmed or item.result.attempted]
+                             if item.result is None or effect_observed(item.result) or item.result.attempted]
             account = stop_account(self.outcomes)
             if account is None:
                 await self.push_reply_end(token)
@@ -1331,16 +1357,14 @@ class HermesLLMService(LLMService):
                 raise
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 remove_original()
-                await self.speak_local_reply(
-                    "I couldn't check the installed apps. I didn't send an open request. Use the app menu.", token,
-                )
+                await self.speak_local_reply(APP_LOOKUP_ADVISORY, token)
                 return
         if tool is not None:
             if not self.valid_origin(frame):
                 return
             remove_original()
             # LocalActions owns an accepted action independently of later reply ownership.
-            if tool.subject in BRIDGED_SUBJECTS:
+            if tool.subject in EXACT_STOP_SUBJECTS:
                 result = await self.run_shared(tool, epoch=self.stop_epoch, reporter=token)
             else:
                 result = await self.local_actions.run(tool, admitted=self.admitted)

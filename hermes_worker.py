@@ -11,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 from typing import NamedTuple
+import uuid
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
@@ -27,7 +28,7 @@ TRACE_FAILURE_ERROR = ('Local conversation tracing failed. Check free space and 
 RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by this user. '
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
-TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five desktop tools. '
+TOOL_SURFACE_ERROR = ("Hermes offered tools other than memory and Kestrel's desktop tools. "
                       'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 ORDINARY_MAX_TOKENS = 180
@@ -38,6 +39,9 @@ REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
 REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
                                  'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+KESTREL_IDENTITY = "You are Kestrel, Zain's local voice assistant."
+PROMPT_IDENTITY_ERROR = ("Kestrel's identity could not be applied to the brain's instructions. "
+                         'Check the pinned engine, then restart Kestrel.')
 
 
 def deeper_thought_requested(text: str) -> bool:
@@ -117,15 +121,17 @@ class ReplyReasoningFilter:
 
 class DesktopToolSchema(NamedTuple):
     description: str
-    bounds: dict[str, tuple[int, int]]
+    bounds: dict[str, tuple[type, int, int]]
 
 
 DESKTOP_TOOLS = {
     'mute': DesktopToolSchema('Mute the selected audio output.', {}),
-    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (0, 100)}),
+    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (int, 0, 100)}),
     'pause_media': DesktopToolSchema('Pause current media.', {}),
     'next_track': DesktopToolSchema('Advance to the next media track.', {}),
-    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (1, 2147483647)}),
+    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (int, 1, 2147483647)}),
+    'open_app': DesktopToolSchema('Open one installed app by its visible name.', {'name': (str, 1, 1024)}),
+    'take_screenshot': DesktopToolSchema('Save a screenshot to the screenshot folder; its content is never shown to you.', {}),
 }
 
 
@@ -134,8 +140,10 @@ def valid_desktop_arguments(name: str, arguments: dict) -> bool:
         return False
     bounds = DESKTOP_TOOLS[name].bounds
     return set(arguments) == set(bounds) and all(
-        type(arguments[key]) is int and low <= arguments[key] <= high
-        for key, (low, high) in bounds.items()
+        type(arguments[key]) is kind and (
+            low <= arguments[key] <= high if kind is int
+            else low <= len(arguments[key]) <= high and bool(arguments[key].strip()))
+        for key, (kind, low, high) in bounds.items()
     )
 
 
@@ -207,18 +215,29 @@ class ReplyDeliveryPrefix:
 
 
 SYSTEM_PROMPT = (
-    "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
+    "Speak naturally in concise English. "
+    "Never name the software you run on, and never point to a website or documentation for your abilities. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
-    "This session is a local conversation. Your tools are native local memory for small facts and preferences, "
-    "and Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace. "
+    "This session is a local conversation. You can talk, answer from general knowledge, and use these tools: "
+    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, set_volume, "
+    "pause_media, next_track, focus_workspace, open_app and take_screenshot. "
     "Maintain notes automatically when useful, including updating or removing outdated notes. "
-    "Claim a save only after a successful memory tool result. You have no web access or other desktop tools: "
-    "you cannot unmute, resume or go back in media, open apps or take screenshots; say so when asked. "
-    "Call a desktop tool only for an effect the owner asks for, at most once per reply. "
+    "Claim a save only after a successful memory tool result. You have no internet, web access or live "
+    "information such as news, weather or prices, and you cannot see the screen or any screenshot; "
+    "you cannot unmute, resume or go back in media. Say so plainly when asked. "
+    "When asked what you can do, name conversation and general knowledge, remembering notes and each desktop tool "
+    "in plain words (muting, setting the volume, pausing media, skipping to the next track, switching to a "
+    "numbered workspace, opening an installed app by name and taking a screenshot), then state these limits, "
+    "then say this sentence word for word: You can also say repeat that, stop, that's all, or what can I say. "
+    "Call a desktop tool only when the owner clearly asks for that tool's effect, at most once per reply; "
+    "when a request is unclear or asks for something no tool does, ask instead of calling a tool. "
     "Each desktop result is JSON with confirmed, attempted and reason. "
-    "Say an effect happened only when confirmed is true, never before its result arrives. Never call a desktop tool again to retry it.\n\n"
+    "Say an effect happened only when confirmed is true, never before its result arrives. "
+    "For open_app, confirmed means the launch request was accepted, not that a window is visible. "
+    "For take_screenshot, confirmed means a new screenshot file was saved; you never see it. "
+    "Never call a desktop tool again to retry it.\n\n"
     'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
     'practical information and ordinary replies without a clear emotional cue. Curious suits an '
@@ -407,6 +426,44 @@ def preserve_user_turns(messages, *, drop_codex_reasoning_items=True, drop_nudge
     return kept
 
 
+def kestrel_system_prompt(built, prompt: str) -> str:
+    # Hermes 0.22.2 has no setting for these four blocks; remove exactly them or refuse.
+    # Count each block's own text: adjacent paragraphs share one separator.
+    from agent.prompt_builder import (HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, RUNTIME_ENVIRONMENT_END,
+                                      RUNTIME_ENVIRONMENT_HEADING, STEER_CHANNEL_NOTE)
+    from agent.system_prompt import _active_profile_line
+    # Notes are free text, so engine blocks are judged only outside the memory snapshot.
+    memory = []
+    if built._memory_store is not None:
+        for enabled, kind in ((built._memory_enabled, 'memory'), (built._user_profile_enabled, 'user')):
+            block = built._memory_store.format_for_system_prompt(kind) if enabled else None
+            if block and block.strip():
+                memory.append(block.strip())
+    held = []
+    for block in sorted(memory, key=len, reverse=True):
+        placeholder = uuid.uuid4().hex
+        if prompt.count(block) != 1 or f'\n\n{block}\n\n' not in prompt or placeholder in prompt:
+            raise RuntimeError(PROMPT_IDENTITY_ERROR)
+        prompt = prompt.replace(block, placeholder)
+        held.append((placeholder, block))
+    head = f'{KESTREL_IDENTITY}\n\n{HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS}\n\n'
+    runtime = prompt.find(f'\n\n{RUNTIME_ENVIRONMENT_HEADING}\n\n')
+    if (not prompt.startswith(head) or runtime == -1 or not prompt.endswith(RUNTIME_ENVIRONMENT_END)
+            or any(prompt.count(text) != 1 for text in
+                   (HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, RUNTIME_ENVIRONMENT_HEADING, RUNTIME_ENVIRONMENT_END))):
+        raise RuntimeError(PROMPT_IDENTITY_ERROR)
+    kept = f'{KESTREL_IDENTITY}\n\n{prompt[len(head):runtime]}\n\n'
+    for text, expected in ((_active_profile_line(built), 1),
+                           (STEER_CHANNEL_NOTE, 1 if built.valid_tool_names else 0)):
+        paragraph = f'\n\n{text}\n\n'
+        if prompt.count(text) != expected or expected and paragraph not in kept:
+            raise RuntimeError(PROMPT_IDENTITY_ERROR)
+        kept = kept.replace(paragraph, '\n\n', expected)
+    for placeholder, block in held:
+        kept = kept.replace(placeholder, block)
+    return kept.removesuffix('\n\n')
+
+
 def child_environment(home):
     home = Path(home).resolve()
     environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ')
@@ -439,6 +496,7 @@ def main(*, base_url=BONSAI_URL):
             os.chdir(home)
             config = {
                 'model': {'context_length': 64000},
+                'agent': {'coding_context': 'off'},
                 'memory': {'memory_enabled': True, 'user_profile_enabled': True, 'provider': '',
                            'memory_char_limit': 2200, 'user_char_limit': 1375, 'write_approval': False},
                 'sessions': {'write_json_snapshots': False},
@@ -448,6 +506,11 @@ def main(*, base_url=BONSAI_URL):
                 'tools': {'tool_search': {'enabled': 'off'}},
             }
             (home / 'config.yaml').write_text(json.dumps(config))
+            try:
+                with (home / 'SOUL.md').open('x') as soul:
+                    soul.write(KESTREL_IDENTITY)
+            except OSError:
+                raise RuntimeError(RUNTIME_HOME_ERROR) from None
             try:
                 (home / 'memories').lstat()
             except FileNotFoundError:
@@ -514,8 +577,9 @@ def main(*, base_url=BONSAI_URL):
                     name=name, toolset='kestrel_desktop', handler=desktop_handler(name),
                     schema={'name': name, 'description': description, 'parameters': {
                         'type': 'object',
-                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high}
-                                       for key, (low, high) in bounds.items()},
+                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high} if kind is int
+                                       else {'type': 'string', 'minLength': low, 'maxLength': high}
+                                       for key, (kind, low, high) in bounds.items()},
                         'required': list(bounds), 'additionalProperties': False,
                     }},
                 )
@@ -541,7 +605,7 @@ def main(*, base_url=BONSAI_URL):
                 built = AIAgent(
                     base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
                     model='bonsai-2-27b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
-                    skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
+                    skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=True,
                     session_db=None, fallback_model=None, save_trajectories=False,
                     # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
                     checkpoints_enabled=False, quiet_mode=True, max_tokens=ORDINARY_MAX_TOKENS, max_iterations=9,
@@ -550,6 +614,12 @@ def main(*, base_url=BONSAI_URL):
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
+                native_prompt = built._build_system_prompt
+
+                def kestrel_prompt(system_message=None):
+                    return kestrel_system_prompt(built, native_prompt(system_message))
+
+                built._build_system_prompt = kestrel_prompt
                 native_repair = built._repair_tool_call
 
                 def exact_repair(name):

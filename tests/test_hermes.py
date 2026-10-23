@@ -292,7 +292,7 @@ class HermesWorkerTests(unittest.TestCase):
             native.AtofExporter = exporter
             def construct(**kwargs):
                 (home / 'memories').mkdir(mode=0o700, exist_ok=True)
-                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'}
                 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
                 agent._memory_store = object()
                 agent._memory_manager = None
@@ -358,6 +358,77 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertNotIn('PRIVATE', json.dumps(events))
         self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 180)])
         self.assertIs(transport.normalize_response, normalizer)
+
+    def test_engine_prompt_keeps_kestrel_identity_and_removes_engine_blocks(self):
+        identity = "You are Kestrel, Zain's local voice assistant."
+        error = ("Kestrel's identity could not be applied to the brain's instructions. "
+                 'Check the pinned engine, then restart Kestrel.')
+        prompt_builder = ModuleType('agent.prompt_builder')
+        prompt_builder.HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = 'POINTER'
+        prompt_builder.STEER_CHANNEL_NOTE = '## STEER\nSteering body.'
+        prompt_builder.RUNTIME_ENVIRONMENT_HEADING = '# RUNTIME'
+        prompt_builder.RUNTIME_ENVIRONMENT_END = '<!-- END RUNTIME -->'
+        system_prompt = ModuleType('agent.system_prompt')
+        system_prompt._active_profile_line = lambda built: 'PROFILE'
+        runtime = '# RUNTIME\n\nHost hints.\n\n<!-- END RUNTIME -->'
+        def store(memory='Memory block.', user=None):
+            return SimpleNamespace(format_for_system_prompt=lambda kind: {'memory': memory, 'user': user}[kind])
+
+        def built_with(tool_names, memory_store):
+            return SimpleNamespace(valid_tool_names=tool_names, _memory_enabled=True, _user_profile_enabled=True,
+                                   _memory_store=memory_store)
+
+        tools = built_with({'memory', 'mute'}, store())
+        no_tools = built_with(set(), store())
+        # A saved note is free text: it may quote engine blocks and hold blank lines.
+        note = 'NOTES\nUser quotes POINTER and PROFILE.\n\n## STEER\nSteering body.\n\n# RUNTIME\n\n<!-- END RUNTIME -->'
+        noted = built_with({'memory', 'mute'}, store(user=note))
+
+        def engine(*paragraphs):
+            return '\n\n'.join(paragraphs)
+
+        def tool_prompt(first=identity, pointer=('POINTER',), steer=('## STEER\nSteering body.',),
+                        profile=('PROFILE',), tail=(runtime,), memory=('Memory block.',)):
+            return engine(first, *pointer, 'Guidance.', *steer, 'Kestrel instructions.', *memory,
+                          *profile, 'Timestamp.', *tail)
+
+        with patch.dict(sys.modules, {'agent.prompt_builder': prompt_builder, 'agent.system_prompt': system_prompt}):
+            from hermes_worker import kestrel_system_prompt
+            self.assertEqual(kestrel_system_prompt(tools, tool_prompt()), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(no_tools, tool_prompt(steer=())), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(noted, tool_prompt(memory=('Memory block.', note))), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', note, 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(built_with(set(), None), tool_prompt(steer=())), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            quoting = built_with({'memory', 'mute'}, store(user='USER\nQuoted: Memory block.'))
+            self.assertEqual(kestrel_system_prompt(quoting, tool_prompt(
+                memory=('Memory block.', 'USER\nQuoted: Memory block.'))), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'USER\nQuoted: Memory block.',
+                'Timestamp.'))
+            refusals = {
+                'default engine identity': (tools, tool_prompt(first='You are Hermes Agent, built by Nous Research.')),
+                'missing pointer': (tools, tool_prompt(pointer=())),
+                'adjacent pointer duplicate': (tools, tool_prompt(pointer=('POINTER', 'POINTER'))),
+                'missing profile line': (tools, tool_prompt(profile=())),
+                'adjacent profile duplicate': (tools, tool_prompt(profile=('PROFILE', 'PROFILE'))),
+                'steering note without tools': (no_tools, tool_prompt()),
+                'missing steering note with tools': (tools, tool_prompt(steer=())),
+                'adjacent steering duplicate': (tools, tool_prompt(
+                    steer=('## STEER\nSteering body.', '## STEER\nSteering body.'))),
+                'missing runtime block': (tools, tool_prompt(tail=())),
+                'second runtime block': (tools, tool_prompt(tail=(runtime, runtime))),
+                'text after runtime block': (tools, tool_prompt(tail=(runtime, 'Trailing.'))),
+                'memory block missing': (tools, tool_prompt(memory=())),
+                'memory block twice': (tools, tool_prompt(memory=('Memory block.', 'Memory block.'))),
+            }
+            self.assertIn('\n\nPROFILE\n\nPROFILE\n\n', refusals['adjacent profile duplicate'][1])
+            for case, (built, prompt) in refusals.items():
+                with self.subTest(case=case):
+                    with self.assertRaises(RuntimeError) as refused:
+                        kestrel_system_prompt(built, prompt)
+                    self.assertEqual(str(refused.exception), error)
 
     def test_native_filter_lifecycle(self):
         import hermes_worker
@@ -890,7 +961,7 @@ print('private storage matrix passed')
             native.AtofExporter = exporter
             def construct_agent(**kwargs):
                 (home / 'memories').mkdir(mode=0o700, exist_ok=True)
-                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+                agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'}
                 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
                 agent._memory_store = object()
                 agent._memory_manager = None
@@ -989,7 +1060,7 @@ def create_exporter(config):
     exporter.path = str(event_file)
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
-agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users',
+agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users', '_build_system_prompt',
                    '_fire_stream_delta', '_stream_think_scrubber', '_get_transport',
                    '_stream_context_scrubber', '_stream_writer_superseded', '_repair_tool_call', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
 for name in ('_stream_think_scrubber', '_fire_stream_delta', '_get_transport'):
@@ -998,7 +1069,7 @@ agent._stream_context_scrubber = None
 agent._stream_writer_superseded.return_value = False
 agent._stream_writer_lock = threading.Lock()
 agent._reset_stream_delivery_tracking = Mock()
-agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'}
+agent.valid_tool_names = {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'}
 if case == 'tool surface':
     agent.valid_tool_names.add('tool_search')
 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
@@ -1047,7 +1118,7 @@ raise SystemExit(status)
             'engine construction': 'synthetic engine construction failure',
             'runtime home': home_error,
             'engine close': engine_close_error,
-            'tool surface': 'Hermes offered tools other than memory and the five desktop tools. Check the pinned Hermes configuration, then restart Kestrel.',
+            'tool surface': "Hermes offered tools other than memory and Kestrel's desktop tools. Check the pinned Hermes configuration, then restart Kestrel.",
             'memory manager': 'Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.',
         }
         for case in ('inactive', 'missing runtime', 'creation', 'registration', 'flush',
@@ -1506,7 +1577,7 @@ class NativeHermesTests(unittest.TestCase):
                                  {'enable_thinking': True, 'reasoning_effort': 'medium'} if deep
                                  else {'enable_thinking': False})
                 self.assertEqual({t['function']['name'] for t in body['tools']},
-                                 {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+                                 {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
             self.assertEqual(brain.requests[1][2]['messages'][-1]['content'], 'Think more deeply about volume.')
 
     def test_iteration_budget_ends_invalid_memory_loop_as_incomplete_turn(self):
@@ -1888,7 +1959,7 @@ class NativeHermesTests(unittest.TestCase):
                                   if message['role'] == 'tool')
                     self.assertTrue(json.loads(result['content'])['success'], result)
                     self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']},
-                                     {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+                                     {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
                 self.assertEqual((notes / 'MEMORY.md').read_text(), expected)
                 self.assertEqual((notes / 'USER.md').read_text(), 'User prefers tea nonce-641.')
                 self.assertEqual(stat.S_IMODE(notes.stat().st_mode), 0o700)
@@ -2047,7 +2118,7 @@ class NativeHermesTests(unittest.TestCase):
                 for index in range(10):
                     self.assertEqual(worker.request([{'role': 'user', 'content': f'Accepted turn {index}.'}]),
                                      [{'delivery': 'neutral'}, {'text': 'Ordinary reply.'}, {'done': True}])
-                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+                    self.assertEqual({tool['function']['name'] for tool in brain.requests[-1][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
                 self.assertEqual(len(brain.requests), 12)
                 thresholds = [json.loads(line) for line in
                               (worker.home / 'review-threshold.jsonl').read_text().splitlines()]
@@ -2449,13 +2520,14 @@ class NativeHermesTests(unittest.TestCase):
             base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
             api_mode='chat_completions', model='bonsai-2-27b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
-            load_soul_identity=False, session_db=None, fallback_model=None,
+            load_soul_identity=True, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
             quiet_mode=True, max_tokens=180, max_iterations=9,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
             'model': {'context_length': 64000},
+            'agent': {'coding_context': 'off'},
             'memory': {'memory_enabled': True, 'user_profile_enabled': True, 'provider': '',
                        'memory_char_limit': 2200, 'user_char_limit': 1375, 'write_approval': False},
             'sessions': {'write_json_snapshots': False},
@@ -2511,7 +2583,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual(body['max_tokens'], 180)
             self.assertEqual(body.get('reasoning_effort'), 'none')
             self.assertEqual(body.get('temperature'), 0.4)
-            self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+            self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
             self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
             connections = [json.loads(line) for line in (worker.home / 'connections.jsonl').read_text().splitlines()]
             self.assertTrue(connections)
@@ -2555,9 +2627,34 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(len(system), 1)
                 self.assertEqual(body['messages'][0], system[0])
                 self.assertEqual(system[0]['content'].count(SYSTEM_PROMPT), 1)
-                self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+                self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         self.assertIsNotNone(worker.process.returncode)
         self.assertFalse(worker.home.exists())
+
+    def test_native_prompt_is_kestrel_without_engine_name_or_links(self):
+        from hermes_worker import SYSTEM_PROMPT
+
+        identity = "You are Kestrel, Zain's local voice assistant."
+        with native_worker(['[delivery:neutral] Prepared nonce-124.',
+                            '[delivery:neutral] Kestrel here nonce-125.']) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            prepared = worker.prepare()
+            self.assertEqual(prepared[-1], {'done': True})
+            self.assertFalse(any('error' in event for event in prepared), prepared)
+            self.assertEqual(worker.begin(), {'session_ready': True})
+            events = worker.request([{'role': 'user', 'content': 'Who are you?'}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Kestrel here nonce-125.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            for _, _, body in brain.requests:
+                system = body['messages'][0]
+                self.assertEqual(system['role'], 'system')
+                self.assertTrue(system['content'].startswith(identity + '\n\n'), system['content'][:200])
+                self.assertEqual(system['content'].count(SYSTEM_PROMPT), 1)
+                offered = [system['content'], *(tool['function']['description'] for tool in body.get('tools', []))]
+                for text in offered:
+                    for forbidden in ('hermes', 'nous', 'http'):
+                        self.assertNotIn(forbidden, text.casefold())
+            self.assertEqual((worker.home / 'SOUL.md').read_text(), identity)
 
     def test_user_turn_adapter_retains_native_filters(self):
         require_native_hermes()
@@ -2678,7 +2775,7 @@ case.assertEqual(messages, original)
                                                  'read_file', 'delegate_task', 'tool_search')):
                 self.assertIn(f"Tool '{name}' does not exist", message['content'])
             self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Conversation only nonce-25.'}, {'done': True}])
-            self.assertEqual({tool['function']['name'] for tool in brain.requests[0][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+            self.assertEqual({tool['function']['name'] for tool in brain.requests[0][2]['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
             parameters = {tool['function']['name']: tool['function']['parameters']
                           for tool in brain.requests[0][2]['tools']}
             self.assertEqual({name: value for name, value in parameters.items() if name != 'memory'}, {
@@ -2691,6 +2788,10 @@ case.assertEqual(messages, original)
                 'focus_workspace': {'type': 'object', 'properties': {
                     'number': {'type': 'integer', 'minimum': 1, 'maximum': 2147483647}},
                     'required': ['number'], 'additionalProperties': False},
+                'open_app': {'type': 'object', 'properties': {
+                    'name': {'type': 'string', 'minLength': 1, 'maxLength': 1024}},
+                    'required': ['name'], 'additionalProperties': False},
+                'take_screenshot': {'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False},
             })
             worker.begin()
             events = worker.request([{'role': 'user', 'content': 'A fresh caller turn.'}])
