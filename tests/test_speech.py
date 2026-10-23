@@ -338,8 +338,45 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
             for name, data in contents.items():
                 (directory / name).write_bytes(data)
             pins = {name: (len(data), hashlib.sha256(data).hexdigest()) for name, data in contents.items()}
-            with patch.object(speech, 'ROOT', root), patch.object(speech, 'PHONON_ASSETS', pins):
+            (directory.parent / 'phonon-bryony-gfP44RlHwr2kEwk7.safetensors').write_bytes(b'abc')
+            with (
+                patch.object(speech, 'ROOT', root), patch.object(speech, 'PHONON_ASSETS', pins),
+                patch.object(speech, 'PHONON_BRYONY_ASSET',
+                             ('phonon-bryony-gfP44RlHwr2kEwk7.safetensors', 3,
+                              'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')),
+            ):
                 yield directory, contents
+
+    async def test_bryony_assets_refuse_before_native_load(self):
+        for fault in ('missing', 'short', 'long', 'digest', 'symlink', 'directory', 'fifo'):
+            with self.subTest(fault=fault), self.assets() as (directory, _):
+                asset = directory.parent / 'phonon-bryony-gfP44RlHwr2kEwk7.safetensors'
+                if fault == 'missing':
+                    asset.unlink()
+                elif fault == 'short':
+                    asset.write_bytes(b'ab')
+                elif fault == 'long':
+                    asset.write_bytes(b'abcd')
+                elif fault == 'digest':
+                    asset.write_bytes(b'xyz')
+                else:
+                    asset.unlink()
+                    if fault == 'symlink':
+                        asset.symlink_to(directory / 'config.json')
+                    elif fault == 'directory':
+                        asset.mkdir()
+                    else:
+                        os.mkfifo(asset)
+                model = Mock(sample_rate=24000, voices=['default'])
+                native = Mock(__version__='0.4.0', TTS=Mock(return_value=model))
+                with patch.dict(sys.modules, {'ptts': native}):
+                    with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estore.*Bryony.*restart'):
+                        speech.load_phonon()
+                native.TTS.assert_not_called()
+        self.assertEqual(speech.PHONON_BRYONY_ASSET, (
+            'phonon-bryony-gfP44RlHwr2kEwk7.safetensors', 256136,
+            'bcc207a73b7885e45b49ab633d3377a10158292e3a7cef9cd6764ad107f1cb9b',
+        ))
 
     async def test_pinned_assets_refuse_before_native_load(self):
         self.assertEqual(speech.PHONON_ASSETS, {
@@ -372,21 +409,54 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estore'):
                         speech.load_phonon()
                 native.TTS.assert_not_called()
-        with self.assets() as (directory, _):
-            model = Mock(sample_rate=24000, voices=['default'])
-            native = Mock(__version__='0.4.0', TTS=Mock(return_value=model))
-            with patch.dict(sys.modules, {'ptts': native}):
-                self.assertIs(speech.load_phonon(), model)
-            native.TTS.assert_called_once_with(str(directory), lang='en', quant='q8', device='cpu')
-            native.set_num_threads.assert_called_once_with(4)
+        for replaced in (False, True):
+            with self.subTest(replaced=replaced), self.assets() as (directory, _):
+                model = Mock(sample_rate=24000, voices=['default'])
+                descriptors = []
+
+                def register(name, path):
+                    self.assertEqual(name, 'bryony')
+                    self.assertTrue(path.startswith('/proc/self/fd/'))
+                    self.assertEqual(Path(path).read_bytes(), b'abc')
+                    descriptors.append(Path(path))
+                    model.voices.append(name)
+
+                def construct(*args, **kwargs):
+                    if replaced:
+                        asset = directory.parent / 'phonon-bryony-gfP44RlHwr2kEwk7.safetensors'
+                        asset.unlink()
+                        asset.write_bytes(b'xyz')
+                    return model
+
+                model.add_voice.side_effect = register
+                native = Mock(__version__='0.4.0', TTS=Mock(side_effect=construct))
+                with patch.dict(sys.modules, {'ptts': native}):
+                    self.assertIs(speech.load_phonon(), model)
+                native.TTS.assert_called_once_with(str(directory), lang='en', quant='q8', device='cpu')
+                native.set_num_threads.assert_called_once_with(4)
+                model.add_voice.assert_called_once()
+                self.assertEqual(len(descriptors), 1)
+                self.assertFalse(descriptors[0].exists())
 
     async def test_runtime_and_default_voice_refuse_before_stream(self):
-        for fault in ('missing package', 'version', 'missing version', 'rate', 'default', 'native load'):
+        for fault in ('missing package', 'version', 'missing version', 'rate', 'default', 'native load',
+                      'registration', 'missing Bryony'):
             with self.subTest(fault=fault), self.assets():
                 model = Mock(sample_rate=22050 if fault == 'rate' else 24000,
                              voices=[] if fault == 'default' else ['default'])
                 native = Mock(__version__='0.3.0' if fault == 'version' else '0.4.0',
                               TTS=Mock(return_value=model))
+                descriptors = []
+
+                def register(name, path):
+                    descriptors.append(Path(path))
+                    self.assertEqual(Path(path).read_bytes(), b'abc')
+                    if fault == 'registration':
+                        raise ValueError('registration refused')
+                    if fault != 'missing Bryony':
+                        model.voices.append(name)
+
+                model.add_voice.side_effect = register
                 if fault == 'missing version':
                     del native.__version__
                 if fault == 'native load':
@@ -395,6 +465,7 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estore'):
                         speech.load_phonon()
                 model.stream.assert_not_called()
+                self.assertTrue(all(not path.exists() for path in descriptors))
                 if fault in ('missing package', 'version', 'missing version'):
                     native.TTS.assert_not_called()
                 self.assertFalse(any('catalog' in call[0] or 'clone' in call[0] for call in native.mock_calls))
@@ -427,9 +498,10 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                 model = Mock(sample_rate=24000, voices=['default'], stream=Mock(return_value=stream))
                 voice = speech.PhononTTS(model)
                 self.assertIsInstance(voice, speech.ConversationTTS)
+                self.assertEqual(voice.settings.voice, 'bryony')
                 voice._conversation_audio_contexts['turn'] = speech.ConversationAudioContext(None, delivery=delivery)
                 frames = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
-                model.stream.assert_called_once_with('The answer is eighteen.', voice='default', seed=1234)
+                model.stream.assert_called_once_with('The answer is eighteen.', voice='bryony', seed=1234)
                 stream.close.assert_called_once_with()
                 self.assertTrue(all(isinstance(frame, TTSAudioRawFrame) and frame.sample_rate == 48000
                                     and frame.num_channels == 1 and frame.context_id == 'turn' for frame in frames))
@@ -529,7 +601,7 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                             raise RuntimeError('native close refused')
 
                 def generate(text, *, voice, seed):
-                    self.assertEqual((voice, seed), ('default', 1234))
+                    self.assertEqual((voice, seed), ('bryony', 1234))
                     events.append((text, 'start'))
                     stream = NativeStream(text)
                     streams.append(stream)

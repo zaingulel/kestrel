@@ -2623,7 +2623,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 streams = []
 
                 def stream(text, *, voice, seed):
-                    self.assertEqual((voice, seed), ('default', 1234))
+                    self.assertEqual((voice, seed), ('bryony', 1234))
                     native = Mock(sample_rate=24000, close=Mock())
                     native.__iter__ = Mock(return_value=iter([np.zeros(2400, dtype=np.float32)]))
                     streams.append(native)
@@ -3918,7 +3918,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         if tts_model in (None, 'phonon'):
             def stream(text, *, voice, seed):
-                self.assertEqual((voice, seed), ('default', 1234))
+                self.assertEqual((voice, seed), ('bryony', 1234))
                 native = Mock(sample_rate=24000, close=Mock())
                 native.__iter__ = Mock(return_value=iter([np.zeros(2400, dtype=np.float32)]))
                 return native
