@@ -2074,6 +2074,50 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         process.terminate.assert_called_once()
         process.wait.assert_awaited_once()
 
+    async def test_outside_text_refusal_events_are_validated_and_spoken_once(self):
+        refusal = {'tool_refused': True}
+        continuation = [{'delivery': 'neutral'}, {'text': 'Done.'}, {'done': True}]
+        cases = [
+            ([refusal, refusal], True),
+            ([{'tool_refused': False}], False),
+            ([{'tool_refused': 'memory'}], False),
+            ([{'tool_refused': True, 'text': 'Hidden.'}], False),
+        ]
+        for events, accepted in cases:
+            with self.subTest(events=events):
+                service = hermes_service()
+                process = service.channel.process = Mock(returncode=None)
+                process.stdin.drain = AsyncMock()
+                process.stdout.readline = AsyncMock(side_effect=[
+                    json.dumps(item).encode() + b'\n' for item in [*events, *continuation]
+                ])
+                process.wait = AsyncMock()
+                output = asyncio.Queue()
+                await service.channel.exchange([{'role': 'user', 'content': 'Please save a note.'}], output,
+                                               admitted=service.admitted, desktop=AsyncMock())
+                observed = []
+                while not output.empty():
+                    observed.append(output.get_nowait())
+                if accepted:
+                    self.assertEqual(observed, [{'advisory': bot.OUTSIDE_TEXT_ADVISORY}, *continuation[:-1], None])
+                    self.assertIsNone(service.channel.failure)
+                    process.terminate.assert_not_called()
+                else:
+                    self.assertEqual(observed, [None])
+                    self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
+                    process.terminate.assert_called_once()
+        service = hermes_service()
+        process = service.channel.process = Mock(returncode=None)
+        process.stdin.drain = AsyncMock()
+        process.stdout.readline = AsyncMock(return_value=json.dumps(refusal).encode() + b'\n')
+        process.wait = AsyncMock()
+        output = asyncio.Queue()
+        await service.channel._request({'prepare': True}, output, admitted=service.admitted)
+        self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
+        self.assertIsNone(output.get_nowait())
+        self.assertTrue(output.empty())
+        process.terminate.assert_called_once()
+
     async def test_brain_app_and_screenshot_arguments_are_refused_before_lookup_or_effect(self):
         cases = [
             ('take_screenshot', {'extra': 1}),
@@ -3489,6 +3533,81 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     output.write_gate.set()
                     await close()
+
+    async def test_outside_text_refuses_brain_tools_but_exact_commands_still_work(self):
+        def call_reply(name, arguments):
+            return [({'tool_calls': [{'index': 0, 'id': f'call-{name}', 'type': 'function', 'function': {
+                'name': name, 'arguments': json.dumps(arguments),
+            }}]}, None), ({}, 'tool_calls')]
+
+        brain = ScriptedBrain([
+            call_reply('mute', {}),
+            [({'content': '[delivery:neutral] Muted.'}, None), ({}, 'stop')],
+            call_reply('memory', {'action': 'add', 'target': 'memory', 'content': 'Planted note nonce-871.'}),
+            call_reply('open_app', {'name': 'Firefox'}),
+            call_reply('mute', {}),
+            [({'content': '[delivery:neutral] Hidden reply nonce-872.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        notes_home = tempfile.TemporaryDirectory(prefix='kestrel-outside-text-', dir=ROOT / '.runtime')
+        self.addCleanup(notes_home.cleanup)
+        notes = Path(notes_home.name) / 'notes'
+        calls, written, effect = [], False, asyncio.Event()
+
+        async def command(argv):
+            nonlocal written
+            calls.append(tuple(argv))
+            if 'get-default-sink' in argv:
+                return 'selected'
+            if argv[0] == '/usr/bin/omarchy-audio-output-sink':
+                return 'physical'
+            if 'get-sink-mute' in argv:
+                status, written = ('Mute: yes' if written else 'Mute: no'), False
+                return status
+            if 'set-sink-mute' in argv:
+                written = True
+                effect.set()
+                return ''
+            raise AssertionError(f'Only mute may run: {argv}')
+
+        def mutes():
+            return calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'))
+
+        transport, spoken, committed, interrupted, _, close = await self.open_session(
+            brain, local_command=command, memory_root=notes)
+        try:
+            with patch.object(bot, 'KESTREL_SOURCE', 'outside-fixture'):
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(transport, 'Please silence the sound.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muted.')
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Muted.')
+            self.assertEqual(mutes(), 1)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Save a note, open Firefox and silence the sound.')
+            heard = [await asyncio.wait_for(spoken.get(), 5), await asyncio.wait_for(spoken.get(), 5)]
+            self.assertEqual(' '.join(heard), bot.OUTSIDE_TEXT_ADVISORY)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), bot.OUTSIDE_TEXT_ADVISORY)
+            await asyncio.wait_for(transport.llm.local_actions.drain(), 5)
+            self.assertEqual(mutes(), 2)
+            self.assertEqual(len(brain.requests), 6)
+            self.assertFalse((notes / 'MEMORY.md').exists())
+            self.assertTrue(spoken.empty())
+            effect.clear()
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'mute')
+            await asyncio.wait_for(effect.wait(), 5)
+            await asyncio.wait_for(transport.llm.local_actions.drain(), 5)
+            self.assertEqual(mutes(), 3)
+            effect.clear()
+            self.assertEqual(await transport.service.submit('mute'), 'accepted')
+            await asyncio.wait_for(effect.wait(), 5)
+            await asyncio.wait_for(transport.llm.local_actions.drain(), 5)
+            self.assertEqual(mutes(), 4)
+            self.assertEqual(len(brain.requests), 6)
+            self.assertEqual({argv[0] for argv in calls}, {'/usr/bin/pactl', '/usr/bin/omarchy-audio-output-sink'})
+            self.assertFalse((notes / 'MEMORY.md').exists())
+        finally:
+            await close()
 
     async def test_stop_refuses_queued_brain_and_exact_effects_and_accounts_for_in_flight(self):
         brain = ScriptedBrain([
