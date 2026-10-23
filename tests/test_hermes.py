@@ -26,6 +26,7 @@ from hermes_worker import HERMES_PYTHON
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_PYTHON = HERMES_PYTHON
+BRAIN_KEY_SENTINEL = 'b7e2c4a9' * 8
 
 
 class ScriptedBrain:
@@ -2899,6 +2900,9 @@ class BonsaiStartupTests(unittest.TestCase):
             'print(json.dumps({"arguments": sys.argv[1:], "environment": dict(os.environ), "cwd": os.getcwd()}))\n'
         )
         server.chmod(0o755)
+        key = root / '.runtime/brain-api-key'
+        key.write_text(BRAIN_KEY_SENTINEL + '\n')
+        key.chmod(0o600)
         return root, prism, server
 
     def test_brain_launcher_pins_f16_and_scrubs_environment(self):
@@ -2913,6 +2917,7 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(observed['arguments'], [
             '-m', str(root / '.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf'),
             '--alias', 'bonsai-2-27b', '--host', '127.0.0.1', '--port', '8080',
+            '--api-key-file', str(root / '.runtime/brain-api-key'),
             '--gpu-layers', 'all', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
             '--fit', 'off', '--kv-offload', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
             '--no-context-shift', '--no-webui', '--no-slots', '--no-agent', '--no-ui-mcp-proxy',
@@ -2930,6 +2935,53 @@ class BonsaiStartupTests(unittest.TestCase):
             )),
         })
         self.assertEqual(observed['cwd'], str(prism))
+
+    def test_brain_launcher_refuses_missing_empty_or_malformed_key(self):
+        root, _, _ = self.launcher_fixture()
+        key = root / '.runtime/brain-api-key'
+        valid = BRAIN_KEY_SENTINEL.encode()
+        linked = root / 'linked-key'
+        linked.write_bytes(valid + b'\n')
+        linked.chmod(0o600)
+
+        def regular(content, mode=0o600):
+            def create():
+                key.write_bytes(content)
+                key.chmod(mode)
+            return create
+
+        def fifo():
+            os.mkfifo(key, 0o600)
+
+        cases = {
+            'missing': lambda: None,
+            'empty': regular(b''),
+            'no trailing newline': regular(valid),
+            'uppercase': regular(valid.upper() + b'\n'),
+            '63 characters': regular(valid[:63] + b'\n'),
+            '65 characters': regular(valid + b'a\n'),
+            'second line': regular(valid[:31] + b'\n' + valid[31:63] + b'\n'),
+            'trailing NUL byte': regular(valid + b'\n\0'),
+            'comment line': regular(b'#' + valid[:63] + b'\n'),
+            'symlink to a valid key': lambda: key.symlink_to(linked),
+            'mode 0640': regular(valid + b'\n', 0o640),
+            'mode 0604': regular(valid + b'\n', 0o604),
+            'directory': key.mkdir,
+            'FIFO': fifo,
+        }
+        for name, create in cases.items():
+            with self.subTest(name):
+                if key.is_dir() and not key.is_symlink():
+                    key.rmdir()
+                else:
+                    key.unlink(missing_ok=True)
+                create()
+                result = subprocess.run(['/usr/bin/bash', str(root / 'run-brain.sh')],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr, 'The brain key .runtime/brain-api-key is missing or unsafe. '
+                                 'Create it as README.md describes under Brain key, then restart Kestrel.\n')
+                self.assertEqual(result.stdout, '')
 
     def test_brain_launcher_propagates_failure(self):
         root, _, server = self.launcher_fixture()
