@@ -27,7 +27,7 @@ TRACE_FAILURE_ERROR = ('Local conversation tracing failed. Check free space and 
 RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by this user. '
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
-TOOL_SURFACE_ERROR = ('Hermes offered tools other than memory and the five desktop tools. '
+TOOL_SURFACE_ERROR = ("Hermes offered tools other than memory and Kestrel's desktop tools. "
                       'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 ORDINARY_MAX_TOKENS = 180
@@ -120,15 +120,17 @@ class ReplyReasoningFilter:
 
 class DesktopToolSchema(NamedTuple):
     description: str
-    bounds: dict[str, tuple[int, int]]
+    bounds: dict[str, tuple[type, int, int]]
 
 
 DESKTOP_TOOLS = {
     'mute': DesktopToolSchema('Mute the selected audio output.', {}),
-    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (0, 100)}),
+    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (int, 0, 100)}),
     'pause_media': DesktopToolSchema('Pause current media.', {}),
     'next_track': DesktopToolSchema('Advance to the next media track.', {}),
-    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (1, 2147483647)}),
+    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (int, 1, 2147483647)}),
+    'open_app': DesktopToolSchema('Open one installed app by its visible name.', {'name': (str, 1, 1024)}),
+    'take_screenshot': DesktopToolSchema('Save a screenshot to the screenshot folder; its content is never shown to you.', {}),
 }
 
 
@@ -137,8 +139,10 @@ def valid_desktop_arguments(name: str, arguments: dict) -> bool:
         return False
     bounds = DESKTOP_TOOLS[name].bounds
     return set(arguments) == set(bounds) and all(
-        type(arguments[key]) is int and low <= arguments[key] <= high
-        for key, (low, high) in bounds.items()
+        type(arguments[key]) is kind and (
+            low <= arguments[key] <= high if kind is int
+            else low <= len(arguments[key]) <= high and bool(arguments[key].strip()))
+        for key, (kind, low, high) in bounds.items()
     )
 
 
@@ -215,14 +219,23 @@ SYSTEM_PROMPT = (
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
-    "This session is a local conversation. Your tools are native local memory for small facts and preferences, "
-    "and Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace. "
+    "This session is a local conversation. You can talk, answer from general knowledge, and use these tools: "
+    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, set_volume, "
+    "pause_media, next_track, focus_workspace, open_app and take_screenshot. "
     "Maintain notes automatically when useful, including updating or removing outdated notes. "
-    "Claim a save only after a successful memory tool result. You have no web access or other desktop tools: "
-    "you cannot unmute, resume or go back in media, open apps or take screenshots; say so when asked. "
+    "Claim a save only after a successful memory tool result. You have no internet, web access or live "
+    "information such as news, weather or prices, and you cannot see the screen or any screenshot; "
+    "you cannot unmute, resume or go back in media. Say so plainly when asked. "
+    "When asked what you can do, name conversation and general knowledge, remembering notes, each desktop tool "
+    "in plain words (muting, setting the volume, pausing media, skipping to the next track, switching to a "
+    "numbered workspace, opening an installed app by name and taking a screenshot), the exact phrases repeat "
+    "that, stop, that's all and what can I say, and these limits. "
     "Call a desktop tool only for an effect the owner asks for, at most once per reply. "
     "Each desktop result is JSON with confirmed, attempted and reason. "
-    "Say an effect happened only when confirmed is true, never before its result arrives. Never call a desktop tool again to retry it.\n\n"
+    "Say an effect happened only when confirmed is true, never before its result arrives. "
+    "For open_app, confirmed means the launch request was accepted, not that a window is visible. "
+    "For take_screenshot, confirmed means a new screenshot file was saved; you never see it. "
+    "Never call a desktop tool again to retry it.\n\n"
     'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
     'practical information and ordinary replies without a clear emotional cue. Curious suits an '
@@ -546,8 +559,9 @@ def main(*, base_url=BONSAI_URL):
                     name=name, toolset='kestrel_desktop', handler=desktop_handler(name),
                     schema={'name': name, 'description': description, 'parameters': {
                         'type': 'object',
-                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high}
-                                       for key, (low, high) in bounds.items()},
+                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high} if kind is int
+                                       else {'type': 'string', 'minLength': low, 'maxLength': high}
+                                       for key, (kind, low, high) in bounds.items()},
                         'required': list(bounds), 'additionalProperties': False,
                     }},
                 )

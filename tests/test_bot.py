@@ -34,6 +34,7 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
 import bot
+import hermes_worker
 import speech
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
 
@@ -2007,7 +2008,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             ({'tool_call': {'name': 'mute', 'arguments': {}, 'extra': True}}, False),
             ({'tool_call': {'arguments': {}}}, False),
             ({'tool_call': {'name': 'mute'}}, False),
-            ({'tool_call': {'name': 'open_app', 'arguments': {}}}, False),
+            ({'tool_call': {'name': 'launch_app', 'arguments': {}}}, False),
             ({'tool_call': {'name': ['mute'], 'arguments': {}}}, False),
             ({'tool_call': {'name': 'mute', 'arguments': []}}, False),
             ({'tool_call': []}, False),
@@ -2059,6 +2060,33 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.empty())
         process.terminate.assert_called_once()
         process.wait.assert_awaited_once()
+
+    async def test_brain_app_and_screenshot_arguments_are_refused_before_lookup_or_effect(self):
+        cases = [
+            ('take_screenshot', {'extra': 1}),
+            ('open_app', {}),
+            ('open_app', {'name': 123}),
+            ('open_app', {'name': ''}),
+            ('open_app', {'name': '   '}),
+            ('open_app', {'name': 'Fire\x07fox'}),
+            # Within the shared 1,024-character bound, beyond the resolver's 1,024-byte limit.
+            ('open_app', {'name': 'é' * 600}),
+            ('open_app', {'name': 'x' * 1025}),
+            ('open_app', {'name': 'A', 'extra': 1}),
+        ]
+        command = AsyncMock(side_effect=AssertionError('Refused arguments must never reach lookup or effect'))
+        service = hermes_service(local_command=command)
+        for name, arguments in cases:
+            with self.subTest(name=name, arguments=arguments):
+                # An unknown name is refused before any argument check, so each case must name a desktop tool.
+                self.assertIn(name, bot.DESKTOP_TOOLS)
+                turn = bot.BrainTurn(names=set(), user={'role': 'user', 'content': 'Open it.'},
+                                     epoch=service.stop_epoch, records=[])
+                result = await service.desktop_call(turn, object(), asyncio.Queue(), name, arguments)
+                self.assertEqual(json.loads(result), {'confirmed': False, 'attempted': False, 'reason': 'invalid arguments'})
+                self.assertTrue(turn.closed)
+                self.assertEqual(turn.records, [])
+        command.assert_not_awaited()
 
     async def test_delivery_events_are_validated_before_text(self):
         cases = [
@@ -3591,6 +3619,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             ('set_volume', {'percent': 101}, 'invalid arguments', invalid),
             ('focus_workspace', {'number': 0}, 'invalid arguments', invalid),
             ('mute', {'extra': 1}, 'invalid arguments', invalid),
+            ('open_app', {'name': 'Fire\x07fox'}, 'invalid arguments', invalid),
         ]
         replies = []
         for name, arguments, _, _ in cases:
@@ -3846,6 +3875,200 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
         finally:
+            await close()
+
+    @staticmethod
+    def brain_tool_call(call_id, name, arguments):
+        return [({'tool_calls': [{'index': 0, 'id': call_id, 'type': 'function', 'function': {
+            'name': name, 'arguments': json.dumps(arguments),
+        }}]}, None), ({}, 'tool_calls')]
+
+    async def test_brain_app_and_screenshot_calls_use_exact_tools_and_send_only_observed_results(self):
+        clock = patch.object(time, 'time_ns', return_value=2_000_000_000_000_000_000)
+        clock.start()
+        self.addCleanup(clock.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / 'screenshot-2026-10-18_12-34-56.png'
+        path.write_bytes(b'PRIVATE screenshot content must never be opened')
+        os.utime(path, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+        screenshot = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        screenshot_failure = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
+        lookup_failure = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
+        no_match = "I couldn't find exactly one installed app with that name, so I didn't open anything."
+        discovery = bot.app_discovery_environment()
+        lookup = ('/usr/bin/env', *discovery, '/usr/bin/python', '-I', str(ROOT / 'app_resolver.py'))
+        launch = ('/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env', *discovery,
+                  '/usr/bin/gtk-launch', 'fixture.desktop')
+        untrue = [({'content': '[delivery:neutral] Untrue success claim.'}, None), ({}, 'stop')]
+        # Each case: user text, scripted brain replies, command answers, expected calls, tool results, speech.
+        cases = [
+            ('Could you start FixtureApp for me?',
+             [self.brain_tool_call('known', 'open_app', {'name': 'FixtureApp'}),
+              [({'content': '[delivery:neutral] Asked it to open.'}, None), ({}, 'stop')]],
+             ['"fixture.desktop"', ''], [(lookup, b'FixtureApp'), (launch, None)],
+             [('known', {'confirmed': True, 'attempted': True, 'reason': 'launch accepted'})], 'Asked it to open.'),
+            ('Grab a picture of my screen.',
+             [self.brain_tool_call('saved', 'take_screenshot', {}),
+              [({'content': '[delivery:neutral] Saved a screenshot.'}, None), ({}, 'stop')]],
+             [str(path) + '\n'], [(screenshot, None)],
+             [('saved', {'confirmed': True, 'attempted': True, 'reason': 'confirmed'})], 'Saved a screenshot.'),
+            ('Grab another picture of my screen.',
+             [self.brain_tool_call('unconfirmed', 'take_screenshot', {}), untrue],
+             ['PRIVATE native output'], [(screenshot, None)],
+             [('unconfirmed', {'confirmed': False, 'attempted': True, 'reason': 'screenshot unconfirmed'})],
+             screenshot_failure),
+            ('Could you start Blorptastic for me?',
+             [self.brain_tool_call('unknown', 'open_app', {'name': 'Blorptastic'}),
+              self.brain_tool_call('retry', 'open_app', {'name': 'FixtureApp'}), untrue],
+             ['null'], [(lookup, b'Blorptastic')],
+             [('unknown', {'confirmed': False, 'attempted': False, 'reason': 'no unique installed app'}),
+              ('retry', {'confirmed': False, 'attempted': False, 'reason': 'already attempted'})], no_match),
+            ('Could you start Unavailable for me?',
+             [self.brain_tool_call('unavailable', 'open_app', {'name': 'Unavailable'}), untrue],
+             [RuntimeError('PRIVATE lookup failure')], [(lookup, b'Unavailable')],
+             [('unavailable', {'confirmed': False, 'attempted': False, 'reason': 'app lookup failed'})], lookup_failure),
+            ('Could you start Corrupt for me?',
+             [self.brain_tool_call('corrupt', 'open_app', {'name': 'Corrupt'}), untrue],
+             ['{}'], [(lookup, b'Corrupt')],
+             [('corrupt', {'confirmed': False, 'attempted': False, 'reason': 'app lookup failed'})], lookup_failure),
+        ]
+        brain = ScriptedBrain([reply for case in cases for reply in case[1]])
+        self.addCleanup(brain.close)
+        answers, calls = [], []
+
+        async def command(argv, *, stdin_data=None):
+            calls.append((argv, stdin_data))
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
+        try:
+            requests = 0
+            for text, replies, outputs, expected_calls, results, speech in cases:
+                with self.subTest(text=text):
+                    answers[:], calls[:] = outputs, []
+                    requests += len(replies)
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, text)
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), speech)
+                    heard = []
+                    while not spoken.empty():
+                        heard.append(spoken.get_nowait())
+                    self.assertEqual(' '.join(heard), speech)
+                    self.assertEqual(calls, expected_calls)
+                    self.assertEqual(answers, [])
+                    self.assertEqual(len(brain.requests), requests)
+                    ids = [call_id for call_id, _ in results]
+                    tools = [m for m in brain.requests[-1][2]['messages'] if m['role'] == 'tool' and m['tool_call_id'] in ids]
+                    self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in tools], results)
+            for _, _, body in brain.requests:
+                sent = json.dumps(body)
+                for private in (str(path), 'screenshot-2026', 'PRIVATE'):
+                    self.assertNotIn(private, sent)
+        finally:
+            await close()
+
+    async def test_stop_refuses_brain_launch_after_lookup_and_accounts_for_accepted_launch(self):
+        from desktop import conversation
+        brain = ScriptedBrain([
+            self.brain_tool_call('held-open', 'open_app', {'name': 'FixtureApp'}),
+            [({'content': '[delivery:neutral] Obsolete reply.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral] Account remembered.'}, None), ({}, 'stop')],
+            self.brain_tool_call('accepted-open', 'open_app', {'name': 'FixtureApp'}),
+            [({'content': '[delivery:neutral] Asked it to open.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        held, release = asyncio.Event(), asyncio.Event()
+        self.addCleanup(release.set)
+        calls = []
+
+        async def command(argv, *, stdin_data=None):
+            calls.append(argv)
+            if argv[0] == '/usr/bin/env':
+                self.assertEqual(stdin_data, b'FixtureApp')
+                if not release.is_set():
+                    held.set()
+                    await release.wait()
+                return '"fixture.desktop"'
+            self.assertIsNone(stdin_data)
+            return ''
+
+        def chunks(**kwargs):
+            if kwargs['text'] != 'Asked it to open.':
+                yield np.zeros(4800, dtype=np.float32)
+
+        transport, spoken, committed, interrupted, _, close = await self.open_session(
+            brain, local_command=command, synthesis_chunks=chunks,
+        )
+        writer = None
+        try:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Could you start FixtureApp for me?')
+            await asyncio.wait_for(held.wait(), 5)
+            exchange = transport.llm.channel.reader
+            epoch = transport.llm.stop_epoch
+            interrupted.clear()
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await asyncio.wait_for(interrupted.wait(), 5)
+            await self.finish_user_turn(transport, 'stop')
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(transport.llm.stop_epoch, epoch + 1)
+            self.assertFalse(exchange.done(), 'The held lookup outlives the stop')
+            self.assertTrue(spoken.empty(), 'Nothing had started, so the stop has nothing to account for')
+            release.set()
+            await asyncio.wait_for(asyncio.shield(exchange), 5)
+            await asyncio.wait_for(transport.llm.local_actions.drain(), 5)
+            self.assertEqual([argv[0] for argv in calls], ['/usr/bin/env'], 'A stopped brain launch never starts')
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'What happened?')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Account remembered.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Account remembered.')
+            messages = [m for m in brain.requests[2][2]['messages'] if m['role'] != 'system']
+            self.assertEqual(messages[0], {'role': 'user', 'content': 'Could you start FixtureApp for me?'})
+            self.assertEqual([(c['function']['name'], json.loads(c['function']['arguments']))
+                              for c in messages[1]['tool_calls']], [('open_app', {'name': 'FixtureApp'})])
+            self.assertEqual((messages[2]['tool_call_id'], json.loads(messages[2]['content'])),
+                             (messages[1]['tool_calls'][0]['id'],
+                              {'confirmed': False, 'attempted': False, 'reason': 'stopped'}))
+            self.assertEqual(messages[3], {'role': 'user', 'content': 'What happened?'})
+            self.assertEqual(len(messages), 4)
+
+            reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(conversation.address()), 5)
+
+            async def rows_until(predicate):
+                async with asyncio.timeout(5):
+                    while True:
+                        snapshot = json.loads(await reader.readline())
+                        if 'turns' in snapshot and predicate(snapshot['turns']):
+                            return snapshot['turns']
+
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'Please start FixtureApp again.')
+            # The text frame reaches output without audio; the failed row is the delivery oracle.
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Asked it to open.')
+            rows = await rows_until(lambda rows: rows and rows[-1]['speaker'] == 'kestrel'
+                                    and rows[-1]['state'] == 'failed')
+            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': '', 'state': 'failed'})
+            self.assertEqual([argv[0] for argv in calls], ['/usr/bin/env', '/usr/bin/env', '/usr/bin/uwsm-app'])
+            self.assertEqual(calls[-1][-1], 'fixture.desktop')
+            interrupted.clear()
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await asyncio.wait_for(interrupted.wait(), 5)
+            await self.finish_user_turn(transport, 'stop')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5),
+                             "Stopped. Done: open app. I won't undo anything.")
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(len(brain.requests), 5)
+        finally:
+            release.set()
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
             await close()
 
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
@@ -7556,7 +7779,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(committed.empty())
                 self.assertEqual(len(brain.requests), 2)
                 self.assertIn(
-                    "Your tools are native local memory for small facts and preferences, and Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace.",
+                    hermes_worker.SYSTEM_PROMPT,
                     ' '.join(m['content'] for m in brain.requests[1][2]['messages'] if m['role'] == 'system'),
                 )
                 self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] != 'system'], [
@@ -8289,10 +8512,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         self.assertIn(
-            'Your tools are native local memory for small facts and preferences, and '
-            "Kestrel's desktop tools mute, set_volume, pause_media, next_track and focus_workspace.",
+            hermes_worker.SYSTEM_PROMPT,
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
         )
 
