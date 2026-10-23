@@ -47,7 +47,8 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text, valid_desktop_id
-from hermes_worker import DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, MEMORY_ERROR, child_environment, valid_desktop_arguments
+from hermes_worker import (DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
+                           child_environment, valid_desktop_arguments)
 from speech import (
     ConversationSynthesisFailedFrame, ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
     NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_phonon, load_voice_preset,
@@ -833,7 +834,7 @@ class HermesRequestChannel:
                           and isinstance(event['tool_call']['arguments'], dict)):
                         call = event['tool_call']
                         content = await desktop(call['name'], call['arguments'])
-                        self.process.stdin.write(json.dumps({'tool_result': content}).encode() + b'\n')
+                        self.process.stdin.write(json.dumps({'tool_result': content, 'source': KESTREL_SOURCE}).encode() + b'\n')
                         await self.process.stdin.drain()
                     elif set(event) == {'done'} and event['done'] is True and has_text:
                         break
@@ -1246,7 +1247,8 @@ class HermesLLMService(LLMService):
         turn.names.add(name)
 
         def record(content):
-            turn.records.append({'role': 'tool', 'name': name, 'arguments': deepcopy(arguments), 'content': content})
+            turn.records.append({'role': 'tool', 'name': name, 'arguments': deepcopy(arguments), 'content': content,
+                                 'source': KESTREL_SOURCE})
             return content
 
         if turn.closed:

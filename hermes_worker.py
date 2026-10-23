@@ -137,6 +137,11 @@ DESKTOP_TOOLS = {
     'open_app': DesktopToolSchema('Open one installed app by its visible name.', {'name': (str, 1, 1024)}),
     'take_screenshot': DesktopToolSchema('Save a screenshot to the screenshot folder; its content is never shown to you.', {}),
 }
+KESTREL_SOURCE = 'kestrel'
+HARMLESS_TOOLS = frozenset({'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+OUTSIDE_TEXT_RESULT = json.dumps({'confirmed': False, 'attempted': False, 'reason': 'outside text'})
+OUTSIDE_TEXT_REFUSAL = ('Refused: this conversation contains outside text, so notes cannot change '
+                        'until a fresh conversation.')
 
 
 def valid_desktop_arguments(name: str, arguments: dict) -> bool:
@@ -561,9 +566,11 @@ def main(*, base_url=BONSAI_URL):
             from agent.relay_runtime import get_runtime
             from agent.turn_failure_copy import is_max_iteration_handoff
             from agent.reasoning_promotion import answer_in_reasoning_capability
+            from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
             import nemo_relay
 
             bridge_failed = False
+            outside = False
             privacy_failed = False
             reasoning_filter = None
 
@@ -575,24 +582,42 @@ def main(*, base_url=BONSAI_URL):
 
             def desktop_handler(name):
                 def handle(args):
-                    nonlocal bridge_failed
+                    nonlocal bridge_failed, outside
                     check_privacy()
                     if bridge_failed:
                         return 'Kestrel desktop bridge failed'
+                    if outside and name not in HARMLESS_TOOLS:
+                        emit({'tool_refused': True})
+                        return OUTSIDE_TEXT_RESULT
                     emit({'tool_call': {'name': name, 'arguments': args}})
                     try:
                         line = sys.stdin.buffer.readline(4096)
                         reply = json.loads(line)
                         if (len(line) == 4096 and not line.endswith(b'\n')
-                                or not isinstance(reply, dict) or set(reply) != {'tool_result'}
+                                or not isinstance(reply, dict)
+                                or set(reply) not in ({'tool_result'}, {'tool_result', 'source'})
                                 or not isinstance(reply['tool_result'], str)
                                 or not reply['tool_result'].strip() or len(reply['tool_result']) > 1024):
                             raise ValueError('Invalid desktop result')
+                        if reply.get('source') != KESTREL_SOURCE:
+                            outside = True
                         return reply['tool_result']
                     except ValueError:
                         bridge_failed = True
                         return 'Kestrel desktop bridge failed'
                 return handle
+
+            native_memory = INLINE_TOOL_EXECUTORS['memory']
+
+            # Hermes plugin hooks fail open, and both memory dispatch paths read this table at call time
+            # before any memory validation, threat scan or write, so the private entry is the refusal seam.
+            def gated_memory(agent, args, ctx):
+                if outside:
+                    emit({'tool_refused': True})
+                    return json.dumps({'success': False, 'error': OUTSIDE_TEXT_REFUSAL})
+                return native_memory(agent, args, ctx)
+
+            INLINE_TOOL_EXECUTORS['memory'] = gated_memory
 
             for name, (description, bounds) in DESKTOP_TOOLS.items():
                 registry.register(
@@ -697,6 +722,7 @@ def main(*, base_url=BONSAI_URL):
                         raise ValueError('Expected a preparation, begin or messages request')
                     if set(request) == {'begin'} and request['begin'] is True:
                         begun = False
+                        outside = False
                         close_agent()
                         validate_runtime_home(home)
                         if not attached:
@@ -729,7 +755,8 @@ def main(*, base_url=BONSAI_URL):
                     group_names = set()
                     for index, message in enumerate(messages):
                         if isinstance(message, dict) and message.get('role') == 'tool':
-                            if (set(message) != {'role', 'name', 'arguments', 'content'}
+                            if (set(message) not in ({'role', 'name', 'arguments', 'content'},
+                                                     {'role', 'name', 'arguments', 'content', 'source'})
                                     or not valid_desktop_arguments(message['name'], message['arguments'])
                                     or not isinstance(message['content'], str) or not message['content'].strip()
                                     or len(message['content']) > 1024):
@@ -748,6 +775,9 @@ def main(*, base_url=BONSAI_URL):
                             raise ValueError('Expected text-only user/assistant messages')
                     if messages[-1]['role'] != 'user':
                         raise ValueError('Conversation history must end in user')
+                    if any(message['role'] == 'tool' and message.get('source') != KESTREL_SOURCE
+                           for message in messages):
+                        outside = True
                     converted = []
                     tool_count = 0
                     for index, message in enumerate(messages):

@@ -2049,7 +2049,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     observed.append(output.get_nowait())
                 if accepted:
                     desktop.assert_awaited_once_with('mute', {})
-                    self.assertEqual(writes[1:], [{'tool_result': content}])
+                    self.assertEqual(writes[1:], [{'tool_result': content, 'source': 'kestrel'}])
                     self.assertEqual(observed, [*continuation[:-1], None])
                     self.assertIsNone(service.channel.failure)
                     process.terminate.assert_not_called()
