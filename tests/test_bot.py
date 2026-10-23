@@ -1285,9 +1285,12 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
 
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_only_handles_completed_exact_user_turns(self):
-        expected = ("You can say: mute; set the volume to thirty; pause music; next track; "
+        expected = ("I can talk with you, answer general knowledge questions and keep short notes between conversations. "
+                    "You can say: mute; set the volume to thirty; pause music; next track; "
                     "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                    "None of these tools needs permission first.")
+                    "None of these tools needs permission first. "
+                    "You can also say repeat that, stop, that's all, or what can I say. "
+                    "I have no internet or live information, and I can't see what's on your screen.")
         accepted = ('what can I say', ' WHAT CAN I SAY. ', 'What can I say!', ' What Can I Say? ')
         rejected = ('"what can I say"', 'what can I say!!', 'what can I say??',
                     'do not tell me what can I say', 'what can I say please', 'what can I say? now',
@@ -1334,34 +1337,43 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         free = bot.PermissionTier.FREE
         ask = bot.PermissionTier.ASK
         forbidden = bot.PermissionTier.FORBIDDEN
+        intro = "I can talk with you, answer general knowledge questions and keep short notes between conversations."
+        phrases = "You can also say repeat that, stop, that's all, or what can I say."
+        limits = "I have no internet or live information, and I can't see what's on your screen."
         with patch.dict(bot.LOCAL_TOOLS, {
             'alpha': bot.LocalTool(free, action, 'alpha', 'alpha example'),
         }, clear=True):
             self.assertEqual(bot.capability_help(),
-                             'You can say: alpha example. None of these tools needs permission first.')
+                             f'{intro} You can say: alpha example. None of these tools needs permission first. '
+                             f'{phrases} {limits}')
             bot.LOCAL_TOOLS['beta'] = bot.LocalTool(free, action, 'beta', 'beta example')
             self.assertEqual(bot.capability_help(),
-                             'You can say: alpha example; beta example. None of these tools needs permission first.')
+                             f'{intro} You can say: alpha example; beta example. None of these tools needs permission '
+                             f'first. {phrases} {limits}')
             del bot.LOCAL_TOOLS['alpha']
             self.assertEqual(bot.capability_help(),
-                             'You can say: beta example. None of these tools needs permission first.')
+                             f'{intro} You can say: beta example. None of these tools needs permission first. '
+                             f'{phrases} {limits}')
             bot.LOCAL_TOOLS['beta'] = bot.LocalTool(ask, action, 'beta', 'beta example')
             self.assertEqual(bot.capability_help(),
-                             'No local tools are available without permission. Permission required: beta example. '
-                             "These tools aren't available by voice yet.")
+                             f'{intro} No local tools are available without permission. Permission required: beta example. '
+                             f"These tools aren't available by voice yet. {phrases} {limits}")
             bot.LOCAL_TOOLS['alpha'] = bot.LocalTool(free, action, 'alpha', 'alpha example')
             bot.LOCAL_TOOLS['gamma'] = bot.LocalTool(ask, action, 'gamma', 'gamma example')
             self.assertEqual(bot.capability_help(),
-                             'You can say: alpha example. Permission required: beta example; gamma example. '
-                             "These tools aren't available by voice yet.")
+                             f'{intro} You can say: alpha example. Permission required: beta example; gamma example. '
+                             f"These tools aren't available by voice yet. {phrases} {limits}")
             bot.LOCAL_TOOLS['beta'] = bot.LocalTool(forbidden, action, 'beta', 'beta example')
             del bot.LOCAL_TOOLS['gamma']
             self.assertEqual(bot.capability_help(),
-                             'You can say: alpha example. None of these tools needs permission first.')
+                             f'{intro} You can say: alpha example. None of these tools needs permission first. '
+                             f'{phrases} {limits}')
             del bot.LOCAL_TOOLS['alpha']
-            self.assertEqual(bot.capability_help(), "No local tools are available. Check Kestrel's setup.")
+            self.assertEqual(bot.capability_help(),
+                             f"{intro} No local tools are available. Check Kestrel's setup. {phrases} {limits}")
             bot.LOCAL_TOOLS.clear()
-            self.assertEqual(bot.capability_help(), "No local tools are available. Check Kestrel's setup.")
+            self.assertEqual(bot.capability_help(),
+                             f"{intro} No local tools are available. Check Kestrel's setup. {phrases} {limits}")
         action.assert_not_called()
 
     async def test_repeat_only_handles_completed_exact_user_turns(self):
@@ -6545,10 +6557,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             for utterance in ('repeat that', 'what can I say?'):
                 await start()
                 await self.finish_user_turn(transport, utterance)
-                expected = ('Hello.' if utterance == 'repeat that' else
-                            "You can say: mute; set the volume to thirty; pause music; next track; "
-                            "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                            "None of these tools needs permission first.")
+                expected = 'Hello.' if utterance == 'repeat that' else bot.capability_help()
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), expected)
                 rows = await turns_until(lambda turns: turns[-2]['text'] == utterance and turns[-1]['state'] == 'complete')
                 self.assertEqual(rows[-2:], [
@@ -6669,11 +6678,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, LLMContextFrame):
                     local_histories.append(deepcopy(frame.context.get_messages()))
 
-            expected_help = (
-                "You can say: mute; set the volume to thirty; pause music; next track; "
-                "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                "None of these tools needs permission first."
-            )
+            expected_help = bot.capability_help()
             for local_turn in ('what can I say?', 'repeat that'):
                 await start()
                 await self.finish_user_turn(transport, local_turn)
@@ -8336,9 +8341,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(committed.empty())
 
     async def test_capability_help_is_spoken_locally_without_history(self):
-        expected = ("You can say: mute; set the volume to thirty; pause music; next track; "
-                    "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                    "None of these tools needs permission first.")
+        expected = bot.capability_help()
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         command = AsyncMock(side_effect=AssertionError('Help cannot execute desktop actions'))

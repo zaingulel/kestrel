@@ -548,6 +548,11 @@ NUMBER_WORDS = {
 }
 
 
+HELP_INTRO = "I can talk with you, answer general knowledge questions and keep short notes between conversations."
+HELP_PHRASES = "You can also say repeat that, stop, that's all, or what can I say."
+HELP_LIMITS = "I have no internet or live information, and I can't see what's on your screen."
+
+
 def capability_help() -> str:
     free = []
     ask = []
@@ -557,13 +562,15 @@ def capability_help() -> str:
         elif tool.permission == PermissionTier.ASK:
             ask.append(tool.spoken)
     if not free and not ask:
-        return "No local tools are available. Check Kestrel's setup."
-    message = ('You can say: ' + '; '.join(free) + '.' if free else
-               'No local tools are available without permission.')
-    if ask:
-        return (message + ' Permission required: ' + '; '.join(ask)
-                + ". These tools aren't available by voice yet.")
-    return message + ' None of these tools needs permission first.'
+        tools = "No local tools are available. Check Kestrel's setup."
+    elif ask:
+        message = ('You can say: ' + '; '.join(free) + '.' if free else
+                   'No local tools are available without permission.')
+        tools = (message + ' Permission required: ' + '; '.join(ask)
+                 + ". These tools aren't available by voice yet.")
+    else:
+        tools = 'You can say: ' + '; '.join(free) + '. None of these tools needs permission first.'
+    return f'{HELP_INTRO} {tools} {HELP_PHRASES} {HELP_LIMITS}'
 
 
 def free_tool(key, *arguments) -> LocalTool | None:
