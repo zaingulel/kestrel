@@ -4891,7 +4891,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(prepare_entered.wait(), 5)
             self.assertEqual(await control.submit('Before model preparation'), 'unavailable')
             release_prepare.set()
-            handle, spoken, committed, _, _, close = await asyncio.wait_for(opening, 5)
+            handle, spoken, committed, _, _, close = await asyncio.wait_for(opening, ENGINE_STARTUP)
         service, manager = handle.service, handle.service.manager
         await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
         initializing, release_initialization, initialization_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
