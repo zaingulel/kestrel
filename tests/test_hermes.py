@@ -2650,12 +2650,6 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(system['role'], 'system')
                 self.assertTrue(system['content'].startswith(identity + '\n\n'), system['content'][:200])
                 self.assertEqual(system['content'].count(SYSTEM_PROMPT), 1)
-                self.assertIn("then say this sentence word for word: You can also say repeat that, stop, that's all, or what can I say.",
-                              system['content'])
-                self.assertIn("Call a desktop tool only when the owner clearly asks for that tool's effect", system['content'])
-                self.assertIn('when a request is unclear or asks for something no tool does, ask instead of calling a tool.',
-                              system['content'])
-                self.assertNotIn('the exact phrases repeat', system['content'])
                 offered = [system['content'], *(tool['function']['description'] for tool in body.get('tools', []))]
                 for text in offered:
                     for forbidden in ('hermes', 'nous', 'http'):

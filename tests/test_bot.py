@@ -1339,6 +1339,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         forbidden = bot.PermissionTier.FORBIDDEN
         intro = "I can talk with you, answer general knowledge questions and keep short notes between conversations."
         phrases = "You can also say repeat that, stop, that's all, or what can I say."
+        self.assertIn(bot.HELP_PHRASES, hermes_worker.SYSTEM_PROMPT)
         limits = "I have no internet or live information, and I can't see what's on your screen."
         with patch.dict(bot.LOCAL_TOOLS, {
             'alpha': bot.LocalTool(free, action, 'alpha', 'alpha example'),
