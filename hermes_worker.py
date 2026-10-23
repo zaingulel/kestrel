@@ -38,6 +38,9 @@ REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
 REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
                                  'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+KESTREL_IDENTITY = "You are Kestrel, Zain's local voice assistant."
+PROMPT_IDENTITY_ERROR = ("Kestrel's identity could not be applied to the brain's instructions. "
+                         'Check the pinned engine, then restart Kestrel.')
 
 
 def deeper_thought_requested(text: str) -> bool:
@@ -207,7 +210,8 @@ class ReplyDeliveryPrefix:
 
 
 SYSTEM_PROMPT = (
-    "You are Kestrel, Zain's local voice assistant. Speak naturally in concise English. "
+    "Speak naturally in concise English. "
+    "Never name the software you run on, and never point to a website or documentation for your abilities. "
     "Usually answer in one or two short sentences, beginning with a short complete sentence. "
     "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
@@ -407,6 +411,28 @@ def preserve_user_turns(messages, *, drop_codex_reasoning_items=True, drop_nudge
     return kept
 
 
+def kestrel_system_prompt(built, prompt: str) -> str:
+    # Hermes 0.22.2 has no setting for these four blocks; remove exactly them or refuse.
+    # Count each block's own text: adjacent paragraphs share one separator.
+    from agent.prompt_builder import (HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, RUNTIME_ENVIRONMENT_END,
+                                      RUNTIME_ENVIRONMENT_HEADING, STEER_CHANNEL_NOTE)
+    from agent.system_prompt import _active_profile_line
+    head = f'{KESTREL_IDENTITY}\n\n{HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS}\n\n'
+    runtime = prompt.find(f'\n\n{RUNTIME_ENVIRONMENT_HEADING}\n\n')
+    if (not prompt.startswith(head) or runtime == -1 or not prompt.endswith(RUNTIME_ENVIRONMENT_END)
+            or any(prompt.count(text) != 1 for text in
+                   (HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, RUNTIME_ENVIRONMENT_HEADING, RUNTIME_ENVIRONMENT_END))):
+        raise RuntimeError(PROMPT_IDENTITY_ERROR)
+    kept = f'{KESTREL_IDENTITY}\n\n{prompt[len(head):runtime]}\n\n'
+    for text, expected in ((_active_profile_line(built), 1),
+                           (STEER_CHANNEL_NOTE, 1 if built.valid_tool_names else 0)):
+        paragraph = f'\n\n{text}\n\n'
+        if prompt.count(text) != expected or expected and paragraph not in kept:
+            raise RuntimeError(PROMPT_IDENTITY_ERROR)
+        kept = kept.replace(paragraph, '\n\n', expected)
+    return kept.removesuffix('\n\n')
+
+
 def child_environment(home):
     home = Path(home).resolve()
     environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ')
@@ -439,6 +465,7 @@ def main(*, base_url=BONSAI_URL):
             os.chdir(home)
             config = {
                 'model': {'context_length': 64000},
+                'agent': {'coding_context': 'off'},
                 'memory': {'memory_enabled': True, 'user_profile_enabled': True, 'provider': '',
                            'memory_char_limit': 2200, 'user_char_limit': 1375, 'write_approval': False},
                 'sessions': {'write_json_snapshots': False},
@@ -448,6 +475,11 @@ def main(*, base_url=BONSAI_URL):
                 'tools': {'tool_search': {'enabled': 'off'}},
             }
             (home / 'config.yaml').write_text(json.dumps(config))
+            try:
+                with (home / 'SOUL.md').open('x') as soul:
+                    soul.write(KESTREL_IDENTITY)
+            except OSError:
+                raise RuntimeError(RUNTIME_HOME_ERROR) from None
             try:
                 (home / 'memories').lstat()
             except FileNotFoundError:
@@ -541,7 +573,7 @@ def main(*, base_url=BONSAI_URL):
                 built = AIAgent(
                     base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
                     model='bonsai-2-27b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
-                    skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=False,
+                    skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=True,
                     session_db=None, fallback_model=None, save_trajectories=False,
                     # Contain repeated malformed-tool loops; incomplete summaries must never claim success.
                     checkpoints_enabled=False, quiet_mode=True, max_tokens=ORDINARY_MAX_TOKENS, max_iterations=9,
@@ -550,6 +582,12 @@ def main(*, base_url=BONSAI_URL):
                     ephemeral_system_prompt=MEMORY_REPLY_REMINDER if memory else None,
                 )
                 built._drop_thinking_only_and_merge_users = preserve_user_turns
+                native_prompt = built._build_system_prompt
+
+                def kestrel_prompt(system_message=None):
+                    return kestrel_system_prompt(built, native_prompt(system_message))
+
+                built._build_system_prompt = kestrel_prompt
                 native_repair = built._repair_tool_call
 
                 def exact_repair(name):

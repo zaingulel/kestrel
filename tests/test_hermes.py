@@ -359,6 +359,56 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 180)])
         self.assertIs(transport.normalize_response, normalizer)
 
+    def test_engine_prompt_keeps_kestrel_identity_and_removes_engine_blocks(self):
+        identity = "You are Kestrel, Zain's local voice assistant."
+        error = ("Kestrel's identity could not be applied to the brain's instructions. "
+                 'Check the pinned engine, then restart Kestrel.')
+        prompt_builder = ModuleType('agent.prompt_builder')
+        prompt_builder.HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = 'POINTER'
+        prompt_builder.STEER_CHANNEL_NOTE = '## STEER\nSteering body.'
+        prompt_builder.RUNTIME_ENVIRONMENT_HEADING = '# RUNTIME'
+        prompt_builder.RUNTIME_ENVIRONMENT_END = '<!-- END RUNTIME -->'
+        system_prompt = ModuleType('agent.system_prompt')
+        system_prompt._active_profile_line = lambda built: 'PROFILE'
+        runtime = '# RUNTIME\n\nHost hints.\n\n<!-- END RUNTIME -->'
+        tools = SimpleNamespace(valid_tool_names={'memory', 'mute'})
+        no_tools = SimpleNamespace(valid_tool_names=set())
+
+        def engine(*paragraphs):
+            return '\n\n'.join(paragraphs)
+
+        def tool_prompt(first=identity, pointer=('POINTER',), steer=('## STEER\nSteering body.',),
+                        profile=('PROFILE',), tail=(runtime,)):
+            return engine(first, *pointer, 'Guidance.', *steer, 'Kestrel instructions.', 'Memory block.',
+                          *profile, 'Timestamp.', *tail)
+
+        with patch.dict(sys.modules, {'agent.prompt_builder': prompt_builder, 'agent.system_prompt': system_prompt}):
+            from hermes_worker import kestrel_system_prompt
+            self.assertEqual(kestrel_system_prompt(tools, tool_prompt()), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(no_tools, tool_prompt(steer=())), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            refusals = {
+                'default engine identity': (tools, tool_prompt(first='You are Hermes Agent, built by Nous Research.')),
+                'missing pointer': (tools, tool_prompt(pointer=())),
+                'adjacent pointer duplicate': (tools, tool_prompt(pointer=('POINTER', 'POINTER'))),
+                'missing profile line': (tools, tool_prompt(profile=())),
+                'adjacent profile duplicate': (tools, tool_prompt(profile=('PROFILE', 'PROFILE'))),
+                'steering note without tools': (no_tools, tool_prompt()),
+                'missing steering note with tools': (tools, tool_prompt(steer=())),
+                'adjacent steering duplicate': (tools, tool_prompt(
+                    steer=('## STEER\nSteering body.', '## STEER\nSteering body.'))),
+                'missing runtime block': (tools, tool_prompt(tail=())),
+                'second runtime block': (tools, tool_prompt(tail=(runtime, runtime))),
+                'text after runtime block': (tools, tool_prompt(tail=(runtime, 'Trailing.'))),
+            }
+            self.assertIn('\n\nPROFILE\n\nPROFILE\n\n', refusals['adjacent profile duplicate'][1])
+            for case, (built, prompt) in refusals.items():
+                with self.subTest(case=case):
+                    with self.assertRaises(RuntimeError) as refused:
+                        kestrel_system_prompt(built, prompt)
+                    self.assertEqual(str(refused.exception), error)
+
     def test_native_filter_lifecycle(self):
         import hermes_worker
         registry = Mock()
@@ -989,7 +1039,7 @@ def create_exporter(config):
     exporter.path = str(event_file)
     return exporter
 native.AtofExporter = Mock(side_effect=create_exporter)
-agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users',
+agent = Mock(spec=['run_conversation', 'close', '_drop_thinking_only_and_merge_users', '_build_system_prompt',
                    '_fire_stream_delta', '_stream_think_scrubber', '_get_transport',
                    '_stream_context_scrubber', '_stream_writer_superseded', '_repair_tool_call', 'valid_tool_names', 'tools', '_memory_store', '_memory_manager'])
 for name in ('_stream_think_scrubber', '_fire_stream_delta', '_get_transport'):
@@ -2449,13 +2499,14 @@ class NativeHermesTests(unittest.TestCase):
             base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
             api_mode='chat_completions', model='bonsai-2-27b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
-            load_soul_identity=False, session_db=None, fallback_model=None,
+            load_soul_identity=True, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
             quiet_mode=True, max_tokens=180, max_iterations=9,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
             'model': {'context_length': 64000},
+            'agent': {'coding_context': 'off'},
             'memory': {'memory_enabled': True, 'user_profile_enabled': True, 'provider': '',
                        'memory_char_limit': 2200, 'user_char_limit': 1375, 'write_approval': False},
             'sessions': {'write_json_snapshots': False},
@@ -2558,6 +2609,31 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
         self.assertIsNotNone(worker.process.returncode)
         self.assertFalse(worker.home.exists())
+
+    def test_native_prompt_is_kestrel_without_engine_name_or_links(self):
+        from hermes_worker import SYSTEM_PROMPT
+
+        identity = "You are Kestrel, Zain's local voice assistant."
+        with native_worker(['[delivery:neutral] Prepared nonce-124.',
+                            '[delivery:neutral] Kestrel here nonce-125.']) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            prepared = worker.prepare()
+            self.assertEqual(prepared[-1], {'done': True})
+            self.assertFalse(any('error' in event for event in prepared), prepared)
+            self.assertEqual(worker.begin(), {'session_ready': True})
+            events = worker.request([{'role': 'user', 'content': 'Who are you?'}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Kestrel here nonce-125.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            for _, _, body in brain.requests:
+                system = body['messages'][0]
+                self.assertEqual(system['role'], 'system')
+                self.assertTrue(system['content'].startswith(identity + '\n\n'), system['content'][:200])
+                self.assertEqual(system['content'].count(SYSTEM_PROMPT), 1)
+                offered = [system['content'], *(tool['function']['description'] for tool in body.get('tools', []))]
+                for text in offered:
+                    for forbidden in ('hermes', 'nous', 'http'):
+                        self.assertNotIn(forbidden, text.casefold())
+            self.assertEqual((worker.home / 'SOUL.md').read_text(), identity)
 
     def test_user_turn_adapter_retains_native_filters(self):
         require_native_hermes()
