@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -20,6 +21,9 @@ ROOT = Path(__file__).resolve().parent
 MEMORY_ROOT = ROOT / '.runtime/hermes-memory'
 MEMORY_ERROR = ('Local notes are unavailable or unsafe. Check note ownership, permissions, '
                 'encoding and size, then restart Kestrel.')
+BRAIN_KEY = ROOT / '.runtime/brain-api-key'
+BRAIN_KEY_ERROR = ('The brain key .runtime/brain-api-key is missing or unsafe. '
+                   'Create it as README.md describes under Brain key, then restart Kestrel.')
 TRACE_ROOT = Path(__file__).resolve().parent / '.runtime/hermes-traces'
 TRACE_STARTUP_ERROR = ('Local conversation tracing could not start. '
                        'Check runtime permissions and restart Kestrel.')
@@ -379,6 +383,23 @@ def validate_memory_storage() -> Path:
         raise RuntimeError(MEMORY_ERROR) from None
 
 
+def read_brain_key() -> str:
+    try:
+        descriptor = os.open(BRAIN_KEY, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+                raise RuntimeError(BRAIN_KEY_ERROR)
+            raw = os.read(descriptor, 66)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise RuntimeError(BRAIN_KEY_ERROR) from None
+    if not re.fullmatch(rb'[0-9a-f]{64}\n', raw):
+        raise RuntimeError(BRAIN_KEY_ERROR)
+    return raw[:64].decode()
+
+
 def validate_runtime_home(home: Path) -> None:
     try:
         metadata = home.lstat()
@@ -519,6 +540,7 @@ def main(*, base_url=BONSAI_URL):
                 raise RuntimeError(MEMORY_ERROR)
             validate_hermes_source()
             validate_local_configuration()
+            brain_key = read_brain_key()
             try:
                 session = create_trace_directory()
                 event_file = session / 'events.jsonl'
@@ -603,7 +625,7 @@ def main(*, base_url=BONSAI_URL):
                 raise RuntimeError(TRACE_STARTUP_ERROR) from error
             def construct_agent(*, memory):
                 built = AIAgent(
-                    base_url=base_url, api_key='lm-studio', provider='custom', api_mode='chat_completions',
+                    base_url=base_url, api_key=brain_key, provider='custom', api_mode='chat_completions',
                     model='bonsai-2-27b', enabled_toolsets=['memory', 'kestrel_desktop'] if memory else [], disabled_toolsets=['terminal'],
                     skip_memory=True, skip_background_review=True, skip_context_files=True, load_soul_identity=True,
                     session_db=None, fallback_model=None, save_trajectories=False,

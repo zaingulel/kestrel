@@ -26,6 +26,19 @@ from hermes_worker import HERMES_PYTHON
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_PYTHON = HERMES_PYTHON
+BRAIN_KEY_SENTINEL = 'b7e2c4a9' * 8
+
+
+def write_brain_key(path):
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+        output.write(BRAIN_KEY_SENTINEL + '\n')
+
+
+def setUpModule():
+    import hermes_worker
+    key = Path(unittest.enterModuleContext(tempfile.TemporaryDirectory(prefix='hermes-key-'))) / 'brain-api-key'
+    write_brain_key(key)
+    unittest.enterModuleContext(patch.object(hermes_worker, 'BRAIN_KEY', key))
 
 
 class ScriptedBrain:
@@ -111,7 +124,7 @@ class WorkerProcess:
     def command(home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None, non_streaming=False):
         # Test-only containment observes even caught attempts, before permitting only this provider.
         bootstrap = '''
-import json, pathlib, sys
+import json, os, pathlib, sys
 from contextlib import nullcontext
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
@@ -128,6 +141,9 @@ sys.addaudithook(audit)
 import hermes_worker
 hermes_worker.TRACE_ROOT = pathlib.Path(TRACE_FIXTURE)
 hermes_worker.MEMORY_ROOT = pathlib.Path(MEMORY_FIXTURE)
+with open(os.open(home / 'brain-api-key', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+    output.write(BRAIN_KEY_FIXTURE + '\\n')
+hermes_worker.BRAIN_KEY = home / 'brain-api-key'
 original_scaffold = hermes_worker.memory_scaffold_identity
 observing = False
 stream_origin = {}
@@ -174,7 +190,7 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
       if len(sys.argv) > 5 else nullcontext()):
     import hermes_worker
     hermes_worker.main(base_url=sys.argv[4])
-'''.replace('NON_STREAMING_FIXTURE', repr(non_streaming)).replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
+'''.replace('BRAIN_KEY_FIXTURE', repr(BRAIN_KEY_SENTINEL)).replace('NON_STREAMING_FIXTURE', repr(non_streaming)).replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
     'MEMORY_FIXTURE', repr(str(memory_root if memory_root is not None else home / 'notes')))
         command = [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
                    str(brain.server.server_port), brain.url]
@@ -317,6 +333,62 @@ class HermesWorkerTests(unittest.TestCase):
                 os.chdir(cwd)
                 os.umask(mask)
             return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_brain_key_file_refuses_unsafe_or_malformed_content(self):
+        import hermes_worker
+
+        refusal = ('The brain key .runtime/brain-api-key is missing or unsafe. '
+                   'Create it as README.md describes under Brain key, then restart Kestrel.')
+        valid = BRAIN_KEY_SENTINEL.encode()
+        with tempfile.TemporaryDirectory(prefix='hermes-key-') as directory:
+            key = Path(directory) / 'brain-api-key'
+            linked = Path(directory) / 'linked-key'
+            write_brain_key(linked)
+
+            def regular(content, mode=0o600):
+                def create():
+                    key.write_bytes(content)
+                    key.chmod(mode)
+                return create
+
+            cases = {
+                'missing': lambda: None,
+                'empty': regular(b''),
+                'no trailing newline': regular(valid),
+                'uppercase': regular(valid.upper() + b'\n'),
+                '63 characters': regular(valid[:63] + b'\n'),
+                '65 characters': regular(valid + b'a\n'),
+                'second line': regular(valid[:31] + b'\n' + valid[31:63] + b'\n'),
+                'trailing NUL byte': regular(valid + b'\n\0'),
+                'comment line': regular(b'#' + valid[:63] + b'\n'),
+                'symlink to a valid key': lambda: key.symlink_to(linked),
+                'mode 0640': regular(valid + b'\n', 0o640),
+                'mode 0604': regular(valid + b'\n', 0o604),
+                'directory': key.mkdir,
+                'FIFO': lambda: os.mkfifo(key, 0o600),
+            }
+            with patch.object(hermes_worker, 'BRAIN_KEY', key):
+                write_brain_key(key)
+                self.assertEqual(hermes_worker.read_brain_key(), BRAIN_KEY_SENTINEL)
+                for name, create in cases.items():
+                    with self.subTest(name):
+                        if key.is_dir() and not key.is_symlink():
+                            key.rmdir()
+                        else:
+                            key.unlink(missing_ok=True)
+                        create()
+                        with self.assertRaises(RuntimeError) as raised:
+                            hermes_worker.read_brain_key()
+                        self.assertEqual(str(raised.exception), refusal)
+                        self.assertNotIn(BRAIN_KEY_SENTINEL, str(raised.exception))
+
+    def test_worker_refuses_to_start_without_brain_key(self):
+        import hermes_worker
+
+        with tempfile.TemporaryDirectory(prefix='hermes-key-') as directory:
+            with patch.object(hermes_worker, 'BRAIN_KEY', Path(directory) / 'brain-api-key'):
+                events = self.worker_main(Mock(), [], expected_status=1)
+        self.assertEqual(events, [{'error': hermes_worker.BRAIN_KEY_ERROR}])
 
     def test_final_reasoning_refuses_empty_reply(self):
         agent = Mock()
@@ -1005,7 +1077,7 @@ print('private storage matrix passed')
         from hermes_worker import child_environment
 
         bootstrap = '''
-import json, pathlib, sys, threading
+import json, os, pathlib, sys, threading
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 sys.path.insert(0, sys.argv[1])
@@ -1013,6 +1085,9 @@ import hermes_worker
 home = pathlib.Path(sys.argv[2])
 hermes_worker.TRACE_ROOT = home / 'traces'
 hermes_worker.MEMORY_ROOT = home / 'notes'
+with open(os.open(home / 'brain-api-key', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
+    output.write(BRAIN_KEY_FIXTURE + '\\n')
+hermes_worker.BRAIN_KEY = home / 'brain-api-key'
 case = sys.argv[3]
 if case == 'runtime home':
     home.chmod(0o755)
@@ -1105,7 +1180,7 @@ try:
 finally:
     print(json.dumps({'cleanup': calls, 'turns': agent.run_conversation.call_count}), file=sys.stderr)
 raise SystemExit(status)
-'''
+'''.replace('BRAIN_KEY_FIXTURE', repr(BRAIN_KEY_SENTINEL))
         startup_error = ('Local conversation tracing could not start. '
                          'Check runtime permissions and restart Kestrel.')
         trace_error = ('Local conversation tracing failed. Check free space and runtime '
@@ -2309,6 +2384,7 @@ class NativeHermesTests(unittest.TestCase):
                             self.assertTrue(events)
                             self.assertIn(prompt, recorded.decode())
                             self.assertIn(reply, recorded.decode())
+                            self.assertNotIn(BRAIN_KEY_SENTINEL.encode(), recorded)
                             for path, mode in ((trace_root, 0o700), (current.parent, 0o700), (current, 0o600)):
                                 self.assertEqual(stat.S_IMODE(path.lstat().st_mode), mode)
                                 self.assertEqual(path.lstat().st_uid, os.getuid())
@@ -2512,12 +2588,13 @@ class NativeHermesTests(unittest.TestCase):
                       patch('sys.stdin', TextIOWrapper(BytesIO())),
                       patch('sys.stdout', protocol)):
                     self.assertEqual(hermes_worker.main(), 0)
+                    self.assertFalse(BRAIN_KEY_SENTINEL in json.dumps(dict(os.environ)), 'the brain key reached the worker environment')
                 config = json.loads((home / 'config.yaml').read_text())
             finally:
                 os.chdir(original_cwd)
                 os.umask(original_umask)
         run_agent.AIAgent.assert_called_once_with(
-            base_url='http://127.0.0.1:8080/v1', api_key='lm-studio', provider='custom',
+            base_url='http://127.0.0.1:8080/v1', api_key=BRAIN_KEY_SENTINEL, provider='custom',
             api_mode='chat_completions', model='bonsai-2-27b', enabled_toolsets=[],
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=True, session_db=None, fallback_model=None,
@@ -2549,6 +2626,7 @@ class NativeHermesTests(unittest.TestCase):
             home.mkdir(mode=0o700)
             runtime = checkout / '.runtime'
             runtime.mkdir(mode=0o700)
+            write_brain_key(runtime / 'brain-api-key')
             (runtime / 'hermes-0.22.2').symlink_to(ROOT / '.runtime/hermes-0.22.2', target_is_directory=True)
             worker_source = checkout / 'hermes_worker.py'
             shutil.copyfile(ROOT / 'hermes_worker.py', worker_source)
@@ -2584,7 +2662,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertEqual(body.get('reasoning_effort'), 'none')
             self.assertEqual(body.get('temperature'), 0.4)
             self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
-            self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
+            self.assertEqual(brain.requests[0][1]['Authorization'], f'Bearer {BRAIN_KEY_SENTINEL}')
             connections = [json.loads(line) for line in (worker.home / 'connections.jsonl').read_text().splitlines()]
             self.assertTrue(connections)
             self.assertEqual(set(map(tuple, connections)), {('127.0.0.1', brain.server.server_port)})
@@ -2858,7 +2936,7 @@ case.assertEqual(messages, original)
                                      [{'delivery': 'neutral'}, {'text': 'Clean nonce-27.'}, {'done': True}])
                     self.assertEqual(len(brain.requests), 1)
                     self.assertNotIn('normal-home-private-nonce', json.dumps(brain.requests))
-                    self.assertEqual(brain.requests[0][1]['Authorization'], 'Bearer lm-studio')
+                    self.assertEqual(brain.requests[0][1]['Authorization'], f'Bearer {BRAIN_KEY_SENTINEL}')
                     self.assertEqual(os.environ['OPENAI_API_KEY'], 'synthetic-poison-key')
                     import hermes_worker
                     environment = hermes_worker.child_environment(worker.home)
@@ -2880,7 +2958,17 @@ case.assertEqual(messages, original)
             for dump in dumps:
                 self.assertTrue(dump.resolve().is_relative_to(worker.home))
                 self.assertIn('failure-private-nonce', dump.read_text())
+                # Hermes masks the key in its dump to the first eight and last four characters.
+                self.assertIn('Bearer b7e2c4a9...c4a9', dump.read_text())
             self.assertEqual(len(brain.requests), 1)
+            worker.process.stdin.close()
+            worker.process.wait(timeout=5)
+            written = [path for path in worker.home.rglob('*') if path.is_file() and not path.is_symlink()
+                       and path != worker.home / 'brain-api-key']
+            self.assertLessEqual({*dumps, worker.home / 'worker-stderr.txt'}, set(written))
+            self.assertTrue(any(path.name == 'events.jsonl' for path in written))
+            for path in written:
+                self.assertNotIn(BRAIN_KEY_SENTINEL.encode(), path.read_bytes(), str(path))
         self.assertTrue((ROOT / '.runtime/voice-venv/bin/python').exists())
 
 
@@ -2899,10 +2987,13 @@ class BonsaiStartupTests(unittest.TestCase):
             'print(json.dumps({"arguments": sys.argv[1:], "environment": dict(os.environ), "cwd": os.getcwd()}))\n'
         )
         server.chmod(0o755)
+        key = root / '.runtime/brain-api-key'
+        key.write_text(BRAIN_KEY_SENTINEL + '\n')
+        key.chmod(0o600)
         return root, prism, server
 
     def test_brain_launcher_pins_f16_and_scrubs_environment(self):
-        root, prism, _ = self.launcher_fixture()
+        root, _, server = self.launcher_fixture()
         environment = dict(os.environ, HOME=str(root), HTTPS_PROXY='http://poison.invalid:99',
                            LLAMA_ARG_HOST='0.0.0.0', LLAMA_ARG_CTX_SIZE='12',
                            LD_PRELOAD='/nonexistent/poison.so', OPENAI_API_KEY='poison')
@@ -2913,6 +3004,7 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(observed['arguments'], [
             '-m', str(root / '.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf'),
             '--alias', 'bonsai-2-27b', '--host', '127.0.0.1', '--port', '8080',
+            '--api-key-file', str(root / '.runtime/brain-api-key'),
             '--gpu-layers', 'all', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
             '--fit', 'off', '--kv-offload', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
             '--no-context-shift', '--no-webui', '--no-slots', '--no-agent', '--no-ui-mcp-proxy',
@@ -2929,7 +3021,54 @@ class BonsaiStartupTests(unittest.TestCase):
                 str(root / '.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64'),
             )),
         })
-        self.assertEqual(observed['cwd'], str(prism))
+        self.assertEqual(observed['cwd'], str(server.parent))
+
+    def test_brain_launcher_refuses_missing_empty_or_malformed_key(self):
+        root, _, _ = self.launcher_fixture()
+        key = root / '.runtime/brain-api-key'
+        valid = BRAIN_KEY_SENTINEL.encode()
+        linked = root / 'linked-key'
+        linked.write_bytes(valid + b'\n')
+        linked.chmod(0o600)
+
+        def regular(content, mode=0o600):
+            def create():
+                key.write_bytes(content)
+                key.chmod(mode)
+            return create
+
+        def fifo():
+            os.mkfifo(key, 0o600)
+
+        cases = {
+            'missing': lambda: None,
+            'empty': regular(b''),
+            'no trailing newline': regular(valid),
+            'uppercase': regular(valid.upper() + b'\n'),
+            '63 characters': regular(valid[:63] + b'\n'),
+            '65 characters': regular(valid + b'a\n'),
+            'second line': regular(valid[:31] + b'\n' + valid[31:63] + b'\n'),
+            'trailing NUL byte': regular(valid + b'\n\0'),
+            'comment line': regular(b'#' + valid[:63] + b'\n'),
+            'symlink to a valid key': lambda: key.symlink_to(linked),
+            'mode 0640': regular(valid + b'\n', 0o640),
+            'mode 0604': regular(valid + b'\n', 0o604),
+            'directory': key.mkdir,
+            'FIFO': fifo,
+        }
+        for name, create in cases.items():
+            with self.subTest(name):
+                if key.is_dir() and not key.is_symlink():
+                    key.rmdir()
+                else:
+                    key.unlink(missing_ok=True)
+                create()
+                result = subprocess.run(['/usr/bin/bash', str(root / 'run-brain.sh')],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr, 'The brain key .runtime/brain-api-key is missing or unsafe. '
+                                 'Create it as README.md describes under Brain key, then restart Kestrel.\n')
+                self.assertEqual(result.stdout, '')
 
     def test_brain_launcher_propagates_failure(self):
         root, _, server = self.launcher_fixture()
