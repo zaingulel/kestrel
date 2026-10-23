@@ -594,6 +594,12 @@ import hermes_worker
 from tools.memory_tool_store import MemoryStore, ENTRY_DELIMITER
 case = unittest.TestCase()
 os.umask(0o077)
+# Access time is not a protected identity; advancing it makes the comparisons below deterministic, not clock-dependent.
+def advance_atime(path):
+    metadata = os.lstat(path)
+    os.utime(path, ns=(metadata.st_atime_ns + 5_000_000_000, metadata.st_mtime_ns), follow_symlinks=False)
+def identity_of(metadata):
+    return tuple(getattr(metadata, field) for field in ('st_mode', 'st_ino', 'st_dev', 'st_nlink', 'st_uid', 'st_gid', 'st_size', 'st_mtime_ns'))
 root = pathlib.Path(sys.argv[2])
 notes = root / 'notes'
 with patch.object(hermes_worker, 'MEMORY_ROOT', notes):
@@ -659,6 +665,8 @@ for kind in ('invalid utf8', 'byte overflow', 'memory overflow', 'user overflow'
         sentinel_before = sentinel.stat()
         readable = kind not in ('dangling leaf', 'directory leaf', 'fifo leaf', 'unreadable note')
         before_bytes = leaf.read_bytes() if readable else None
+        for item in (leaf, target, parent):
+            advance_atime(item)
         original_open, original_fstat, original_lstat = os.open, os.fstat, pathlib.Path.lstat
         def guarded_open(path, *args, **kwargs):
             if kind == 'read error' and pathlib.Path(path) == leaf:
@@ -682,9 +690,9 @@ for kind in ('invalid utf8', 'byte overflow', 'memory overflow', 'user overflow'
                 hermes_worker.validate_memory_storage()
             case.assertEqual(str(raised.exception), hermes_worker.MEMORY_ERROR, kind)
             case.assertNotIn('nonce-', str(raised.exception))
-        case.assertEqual(leaf.lstat(), before, kind)
-        case.assertEqual(target.lstat(), root_before, kind)
-        case.assertEqual(parent.lstat(), parent_before, kind)
+        case.assertEqual(identity_of(leaf.lstat()), identity_of(before), kind)
+        case.assertEqual(identity_of(target.lstat()), identity_of(root_before), kind)
+        case.assertEqual(identity_of(parent.lstat()), identity_of(parent_before), kind)
         if readable:
             case.assertEqual(leaf.read_bytes(), before_bytes, kind)
         case.assertEqual(sentinel.read_bytes(), b'external nonce-928')
@@ -708,6 +716,7 @@ for kind in ('changed inode', 'symlink', 'nonempty', 'loose mode', 'failed rmdir
         elif kind == 'loose mode':
             scaffold.chmod(0o755)
         before = scaffold.lstat()
+        advance_atime(scaffold)
         original_rmdir = pathlib.Path.rmdir
         def guarded_rmdir(path, *args, **kwargs):
             if kind == 'failed rmdir' and path == scaffold:
@@ -717,7 +726,7 @@ for kind in ('changed inode', 'symlink', 'nonempty', 'loose mode', 'failed rmdir
               patch.object(pathlib.Path, 'rmdir', guarded_rmdir)):
             with case.assertRaisesRegex(RuntimeError, '^' + hermes_worker.MEMORY_ERROR.replace('.', r'\.') + '$'):
                 hermes_worker.attach_memory_storage(home, scaffold_identity=identity)
-        case.assertEqual(scaffold.lstat(), before)
+        case.assertEqual(identity_of(scaffold.lstat()), identity_of(before))
         if kind == 'nonempty':
             case.assertEqual((scaffold / 'sentinel').read_bytes(), b'untouched nonce-829')
 
@@ -727,6 +736,7 @@ with tempfile.TemporaryDirectory(dir=root) as directory:
     scaffold = home / 'memories'
     scaffold.mkdir(mode=0o700)
     before = scaffold.lstat()
+    advance_atime(scaffold)
     output = io.StringIO()
     with (patch.dict(os.environ, HERMES_HOME=str(home)),
           patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
@@ -734,7 +744,7 @@ with tempfile.TemporaryDirectory(dir=root) as directory:
         case.assertEqual(hermes_worker.main(), 1)
     case.assertEqual([json.loads(line) for line in output.getvalue().splitlines()],
                      [{'error': hermes_worker.MEMORY_ERROR}])
-    case.assertEqual(scaffold.lstat(), before)
+    case.assertEqual(identity_of(scaffold.lstat()), identity_of(before))
 print('private storage matrix passed')
 '''
         with tempfile.TemporaryDirectory(prefix='hermes-storage-', dir=ROOT / '.runtime') as directory:
