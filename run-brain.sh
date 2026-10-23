@@ -25,7 +25,7 @@ if ! brain_key_is_safe; then
   exit 1
 fi
 
-cd -- "$PRISM"
+cd -- "$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c"
 exec /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 \
   LD_LIBRARY_PATH="$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c:$CUDA" \
   "$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c/llama-server" \

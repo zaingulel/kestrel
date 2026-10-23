@@ -2993,7 +2993,7 @@ class BonsaiStartupTests(unittest.TestCase):
         return root, prism, server
 
     def test_brain_launcher_pins_f16_and_scrubs_environment(self):
-        root, prism, _ = self.launcher_fixture()
+        root, _, server = self.launcher_fixture()
         environment = dict(os.environ, HOME=str(root), HTTPS_PROXY='http://poison.invalid:99',
                            LLAMA_ARG_HOST='0.0.0.0', LLAMA_ARG_CTX_SIZE='12',
                            LD_PRELOAD='/nonexistent/poison.so', OPENAI_API_KEY='poison')
@@ -3021,7 +3021,7 @@ class BonsaiStartupTests(unittest.TestCase):
                 str(root / '.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64'),
             )),
         })
-        self.assertEqual(observed['cwd'], str(prism))
+        self.assertEqual(observed['cwd'], str(server.parent))
 
     def test_brain_launcher_refuses_missing_empty_or_malformed_key(self):
         root, _, _ = self.launcher_fixture()
