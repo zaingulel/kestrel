@@ -2588,7 +2588,7 @@ class NativeHermesTests(unittest.TestCase):
                       patch('sys.stdin', TextIOWrapper(BytesIO())),
                       patch('sys.stdout', protocol)):
                     self.assertEqual(hermes_worker.main(), 0)
-                    self.assertNotIn(BRAIN_KEY_SENTINEL, json.dumps(dict(os.environ)))
+                    self.assertFalse(BRAIN_KEY_SENTINEL in json.dumps(dict(os.environ)), 'the brain key reached the worker environment')
                 config = json.loads((home / 'config.yaml').read_text())
             finally:
                 os.chdir(original_cwd)
