@@ -371,15 +371,25 @@ class HermesWorkerTests(unittest.TestCase):
         system_prompt = ModuleType('agent.system_prompt')
         system_prompt._active_profile_line = lambda built: 'PROFILE'
         runtime = '# RUNTIME\n\nHost hints.\n\n<!-- END RUNTIME -->'
-        tools = SimpleNamespace(valid_tool_names={'memory', 'mute'})
-        no_tools = SimpleNamespace(valid_tool_names=set())
+        def store(memory='Memory block.', user=None):
+            return SimpleNamespace(format_for_system_prompt=lambda kind: {'memory': memory, 'user': user}[kind])
+
+        def built_with(tool_names, memory_store):
+            return SimpleNamespace(valid_tool_names=tool_names, _memory_enabled=True, _user_profile_enabled=True,
+                                   _memory_store=memory_store)
+
+        tools = built_with({'memory', 'mute'}, store())
+        no_tools = built_with(set(), store())
+        # A saved note is free text: it may quote engine blocks and hold blank lines.
+        note = 'NOTES\nUser quotes POINTER and PROFILE.\n\n## STEER\nSteering body.\n\n# RUNTIME\n\n<!-- END RUNTIME -->'
+        noted = built_with({'memory', 'mute'}, store(user=note))
 
         def engine(*paragraphs):
             return '\n\n'.join(paragraphs)
 
         def tool_prompt(first=identity, pointer=('POINTER',), steer=('## STEER\nSteering body.',),
-                        profile=('PROFILE',), tail=(runtime,)):
-            return engine(first, *pointer, 'Guidance.', *steer, 'Kestrel instructions.', 'Memory block.',
+                        profile=('PROFILE',), tail=(runtime,), memory=('Memory block.',)):
+            return engine(first, *pointer, 'Guidance.', *steer, 'Kestrel instructions.', *memory,
                           *profile, 'Timestamp.', *tail)
 
         with patch.dict(sys.modules, {'agent.prompt_builder': prompt_builder, 'agent.system_prompt': system_prompt}):
@@ -387,6 +397,10 @@ class HermesWorkerTests(unittest.TestCase):
             self.assertEqual(kestrel_system_prompt(tools, tool_prompt()), engine(
                 identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
             self.assertEqual(kestrel_system_prompt(no_tools, tool_prompt(steer=())), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(noted, tool_prompt(memory=('Memory block.', note))), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', note, 'Timestamp.'))
+            self.assertEqual(kestrel_system_prompt(built_with(set(), None), tool_prompt(steer=())), engine(
                 identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
             refusals = {
                 'default engine identity': (tools, tool_prompt(first='You are Hermes Agent, built by Nous Research.')),
@@ -401,6 +415,8 @@ class HermesWorkerTests(unittest.TestCase):
                 'missing runtime block': (tools, tool_prompt(tail=())),
                 'second runtime block': (tools, tool_prompt(tail=(runtime, runtime))),
                 'text after runtime block': (tools, tool_prompt(tail=(runtime, 'Trailing.'))),
+                'memory block missing': (tools, tool_prompt(memory=())),
+                'memory block twice': (tools, tool_prompt(memory=('Memory block.', 'Memory block.'))),
             }
             self.assertIn('\n\nPROFILE\n\nPROFILE\n\n', refusals['adjacent profile duplicate'][1])
             for case, (built, prompt) in refusals.items():

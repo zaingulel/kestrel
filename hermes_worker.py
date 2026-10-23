@@ -11,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 from typing import NamedTuple
+import uuid
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
@@ -430,6 +431,20 @@ def kestrel_system_prompt(built, prompt: str) -> str:
     from agent.prompt_builder import (HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, RUNTIME_ENVIRONMENT_END,
                                       RUNTIME_ENVIRONMENT_HEADING, STEER_CHANNEL_NOTE)
     from agent.system_prompt import _active_profile_line
+    # Notes are free text, so engine blocks are judged only outside the memory snapshot.
+    memory = []
+    if built._memory_store is not None:
+        for enabled, kind in ((built._memory_enabled, 'memory'), (built._user_profile_enabled, 'user')):
+            block = built._memory_store.format_for_system_prompt(kind) if enabled else None
+            if block and block.strip():
+                memory.append(block.strip())
+    held = []
+    for block in memory:
+        placeholder = uuid.uuid4().hex
+        if prompt.count(block) != 1 or f'\n\n{block}\n\n' not in prompt or placeholder in prompt:
+            raise RuntimeError(PROMPT_IDENTITY_ERROR)
+        prompt = prompt.replace(block, placeholder)
+        held.append((placeholder, block))
     head = f'{KESTREL_IDENTITY}\n\n{HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS}\n\n'
     runtime = prompt.find(f'\n\n{RUNTIME_ENVIRONMENT_HEADING}\n\n')
     if (not prompt.startswith(head) or runtime == -1 or not prompt.endswith(RUNTIME_ENVIRONMENT_END)
@@ -443,6 +458,8 @@ def kestrel_system_prompt(built, prompt: str) -> str:
         if prompt.count(text) != expected or expected and paragraph not in kept:
             raise RuntimeError(PROMPT_IDENTITY_ERROR)
         kept = kept.replace(paragraph, '\n\n', expected)
+    for placeholder, block in held:
+        kept = kept.replace(placeholder, block)
     return kept.removesuffix('\n\n')
 
 
