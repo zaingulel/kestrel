@@ -402,6 +402,11 @@ class HermesWorkerTests(unittest.TestCase):
                 identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', note, 'Timestamp.'))
             self.assertEqual(kestrel_system_prompt(built_with(set(), None), tool_prompt(steer=())), engine(
                 identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'Timestamp.'))
+            quoting = built_with({'memory', 'mute'}, store(user='USER\nQuoted: Memory block.'))
+            self.assertEqual(kestrel_system_prompt(quoting, tool_prompt(
+                memory=('Memory block.', 'USER\nQuoted: Memory block.'))), engine(
+                identity, 'Guidance.', 'Kestrel instructions.', 'Memory block.', 'USER\nQuoted: Memory block.',
+                'Timestamp.'))
             refusals = {
                 'default engine identity': (tools, tool_prompt(first='You are Hermes Agent, built by Nous Research.')),
                 'missing pointer': (tools, tool_prompt(pointer=())),

@@ -439,7 +439,7 @@ def kestrel_system_prompt(built, prompt: str) -> str:
             if block and block.strip():
                 memory.append(block.strip())
     held = []
-    for block in memory:
+    for block in sorted(memory, key=len, reverse=True):
         placeholder = uuid.uuid4().hex
         if prompt.count(block) != 1 or f'\n\n{block}\n\n' not in prompt or placeholder in prompt:
             raise RuntimeError(PROMPT_IDENTITY_ERROR)
