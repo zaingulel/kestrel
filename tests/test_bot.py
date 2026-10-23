@@ -162,6 +162,8 @@ MEASURED_FIRST_HI_SCORES = (
     (0.035856425762176514, 0.11044817624999621),
     (0.0331246554851532, 0.08835854099999697),
 )
+# Production worker-startup budget, read at import so tests that patch bot.ENGINE_TIMEOUT cannot shrink it.
+ENGINE_STARTUP = bot.ENGINE_TIMEOUT
 
 
 def hermes_service(*, local_command=None):
@@ -4139,10 +4141,24 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             bindings.append(binding)
             self.addCleanup(binding.stop)
 
+        native_open = supplied_channel._open
+        engine_opened = asyncio.Event()
+
+        async def open_engine():
+            try:
+                await native_open()
+            finally:
+                engine_opened.set()
+
+        binding = patch.object(supplied_channel, '_open', side_effect=open_engine)
+        binding.start()
+        bindings.append(binding)
+        self.addCleanup(binding.stop)
         native_prepare = supplied_channel.prepare
 
         async def prepare():
             if supplied_channel.process is not None:
+                engine_opened.set()
                 return
             if prepare_engine or through_service:
                 await native_prepare()
@@ -4260,6 +4276,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(binding.stop)
         service_task = asyncio.create_task(bot.run_voice_service())
         await asyncio.wait_for(prepared.wait(), 5)
+        # Worker startup is CPU-bound and gets the production budget; later waits keep five seconds so a hang fails.
+        await asyncio.wait_for(engine_opened.wait(), ENGINE_STARTUP)
         await state('inactive')
         if activate:
             self.assertEqual(await toggle(), 'starting')
