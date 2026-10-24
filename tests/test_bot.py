@@ -37,6 +37,7 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserT
 import bot
 import hermes_worker
 import speech
+import tool_actions
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
 
 
@@ -202,7 +203,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                     'selected', 'physical', self.volume(32768), 'Mute: yes', '',
                     self.volume(target), '', 'selected', 'physical', self.volume(target), 'Mute: no',
                 ])
-                result = await bot.volume_output(percent, command=command)
+                result = await tool_actions.volume_output(percent, command=command)
                 self.assertTrue(result.confirmed)
                 self.assertTrue(result.attempted)
                 self.assertEqual(command.await_args_list, [
@@ -228,7 +229,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                     'selected', 'physical', self.volume(32768), 'Mute: no', '', self.volume(19660),
                     default, sink, after_volume, 'Mute: no',
                 ])
-                result = await bot.volume_output(30, command=command)
+                result = await tool_actions.volume_output(30, command=command)
                 self.assertFalse(result.confirmed)
                 self.assertTrue(result.attempted)
                 self.assertEqual(command.await_count, 10)
@@ -239,8 +240,8 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 command = AsyncMock(side_effect=[
                     'selected', 'physical', self.volume(32768), 'Mute: yes', '', readback,
                 ])
-                result = await bot.volume_output(30, command=command)
-                self.assertEqual(result, bot.AudioResult(False, True, 'readback unconfirmed'))
+                result = await tool_actions.volume_output(30, command=command)
+                self.assertEqual(result, tool_actions.AudioResult(False, True, 'readback unconfirmed'))
                 self.assertEqual(command.await_count, 6)
                 self.assertFalse(any(c.args[0][1] == 'set-sink-mute' for c in command.await_args_list))
 
@@ -260,7 +261,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                     writes.append(('/usr/bin/pactl', 'set-sink-mute', 'physical', '0'))
                 outputs += ['selected', 'physical', self.volume(target), 'Mute: no']
                 command = AsyncMock(side_effect=outputs)
-                result = await bot.volume_output(percent, command=command)
+                result = await tool_actions.volume_output(percent, command=command)
                 self.assertTrue(result.confirmed)
                 self.assertEqual(result.attempted, bool(writes))
                 self.assertEqual([c.args[0] for c in command.await_args_list if c.args[0][1].startswith('set-')], writes)
@@ -300,7 +301,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 outputs = base.copy()
                 outputs[stage] = value
                 command = AsyncMock(side_effect=outputs)
-                result = await bot.volume_output(30, command=command)
+                result = await tool_actions.volume_output(30, command=command)
                 self.assertFalse(result.confirmed)
                 self.assertEqual(result.attempted, stage >= 4)
                 self.assertEqual(result.reason, reason)
@@ -313,8 +314,8 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
         for default, sink in (('changed', 'physical'), ('selected', 'changed')):
             outputs = base.copy()
             outputs[7:9] = [default, sink]
-            result = await bot.volume_output(30, command=AsyncMock(side_effect=outputs))
-            self.assertEqual(result, bot.AudioResult(False, True, 'target changed'))
+            result = await tool_actions.volume_output(30, command=AsyncMock(side_effect=outputs))
+            self.assertEqual(result, tool_actions.AudioResult(False, True, 'target changed'))
 
     async def test_completed_user_turn_and_consumption(self):
         cases = [
@@ -397,16 +398,16 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                         return 'Mute: yes'
                     return ''
 
-                with patch.object(bot, 'VOLUME_TIMEOUT', 0.01):
-                    result = await asyncio.wait_for(bot.volume_output(30, command=hung), 5)
+                with patch.object(tool_actions, 'VOLUME_TIMEOUT', 0.01):
+                    result = await asyncio.wait_for(tool_actions.volume_output(30, command=hung), 5)
                 self.assertTrue(started.is_set())
                 self.assertTrue(cleaned.is_set())
-                self.assertEqual(result, bot.AudioResult(False, True, 'volume timeout'))
+                self.assertEqual(result, tool_actions.AudioResult(False, True, 'volume timeout'))
                 self.assertEqual(len(calls), 5 if effect == 'set-sink-volume' else 7)
                 calls.clear()
                 started.clear()
                 cleaned.clear()
-                task = asyncio.create_task(bot.volume_output(30, command=hung))
+                task = asyncio.create_task(tool_actions.volume_output(30, command=hung))
                 try:
                     await asyncio.wait_for(started.wait(), 5)
                     task.cancel()
@@ -538,7 +539,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                           patch.object(io, 'open', side_effect=AssertionError('Screenshot content must not be opened')),
                           patch.object(os, 'open', side_effect=AssertionError('Screenshot content must not be opened'))):
                         result = await tool.run(command=command)
-                    self.assertEqual(result, bot.DesktopResult(confirmed, True,
+                    self.assertEqual(result, tool_actions.DesktopResult(confirmed, True,
                                      'confirmed' if confirmed else 'screenshot unconfirmed',
                                      None if confirmed else advisory))
                     command.assert_awaited_once_with(argv)
@@ -547,12 +548,12 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                                            (TimeoutError(), 'screenshot unconfirmed')):
                 command = AsyncMock(side_effect=error)
                 result = await tool.run(command=command)
-                self.assertEqual(result, bot.DesktopResult(False, True, expected_reason, advisory))
+                self.assertEqual(result, tool_actions.DesktopResult(False, True, expected_reason, advisory))
                 command.assert_awaited_once_with(argv)
             command = AsyncMock(return_value=str(path))
             with patch.object(os, 'lstat', side_effect=PermissionError('PRIVATE path')):
                 result = await tool.run(command=command)
-            self.assertEqual(result, bot.DesktopResult(False, True, 'screenshot unconfirmed', advisory))
+            self.assertEqual(result, tool_actions.DesktopResult(False, True, 'screenshot unconfirmed', advisory))
             command = AsyncMock(side_effect=asyncio.CancelledError())
             with self.assertRaises(asyncio.CancelledError):
                 await tool.run(command=command)
@@ -698,7 +699,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 command.assert_not_awaited()
                 self.assertEqual(context.get_messages(), messages)
         with self.assertRaises(ValueError):
-            await bot.media_action('playPause', command=AsyncMock())
+            await tool_actions.media_action('playPause', command=AsyncMock())
         started, cleaned = asyncio.Event(), asyncio.Event()
         async def hanging(argv):
             started.set()
@@ -706,13 +707,13 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Future()
             finally:
                 cleaned.set()
-        with patch.object(bot, 'DESKTOP_TIMEOUT', .01):
-            result = await bot.media_action('pause', command=hanging)
+        with patch.object(tool_actions, 'DESKTOP_TIMEOUT', .01):
+            result = await tool_actions.media_action('pause', command=hanging)
         self.assertTrue(started.is_set())
         self.assertTrue(cleaned.is_set())
         self.assertFalse(result.confirmed)
         self.assertFalse(result.attempted)
-        task = asyncio.create_task(bot.media_action('pause', command=hanging))
+        task = asyncio.create_task(tool_actions.media_action('pause', command=hanging))
         started.clear()
         await asyncio.wait_for(started.wait(), 5)
         task.cancel()
@@ -931,14 +932,14 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         command = AsyncMock()
         for value in (True, False, 0, -1, 2147483648, '3', 3.0, None):
             with self.assertRaises(ValueError):
-                await bot.workspace_action(value, command=command)
+                await tool_actions.workspace_action(value, command=command)
         command.assert_not_awaited()
         dispatch = ('/usr/bin/hyprctl', 'dispatch', 'hl.dsp.focus({ workspace = "3" })')
         advisory = "I couldn't confirm workspace 3. Check the desktop. I won't retry."
         for lag in range(3):
             command = AsyncMock(side_effect=['{"id":1}', 'ok', *['{"id":1}'] * lag, '{"id":3}'])
             with patch.object(bot.asyncio, 'sleep', AsyncMock()) as delay:
-                result = await bot.workspace_action(3, command=command)
+                result = await tool_actions.workspace_action(3, command=command)
             self.assertTrue(result.confirmed)
             self.assertTrue(result.attempted)
             self.assertIsNone(result.message)
@@ -951,21 +952,21 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             for output in invalid + [RuntimeError('PRIVATE command output')]:
                 with self.subTest(stage=stage, output=str(output)[:80]):
                     command = AsyncMock(side_effect=([output] if stage == 0 else ['{"id":1}', 'ok', output]))
-                    result = await bot.workspace_action(3, command=command)
+                    result = await tool_actions.workspace_action(3, command=command)
                     self.assertFalse(result.confirmed)
                     self.assertEqual(result.attempted, stage == 2)
                     self.assertEqual(result.message, advisory)
                     self.assertEqual(command.await_args_list, [call(status), call(dispatch), call(status)][:stage + 1])
         for reply in ('unhandled', 'ok\n\n', 'ok\r\n', ' ok', 'PRIVATE', RuntimeError('PRIVATE')):
             command = AsyncMock(side_effect=['{"id":1}', reply])
-            result = await bot.workspace_action(3, command=command)
+            result = await tool_actions.workspace_action(3, command=command)
             self.assertFalse(result.confirmed)
             self.assertTrue(result.attempted)
             self.assertEqual(result.message, advisory)
             self.assertEqual(command.await_args_list, [call(status), call(dispatch)])
         command = AsyncMock(side_effect=['{"id":1}', 'ok', '{"id":1}', '{"id":2}', '{"id":1}'])
         with patch.object(bot.asyncio, 'sleep', AsyncMock()):
-            result = await bot.workspace_action(3, command=command)
+            result = await tool_actions.workspace_action(3, command=command)
         self.assertFalse(result.confirmed)
         self.assertTrue(result.attempted)
         self.assertEqual(result.message, advisory)
@@ -981,8 +982,8 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.Future()
                 finally:
                     cleaned.set()
-            with patch.object(bot, 'DESKTOP_TIMEOUT', .01):
-                result = await bot.workspace_action(3, command=hanging)
+            with patch.object(tool_actions, 'DESKTOP_TIMEOUT', .01):
+                result = await tool_actions.workspace_action(3, command=hanging)
             self.assertTrue(cleaned.is_set())
             self.assertFalse(result.confirmed)
             self.assertEqual(result.attempted, hang_at == 2)
@@ -1015,9 +1016,9 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                              'OMARCHY_SCREENSHOT_DIR': '/shots/$(literal)',
                              'XDG_PICTURES_DIR': '/pictures/white space'}
             with (patch.dict(os.environ, poisoned, clear=True),
-                  patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
+                  patch.object(tool_actions.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
                   patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
-                self.assertEqual(await bot.run_local_command(argv), 'ok\n')
+                self.assertEqual(await tool_actions.run_local_command(argv), 'ok\n')
                 spawn.assert_awaited_once_with(
                     *argv, env=expected, stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -1034,14 +1035,14 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                     with (patch.dict(os.environ, env, clear=True),
                           patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn):
                         with self.assertRaisesRegex(RuntimeError, '^desktop session unavailable$'):
-                            await bot.run_local_command(argv)
+                            await tool_actions.run_local_command(argv)
                         spawn.assert_not_awaited()
         process = Mock(pid=9876, returncode=0)
         process.stdout.read = AsyncMock(side_effect=[b'ok', b''])
         process.wait = AsyncMock(return_value=0)
         with (patch.dict(os.environ, poisoned, clear=True),
               patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
-            await bot.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
+            await tool_actions.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
             self.assertEqual(spawn.await_args.kwargs['env'], baseline)
 
         screenshot = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
@@ -1050,16 +1051,16 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 with (patch.dict(os.environ, poisoned | {key: value}, clear=True),
                       patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock()) as spawn):
                     with self.assertRaisesRegex(RuntimeError, '^screenshot destination unavailable$'):
-                        await bot.run_local_command(screenshot)
+                        await tool_actions.run_local_command(screenshot)
                     spawn.assert_not_awaited()
         for destinations in ({}, {'OMARCHY_SCREENSHOT_DIR': '/' + 'é' * 4095}):
             process = Mock(pid=9876, returncode=0)
             process.stdout.read = AsyncMock(side_effect=[b'ok', b''])
             process.wait = AsyncMock(return_value=0)
             with (patch.dict(os.environ, selectors | destinations, clear=True),
-                  patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
+                  patch.object(tool_actions.pwd, 'getpwuid', return_value=Mock(pw_dir='/canonical/home')),
                   patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
-                await bot.run_local_command(screenshot)
+                await tool_actions.run_local_command(screenshot)
                 self.assertEqual(spawn.await_args.kwargs['env'], baseline | selectors | destinations |
                                  {'HOME': '/canonical/home', 'OMARCHY_PATH': '/usr/share/omarchy'})
         for argv in (('/tmp/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'),
@@ -1070,7 +1071,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             process.wait = AsyncMock(return_value=0)
             with (patch.dict(os.environ, poisoned, clear=True),
                   patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn):
-                await bot.run_local_command(argv)
+                await tool_actions.run_local_command(argv)
                 self.assertEqual(spawn.await_args.kwargs['env'], baseline)
 
         cases = []
@@ -1105,7 +1106,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                       patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
                       patch.object(bot.os, 'killpg') as killpg):
                     if accepted:
-                        output = await bot.run_local_command(argv)
+                        output = await tool_actions.run_local_command(argv)
                         self.assertEqual(len(output), size)
                         self.assertEqual(output, 'A' * size)
                         process.stdout._transport.close.assert_not_called()
@@ -1113,7 +1114,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                         process.wait.assert_awaited_once_with()
                     else:
                         with self.assertRaisesRegex(RuntimeError, '^output too large$'):
-                            await bot.run_local_command(argv)
+                            await tool_actions.run_local_command(argv)
                         process.stdout._transport.close.assert_called_once_with()
                         self.assertEqual(killpg.call_args_list,
                                          [call(9876, signal.SIGTERM), call(9876, signal.SIGKILL)])
@@ -1136,7 +1137,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             'HOME=/fixture/home ; $$literal', 'XDG_DATA_HOME=/fixture/caller data',
             'XDG_DATA_DIRS=/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP=Hyprland:Fixture_1',
         )
-        with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {
+        with patch.object(tool_actions.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {
             'HOME': '/wrong/caller/home', 'XDG_DATA_HOME': '/fixture/caller data',
             'XDG_DATA_DIRS': '/fixture/a;/literal:/fixture/b', 'XDG_CURRENT_DESKTOP': 'Hyprland:Fixture_1',
         }, clear=True):
@@ -1181,7 +1182,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(selected_name, 'FixtureApp')
             bad_ids = ('../fixture.desktop', '-fixture.desktop', '.fixture.desktop', 'fixture', 'a:b.desktop',
                        'a\\b.desktop', 'a\n.desktop', 'é' * 510 + '.desktop')
-            bad_names = (None, 3, '', '  ', 'Fixture\nApp', 'x' * (bot.APP_NAME_BYTES + 1))
+            bad_names = (None, 3, '', '  ', 'Fixture\nApp', 'x' * (tool_actions.APP_NAME_BYTES + 1))
             for output in ('', '{', 'null null', 'false', '42', '[]', '{}', '""', '"fixture.desktop"',
                            *(json.dumps({'id': bad_id, 'name': 'FixtureApp'}) for bad_id in bad_ids),
                            json.dumps({'id': 'fixture.desktop'}),
@@ -1198,14 +1199,14 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(command.await_count, 1)
             for error in (RuntimeError('launch failed'), FileNotFoundError('missing'), TimeoutError()):
                 command = AsyncMock(side_effect=error)
-                result = await bot.open_app(desktop_id, expected_env, command=command)
+                result = await tool_actions.open_app(desktop_id, expected_env, command=command)
                 self.assertFalse(result.accepted)
                 self.assertTrue(result.attempted)
                 self.assertEqual(result.message, "I couldn't confirm the app opened. Check the desktop. I won't retry.")
                 self.assertEqual(command.await_count, 1)
         defaults = (f'HOME={home}', f'XDG_DATA_HOME={home}/.local/share',
                     'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=')
-        with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
+        with patch.object(tool_actions.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
             command = AsyncMock(return_value='{"id": "fixture.desktop", "name": "FixtureApp"}')
             tool = await bot.resolve_app_tool(selected_name, command=command)
             with patch.dict(os.environ, {'XDG_DATA_HOME': '/changed', 'XDG_DATA_DIRS': '/changed'}):
@@ -1217,7 +1218,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             ))
             for key in ('XDG_DATA_HOME', 'XDG_DATA_DIRS'):
                 with patch.dict(os.environ, {key: ''}):
-                    self.assertEqual(bot.app_discovery_environment(), defaults)
+                    self.assertEqual(tool_actions.app_discovery_environment(), defaults)
             for key, value in (('XDG_DATA_HOME', 'relative'), ('XDG_DATA_HOME', '/a\n'),
                                ('XDG_DATA_DIRS', ':/a'), ('XDG_DATA_DIRS', '/a:'),
                                ('XDG_DATA_DIRS', '/a:relative'), ('XDG_DATA_HOME', '/' + 'a' * 4096),
@@ -1242,7 +1243,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
         real_resolve, real_shield = bot.resolve_app_tool, asyncio.shield
         requests = []
 
-        async def resolve_at_checkpoint(text, *, command=bot.run_local_command):
+        async def resolve_at_checkpoint(text, *, command=tool_actions.run_local_command):
             if text == ordinary:
                 checkpoint.set()
                 await unreleased.wait()
@@ -1652,7 +1653,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     self.assertGreater(events.index(speech_frames[0]),
                                        max(i for i, event in enumerate(events) if isinstance(event, tuple)))
                     self.assertEqual([(item.subject, item.result) for item in service.outcomes],
-                                     [('unmute', bot.AudioResult(True, True, 'confirmed'))])
+                                     [('unmute', tool_actions.AudioResult(True, True, 'confirmed'))])
                     service.accept_request(object())
                     events.clear()
                     stop = bot.LLMContext([{'role': 'user', 'content': 'stop'}])
@@ -1673,7 +1674,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             'processing.sink\n', 'alsa_output.test\n', 'Mute: no\n', '',
             'processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n',
         ])
-        result = await bot.set_output_mute(True, command=command)
+        result = await tool_actions.set_output_mute(True, command=command)
         self.assertTrue(result.confirmed)
         self.assertTrue(result.attempted)
         self.assertEqual(command.await_args_list, [
@@ -1694,21 +1695,21 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         before = ['processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n', '']
         for label, outputs, expected, calls in (
             ('success', before + ['processing.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
-             bot.AudioResult(True, True, 'confirmed'), [*reads, status, write, *reads, status]),
+             tool_actions.AudioResult(True, True, 'confirmed'), [*reads, status, write, *reads, status]),
             ('already unmuted', ['processing.sink\n', 'alsa_output.test\n', 'Mute: no\n',
                                 'processing.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
-             bot.AudioResult(True, False, 'already unmuted'), [*reads, status, *reads, status]),
+             tool_actions.AudioResult(True, False, 'already unmuted'), [*reads, status, *reads, status]),
             ('readback still muted', before + ['processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n'],
-             bot.AudioResult(False, True, 'readback unconfirmed'), [*reads, status, write, *reads, status]),
+             tool_actions.AudioResult(False, True, 'readback unconfirmed'), [*reads, status, write, *reads, status]),
             ('changed default', before + ['other.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
-             bot.AudioResult(False, True, 'target changed'),
+             tool_actions.AudioResult(False, True, 'target changed'),
              [*reads, status, write, reads[0], ('/usr/bin/omarchy-audio-output-sink', 'other.sink'), status]),
             ('corrupt status', ['processing.sink\n', 'alsa_output.test\n', 'Mute: YES'],
-             bot.AudioResult(False, False, 'invalid status'), [*reads, status]),
+             tool_actions.AudioResult(False, False, 'invalid status'), [*reads, status]),
         ):
             with self.subTest(label):
                 command = AsyncMock(side_effect=outputs)
-                result = await bot.set_output_mute(False, command=command)
+                result = await tool_actions.set_output_mute(False, command=command)
                 self.assertEqual(result, expected)
                 self.assertEqual(command.await_args_list, [call(argv) for argv in calls])
                 writes = [c for c in command.await_args_list if c.args[0][1] == 'set-sink-mute']
@@ -1725,9 +1726,9 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 return 'Mute: yes'
             await asyncio.Future()
 
-        with patch.object(bot, 'MUTE_TIMEOUT', 0.01, create=True):
-            result = await asyncio.wait_for(bot.set_output_mute(False, command=hung), 5)
-        self.assertEqual(result, bot.AudioResult(False, True, 'unmute timeout'))
+        with patch.object(tool_actions, 'MUTE_TIMEOUT', 0.01):
+            result = await asyncio.wait_for(tool_actions.set_output_mute(False, command=hung), 5)
+        self.assertEqual(result, tool_actions.AudioResult(False, True, 'unmute timeout'))
         self.assertEqual(commands[-1], write)
 
     async def test_already_muted_is_a_verified_noop(self):
@@ -1742,8 +1743,8 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     'selected\n', 'physical\n', 'Mute: yes\n',
                     after_default, after_sink, after_status,
                 ])
-                result = await bot.set_output_mute(True, command=command)
-                self.assertEqual(result, bot.AudioResult(confirmed, False, reason))
+                result = await tool_actions.set_output_mute(True, command=command)
+                self.assertEqual(result, tool_actions.AudioResult(confirmed, False, reason))
                 self.assertEqual(command.await_args_list, [
                     call(('/usr/bin/pactl', 'get-default-sink')),
                     call(('/usr/bin/omarchy-audio-output-sink', 'selected')),
@@ -1776,7 +1777,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         for outputs, attempted, count, reason in cases:
             with self.subTest(outputs=outputs):
                 command = AsyncMock(side_effect=outputs)
-                result = await bot.set_output_mute(True, command=command)
+                result = await tool_actions.set_output_mute(True, command=command)
                 self.assertFalse(result.confirmed)
                 self.assertEqual(result.attempted, attempted)
                 self.assertEqual(result.reason, reason)
@@ -1803,16 +1804,16 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 stopped.set()
 
-        with patch.object(bot, 'MUTE_TIMEOUT', 0.01, create=True):
-            result = await asyncio.wait_for(bot.set_output_mute(True, command=hung), 5)
+        with patch.object(tool_actions, 'MUTE_TIMEOUT', 0.01):
+            result = await asyncio.wait_for(tool_actions.set_output_mute(True, command=hung), 5)
         self.assertTrue(started.is_set())
         self.assertTrue(stopped.is_set())
-        self.assertEqual(result, bot.AudioResult(False, True, 'mute timeout'))
+        self.assertEqual(result, tool_actions.AudioResult(False, True, 'mute timeout'))
         self.assertEqual(len(commands), 4)
         commands.clear()
         started.clear()
         stopped.clear()
-        task = asyncio.create_task(bot.set_output_mute(True, command=hung))
+        task = asyncio.create_task(tool_actions.set_output_mute(True, command=hung))
         await asyncio.wait_for(started.wait(), 5)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -1843,10 +1844,10 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                       patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
                       patch.object(bot.os, 'killpg') as killpg):
                     if message is None:
-                        self.assertEqual(await bot.run_local_command(('/test/command', 'literal;arg')), 'local\n')
+                        self.assertEqual(await tool_actions.run_local_command(('/test/command', 'literal;arg')), 'local\n')
                     else:
                         with self.assertRaisesRegex(RuntimeError, '^' + message + '$'):
-                            await bot.run_local_command(('/test/command', 'literal;arg'))
+                            await tool_actions.run_local_command(('/test/command', 'literal;arg'))
                     spawn.assert_awaited_once_with(
                         '/test/command', 'literal;arg', env=env,
                         stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
@@ -1859,7 +1860,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                         killpg.assert_not_called()
         with patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(side_effect=FileNotFoundError())):
             with self.assertRaisesRegex(RuntimeError, '^command unavailable$'):
-                await bot.run_local_command(('/missing/command',))
+                await tool_actions.run_local_command(('/missing/command',))
 
         process = Mock(pid=9876, returncode=0)
         process.stdout.read = AsyncMock(side_effect=[b'local\n', b''])
@@ -1867,7 +1868,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         process.stdin.drain = AsyncMock()
         process.stdin.wait_closed = AsyncMock()
         with patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn:
-            self.assertEqual(await bot.run_local_command(('/test/command',), stdin_data=b'private\x00input'), 'local\n')
+            self.assertEqual(await tool_actions.run_local_command(('/test/command',), stdin_data=b'private\x00input'), 'local\n')
             self.assertEqual(spawn.await_args.kwargs['stdin'], asyncio.subprocess.PIPE)
             process.stdin.write.assert_called_once_with(b'private\x00input')
             process.stdin.drain.assert_awaited_once_with()
@@ -1904,9 +1905,9 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 process.wait = AsyncMock(side_effect=wait)
                 with (patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)) as spawn,
                       patch.object(bot.os, 'killpg', side_effect=signal_group) as killpg,
-                      patch.object(bot, 'LOCAL_COMMAND_TIMEOUT', 0.01, create=True),
-                      patch.object(bot, 'LOCAL_COMMAND_CLEANUP_TIMEOUT', 0.01, create=True)):
-                    task = asyncio.create_task(bot.run_local_command(('/test/hung',), stdin_data=b'private input'))
+                      patch.object(tool_actions, 'LOCAL_COMMAND_TIMEOUT', 0.01),
+                      patch.object(tool_actions, 'LOCAL_COMMAND_CLEANUP_TIMEOUT', 0.01)):
+                    task = asyncio.create_task(tool_actions.run_local_command(('/test/hung',), stdin_data=b'private input'))
                     await asyncio.wait_for(started.wait(), 5)
                     if cancel:
                         task.cancel()
@@ -1937,7 +1938,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
               patch.object(bot.os, 'killpg', side_effect=signal_descendant) as killpg):
             with self.assertRaisesRegex(RuntimeError, '^output too large$'):
-                await bot.run_local_command(('/test/descendant',))
+                await tool_actions.run_local_command(('/test/descendant',))
             self.assertFalse(descendant_alive)
             self.assertEqual(killpg.call_args_list, [call(9876, signal.SIGTERM), call(9876, signal.SIGKILL)])
             self.assertTrue(process.wait.await_count)
@@ -1958,7 +1959,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         process.wait = AsyncMock(side_effect=wait_during_cleanup)
         with (patch.object(bot.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process)),
               patch.object(bot.os, 'killpg') as killpg):
-            task = asyncio.create_task(bot.run_local_command(('/test/cleanup',)))
+            task = asyncio.create_task(tool_actions.run_local_command(('/test/cleanup',)))
             await asyncio.wait_for(cleanup_started.wait(), 5)
             task.cancel()
             release_cleanup.set()
@@ -1968,7 +1969,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(killpg.call_args_list, [call(9876, signal.SIGTERM), call(9876, signal.SIGKILL)])
 
     async def test_local_command_wire_success_and_failure(self):
-        self.assertEqual(await bot.run_local_command((
+        self.assertEqual(await tool_actions.run_local_command((
             sys.executable, '-c', "import sys; assert sys.stdin.buffer.read() == b'wire input'; print('local wire', flush=True)",
         ), stdin_data=b'wire input'), 'local wire\n')
         real_spawn = asyncio.create_subprocess_exec
@@ -1988,10 +1989,10 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             leader = ("import subprocess, sys; "
                       f"subprocess.Popen([sys.executable, '-c', {child!r}])")
             with (patch.object(bot.asyncio, 'create_subprocess_exec', spawn),
-                  patch.object(bot, 'LOCAL_COMMAND_TIMEOUT', 0.5)):
+                  patch.object(tool_actions, 'LOCAL_COMMAND_TIMEOUT', 0.5)):
                 try:
                     with self.assertRaisesRegex(RuntimeError, '^command timeout$'):
-                        await bot.run_local_command((sys.executable, '-c', leader))
+                        await tool_actions.run_local_command((sys.executable, '-c', leader))
                     self.assertEqual(len(processes), 1)
                     self.assertEqual(processes[0].returncode, 0)
                     try:
@@ -2019,7 +2020,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_command_child_locale_is_utf8_when_parent_is_not(self):
         # Qt desktop commands print a warning before their JSON unless the locale is UTF-8.
         with patch.dict(os.environ, {'LC_ALL': 'C', 'LC_CTYPE': 'C', 'LANG': 'C'}):
-            self.assertEqual(await bot.run_local_command(('/usr/bin/locale', 'charmap')), 'UTF-8\n')
+            self.assertEqual(await tool_actions.run_local_command(('/usr/bin/locale', 'charmap')), 'UTF-8\n')
 
     async def test_notification_is_fixed_local_and_reports_unavailability(self):
         for subject in ('mute', 'volume'):
@@ -2028,19 +2029,19 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     'Check the audio control. Kestrel will not retry.')
             command = AsyncMock(return_value='')
             with patch.object(bot.logger, 'error') as error:
-                self.assertTrue(await bot.notify_audio_failure(subject, command=command))
+                self.assertTrue(await tool_actions.notify_audio_failure(subject, command=command))
                 command.assert_awaited_once_with(argv)
                 error.assert_not_called()
             for failure in (RuntimeError('private missing executable'), RuntimeError('private external output')):
                 command = AsyncMock(side_effect=failure)
                 with patch.object(bot.logger, 'error') as error:
-                    self.assertFalse(await bot.notify_audio_failure(subject, command=command))
+                    self.assertFalse(await tool_actions.notify_audio_failure(subject, command=command))
                     command.assert_awaited_once_with(argv)
                     error.assert_called_once_with(f'{subject.title()} failure notification unavailable')
             command = AsyncMock(side_effect=asyncio.CancelledError)
             with patch.object(bot.logger, 'error') as error:
                 with self.assertRaises(asyncio.CancelledError):
-                    await bot.notify_audio_failure(subject, command=command)
+                    await tool_actions.notify_audio_failure(subject, command=command)
                 command.assert_awaited_once_with(argv)
                 error.assert_not_called()
 
@@ -4330,7 +4331,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         screenshot_failure = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
         lookup_failure = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
         no_match = "I couldn't find exactly one installed app with that name, so I didn't open anything."
-        discovery = bot.app_discovery_environment()
+        discovery = tool_actions.app_discovery_environment()
         lookup = ('/usr/bin/env', *discovery, '/usr/bin/python', '-I', str(ROOT / 'app_resolver.py'))
         launch = ('/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env', *discovery,
                   '/usr/bin/gtk-launch', 'fixture.desktop')
@@ -9399,7 +9400,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     return next(replies)
 
                 with (patch.object(bot, 'HERMES_PYTHON', Path('/nonexistent-kestrel-hermes/python')),
-                      patch.object(bot, 'MUTE_TIMEOUT', 0.01 if reason == 'timeout' else 5)):
+                      patch.object(tool_actions, 'MUTE_TIMEOUT', 0.01 if reason == 'timeout' else 5)):
                     transport, spoken, committed, _, processes, close = await self.open_session(
                         None, local_command=command,
                     )

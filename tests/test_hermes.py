@@ -2653,7 +2653,7 @@ class NativeHermesTests(unittest.TestCase):
 
     def test_conversation_source_confines_literal_endpoints(self):
         endpoints = []
-        for name in ('bot.py', 'hermes_worker.py'):
+        for name in ('bot.py', 'tool_actions.py', 'hermes_worker.py'):
             for node in ast.walk(ast.parse((ROOT / name).read_text())):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     endpoints.extend(re.findall(r"""https?://[^"'\s]*""", node.value))
