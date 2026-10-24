@@ -1939,7 +1939,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             if case == "timeout":
                                 capture.stdout.feed_data(bytes(640))
                             await asyncio.wait_for(stopped.wait(), 5)
-                        self.assertEqual(transport.failure, "Laptop microphone capture failed. Restart Kestrel.")
+                        self.assertEqual(transport.failure, "Microphone capture failed. Restart Kestrel.")
                         first_failure = transport.failure
                         transport.fail("later private payload")
                         self.assertEqual(transport.failure, first_failure)
@@ -2094,7 +2094,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1))
                             await asyncio.wait_for(transport.playback.wait(), 5)
                             await asyncio.wait_for(stopped.wait(), 5)
-                            self.assertEqual(transport.failure, "Laptop audio playback failed. Restart Kestrel.")
+                            self.assertEqual(transport.failure, "Audio playback failed. Restart Kestrel.")
                             transport.on_stopped.assert_called_once_with()
                             self.assertFalse(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
                             self.assertTrue(receipt.write_failed)
@@ -2273,9 +2273,9 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 await transport.output().queue_frame(TTSAudioRawFrame(b"W" * 3840, 48000, 1))
                 await asyncio.wait_for(drain_entered.wait(), 5)
                 await asyncio.wait_for(error_seen.wait(), 5)
-                with self.assertRaisesRegex(RuntimeError, "Laptop audio playback failed. Restart Kestrel"):
+                with self.assertRaisesRegex(RuntimeError, "Audio playback failed. Restart Kestrel"):
                     await asyncio.wait_for(task, 5)
-                self.assertEqual(transport.failure, "Laptop audio playback failed. Restart Kestrel.")
+                self.assertEqual(transport.failure, "Audio playback failed. Restart Kestrel.")
                 self.assertTrue(receipt.write_failed)
                 transport.on_stopped.assert_called_once_with()
                 for child in (capture, playback):
@@ -2284,7 +2284,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 stt.close.assert_awaited_once()
                 llm.channel.close.assert_awaited_once()
                 transport.fail("later failure")
-                self.assertEqual(transport.failure, "Laptop audio playback failed. Restart Kestrel.")
+                self.assertEqual(transport.failure, "Audio playback failed. Restart Kestrel.")
             finally:
                 blocked.set()
                 if not task.done():
