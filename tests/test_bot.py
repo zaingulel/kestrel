@@ -3208,7 +3208,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         await self.push_frame(frame, direction)
 
                 self.audio.input.return_value = Forward()
-                self.audio.output.return_value = Forward(output=True)
+                output = Forward(output=True)
+                output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
+                self.audio.output.return_value = output
                 native_conversation = bot.run_conversation
 
                 async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
