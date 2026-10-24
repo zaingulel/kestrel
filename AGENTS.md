@@ -233,7 +233,7 @@ release update, of every adopter. An intentional adopter exception needs owner a
 
 Kestrel is a local conversation prototype. Nemotron speech recognition and the default Phonon 31M English q8 voice generation run on the laptop's CPU (central processing unit), with VoxCPM2 available explicitly on its RTX 5080; the Bonsai 2 27B brain runs locally through the pinned Prism server with F16 key and value caches and a 64,000-token context. Ordinary thinking is off; a request beginning with **Think more deeply about** enables it for one answer. Kestrel's desktop tools are local mute, unmute and exact volume setting of the selected audio output, media pause and next track, numbered workspace focus, saving a native screenshot, and launching a uniquely matched visible installed app by name. The service starts inactive; **Hey Kestrel** starts a fresh conversation after local preparation, and **Super + Shift + K** starts or ends one while warm models and echo removal retain microphone use. Wait for local speech readiness before the request; active or stale wake detections cannot toggle the conversation. Ordinary microphone recognition and spoken caller transcripts are admitted only while voice is active. Explicit accepted typed requests share the conversation and exact local commands, with spoken replies while voice remains inactive; typing does not enable ordinary recognition and suppresses wake capture until matching output completion. The brain can invoke native local memory for bounded automatic notes and eight desktop tools through shared local enforcement: mute, unmute, set volume, pause media, next track, numbered workspace focus, opening a uniquely matched installed app by name and saving a screenshot. Exact local commands keep working without the brain. Kestrel has no browser research or reusable conversation archive. [README.md](README.md#automatic-local-notes) owns notes, fresh snapshots and operator controls; its [trace rules](README.md#local-conversation-traces) own separate retained diagnostics.
 
-Product discovery and drilling with the owner must precede any further product implementation. Factory adoption preserves the prototype and stops before product work.
+Product discovery and drilling with the owner must precede any further product implementation. Factory adoption preserves the prototype and stops before product work. A change that keeps every documented behaviour and only reshapes code is not product implementation; it follows the normal plan and surface rules.
 
 ## Hard constraints
 
@@ -247,6 +247,7 @@ Product discovery and drilling with the owner must precede any further product i
 - `bot.py` owns conversation orchestration.
 - `app_resolver.py` owns native installed-app lookup.
 - `tool_actions.py` owns how Kestrel's tools run: each tool's run step, the open-app lookup step and the shared safe local-command runner; the engine process never loads it.
+- `reply_progress.py` owns reply progress: how far each reply's speech has reached audio output and how the reply ended.
 - `speech.py` owns speech adapters.
 - `wakeword.py` owns the isolated local wake detector, pinned asset admission and bounded worker protocol.
 - `asr_worker.py` is the speech recognition process boundary.
@@ -266,7 +267,7 @@ Product discovery and drilling with the owner must precede any further product i
 | sign-off | Changes to microphone access, audio or transcript handling, the localhost brain service boundary, or the workflow trust perimeter. |
 | security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, local brain service exposure; runtime hooks, permission settings, workflow triggers and token permissions, and shared workflow integrity. |
 | hard to undo | Recordings, transcripts or credentials exposed through commits, logs or publication; loss or replacement of local microphone and model assets; repository hosting settings and rulesets. |
-| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `tool_actions.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
+| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `tool_actions.py`, `reply_progress.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
 
 Standing security guarantees:
 
