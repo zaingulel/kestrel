@@ -181,7 +181,8 @@ class PermissionExchange:
                 await asyncio.wait_for(player.wait(), PLAYBACK_GRACE_SECONDS)
 
     async def listen(self):
-        """Return (seconds until speech began, 16 kHz PCM), or (None, None) after silence for the whole wait."""
+        """Return (seconds until speech began, 16 kHz PCM, cut off by the limit), or (None, None, False) after silence
+        for the whole wait."""
         loop = asyncio.get_running_loop()
         self.vad.set_params(self.vad.params)  # Resets the detection state left by the previous trial.
         self.inbox = asyncio.Queue()
@@ -191,11 +192,11 @@ class PermissionExchange:
             while True:
                 remaining = opened + self.wait - loop.time()
                 if remaining <= 0:
-                    return None, None
+                    return None, None, False
                 try:
                     pcm = await asyncio.wait_for(self.inbox.get(), remaining)
                 except TimeoutError:
-                    return None, None
+                    return None, None, False
                 preroll.append(pcm)
                 if await self.vad.analyze_audio(pcm) == VADState.SPEAKING:
                     break
@@ -208,7 +209,8 @@ class PermissionExchange:
                 spoken += FRAME_SECONDS
                 state = await self.vad.analyze_audio(pcm)
                 quiet = quiet + FRAME_SECONDS if state in (VADState.QUIET, VADState.STOPPING) else 0.0
-            return began, b''.join(utterance)
+            # True only when the limit, not the quiet ending, stopped the capture.
+            return began, b''.join(utterance), quiet < END_QUIET_SECONDS
         finally:
             self.inbox = None
 
@@ -218,7 +220,7 @@ class PermissionExchange:
         self.report('speaking read-back', action)
         await self.speak(WORDINGS[self.wording](action))
         self.report('listening', action)
-        began, pcm = await self.listen()
+        began, pcm, cut_off = await self.listen()
         if pcm is None:
             began, transcript, result = '-', '', 'silence'
         else:
@@ -226,14 +228,15 @@ class PermissionExchange:
             self.report('recognising', action, began)
             try:
                 transcript = await self.recognizer.transcribe(wav16k(pcm), admitted=lambda: True)
-                result = classify(transcript)
+                result = 'unclear' if cut_off else classify(transcript)
             except RuntimeError as error:
                 print(f'Recognition error: {error}', flush=True)
                 transcript, result = '', 'unclear'
         outcome, reply = OUTCOMES[result]
-        self.report('speaking outcome', action, began, transcript, result, outcome)
+        shown = 'unclear (cut off)' if cut_off else result
+        self.report('speaking outcome', action, began, transcript, shown, outcome)
         await self.speak(reply)
-        self.report('done', action, began, transcript, result, outcome)
+        self.report('done', action, began, transcript, shown, outcome)
 
 
 async def read_line() -> str:
