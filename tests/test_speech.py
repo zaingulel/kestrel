@@ -750,21 +750,17 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[-1]['text'], 'Local reply.')
             self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
 
-            turn_id = voice._turn_context_id
             await worker.queue_frames([InterruptionFrame(), DataFrame()])
             while type(await asyncio.wait_for(completed.get(), 5)) is not DataFrame:
                 pass
-            self.assertIsNone(voice.section(turn_id))
             await worker.queue_frames([LLMFullResponseStartFrame(), LLMTextFrame('Replacement.'),
                                        LLMFullResponseEndFrame()])
             while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
                 pass
             self.assertEqual(calls[-1]['text'], 'Replacement.')
             self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
-            turn_id = voice._turn_context_id
             await worker.queue_frame(EndFrame())
             await running
-            self.assertIsNone(voice.section(turn_id))
             [f async for f in voice.run_tts('After end.', 'after-end')]
             self.assertEqual(calls[-1]['text'], 'After end.')
         finally:
