@@ -4988,27 +4988,32 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await transport.input().queue_frame(frame)
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
 
-    def reply_intervals(self, frames, records):
-        """Groups reply messages by their start and end frames and checks each carries its own reply's record."""
+    @staticmethod
+    def as_pushed(frame):
+        """Pairs a frame with its label as pushed; later processors relabel frames they stream."""
+        return frame, getattr(frame, 'reply_progress', 'unlabelled')
+
+    def reply_intervals(self, messages, records):
+        """Groups (frame, label) reply messages by their start and end frames and checks each carries its own reply's record."""
         intervals, interval, ended = [], None, None
-        for frame in frames:
+        for frame, label in messages:
             if isinstance(frame, bot.LLMFullResponseStartFrame):
                 self.assertIsNone(interval, 'A reply started inside another')
                 interval = []
                 intervals.append(interval)
             if interval is None:
                 self.assertIsInstance(frame, InterruptionFrame, 'Only an interruption arrives outside a reply')
-                self.assertIn(getattr(frame, 'reply_progress', 'unlabelled'), (None, ended))
+                self.assertIn(label, (None, ended))
                 continue
-            interval.append(frame)
+            interval.append((frame, label))
             if isinstance(frame, LLMFullResponseEndFrame):
                 ended, interval = records[len(intervals) - 1], None
         self.assertIsNone(interval, 'A reply never ended')
         self.assertEqual(len(intervals), len(records))
         for interval, record in zip(intervals, records):
             self.assertIsNotNone(record)
-            for frame in interval:
-                self.assertIs(getattr(frame, 'reply_progress', 'unlabelled'), record, frame)
+            for frame, label in interval:
+                self.assertIs(label, record, frame)
         return intervals
 
     async def test_phonon_typed_reply_preserves_inactive_microphone(self):
@@ -6980,17 +6985,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 brain, through_service=True, synthesis_chunks=chunks,
             )
             output = transport.output()
-            generated, records = [], []
+            generated, delivered, records = [], [], []
 
             @output.event_handler('on_after_push_frame')
             async def collect(processor, frame):
                 pushed.append(frame)
+                if isinstance(frame, reply_progress.REPLY_MESSAGES):
+                    delivered.append(self.as_pushed(frame))
                 frame_pushed.set()
 
             @transport.llm.event_handler('on_before_push_frame')
             async def collect_generated(processor, frame):
                 if isinstance(frame, reply_progress.REPLY_MESSAGES):
-                    generated.append(frame)
+                    generated.append(self.as_pushed(frame))
                     if isinstance(frame, bot.LLMFullResponseStartFrame):
                         records.append(transport.llm.current_reply())
 
@@ -7040,7 +7047,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                  b'\xff\x3f' * 1920 * 4)
                 self.assertEqual(len(records), 1)
                 self.reply_intervals(generated, records)
-                self.reply_intervals([frame for frame in pushed if isinstance(frame, reply_progress.REPLY_MESSAGES)], records)
+                self.reply_intervals(delivered, records)
             finally:
                 release_first.set()
                 release_second.set()
@@ -9885,7 +9892,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         @transport.llm.event_handler('on_before_push_frame')
         async def collect_generated(processor, frame):
             if isinstance(frame, reply_progress.REPLY_MESSAGES):
-                generated.append(frame)
+                generated.append(self.as_pushed(frame))
                 if isinstance(frame, bot.LLMFullResponseStartFrame):
                     records.append(transport.llm.current_reply())
 
@@ -9898,7 +9905,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(records), 2)
         self.assertIsNot(records[0], records[1])
         for interval in self.reply_intervals(generated, records):
-            self.assertTrue(any(isinstance(frame, speech.SpeechAdvisoryFrame) for frame in interval))
+            self.assertTrue(any(isinstance(frame, speech.SpeechAdvisoryFrame) for frame, _ in interval))
 
     async def test_partial_native_reply_speaks_failure(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
