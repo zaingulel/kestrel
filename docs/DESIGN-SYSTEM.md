@@ -13,7 +13,7 @@ Use the installed desktop's native notification component, inheriting its color,
 | Property | Value |
 | --- | --- |
 | Application name | `Kestrel` |
-| Summary | `Mute could not be confirmed` or `Volume could not be confirmed`, matching the failed action |
+| Summary | `Mute could not be confirmed`, `Unmute could not be confirmed` or `Volume could not be confirmed`, matching the failed action |
 | Body | `Check the audio control. Kestrel will not retry.` |
 | Hints | Transient; `boolean:suppress-sound:true` |
 
