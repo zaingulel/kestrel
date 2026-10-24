@@ -298,10 +298,14 @@ async def converse(wording: str, wait: float) -> None:
             exchange.report('ready', ACTIONS[exchange.trials % len(ACTIONS)])
     finally:
         closing = True
-        if transport is not None:
-            await transport.close()
-        await recognizer.close()
-        echo.close()
+        try:
+            if transport is not None:
+                await transport.close()
+        finally:
+            try:
+                await recognizer.close()
+            finally:
+                echo.close()
 
 
 def positive_seconds(value: str) -> float:
