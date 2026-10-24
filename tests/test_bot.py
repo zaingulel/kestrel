@@ -2109,7 +2109,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service = hermes_service()
         process = service.channel.process = Mock(returncode=None)
         process.stdin.drain = AsyncMock()
-        process.stdout.readline = AsyncMock(return_value=json.dumps(refusal).encode() + b'\n')
+        process.stdout.readline = AsyncMock(side_effect=[json.dumps(refusal).encode() + b'\n'])
         process.wait = AsyncMock()
         output = asyncio.Queue()
         await service.channel._request({'prepare': True}, output, admitted=service.admitted)
