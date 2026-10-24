@@ -78,6 +78,7 @@ class LocalTool:
     run: object
     subject: str
     spoken: str
+    confirmation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -519,7 +520,8 @@ LOCAL_TOOLS = {
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track', 'next track'),
     'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace', 'workspace three'),
     'open app': LocalTool(PermissionTier.FREE, open_app, 'open app', "open followed by an installed app's exact name"),
-    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot'),
+    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot',
+                                    confirmation='Screenshot saved.'),
 }
 
 
@@ -625,7 +627,8 @@ def match_instant_tool(text):
     percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
     if percent is None:
         return None
-    return free_tool('volume', percent)
+    tool = free_tool('volume', percent)
+    return replace(tool, confirmation=f'Volume {percent}.') if tool is not None else None
 
 
 def stop_kestrel():
@@ -1380,10 +1383,12 @@ class HermesLLMService(LLMService):
             if result is None or not self.owns_request(token):
                 return
             message = local_result_message(tool, result)
+            if message is None:
+                self.retire_outcomes(token)
+                message = tool.confirmation
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:
-                self.retire_outcomes(token)
                 await self.push_reply_end(token)
             return
         output = None

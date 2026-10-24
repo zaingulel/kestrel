@@ -446,6 +446,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(tool)
                 self.assertEqual(tool.permission, bot.PermissionTier.FREE)
                 self.assertEqual(tool.subject, 'volume')
+                self.assertEqual(tool.confirmation, f'Volume {percent}.')
                 self.assertIsNot(tool, bot.LOCAL_TOOLS['volume'])
                 command = AsyncMock()
                 action = AsyncMock()
@@ -4004,6 +4005,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                     self.assertEqual(command.await_args_list, [call(item) for item in argv])
                     self.assertEqual(len(brain.requests), 2 * index + 2)
+                    if name == 'set_volume':
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
         finally:
@@ -7525,7 +7528,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(logger.remove, sink)
         transport, spoken, committed, _, _, close = await self.open_session(brain, local_command=command)
         try:
-            for phrase, expected in ((' TAKE A SCREENSHOT! ', None), ('take a screenshot', advisory)):
+            for phrase, expected in ((' TAKE A SCREENSHOT! ', 'Screenshot saved.'), ('take a screenshot', advisory)):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, phrase)
                 barrier = DataFrame()
@@ -7591,7 +7594,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(barrier)
                 self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                 self.assertEqual(calls, [argv, argv])
-                self.assertTrue(spoken.empty(), 'Stale failure and confirmed save stay silent without an engine')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Screenshot saved.')
+                self.assertTrue(spoken.empty(), 'The stale failure stays silent and the confirmed save speaks once without an engine')
                 self.assertTrue(committed.empty())
                 self.assertFalse(transport.llm.local_actions.tasks)
                 self.assertEqual(len(processes), 1)
@@ -7828,10 +7832,20 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
-        command = AsyncMock(side_effect=[
+        answers = iter([
             'selected', 'physical', LocalVolumeTests.volume(32768), 'Mute: yes', '',
             LocalVolumeTests.volume(19660), '', 'selected', 'physical', LocalVolumeTests.volume(19660), 'Mute: no',
         ])
+        last_answer_held, release_last_answer = asyncio.Event(), asyncio.Event()
+
+        async def answer(argv):
+            reply = next(answers)
+            if reply == 'Mute: no':
+                last_answer_held.set()
+                await release_last_answer.wait()
+            return reply
+
+        command = AsyncMock(side_effect=answer)
         transport, spoken, committed, _, processes, close = await self.open_session(
             brain, local_command=command, prepare_engine=True,
         )
@@ -7848,9 +7862,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             ])
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await self.finish_user_turn(transport, 'set the volume to 30')
+            await asyncio.wait_for(last_answer_held.wait(), 5)
             barrier = DataFrame()
-            await transport.input().queue_frame(barrier)
+            await transport.llm.push_frame(barrier)
             self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertTrue(spoken.empty(), 'Volume confirmation waits for the confirmed result')
+            release_last_answer.set()
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
             self.assertEqual(command.await_count, 11)
             self.assertEqual(command.await_args_list.count(
                 call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%')),
@@ -8926,6 +8944,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             barrier = DataFrame()
             await transport.input().queue_frame(barrier)
             self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
             self.assertTrue(spoken.empty(), 'A handled volume action must not speak an engine error')
             self.assertEqual(command.await_count, 11)
             self.assertEqual(command.await_args_list.count(
