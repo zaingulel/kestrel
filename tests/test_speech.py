@@ -791,6 +791,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                          '(Subtly curious and interested, natural conversational delivery) Queued.')
         self.assertEqual(queued.section(old_id).reply.text_started_by(audio[0]), 'Queued.')
         await queued.process_frame(CancelFrame(), speech.FrameDirection.DOWNSTREAM)
+        # Retained turn metadata would open a section again.
+        await queued.create_audio_context(context_id)
+        self.assertIsNone(queued.section(context_id))
         [f async for f in queued.run_tts('Replacement.', 'replacement')]
         self.assertEqual(calls[-1]['text'], 'Replacement.')
         self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
@@ -800,6 +803,23 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         await queued.create_audio_context(queued._turn_context_id)
         with self.assertRaisesRegex(RuntimeError, 'delivery'):
             [f async for f in queued.run_tts('Never.', queued._turn_context_id)]
+        # A held list item reaches synthesis as a tail made at the end, labelled like the text it came from.
+        tail_voice = VoxCPMTTS(Mock(generate_streaming=chunks), TEST_PRESET)
+        record, seen = reply_record(), []
+
+        async def record_frame(service, frame, direction):
+            seen.append(frame)
+
+        start, fed, end = LLMFullResponseStartFrame(), LLMTextFrame('- Item'), LLMFullResponseEndFrame()
+        start.reply_progress = end.reply_progress = record
+        with patch.object(speech.TTSService, 'process_frame', record_frame):
+            for frame in (start, fed, end):
+                await tail_voice.process_frame(frame, speech.FrameDirection.DOWNSTREAM)
+        texts = [frame for frame in seen if isinstance(frame, LLMTextFrame)]
+        self.assertEqual(len(texts), 2)
+        self.assertIs(texts[0], fed)
+        for frame in texts:
+            self.assertIs(frame.reply_progress, record)
 
     async def test_reply_cleanup_marks_code_without_speaking_it(self):
         started, finished = asyncio.Event(), asyncio.Event()
@@ -2106,8 +2126,16 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(stopped.wait(), 5)
                             self.assertEqual(transport.failure, "Audio playback failed. Restart Kestrel.")
                             transport.on_stopped.assert_called_once_with()
+                            section = receipt.open_section('neutral')
+                            queued = [TTSAudioRawFrame(bytes(3840), 48000, 1) for _ in range(2)]
+                            for frame in queued:
+                                receipt.stream_frame(frame, section)
+                                transport.output().output_buffer.enter(frame, receipt)
                             self.assertFalse(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
                             self.assertTrue(receipt.output_failed())
+                            # The failed write consumed the first queued chunk, so the next write is the second.
+                            self.assertEqual(transport.output().output_buffer.written(TTSAudioRawFrame(bytes(3840), 48000, 1)),
+                                             [receipt.source_range(queued[1])])
                         else:
                             self.assertTrue(await transport.output().write_audio_frame(TTSAudioRawFrame(b"P" * 3840, 48000, 1)))
                             self.assertEqual(await asyncio.wait_for(transport.playback.stdout.readexactly(3840), 5), b"P" * 3840)

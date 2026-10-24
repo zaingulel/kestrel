@@ -3320,7 +3320,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
             return worker
 
-        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
+        output = Forward()
+        output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
+        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=output))
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
         llm = Forward()
@@ -3330,6 +3332,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm.frame_completed = Mock()
         llm.owns_request = lambda token: True
         llm._assistant_reply_token = None
+        llm.current_reply = Mock(return_value=None)
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,
@@ -3361,7 +3364,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     started.set()
                 await self.push_frame(frame, direction)
 
-        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=Forward()))
+        output = Forward()
+        output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
+        transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=output))
         observer = UserBotLatencyObserver(time_source=lambda: 100.25)
 
         def log(message):
@@ -3378,6 +3383,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm.frame_completed = Mock()
         llm.owns_request = lambda token: True
         llm._assistant_reply_token = None
+        llm.current_reply = Mock(return_value=None)
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
@@ -4979,6 +4985,29 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         frame.input_epoch = getattr(transport.service.manager, 'input_epoch', 0)
         await transport.input().queue_frame(frame)
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
+
+    def reply_intervals(self, frames, records):
+        """Groups reply messages by their start and end frames and checks each carries its own reply's record."""
+        intervals, interval, ended = [], None, None
+        for frame in frames:
+            if isinstance(frame, bot.LLMFullResponseStartFrame):
+                self.assertIsNone(interval, 'A reply started inside another')
+                interval = []
+                intervals.append(interval)
+            if interval is None:
+                self.assertIsInstance(frame, InterruptionFrame, 'Only an interruption arrives outside a reply')
+                self.assertIn(getattr(frame, 'reply_progress', 'unlabelled'), (None, ended))
+                continue
+            interval.append(frame)
+            if isinstance(frame, LLMFullResponseEndFrame):
+                ended, interval = records[len(intervals) - 1], None
+        self.assertIsNone(interval, 'A reply never ended')
+        self.assertEqual(len(intervals), len(records))
+        for interval, record in zip(intervals, records):
+            self.assertIsNotNone(record)
+            for frame in interval:
+                self.assertIs(getattr(frame, 'reply_progress', 'unlabelled'), record, frame)
+        return intervals
 
     async def test_phonon_typed_reply_preserves_inactive_microphone(self):
         brain = ScriptedBrain([
@@ -6949,11 +6978,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 brain, through_service=True, synthesis_chunks=chunks,
             )
             output = transport.output()
+            generated, records = [], []
 
             @output.event_handler('on_after_push_frame')
             async def collect(processor, frame):
                 pushed.append(frame)
                 frame_pushed.set()
+
+            @transport.llm.event_handler('on_before_push_frame')
+            async def collect_generated(processor, frame):
+                if isinstance(frame, reply_progress.REPLY_MESSAGES):
+                    generated.append(frame)
+                    if isinstance(frame, bot.LLMFullResponseStartFrame):
+                        records.append(transport.llm.current_reply())
 
             address = conversation.address()
 
@@ -6999,6 +7036,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(retirements, 3)
                 self.assertEqual(b''.join(frame.audio for frame in pushed if isinstance(frame, TTSAudioRawFrame)),
                                  b'\xff\x3f' * 1920 * 4)
+                self.assertEqual(len(records), 1)
+                self.reply_intervals(generated, records)
+                self.reply_intervals([frame for frame in pushed if isinstance(frame, reply_progress.REPLY_MESSAGES)], records)
             finally:
                 release_first.set()
                 release_second.set()
@@ -9838,12 +9878,25 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         brain = ScriptedBrain([400])
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        generated, records = [], []
+
+        @transport.llm.event_handler('on_before_push_frame')
+        async def collect_generated(processor, frame):
+            if isinstance(frame, reply_progress.REPLY_MESSAGES):
+                generated.append(frame)
+                if isinstance(frame, bot.LLMFullResponseStartFrame):
+                    records.append(transport.llm.current_reply())
+
         await self.assert_failed_reply(transport, spoken, committed, 'Answer this synthetic request.',
                                          expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertIsNotNone(processes[0][0].returncode)
         await self.assert_failed_reply(transport, spoken, committed, 'Try another request.',
                                          expected_advisory="I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
         self.assertEqual(len(brain.requests), 1, 'Broken sessions never silently restart or retry')
+        self.assertEqual(len(records), 2)
+        self.assertIsNot(records[0], records[1])
+        for interval in self.reply_intervals(generated, records):
+            self.assertTrue(any(isinstance(frame, speech.SpeechAdvisoryFrame) for frame in interval))
 
     async def test_partial_native_reply_speaks_failure(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
