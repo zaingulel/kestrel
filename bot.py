@@ -546,7 +546,7 @@ LOCAL_TOOLS = {
 }
 
 
-BRIDGED_TOOL_KEYS = {'mute': 'mute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track',
+BRIDGED_TOOL_KEYS = {'mute': 'mute', 'unmute': 'unmute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track',
                      'focus_workspace': 'workspace', 'open_app': 'open app', 'take_screenshot': 'take a screenshot'}
 # Exact app launches and screenshots stay outside stop accounting, as README's stop section says.
 EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace'))

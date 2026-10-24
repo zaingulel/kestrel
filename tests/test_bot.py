@@ -4224,6 +4224,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
               ('/usr/bin/pactl', 'get-default-sink'),
               ('/usr/bin/omarchy-audio-output-sink', 'selected'),
               ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
+            ('unmute', {}, 'unmute',
+             ['selected', 'physical', 'Mute: yes', '', 'selected', 'physical', 'Mute: no'],
+             [('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+              ('/usr/bin/pactl', 'set-sink-mute', 'physical', '0'),
+              ('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
             ('set_volume', {'percent': 30}, 'set volume to thirty',
              ['selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
               '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
@@ -4293,6 +4302,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(brain.requests), 2 * index + 2)
                     if name == 'mute':
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
+                    if name == 'unmute':
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Unmuted.')
                     if name == 'set_volume':
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
                     self.assertTrue(spoken.empty())
@@ -8978,7 +8989,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         self.assertIn(
             hermes_worker.SYSTEM_PROMPT,
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),

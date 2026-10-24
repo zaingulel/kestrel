@@ -130,6 +130,7 @@ class DesktopToolSchema(NamedTuple):
 
 DESKTOP_TOOLS = {
     'mute': DesktopToolSchema('Mute the selected audio output.', {}),
+    'unmute': DesktopToolSchema('Unmute the selected audio output.', {}),
     'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (int, 0, 100)}),
     'pause_media': DesktopToolSchema('Pause current media.', {}),
     'next_track': DesktopToolSchema('Advance to the next media track.', {}),
@@ -138,7 +139,7 @@ DESKTOP_TOOLS = {
     'take_screenshot': DesktopToolSchema('Save a screenshot to the screenshot folder; its content is never shown to you.', {}),
 }
 KESTREL_SOURCE = 'kestrel'
-HARMLESS_TOOLS = frozenset({'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
+HARMLESS_TOOLS = frozenset({'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
 OUTSIDE_TEXT_RESULT = json.dumps({'confirmed': False, 'attempted': False, 'reason': 'outside text'})
 OUTSIDE_TEXT_REFUSAL = ('Refused: this conversation contains outside text, so notes cannot change '
                         'until a fresh conversation.')
@@ -230,14 +231,14 @@ SYSTEM_PROMPT = (
     "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
     "This session is a local conversation. You can talk, answer from general knowledge, and use these tools: "
-    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, set_volume, "
+    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, unmute, set_volume, "
     "pause_media, next_track, focus_workspace, open_app and take_screenshot. "
     "Maintain notes automatically when useful, including updating or removing outdated notes. "
     "Claim a save only after a successful memory tool result. You have no internet, web access or live "
     "information such as news, weather or prices, and you cannot see the screen or any screenshot; "
-    "you cannot unmute, resume or go back in media. Say so plainly when asked. "
+    "you cannot resume or go back in media. Say so plainly when asked. "
     "When asked what you can do, name conversation and general knowledge, remembering notes and each desktop tool "
-    "in plain words (muting, setting the volume, pausing media, skipping to the next track, switching to a "
+    "in plain words (muting, unmuting, setting the volume, pausing media, skipping to the next track, switching to a "
     "numbered workspace, opening an installed app by name and taking a screenshot), then state these limits, "
     "then say this sentence word for word: You can also say repeat that, stop, that's all, or what can I say. "
     "Call a desktop tool only when the owner clearly asks for that tool's effect, at most once per reply; "
