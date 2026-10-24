@@ -778,27 +778,29 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         advisory = "I couldn't confirm pause. Check the media player. I won't retry."
         self.assertEqual(service.push_frame.await_args_list[0].args[0].text, advisory)
         end = service.push_frame.await_args_list[-1].args[0]
-        self.assertFalse(end.conversation_reply_failed)
+        self.assertFalse(end.reply_progress.answer_failed)
         service.conversation_output(end)
         await request('stop')
         account = "Stopped. Couldn't confirm: pause. I won't undo anything."
         self.assertEqual(service.push_frame.await_args_list[0].args[0].text, account)
         end = service.push_frame.await_args_list[-1].args[0]
-        token = service._indicator_reply
-        context = speech.ConversationAudioContext(token, pending_text_starts=[(0, account)])
-        start = TTSStartedFrame()
-        start.conversation_audio_context = context
-        stopped = TTSStoppedFrame()
-        stopped.conversation_audio_context = context
-        for frame in (start, TTSAudioRawFrame(bytes(960), 48000, 1), stopped, end):
+        record = service.current_reply()
+        section = record.open_section('neutral')
+        start, audio, stopped = TTSStartedFrame(), TTSAudioRawFrame(bytes(960), 48000, 1), TTSStoppedFrame()
+        record.starts_text(audio, account)
+        for frame in (start, audio, stopped):
+            record.stream_frame(frame, section)
+        for frame in (start, audio, stopped, end):
+            if frame is audio:
+                service.conversation_audio([record.source_range(audio)])
             service.conversation_output(frame)
         self.assertEqual(service.outcomes, [])
         await request('stop')
         service.push_frame.assert_awaited_once()
         completion = service.push_frame.await_args.args[0]
         self.assertIs(type(completion), LLMFullResponseEndFrame)
-        self.assertIs(completion.indicator_reply_token, service._indicator_reply)
-        self.assertFalse(completion.conversation_reply_failed)
+        self.assertIs(reply_progress.token_of(completion), service._indicator_reply)
+        self.assertFalse(completion.reply_progress.answer_failed)
         self.assertEqual(command.await_count, 2)
 
     async def test_stop_cancel_only_consume_completed_exact_turns(self):
@@ -833,8 +835,8 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                     service.push_frame.assert_awaited_once()
                     completion = service.push_frame.await_args.args[0]
                     self.assertIs(type(completion), LLMFullResponseEndFrame)
-                    self.assertIs(completion.indicator_reply_token, request.request_origin[0])
-                    self.assertFalse(completion.conversation_reply_failed)
+                    self.assertIs(reply_progress.token_of(completion), request.request_origin[0])
+                    self.assertFalse(completion.reply_progress.answer_failed)
                 command.assert_not_awaited()
                 self.assertEqual(service.last_spoken_reply, 'Known spoken reply.')
                 self.assertFalse(service.local_actions.tasks)
@@ -880,8 +882,8 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(service.push_frame.await_count, 2)
                 completion = service.push_frame.await_args_list[-1].args[0]
                 self.assertIs(type(completion), LLMFullResponseEndFrame)
-                self.assertIs(completion.indicator_reply_token, stop_request.request_origin[0])
-                self.assertFalse(completion.conversation_reply_failed)
+                self.assertIs(reply_progress.token_of(completion), stop_request.request_origin[0])
+                self.assertFalse(completion.reply_progress.answer_failed)
                 service.push_frame.reset_mock()
                 release.set()
                 await asyncio.wait_for(action, 5)
@@ -1505,11 +1507,8 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
 
                 service.push_frame = push_frame
                 token = service._indicator_reply
-                audio_context = speech.ConversationAudioContext(token, pending_text_starts=[(0, 'Muting.')])
                 start = TTSStartedFrame()
-                start.conversation_audio_context = audio_context
                 stopped = TTSStoppedFrame()
-                stopped.conversation_audio_context = audio_context
                 audio = TTSAudioRawFrame(bytes(960), 48000, 1)
                 context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
                 held = case == 'request superseded'
@@ -1534,40 +1533,53 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsInstance(pushed[0], bot.TTSSpeakFrame)
                             self.assertEqual(pushed[0].text, 'Muting.')
                             self.assertFalse(pushed[0].append_to_context)
-                            self.assertIs(pushed[0].conversation_reply_token, token)
+                            self.assertIs(reply_progress.token_of(pushed[0]), token)
                             self.assertIsInstance(pushed[1], bot.AnnouncementMarkFrame)
                             self.assertEqual(calls, [])
                             played = service._announcement[2]
                             self.assertFalse(played.done())
                             marker = pushed[1]
+                            record = service.current_reply()
+                            audio_context = record.open_section('neutral')
+                            record.starts_text(audio, 'Muting.')
+                            for frame in (start, audio, stopped):
+                                record.stream_frame(frame, audio_context)
                             if case == 'played':
                                 for frame in (bot.AnnouncementMarkFrame(), start, audio, stopped):
+                                    if frame is audio:
+                                        service.conversation_audio([record.source_range(audio)])
                                     service.conversation_output(frame)
                                     self.assertFalse(played.done(), f'{type(frame).__name__} cannot confirm playback')
                                 service.conversation_output(marker)
                             elif case == 'interrupted':
+                                foreign_reply = reply_progress.ReplyProgress(object(), feed=None, feed_open=lambda: True)
                                 foreign = speech.ConversationSynthesisFailedFrame(
-                                    context=speech.ConversationAudioContext(object()))
+                                    reply_progress=foreign_reply, section=foreign_reply.open_section('neutral'))
                                 for frame in (start, audio, stopped, foreign):
+                                    if frame is audio:
+                                        service.conversation_audio([record.source_range(audio)])
                                     service.conversation_output(frame)
                                     self.assertFalse(played.done(), f'{type(frame).__name__} cannot release mute')
                                 interruption = InterruptionFrame()
-                                interruption.conversation_reply_token = token
+                                interruption.reply_progress = record
                                 service.conversation_output(interruption)
                             elif case == 'not fully played':
                                 service.conversation_output(marker)
                             elif case == 'stale interruption':
                                 stale = [InterruptionFrame(), InterruptionFrame(), InterruptionFrame()]
-                                stale[1].conversation_reply_token = None
-                                stale[2].conversation_reply_token = object()
+                                stale[1].reply_progress = None
+                                stale[2].reply_progress = reply_progress.ReplyProgress.silent(object())
                                 for frame in stale:
                                     service.conversation_output(frame)
                                     self.assertFalse(played.done(), 'An earlier interruption cannot release mute')
                                     self.assertEqual(calls, [])
                                 for frame in (start, audio, stopped, marker):
+                                    if frame is audio:
+                                        service.conversation_audio([record.source_range(audio)])
                                     service.conversation_output(frame)
                             elif case == 'synthesis failed':
-                                service.conversation_output(speech.ConversationSynthesisFailedFrame(context=audio_context))
+                                service.conversation_output(speech.ConversationSynthesisFailedFrame(
+                                    reply_progress=record, section=audio_context))
                             else:
                                 service.admitted = lambda: False
                                 service.revoke()
@@ -1581,7 +1593,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     if case == 'played':
                         self.assertEqual(len(pushed[2:]), 1)
                         self.assertIs(type(pushed[2]), LLMFullResponseEndFrame)
-                        self.assertIs(pushed[2].indicator_reply_token, token)
+                        self.assertIs(reply_progress.token_of(pushed[2]), token)
                     if case in ('played', 'stale interruption'):
                         warning.assert_not_called()
                     else:
@@ -2430,7 +2442,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             frames = [call.args[0] for call in service.push_frame.call_args_list]
             starts = [f for f in frames if isinstance(f, bot.LLMFullResponseStartFrame)]
             self.assertEqual(len(starts), 1)
-            self.assertEqual(starts[0].speech_delivery, delivery)
+            self.assertEqual(starts[0].reply_progress.delivery, delivery)
             self.assertEqual(sum(isinstance(f, LLMFullResponseEndFrame) for f in frames), 1)
             self.assertEqual([f.text.strip() for f in frames if isinstance(f, LLMTextFrame)],
                              ['Hello.'] if delivery == 'reassuring' else
@@ -2463,7 +2475,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             frames = [call.args[0] for call in service.push_frame.call_args_list]
             starts = [f for f in frames if isinstance(f, bot.LLMFullResponseStartFrame)]
             self.assertEqual(len(starts), 1)
-            self.assertEqual(starts[0].speech_delivery, 'neutral')
+            self.assertEqual(starts[0].reply_progress.delivery, 'neutral')
             self.assertEqual(sum(isinstance(f, LLMFullResponseEndFrame) for f in frames), 1)
             self.assertFalse(any(isinstance(f, LLMTextFrame) for f in frames))
             self.assertIsNone(service.output)
@@ -2905,7 +2917,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
                     self.assertEqual(self.voice.generate_streaming.call_count, 1)
                     os.environ['KESTREL_VOICE'] = 'unknown'
-                    voice._conversation_reply_token = kwargs['llm']._indicator_reply
+                    start = bot.LLMFullResponseStartFrame()
+                    start.reply_progress = reply_progress.ReplyProgress(
+                        kwargs['llm']._indicator_reply, feed=None, feed_open=lambda: True)
+                    await voice.process_frame(start, FrameDirection.DOWNSTREAM)
                     await voice.on_turn_context_created('reply')
                     await voice.create_audio_context('reply')
                     for sentence in ('First reply.', 'Second reply.'):
@@ -2956,7 +2971,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     locks.append(voice._generation_lock)
                     # A later environment edit cannot switch an already prepared service.
                     os.environ['KESTREL_TTS_MODEL'] = 'unknown'
-                    voice._conversation_reply_token = kwargs['llm']._indicator_reply
+                    start = bot.LLMFullResponseStartFrame()
+                    start.reply_progress = reply_progress.ReplyProgress(
+                        kwargs['llm']._indicator_reply, feed=None, feed_open=lambda: True)
+                    await voice.process_frame(start, FrameDirection.DOWNSTREAM)
                     await voice.on_turn_context_created('reply')
                     await voice.create_audio_context('reply')
                     frames = [frame async for frame in voice.run_tts('Reply.', 'reply')]
@@ -3718,7 +3736,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 @output.event_handler('on_after_push_frame')
                 async def ended(processor, frame):
                     if (isinstance(frame, LLMFullResponseEndFrame)
-                            and frame.indicator_reply_token is transport.llm._indicator_reply):
+                            and reply_progress.token_of(frame) is transport.llm._indicator_reply):
                         delivered_end.set()
 
                 async def stop():
@@ -3778,7 +3796,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 @output.event_handler('on_after_push_frame')
                 async def ended(processor, frame):
                     if (isinstance(frame, LLMFullResponseEndFrame)
-                            and frame.indicator_reply_token is transport.llm._indicator_reply):
+                            and reply_progress.token_of(frame) is transport.llm._indicator_reply):
                         delivered_end.set()
 
                 async def stop():
@@ -5313,7 +5331,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             @transport.output().event_handler('on_after_push_frame')
             async def repeat_output_completed(processor, frame):
-                if isinstance(frame, LLMFullResponseEndFrame) and frame.indicator_reply_token is accepted_token:
+                if isinstance(frame, LLMFullResponseEndFrame) and reply_progress.token_of(frame) is accepted_token:
                     repeat_finished.set()
 
             self.assertTrue(manager.llm.owns_request(accepted_token))
@@ -5908,8 +5926,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(manager.wake_detector)
                     # Obsolete output completion has no authority over a newer typed reply.
                     late = LLMFullResponseEndFrame()
-                    late.indicator_reply_token = token
-                    late.conversation_reply_failed = False
+                    late.reply_progress = reply_progress.ReplyProgress.silent(token)
                     await transport.output().push_frame(late)
                     self.assertIsNone(manager.wake_detector)
                     action_release.set()
@@ -6508,14 +6525,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         write = output.write_audio_frame
         delivered, second_write, future_write, ended = (asyncio.Event() for _ in range(4))
         written, texts = [], []
-        current_context = None
+        current_reply = None
         fail_output = False
 
         @output.event_handler('on_after_push_frame')
         async def observe(processor, frame):
-            nonlocal current_context
+            nonlocal current_reply
             if isinstance(frame, TTSStartedFrame):
-                current_context = frame.conversation_audio_context
+                current_reply = frame.reply_progress
             elif isinstance(frame, TTSAudioRawFrame) and frame.audio:
                 delivered.set()
             elif isinstance(frame, TTSTextFrame):
@@ -6525,7 +6542,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         async def controlled_write(frame):
             if fail_output:
-                current_context.write_failed = True
+                current_reply.output_write_failed()
                 output.output_buffer.write_failed(frame)
                 return False
             if len(written) == 1:
@@ -7101,19 +7118,18 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(frame, BotStartedSpeakingFrame):
                 playback_started.set()
             elif isinstance(frame, LLMFullResponseEndFrame):
-                output_order.append(('end', frame.indicator_reply_token))
+                output_order.append(('end', reply_progress.token_of(frame)))
                 if cancel_without_audio:
                     old_end_output.set()
             elif isinstance(frame, InterruptionFrame):
-                output_order.append(('interruption', getattr(frame, 'conversation_reply_token', None)))
+                output_order.append(('interruption', reply_progress.token_of(frame)))
 
         @transport.llm.event_handler('on_before_push_frame')
         async def generated_text(processor, frame):
-            if cancel_without_audio and isinstance(frame, InterruptionFrame) and frame.conversation_reply_token is not None:
+            if cancel_without_audio and isinstance(frame, InterruptionFrame) and reply_progress.token_of(frame) is not None:
                 # Revoked producers suppress their end frame; inject its delayed transport arrival explicitly.
                 late = LLMFullResponseEndFrame()
-                late.indicator_reply_token = frame.conversation_reply_token
-                late.conversation_reply_failed = False
+                late.reply_progress = frame.reply_progress
                 await output.push_frame(late)
                 await asyncio.wait_for(old_end_output.wait(), 5)
             if hold_text and isinstance(frame, LLMTextFrame):
@@ -7189,7 +7205,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             rows = await turns_until(lambda turns: turns[-1]['state'] == 'speaking')
             self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'One fact.', 'state': 'speaking'})
             self.assertTrue(await asyncio.to_thread(blocked.wait, 5))
-            old_token = transport.llm._conversation_attempt
+            old_token = transport.llm.current_reply().token
             await start()
             rows = await turns_until(lambda turns: turns[-1]['state'] == 'interrupted')
             self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': 'One fact.', 'state': 'interrupted'})
@@ -7210,7 +7226,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(generated.wait(), 5)
                 rows = await turns_until(lambda turns: turns[-1]['state'] == 'thinking')
                 self.assertEqual(rows[-1]['text'], '')
-                token = transport.llm._conversation_attempt
+                token = transport.llm.current_reply().token
                 pre_audio_tokens.append(token)
                 old_end_output.clear()
                 playback_started.clear()
@@ -7225,11 +7241,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(playback_started.is_set(), 'No audio starts for this attempted reply')
                 while not spoken.empty():
                     self.assertNotIn('canary', spoken.get_nowait(), 'Unheard generated text is never delivered')
-                self.assertIsNone(transport.llm._conversation_attempt)
+                self.assertIsNone(transport.llm.current_reply())
                 # A delayed native end cannot change a terminal row or a newer attempt.
                 late = LLMFullResponseEndFrame()
-                late.indicator_reply_token = token
-                late.conversation_reply_failed = False
+                late.reply_progress = reply_progress.ReplyProgress.silent(token)
                 await output.push_frame(late)
                 hold_text = False
                 cancel_without_audio = False
@@ -7261,8 +7276,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             rows = await turns_until(lambda turns: turns[-1]['state'] == 'failed')
             self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': expected_failure, 'state': 'failed'})
             late = LLMFullResponseEndFrame()
-            late.indicator_reply_token = old_token
-            late.conversation_reply_failed = False
+            late.reply_progress = reply_progress.ReplyProgress.silent(old_token)
             await output.push_frame(late)
             await barrier()
             self.assertNotIn('Unheard', json.dumps(rows))
