@@ -95,7 +95,7 @@ install -Dm644 systemd/kestrel-brain.service ~/.config/systemd/user/kestrel-brai
 install -Dm644 systemd/kestrel-voice.service ~/.config/systemd/user/kestrel-voice.service
 ```
 
-Select the retained snapshot with persistent `~/.config/systemd/user/kestrel-brain.service.d/zz-bonsai-27b.conf` and `~/.config/systemd/user/kestrel-voice.service.d/zz-bonsai-27b.conf`. Create them exclusively, preserving existing drop-ins. Replace `<full-commit>` below with the reviewed commit; retain exact ownership copies and the prior definition bytes for rollback.
+Select the retained snapshot with persistent `~/.config/systemd/user/kestrel-brain.service.d/zz-kestrel.conf` and `~/.config/systemd/user/kestrel-voice.service.d/zz-kestrel.conf`. Where a file already exists, save its exact prior bytes first, then update it in place; otherwise create it exclusively. Other drop-ins stay as they are. Replace `<full-commit>` below with the reviewed commit; retain exact ownership copies and the prior definition bytes for rollback.
 
 Brain drop-in:
 
@@ -134,7 +134,7 @@ systemctl --user status kestrel-brain.service kestrel-voice.service
 
 Startup leaves conversation inactive. Verify the actual Bonsai alias, 64,000-token context, CUDA/F16 placement, CPU speech and local readiness before activation; `/health` alone does not establish model identity. Confirm that a request without the key is refused: `curl -q --noproxy '*' -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/models` prints `401`. Restart once with `systemctl --user restart kestrel-voice.service` and repeat effective-path/readiness/inactive checks. This verifies a service restart; graphical-login and reboot behaviour require their own observation.
 
-For rollback, stop voice first and verify both units, owned children, socket and graphics allocation have released. Use `cmp` against saved owned copies before removing only this installation's exact `zz-bonsai-27b.conf` files with `rm -i`; restore captured prior definition bytes, preserving unrelated drop-ins. Run `systemctl --user daemon-reload`, repeat `cat`/`show` above, and restore the recorded prior active state with `systemctl --user start kestrel-voice.service` only when it was previously active and voice is intended. Preserve installation snapshots and private owner stores.
+For rollback, stop voice first and verify both units, owned children, socket and graphics allocation have released. Use `cmp` against saved owned copies before changing this installation's exact `zz-kestrel.conf` files: where prior bytes were saved, restore them over the file; remove the file with `rm -i` only where this installation created it. Unrelated drop-ins are preserved. Run `systemctl --user daemon-reload`, repeat `cat`/`show` above, and restore the recorded prior active state with `systemctl --user start kestrel-voice.service` only when it was previously active and voice is intended. Preserve installation snapshots and private owner stores.
 
 Use the effective voice `WorkingDirectory` for its notes `.runtime/hermes-memory/` and traces `.runtime/hermes-traces/`. Inspect `StandardOutput` and the drop-ins for actual log destinations. The unchanged root-main GUI plugin and shortcut may remain at `~/Projects/zaingulel/kestrel/desktop` when `Panel.qml`, `Conversation.qml`, `Service.qml`, `NativeInputs.qml`, `control.py`, `status.py` and `conversation.py` are byte-identical to the retained installation. This preserves the local control protocol; otherwise use matching reviewed interface files before enabling controls.
 
