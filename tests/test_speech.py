@@ -41,6 +41,16 @@ def reply_record(token=None, delivery='neutral'):
     return record
 
 
+async def open_section(voice, context_id, record):
+    # The public path a turn takes: a labelled start frame, then the turn's context opens its section.
+    start = LLMFullResponseStartFrame()
+    start.reply_progress = record
+    await voice.process_frame(start, speech.FrameDirection.DOWNSTREAM)
+    await voice.on_turn_context_created(context_id)
+    await voice.create_audio_context(context_id)
+    return voice.section(context_id)
+
+
 class VoicePresetTests(unittest.TestCase):
     def setUp(self):
         home = tempfile.TemporaryDirectory()
@@ -506,8 +516,8 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                 voice = speech.PhononTTS(model)
                 self.assertIsInstance(voice, speech.ConversationTTS)
                 self.assertEqual(voice.settings.voice, 'bryony')
-                record = reply_record()
-                voice._sections['turn'] = record.open_section(delivery)
+                record = reply_record(delivery=delivery)
+                await open_section(voice, 'turn', record)
                 frames = [frame async for frame in voice.run_tts('The answer is 18.', 'turn')]
                 model.stream.assert_called_once_with('The answer is eighteen.', voice='bryony', seed=1234)
                 stream.close.assert_called_once_with()
@@ -546,8 +556,7 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                 if fault == 'stream creation':
                     model.stream.side_effect = ValueError('native stream failed')
                 voice = speech.PhononTTS(model)
-                context = reply_record(object()).open_section('neutral')
-                voice._sections['invalid'] = context
+                context = await open_section(voice, 'invalid', reply_record(object()))
                 voice.push_frame = AsyncMock()
                 emitted = []
                 with self.assertRaisesRegex(RuntimeError, 'Phonon.*[Rr]estart'):
@@ -564,7 +573,7 @@ class PhononTests(unittest.IsolatedAsyncioTestCase):
                     stream.close.assert_called_once_with()
         model = Mock(sample_rate=24000, voices=['default'])
         voice = speech.PhononTTS(model)
-        voice._sections['invalid'] = reply_record().open_section('unknown')
+        await open_section(voice, 'invalid', reply_record(delivery='unknown'))
         with self.assertRaisesRegex(RuntimeError, 'Invalid internal speech delivery'):
             _ = [frame async for frame in voice.run_tts('Refuse invalid delivery.', 'invalid')]
         model.stream.assert_not_called()
@@ -1101,7 +1110,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
         first_session = VoxCPMTTS(model, TEST_PRESET)
         second_session = VoxCPMTTS(model, TEST_PRESET)
-        first_session._sections['expressive'] = reply_record().open_section('gently_pleased')
+        await open_section(first_session, 'expressive', reply_record(delivery='gently_pleased'))
         for service, text, context_id in [
             (first_session, "Hello.", "expressive"), (first_session, "How are you?", "expressive"),
             (first_session, "Here is another reply.", "turn"), (second_session, "Welcome back.", "turn"),
@@ -1202,7 +1211,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 frames = [frame async for frame in voice.run_tts(text, 'turn')]
                 self.assertEqual(model.generate_streaming.call_args.kwargs['text'], expected)
                 self.assertEqual(len(frames), 1)
-        voice._sections['expressive'] = reply_record().open_section('gently_pleased')
+        await open_section(voice, 'expressive', reply_record(delivery='gently_pleased'))
         frames = [frame async for frame in voice.run_tts('The answer is 18.', 'expressive')]
         self.assertEqual(model.generate_streaming.call_args.kwargs['text'],
                          '(Gently pleased, with a subtle smile in the voice) The answer is eighteen.')
@@ -1350,8 +1359,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(text.reply_progress.span_of(text)[0], started_frame.reply_progress.section_of(started_frame))
                 await voice.push_frame(TTSStoppedFrame(context_id='malformed'))
                 await voice.on_audio_context_completed('malformed')
-            original = record.open_section('neutral')
-            voice._sections['replacement'] = original
+            await voice.on_turn_context_created('replacement')
+            await voice.create_audio_context('replacement')
+            original = voice.section('replacement')
             retained = [f async for f in voice.run_tts('Replacement.', 'replacement')]
             self.assertEqual(original.pending_text_starts, [])
             replacement = record.open_section('neutral')
@@ -1414,8 +1424,8 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         generation_lock = asyncio.Lock()
         voice = VoxCPMTTS(model, TEST_PRESET, generation_lock=generation_lock)
         fresh = VoxCPMTTS(model, TEST_PRESET, generation_lock=generation_lock)
-        old_reply = reply_record()
-        voice._sections['old'] = old_reply.open_section('curious')
+        old_reply = reply_record(delivery='curious')
+        await open_section(voice, 'old', old_reply)
         old_frames = []
 
         async def consume(adapter, text, frames):
