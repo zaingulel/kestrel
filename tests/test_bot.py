@@ -1295,7 +1295,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
 class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
     async def test_help_only_handles_completed_exact_user_turns(self):
         expected = ("I can talk with you, answer general knowledge questions and keep short notes between conversations. "
-                    "You can say: mute; set the volume to thirty; pause music; next track; "
+                    "You can say: mute; unmute; set the volume to thirty; pause music; next track; "
                     "workspace three; open followed by an installed app's exact name; take a screenshot. "
                     "None of these tools needs permission first. "
                     "You can also say repeat that, stop, that's all, or what can I say. "
@@ -1401,7 +1401,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -1593,7 +1593,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -1601,7 +1601,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 self.assertIs(bot.match_instant_tool(text), tool)
         for text in ('mute?', '"mute"', 'mute!!', 'do not mute', 'mute this',
-                     'unmute', 'please mute', 'mute; echo bad', '', 'mute\nnow'):
+                     'please mute', 'mute; echo bad', '', 'mute\nnow'):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
@@ -1609,12 +1609,71 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(bot.match_instant_tool('mute'))
 
 
+    def test_only_exact_unmute_selects_its_free_tool(self):
+        tool = bot.LOCAL_TOOLS['unmute']
+        self.assertEqual(tool.permission, bot.PermissionTier.FREE)
+        for text in ('unmute', ' UNMUTE ', 'unmute.', 'Unmute!'):
+            with self.subTest(text=text):
+                self.assertIs(bot.match_instant_tool(text), tool)
+        for text in ('unmute?', '"unmute"', 'unmute!!', 'do not unmute', 'unmute this', 'please unmute',
+                     'un mute', 'unmute; echo bad', 'unmute\nnow'):
+            with self.subTest(text=text):
+                self.assertIsNone(bot.match_instant_tool(text))
+        for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
+            with patch.dict(bot.LOCAL_TOOLS, unmute=bot.LocalTool(permission, AsyncMock(), 'unmute', 'unmute')):
+                self.assertIsNone(bot.match_instant_tool('unmute'))
+
+    async def test_exact_unmute_says_unmuted_only_after_confirmation_and_advises_on_failure(self):
+        write = ('/usr/bin/pactl', 'set-sink-mute', 'physical', '0')
+        for readback in ('Mute: no', 'Mute: yes'):
+            with self.subTest(readback=readback):
+                events = []
+                replies = iter(['selected', 'physical', 'Mute: yes', '', 'selected', 'physical', readback])
+
+                async def command(argv):
+                    events.append(argv)
+                    return '' if argv[0] == '/usr/bin/notify-send' else next(replies)
+
+                async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+                    events.append(frame)
+
+                service = hermes_service(local_command=command)
+                service.channel.failure = 'This direct processor fixture has no engine'
+                service.push_frame = push_frame
+                self.addAsyncCleanup(service.local_actions.close)
+                context = bot.LLMContext([{'role': 'user', 'content': 'unmute'}])
+                await service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM)
+                speech_frames = [event for event in events if isinstance(event, bot.TTSSpeakFrame)]
+                self.assertEqual(context.get_messages(), [])
+                self.assertEqual(events.count(write), 1)
+                if readback == 'Mute: no':
+                    self.assertEqual([frame.text for frame in speech_frames], ['Unmuted.'])
+                    self.assertFalse(speech_frames[0].append_to_context)
+                    self.assertGreater(events.index(speech_frames[0]),
+                                       max(i for i, event in enumerate(events) if isinstance(event, tuple)))
+                    self.assertEqual([(item.subject, item.result) for item in service.outcomes],
+                                     [('unmute', bot.AudioResult(True, True, 'confirmed'))])
+                    service.accept_request(object())
+                    events.clear()
+                    stop = bot.LLMContext([{'role': 'user', 'content': 'stop'}])
+                    await service.process_frame(request_frame(service, stop), FrameDirection.DOWNSTREAM)
+                    self.assertEqual([event.text for event in events if isinstance(event, bot.TTSSpeakFrame)],
+                                     ["Stopped. Done: unmute. I won't undo anything."])
+                else:
+                    self.assertEqual([frame.text for frame in speech_frames],
+                                     ["I couldn't confirm unmute. Check the audio control. I won't retry."])
+                    self.assertEqual([event for event in events if isinstance(event, tuple)
+                                      and event[0] == '/usr/bin/notify-send'], [(
+                        '/usr/bin/notify-send', '--app-name=Kestrel', '--transient',
+                        '--hint=boolean:suppress-sound:true', 'Unmute could not be confirmed',
+                        'Check the audio control. Kestrel will not retry.')])
+
     async def test_mute_sets_one_captured_sink_and_requires_readback(self):
         command = AsyncMock(side_effect=[
             'processing.sink\n', 'alsa_output.test\n', 'Mute: no\n', '',
             'processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n',
         ])
-        result = await bot.mute_output(command=command)
+        result = await bot.set_output_mute(True, command=command)
         self.assertTrue(result.confirmed)
         self.assertTrue(result.attempted)
         self.assertEqual(command.await_args_list, [
@@ -1628,6 +1687,49 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         ])
 
 
+    async def test_unmute_sets_one_captured_sink_and_requires_readback(self):
+        reads = ('/usr/bin/pactl', 'get-default-sink'), ('/usr/bin/omarchy-audio-output-sink', 'processing.sink')
+        status = ('/usr/bin/pactl', 'get-sink-mute', 'alsa_output.test')
+        write = ('/usr/bin/pactl', 'set-sink-mute', 'alsa_output.test', '0')
+        before = ['processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n', '']
+        for label, outputs, expected, calls in (
+            ('success', before + ['processing.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
+             bot.AudioResult(True, True, 'confirmed'), [*reads, status, write, *reads, status]),
+            ('already unmuted', ['processing.sink\n', 'alsa_output.test\n', 'Mute: no\n',
+                                'processing.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
+             bot.AudioResult(True, False, 'already unmuted'), [*reads, status, *reads, status]),
+            ('readback still muted', before + ['processing.sink\n', 'alsa_output.test\n', 'Mute: yes\n'],
+             bot.AudioResult(False, True, 'readback unconfirmed'), [*reads, status, write, *reads, status]),
+            ('changed default', before + ['other.sink\n', 'alsa_output.test\n', 'Mute: no\n'],
+             bot.AudioResult(False, True, 'target changed'),
+             [*reads, status, write, reads[0], ('/usr/bin/omarchy-audio-output-sink', 'other.sink'), status]),
+            ('corrupt status', ['processing.sink\n', 'alsa_output.test\n', 'Mute: YES'],
+             bot.AudioResult(False, False, 'invalid status'), [*reads, status]),
+        ):
+            with self.subTest(label):
+                command = AsyncMock(side_effect=outputs)
+                result = await bot.set_output_mute(False, command=command)
+                self.assertEqual(result, expected)
+                self.assertEqual(command.await_args_list, [call(argv) for argv in calls])
+                writes = [c for c in command.await_args_list if c.args[0][1] == 'set-sink-mute']
+                self.assertEqual(writes, [call(write)] if expected.attempted else [])
+        commands = []
+
+        async def hung(argv):
+            commands.append(argv)
+            if argv[1] == 'get-default-sink':
+                return 'processing.sink'
+            if argv[0] == '/usr/bin/omarchy-audio-output-sink':
+                return 'alsa_output.test'
+            if argv[1] == 'get-sink-mute':
+                return 'Mute: yes'
+            await asyncio.Future()
+
+        with patch.object(bot, 'MUTE_TIMEOUT', 0.01, create=True):
+            result = await asyncio.wait_for(bot.set_output_mute(False, command=hung), 5)
+        self.assertEqual(result, bot.AudioResult(False, True, 'unmute timeout'))
+        self.assertEqual(commands[-1], write)
+
     async def test_already_muted_is_a_verified_noop(self):
         for after_default, after_sink, after_status, confirmed, reason in (
             ('selected', 'physical', 'Mute: yes', True, 'already muted'),
@@ -1640,7 +1742,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     'selected\n', 'physical\n', 'Mute: yes\n',
                     after_default, after_sink, after_status,
                 ])
-                result = await bot.mute_output(command=command)
+                result = await bot.set_output_mute(True, command=command)
                 self.assertEqual(result, bot.AudioResult(confirmed, False, reason))
                 self.assertEqual(command.await_args_list, [
                     call(('/usr/bin/pactl', 'get-default-sink')),
@@ -1674,7 +1776,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         for outputs, attempted, count, reason in cases:
             with self.subTest(outputs=outputs):
                 command = AsyncMock(side_effect=outputs)
-                result = await bot.mute_output(command=command)
+                result = await bot.set_output_mute(True, command=command)
                 self.assertFalse(result.confirmed)
                 self.assertEqual(result.attempted, attempted)
                 self.assertEqual(result.reason, reason)
@@ -1702,7 +1804,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 stopped.set()
 
         with patch.object(bot, 'MUTE_TIMEOUT', 0.01, create=True):
-            result = await asyncio.wait_for(bot.mute_output(command=hung), 5)
+            result = await asyncio.wait_for(bot.set_output_mute(True, command=hung), 5)
         self.assertTrue(started.is_set())
         self.assertTrue(stopped.is_set())
         self.assertEqual(result, bot.AudioResult(False, True, 'mute timeout'))
@@ -1710,7 +1812,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         commands.clear()
         started.clear()
         stopped.clear()
-        task = asyncio.create_task(bot.mute_output(command=hung))
+        task = asyncio.create_task(bot.set_output_mute(True, command=hung))
         await asyncio.wait_for(started.wait(), 5)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -4122,6 +4224,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
               ('/usr/bin/pactl', 'get-default-sink'),
               ('/usr/bin/omarchy-audio-output-sink', 'selected'),
               ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
+            ('unmute', {}, 'unmute',
+             ['selected', 'physical', 'Mute: yes', '', 'selected', 'physical', 'Mute: no'],
+             [('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical'),
+              ('/usr/bin/pactl', 'set-sink-mute', 'physical', '0'),
+              ('/usr/bin/pactl', 'get-default-sink'),
+              ('/usr/bin/omarchy-audio-output-sink', 'selected'),
+              ('/usr/bin/pactl', 'get-sink-mute', 'physical')]),
             ('set_volume', {'percent': 30}, 'set volume to thirty',
              ['selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
               '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
@@ -4191,6 +4302,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(brain.requests), 2 * index + 2)
                     if name == 'mute':
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
+                    if name == 'unmute':
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Unmuted.')
                     if name == 'set_volume':
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
                     self.assertTrue(spoken.empty())
@@ -8876,7 +8989,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         self.assertIn(
             hermes_worker.SYSTEM_PROMPT,
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
