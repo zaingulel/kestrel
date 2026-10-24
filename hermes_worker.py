@@ -722,8 +722,8 @@ def main(*, base_url=BONSAI_URL):
                         raise ValueError('Expected a preparation, begin or messages request')
                     if set(request) == {'begin'} and request['begin'] is True:
                         begun = False
-                        outside = False
                         close_agent()
+                        outside = False
                         validate_runtime_home(home)
                         if not attached:
                             attach_memory_storage(home, scaffold_identity=scaffold_identity)

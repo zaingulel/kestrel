@@ -2032,9 +2032,15 @@ class NativeHermesTests(unittest.TestCase):
                    call('seed-plain', 'memory', {'action': 'add', 'target': 'memory',
                                                  'content': 'Caller likes cedar nonce-731.'}),
                    say('Seeded.')]
-        for _, reply in kinds:
+        same_request = [('same-plain', 'memory', {'action': 'add', 'target': 'memory',
+                                                  'content': 'Same request note nonce-736.'}),
+                        ('same-app', 'open_app', {'name': 'Terminal'})]
+        for kind, reply in kinds:
             if reply is not None:
-                replies.extend((call('next', 'next_track', {}), say('Skipped.')))
+                replies.append(call('next', 'next_track', {}))
+                if kind == 'calendar event':
+                    replies.extend(call(*step) for step in same_request)
+                replies.append(say('Skipped.'))
             replies.extend(call(*step) for step in locked)
             replies.append(say('Answered.'))
         replies.extend((call('final-plain', 'memory', {'action': 'add', 'target': 'memory',
@@ -2059,8 +2065,15 @@ class NativeHermesTests(unittest.TestCase):
                         history.append({'role': 'tool', 'name': 'next_track', 'arguments': {},
                                         'content': 'Track skipped. ' + payload})
                     else:
+                        refusals = [{'tool_refused': True}] * 2 if kind == 'calendar event' else []
                         self.assertEqual(worker.request(history, results=[json.dumps(reply).encode() + b'\n']),
-                                         [{'tool_call': {'name': 'next_track', 'arguments': {}}}, *spoken('Skipped.')])
+                                         [{'tool_call': {'name': 'next_track', 'arguments': {}}}, *refusals,
+                                          *spoken('Skipped.')])
+                        if refusals:
+                            self.assertEqual(results(brain.requests[-1], {'same-plain', 'same-app'}), {
+                                'same-plain': {'success': False, 'error': hermes_worker.OUTSIDE_TEXT_REFUSAL},
+                                'same-app': refused})
+                            self.assertEqual({path.name: path.read_bytes() for path in notes.iterdir()}, seeded)
                         history.append({'role': 'assistant', 'content': 'Skipped.'})
                     history.append({'role': 'user', 'content': 'Save a note, open Terminal, screenshot and mute.'})
                     events = worker.request(history, results=[json.dumps(
