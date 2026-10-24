@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from copy import deepcopy
 import io
 import hashlib
@@ -1457,6 +1458,10 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         service.channel.failure = 'This direct processor fixture has no engine'
         context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
         frame = request_frame(service, context)
+        # This fixture has no output to play Muting., so the announcement bound releases at once.
+        timeout = patch.object(bot, 'ANNOUNCEMENT_TIMEOUT', 0)
+        timeout.start()
+        self.addCleanup(timeout.stop)
         processing = asyncio.create_task(service.process_frame(frame, FrameDirection.DOWNSTREAM))
         try:
             await asyncio.wait_for(started.wait(), 5)
@@ -1475,6 +1480,117 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             if not processing.done():
                 processing.cancel()
             await asyncio.gather(processing, return_exceptions=True)
+
+    async def test_exact_mute_announcement_waits_for_playback_with_bounded_release(self):
+        mute = ('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')
+        for case in ('played', 'interrupted', 'not fully played', 'synthesis failed', 'conversation ended',
+                     'request superseded', 'timed out', 'stale interruption'):
+            with self.subTest(case=case):
+                replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
+                calls = []
+
+                async def command(argv):
+                    calls.append(argv)
+                    return next(replies)
+
+                service = hermes_service(local_command=command)
+                pushed = []
+                first_push = asyncio.Event()
+
+                async def push_frame(frame, direction=FrameDirection.DOWNSTREAM):
+                    pushed.append(frame)
+                    first_push.set()
+
+                service.push_frame = push_frame
+                token = service._indicator_reply
+                audio_context = speech.ConversationAudioContext(token, pending_text_starts=[(0, 'Muting.')])
+                start = TTSStartedFrame()
+                start.conversation_audio_context = audio_context
+                stopped = TTSStoppedFrame()
+                stopped.conversation_audio_context = audio_context
+                audio = TTSAudioRawFrame(bytes(960), 48000, 1)
+                context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
+                held = case == 'request superseded'
+                if held:
+                    await service.local_actions.lock.acquire()
+                processing = asyncio.create_task(
+                    service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM))
+                try:
+                    with (patch.object(bot.logger, 'warning') as warning,
+                          patch.object(bot, 'ANNOUNCEMENT_TIMEOUT', 0) if case == 'timed out' else nullcontext()):
+                        if held:
+                            async def scheduled():
+                                while not service.local_actions.tasks:
+                                    await asyncio.sleep(0)
+
+                            await asyncio.wait_for(scheduled(), 10)
+                            service.accept_request(object())
+                            service.local_actions.lock.release()
+                            held = False
+                        elif case != 'timed out':
+                            await asyncio.wait_for(first_push.wait(), 10)
+                            self.assertIsInstance(pushed[0], bot.TTSSpeakFrame)
+                            self.assertEqual(pushed[0].text, 'Muting.')
+                            self.assertFalse(pushed[0].append_to_context)
+                            self.assertIs(pushed[0].conversation_reply_token, token)
+                            self.assertIsInstance(pushed[1], bot.AnnouncementMarkFrame)
+                            self.assertEqual(calls, [])
+                            played = service._announcement[2]
+                            self.assertFalse(played.done())
+                            marker = pushed[1]
+                            if case == 'played':
+                                for frame in (bot.AnnouncementMarkFrame(), start, audio, stopped):
+                                    service.conversation_output(frame)
+                                    self.assertFalse(played.done(), f'{type(frame).__name__} cannot confirm playback')
+                                service.conversation_output(marker)
+                            elif case == 'interrupted':
+                                foreign = speech.ConversationSynthesisFailedFrame(
+                                    context=speech.ConversationAudioContext(object()))
+                                for frame in (start, audio, stopped, foreign):
+                                    service.conversation_output(frame)
+                                    self.assertFalse(played.done(), f'{type(frame).__name__} cannot release mute')
+                                interruption = InterruptionFrame()
+                                interruption.conversation_reply_token = token
+                                service.conversation_output(interruption)
+                            elif case == 'not fully played':
+                                service.conversation_output(marker)
+                            elif case == 'stale interruption':
+                                stale = [InterruptionFrame(), InterruptionFrame(), InterruptionFrame()]
+                                stale[1].conversation_reply_token = None
+                                stale[2].conversation_reply_token = object()
+                                for frame in stale:
+                                    service.conversation_output(frame)
+                                    self.assertFalse(played.done(), 'An earlier interruption cannot release mute')
+                                    self.assertEqual(calls, [])
+                                for frame in (start, audio, stopped, marker):
+                                    service.conversation_output(frame)
+                            elif case == 'synthesis failed':
+                                service.conversation_output(speech.ConversationSynthesisFailedFrame(context=audio_context))
+                            else:
+                                service.admitted = lambda: False
+                                service.revoke()
+                        await asyncio.wait_for(processing, 10)
+                    if case == 'conversation ended':
+                        self.assertEqual(calls, [])
+                    else:
+                        self.assertEqual(calls.count(mute), 1)
+                    if case == 'request superseded':
+                        self.assertEqual(pushed, [])
+                    if case == 'played':
+                        self.assertEqual(len(pushed[2:]), 1)
+                        self.assertIs(type(pushed[2]), LLMFullResponseEndFrame)
+                        self.assertIs(pushed[2].indicator_reply_token, token)
+                    if case in ('played', 'stale interruption'):
+                        warning.assert_not_called()
+                    else:
+                        warning.assert_called_once_with(f"Playback of 'Muting.' was not confirmed: {case}")
+                finally:
+                    if held:
+                        service.local_actions.lock.release()
+                    await service.local_actions.close()
+                    if not processing.done():
+                        processing.cancel()
+                    await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
         self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
@@ -4012,6 +4128,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                     self.assertEqual(command.await_args_list, [call(item) for item in argv])
                     self.assertEqual(len(brain.requests), 2 * index + 2)
+                    if name == 'mute':
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                     if name == 'set_volume':
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
                     self.assertTrue(spoken.empty())
@@ -6774,11 +6892,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await start()
             await self.finish_user_turn(transport, 'mute')
             await barrier()
-            rows = await turns_until(lambda turns: turns[-1]['text'] == 'mute')
-            self.assertEqual(len(rows), count_before_mute + 1, 'A silent tool creates only the finalized user row')
-            self.assertEqual(rows[-1], {'speaker': 'you', 'text': 'mute', 'state': 'complete', 'source': 'spoken'})
+            rows = await turns_until(
+                lambda turns: turns[-1] == {'speaker': 'kestrel', 'text': 'Muting.', 'state': 'complete'})
+            self.assertEqual(len(rows), count_before_mute + 2, 'Mute creates the finalized user row and its Muting. reply')
+            self.assertEqual(rows[-2], {'speaker': 'you', 'text': 'mute', 'state': 'complete', 'source': 'spoken'})
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
             self.assertTrue(spoken.empty())
-            self.assertEqual(len(brain.requests), 5, 'Silent controls make no engine request')
+            self.assertEqual(len(brain.requests), 5, 'Local controls make no engine request')
             await start()
             await self.finish_user_turn(transport, 'Brain failure turn')
             expected_failure = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
@@ -7985,6 +8105,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await transport.input().queue_frame(barrier)
                         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                         self.assertEqual(command.await_count, 7)
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                         self.assertTrue(spoken.empty())
                         self.assertTrue(committed.empty())
                         await self.assert_failed_reply(
@@ -8230,6 +8351,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(preparation.done())
             self.assertFalse(release.is_set())
             self.assertEqual(len(brain.requests), 1)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
             self.assertTrue(spoken.empty())
             self.assertTrue(committed.empty())
 
@@ -8371,6 +8493,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await transport.input().queue_frame(barrier)
                         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                         self.assertEqual(command.await_count, 7 * (activation + 1))
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                         self.assertTrue(spoken.empty())
                         self.assertTrue(committed.empty())
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
@@ -8568,6 +8691,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'mute')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5),
                          "I couldn't confirm mute. Check the audio control. I won't retry.")
         barrier = DataFrame()
@@ -8631,29 +8755,55 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'A fresh question.'}])
 
-    async def test_exact_mute_is_silent_makes_no_brain_request_and_stays_out_of_history(self):
+    async def test_exact_mute_says_muting_first_makes_no_brain_request_and_stays_out_of_history(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nOrdinary reply.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)
         completed = asyncio.Event()
+        queued = asyncio.Event()
+        played = asyncio.Event()
         replies = iter(['selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes'])
         calls = []
+        early = []
 
         async def command(argv):
             calls.append(argv)
+            if not played.is_set():
+                early.append(argv)
             result = next(replies)
             if len(calls) == 7:
                 completed.set()
             return result
 
         transport, spoken, committed, _, _, _ = await self.open_session(brain, local_command=command)
-        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-        await self.finish_user_turn(transport, ' MUTE! ')
-        await asyncio.wait_for(completed.wait(), 5)
-        # TTS serializes this barrier after earlier speech, before a new turn can interrupt it.
-        barrier = DataFrame()
-        await transport.input().queue_frame(barrier)
-        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
-        self.assertTrue(spoken.empty(), 'Confirmed mute must be silent before the next user turn')
+        output = transport.output()
+
+        @output.event_handler('on_after_process_frame')
+        async def stop_queued(processor, frame):
+            if isinstance(frame, TTSStoppedFrame):
+                queued.set()
+
+        @output.event_handler('on_after_push_frame')
+        async def stop_played(processor, frame):
+            if isinstance(frame, TTSStoppedFrame):
+                played.set()
+
+        output.write_gate.clear()
+        with patch.object(bot.logger, 'warning', wraps=bot.logger.warning) as warning:
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, ' MUTE! ')
+            await asyncio.wait_for(queued.wait(), 5)
+            self.assertEqual(calls, [], 'Mute waits while Muting. is still being played')
+            output.write_gate.set()
+            await asyncio.wait_for(completed.wait(), 5)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
+            self.assertEqual(early, [])
+            # TTS serializes this barrier after earlier speech, before a new turn can interrupt it.
+            barrier = DataFrame()
+            await transport.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertEqual([entry for entry in warning.call_args_list
+                          if str(entry.args[0]).startswith("Playback of 'Muting.'")], [])
+        self.assertTrue(spoken.empty(), 'Confirmed mute adds nothing after Muting.')
         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
         await self.finish_user_turn(transport, 'An ordinary conversation turn.')
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary reply.')
@@ -8759,6 +8909,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(muted, 'The later completed mute remains effective')
                     self.assertTrue(all(task.done() for task in action_tasks.values()))
                     self.assertFalse(transport.llm.local_actions.tasks)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
             finally:
@@ -8974,6 +9125,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             barrier = DataFrame()
             await transport.input().queue_frame(barrier)
             self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
             self.assertTrue(spoken.empty(), 'A handled mute must not speak an engine error')
             self.assertEqual(command.await_count, 7)
             self.assertEqual(command.await_args_list.count(
@@ -9039,11 +9191,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await transport.input().queue_frame(barrier)
         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
         self.assertEqual(command.await_count, 7, 'Local mute completes before the blocked provider is released')
+        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
         self.assertFalse(release.is_set())
         release.set()
         self.assertTrue(await asyncio.to_thread(finished.wait, 5))
         await asyncio.wait_for(asyncio.shield(transport.llm.channel.preparation or transport.llm.channel.reader), 5)
-        self.assertTrue(spoken.empty(), 'Neither mute acknowledgement nor obsolete tail may be spoken')
+        self.assertTrue(spoken.empty(), 'Nothing after Muting. and no obsolete tail may be spoken')
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual([m for m in brain.requests[0][2]['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'Tell me something.'},
@@ -9084,6 +9237,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                         self.assertEqual([argv for argv in calls if argv[0] == '/usr/bin/notify-send'],
                                          [notification])
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), failure)
                         self.assertTrue(spoken.empty())
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
@@ -9127,6 +9281,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, 'mute')
                 await asyncio.wait_for(writes_started.wait(), 5)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                 interrupted.clear()
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await asyncio.wait_for(interrupted.wait(), 5)
@@ -9135,7 +9290,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(notified.wait(), 5)
                 await asyncio.wait_for(asyncio.shield(action_tasks[0]), 5)
                 await self.finish_user_turn(transport, 'repeat that')
-                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
                 barrier = DataFrame()
                 await transport.input().queue_frame(barrier)
                 self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
