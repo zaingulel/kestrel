@@ -242,24 +242,26 @@ async def read_output_mute(sink: str, *, command=run_local_command) -> str:
     return status
 
 
-async def mute_output(*, command=run_local_command):
+async def set_output_mute(muted: bool, *, command=run_local_command) -> AudioResult:
+    wanted = 'Mute: yes' if muted else 'Mute: no'
     attempted = False
     try:
         async with asyncio.timeout(MUTE_TIMEOUT):
             default, sink = await read_selected_output(command=command)
-            already_muted = await read_output_mute(sink, command=command) == 'Mute: yes'
-            if not already_muted:
+            already_set = await read_output_mute(sink, command=command) == wanted
+            if not already_set:
                 attempted = True
-                await command(('/usr/bin/pactl', 'set-sink-mute', sink, '1'))
+                await command(('/usr/bin/pactl', 'set-sink-mute', sink, '1' if muted else '0'))
             after_default, after_sink = await read_selected_output(command=command)
             status = await read_output_mute(sink, command=command)
             if default != after_default or sink != after_sink:
                 return AudioResult(False, attempted, 'target changed')
-            if status != 'Mute: yes':
+            if status != wanted:
                 return AudioResult(False, attempted, 'readback unconfirmed')
-            return AudioResult(True, attempted, 'already muted' if already_muted else 'confirmed')
+            return AudioResult(True, attempted, ('already muted' if muted else 'already unmuted') if already_set
+                               else 'confirmed')
     except TimeoutError:
-        return AudioResult(False, attempted, 'mute timeout')
+        return AudioResult(False, attempted, 'mute timeout' if muted else 'unmute timeout')
     except ValueError as error:
         return AudioResult(False, attempted, str(error))
     except RuntimeError:
@@ -531,7 +533,9 @@ async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool
 
 
 LOCAL_TOOLS = {
-    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute', 'mute', announcement='Muting.'),
+    'mute': LocalTool(PermissionTier.FREE, partial(set_output_mute, True), 'mute', 'mute', announcement='Muting.'),
+    'unmute': LocalTool(PermissionTier.FREE, partial(set_output_mute, False), 'unmute', 'unmute',
+                         confirmation='Unmuted.'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume', 'set the volume to thirty'),
     'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause', 'pause music'),
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track', 'next track'),
@@ -545,7 +549,7 @@ LOCAL_TOOLS = {
 BRIDGED_TOOL_KEYS = {'mute': 'mute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track',
                      'focus_workspace': 'workspace', 'open_app': 'open app', 'take_screenshot': 'take a screenshot'}
 # Exact app launches and screenshots stay outside stop accounting, as README's stop section says.
-EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'volume', 'pause music', 'next track', 'workspace'))
+EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace'))
 APP_LOOKUP_ADVISORY = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
 APP_MATCH_ADVISORY = "I couldn't find exactly one installed app with that name, so I didn't open anything."
 OUTSIDE_TEXT_ADVISORY = ("To keep you safe, I stop saving notes, opening apps and taking screenshots once I've read text "
@@ -620,7 +624,7 @@ def match_instant_tool(text):
     text = text.strip().lower()
     if text in ('mute', 'mute.', 'mute!'):
         return free_tool('mute')
-    match = re.fullmatch(r'(pause music|next track|take a screenshot)[.!]?', text)
+    match = re.fullmatch(r'(unmute|pause music|next track|take a screenshot)[.!]?', text)
     if match:
         return free_tool(match[1])
     match = re.fullmatch(r'workspace ([1-9][0-9]{0,9})[.!]?', text)
