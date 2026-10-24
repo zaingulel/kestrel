@@ -246,6 +246,7 @@ Product discovery and drilling with the owner must precede any further product i
 
 - `bot.py` owns conversation orchestration.
 - `app_resolver.py` owns native installed-app lookup.
+- `tool_actions.py` owns how Kestrel's tools run: each tool's run step, the open-app lookup step and the shared safe local-command runner; the engine process never loads it.
 - `speech.py` owns speech adapters.
 - `wakeword.py` owns the isolated local wake detector, pinned asset admission and bounded worker protocol.
 - `asr_worker.py` is the speech recognition process boundary.
@@ -265,7 +266,7 @@ Product discovery and drilling with the owner must precede any further product i
 | sign-off | Changes to microphone access, audio or transcript handling, the localhost brain service boundary, or the workflow trust perimeter. |
 | security review | The [privacy and runtime boundary](README.md#privacy-and-runtime-boundary): microphone and transcript handling, credentials, local runtime assets, local brain service exposure; runtime hooks, permission settings, workflow triggers and token permissions, and shared workflow integrity. |
 | hard to undo | Recordings, transcripts or credentials exposed through commits, logs or publication; loss or replacement of local microphone and model assets; repository hosting settings and rulesets. |
-| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
+| wide reach | This local contract and `.agents/REPOSITORY.md`; workflow instructions, gates and settings; `bot.py`, `tool_actions.py`, `speech.py`, `asr_worker.py`, `hermes_worker.py`, `run-voice.sh` and the operation manual. |
 
 Standing security guarantees:
 

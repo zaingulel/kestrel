@@ -122,7 +122,7 @@ class WorkerProcess:
 
     @staticmethod
     def command(home, brain, *, synthetic_default_home=None, trace_root=None, memory_root=None, non_streaming=False):
-        # Test-only containment observes even caught attempts, before permitting only this provider.
+        # Test-only containment observes even caught attempts: it refuses Kestrel's tool actions and every connection except this provider.
         bootstrap = '''
 import json, os, pathlib, sys
 from contextlib import nullcontext
@@ -137,6 +137,9 @@ def audit(event, args):
             output.write(json.dumps(address) + '\\n')
         if address != allowed:
             raise RuntimeError('Non-provider connection refused by test containment')
+    if event == 'import' and args[0] == 'tool_actions':
+        (home / 'tool-actions-imported').touch()
+        raise RuntimeError('Kestrel tool actions refused by test containment')
 sys.addaudithook(audit)
 import hermes_worker
 hermes_worker.TRACE_ROOT = pathlib.Path(TRACE_FIXTURE)
@@ -275,6 +278,8 @@ def native_worker(replies, *, synthetic_default_home=None, memory_root=None, non
                 yield worker, brain
             finally:
                 worker.close()
+                if (home / 'tool-actions-imported').exists():
+                    raise AssertionError('The engine process imported tool_actions')
                 connections = home / 'connections.jsonl'
                 if connections.exists():
                     attempted = [tuple(json.loads(line)) for line in connections.read_text().splitlines()]
@@ -2653,7 +2658,7 @@ class NativeHermesTests(unittest.TestCase):
 
     def test_conversation_source_confines_literal_endpoints(self):
         endpoints = []
-        for name in ('bot.py', 'hermes_worker.py'):
+        for name in ('bot.py', 'tool_actions.py', 'hermes_worker.py'):
             for node in ast.walk(ast.parse((ROOT / name).read_text())):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     endpoints.extend(re.findall(r"""https?://[^"'\s]*""", node.value))

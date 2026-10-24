@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 
 import app_resolver
 import bot
+import tool_actions
 
 
 class AppResolverTests(unittest.IsolatedAsyncioTestCase):
@@ -66,9 +67,9 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(argv[-2], '/usr/bin/gtk-launch')
                 probe = (*argv[:3], '-u', unit, '-p', 'RuntimeMaxSec=5s', *argv[3:-2],
                          '/usr/bin/python', '-I', '-c', receipt, socket_path, argv[-1])
-                return await bot.run_local_command(probe)
+                return await tool_actions.run_local_command(probe)
 
-            with patch.object(bot.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=home)), \
+            with patch.object(tool_actions.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=home)), \
                     patch.dict(os.environ, {'XDG_DATA_HOME': data_home, 'XDG_DATA_DIRS': data_dirs,
                                             'XDG_CURRENT_DESKTOP': 'Fixture_1'}):
                 name = bot.match_app_name('open Fixture Query')
@@ -242,7 +243,7 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     cleanup()
 
-            with patch.object(bot.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(caller))), \
+            with patch.object(tool_actions.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(caller))), \
                     patch.dict(os.environ, caller_env):
                 name = bot.match_app_name(f'open {query}')
                 self.assertEqual(name, query)
