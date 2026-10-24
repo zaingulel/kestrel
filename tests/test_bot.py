@@ -23,7 +23,7 @@ from loguru import logger
 from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
-    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, InputAudioRawFrame, LLMFullResponseEndFrame, LLMTextFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, ProposedUserStartedSpeakingFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, InputAudioRawFrame, LLMFullResponseEndFrame, LLMTextFrame, InterruptionFrame, LLMContextAssistantTurnFrame, LLMContextFrame, OutputAudioRawFrame, ProposedUserStartedSpeakingFrame,
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -36,6 +36,7 @@ from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserT
 
 import bot
 import hermes_worker
+import reply_progress
 import speech
 import tool_actions
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
@@ -4698,14 +4699,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                 class Output(BaseOutputTransport):
                     def __init__(self):
-                        super().__init__(TransportParams(audio_out_enabled=True, audio_out_sample_rate=48000))
+                        params = TransportParams(audio_out_enabled=True, audio_out_sample_rate=48000)
+                        super().__init__(params)
+                        self.output_buffer = reply_progress.OutputBuffer.for_params(params)
                         self.write_gate = asyncio.Event()
                         self.write_gate.set()
-                        self.conversation_audio_context = None
+                        self.reply_progress = None
 
                     async def write_transport_frame(self, frame):
                         if isinstance(frame, TTSStartedFrame):
-                            self.conversation_audio_context = getattr(frame, "conversation_audio_context", None)
+                            self.reply_progress = getattr(frame, "reply_progress", None)
                         await super().write_transport_frame(frame)
 
                     async def start(self, frame):
@@ -4714,11 +4717,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                     async def write_audio_frame(self, frame):
                         await self.write_gate.wait()
-                        context = self.conversation_audio_context if hasattr(self, 'conversation_audio_context') else None
+                        record = self.reply_progress if hasattr(self, 'reply_progress') else None
                         written = active() and not transport.closed and (reply_admitted is None or
-                                  (context is not None and reply_admitted(context.reply_token)))
+                                  (record is not None and reply_admitted(record.token)))
                         if written:
                             self.audio_written += 1
+                        else:
+                            self.output_buffer.write_failed(frame)
                         return written
 
                 transport = Mock(capture=None, failure=None, closed=False, admitted=active)
@@ -6521,6 +6526,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         async def controlled_write(frame):
             if fail_output:
                 current_context.write_failed = True
+                output.output_buffer.write_failed(frame)
                 return False
             if len(written) == 1:
                 second_write.set()
@@ -6870,6 +6876,179 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await close()
                     if scenario != 'Healthy synthesis.':
                         self.assertEqual(str(transport.service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
+
+    async def test_panel_resumes_text_from_replacement_audio_context(self):
+        from desktop import conversation
+        loop = asyncio.get_running_loop()
+        release_first, release_second = threading.Event(), threading.Event()
+        for release in (release_first, release_second):
+            self.addCleanup(release.set)
+        first_held, second_held = asyncio.Event(), asyncio.Event()
+        retirement_seen, frame_pushed = asyncio.Event(), asyncio.Event()
+        retired, pushed = [], []
+        native_completed = speech.VoxCPMTTS.on_audio_context_completed
+
+        async def observe_completed(voice, context_id):
+            await native_completed(voice, context_id)
+            retired.append(context_id)
+            retirement_seen.set()
+
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nHeld first. Ends late. Cut short. Then more.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+
+        def chunks(**kwargs):
+            text = kwargs['text']
+            if text == 'Cut short.':
+                # 1000 bytes stay under one 3840-byte output chunk, so the transport never writes them.
+                yield np.full(500, 0.5, dtype=np.float32)
+                loop.call_soon_threadsafe(second_held.set)
+                if not release_second.wait(45):
+                    raise AssertionError('Synthetic second hold was never released')
+                return
+            yield np.full(1920, 0.5, dtype=np.float32)
+            if text == 'Held first.':
+                loop.call_soon_threadsafe(first_held.set)
+                if not release_first.wait(45):
+                    raise AssertionError('Synthetic first hold was never released')
+                yield np.full(1920, 0.5, dtype=np.float32)
+
+        async def until(event, predicate):
+            async with asyncio.timeout(5):
+                while not predicate():
+                    event.clear()
+                    await event.wait()
+
+        def stopped_after_ends_late():
+            ends_late = next((index for index, frame in enumerate(pushed)
+                              if isinstance(frame, TTSTextFrame) and frame.text == 'Ends late.'), None)
+            return ends_late is not None and any(isinstance(frame, BotStoppedSpeakingFrame)
+                                                 for frame in pushed[ends_late + 1:])
+
+        with patch.object(speech.VoxCPMTTS, 'on_audio_context_completed', observe_completed):
+            transport, _, _, interrupted, _, close = await self.open_session(
+                brain, through_service=True, synthesis_chunks=chunks,
+            )
+            output = transport.output()
+
+            @output.event_handler('on_after_push_frame')
+            async def collect(processor, frame):
+                pushed.append(frame)
+                frame_pushed.set()
+
+            address = conversation.address()
+
+            async def snapshot():
+                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+                try:
+                    return json.loads(await asyncio.wait_for(reader.readline(), 1))['turns']
+                finally:
+                    peer = transport.llm.conversation.reader_task
+                    writer.close()
+                    await writer.wait_closed()
+                    if peer is not None:
+                        await asyncio.wait_for(peer, 1)
+
+            writer = None
+            try:
+                await asyncio.shield(transport.service.manager.session_ready)
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                await self.finish_user_turn(transport, 'Resume after a held stream.')
+                await asyncio.wait_for(first_held.wait(), 5)
+                await until(retirement_seen, lambda: len(retired) >= 1)
+                held_first = (await snapshot())[-1]
+                release_first.set()
+                await asyncio.wait_for(second_held.wait(), 5)
+                await until(retirement_seen, lambda: len(retired) >= 2)
+                await until(frame_pushed, stopped_after_ends_late)
+                held_second = (await snapshot())[-1]
+                reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(address), 1)
+                release_second.set()
+                async with asyncio.timeout(5):
+                    while True:
+                        rows = json.loads(await reader.readline()).get('turns')
+                        if rows and len(rows) >= 2 and rows[-2]['text'] == 'Resume after a held stream.' \
+                                and rows[-1]['state'] not in ('thinking', 'speaking'):
+                            break
+                retirements = len(retired)
+                self.assertEqual(rows[-1]['state'], 'failed')
+                self.assertEqual(rows[-1]['text'], 'Held first. Ends late. Then more.')
+                self.assertEqual(held_first, {'speaker': 'kestrel', 'text': 'Held first.', 'state': 'speaking'})
+                self.assertEqual(held_second, {'speaker': 'kestrel', 'text': 'Held first. Ends late.', 'state': 'speaking'})
+                self.assertEqual(len([frame for frame in pushed if isinstance(frame, TTSStartedFrame)]), 1)
+                self.assertEqual(retirements, 3)
+                self.assertEqual(b''.join(frame.audio for frame in pushed if isinstance(frame, TTSAudioRawFrame)),
+                                 b'\xff\x3f' * 1920 * 4)
+            finally:
+                release_first.set()
+                release_second.set()
+                if writer is not None:
+                    writer.close()
+                    await writer.wait_closed()
+                await close()
+
+    async def test_panel_new_reply_ignores_stale_output_after_unawaited_interruption(self):
+        from desktop import conversation
+        loop = asyncio.get_running_loop()
+        release_held = threading.Event()
+        self.addCleanup(release_held.set)
+        held, boundary_text = asyncio.Event(), asyncio.Event()
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
+            [({'content': '[delivery:neutral]\nBoundary first. Held second.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+
+        def chunks(**kwargs):
+            text = kwargs['text']
+            if text == 'Held second.':
+                loop.call_soon_threadsafe(held.set)
+                if not release_held.wait(45):
+                    raise AssertionError('Synthetic held sentence was never released')
+                return
+            # 3000 bytes stay under one 3840-byte output chunk, so 'Boundary first.' keeps a pending span.
+            yield np.full(1500 if text == 'Boundary first.' else 1920, 0.5, dtype=np.float32)
+
+        transport, _, _, interrupted, _, close = await self.open_session(
+            brain, through_service=True, synthesis_chunks=chunks,
+        )
+
+        @transport.output().event_handler('on_after_push_frame')
+        async def observe(processor, frame):
+            if isinstance(frame, TTSTextFrame) and frame.text == 'Boundary first.':
+                boundary_text.set()
+
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(conversation.address()), 1)
+
+        async def rows_until(predicate):
+            async with asyncio.timeout(5):
+                while True:
+                    rows = json.loads(await reader.readline()).get('turns')
+                    if rows and len(rows) >= 4 and rows[-2]['text'] == 'What can I say?' and predicate(rows):
+                        return rows
+
+        try:
+            await asyncio.shield(transport.service.manager.session_ready)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await asyncio.wait_for(interrupted.wait(), 5)
+            await self.finish_user_turn(transport, 'Start a boundary reply.')
+            await asyncio.wait_for(boundary_text.wait(), 5)
+            await asyncio.wait_for(held.wait(), 5)
+            await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(transport, 'What can I say?')
+            await rows_until(lambda rows: rows[-3]['state'] == 'interrupted' and rows[-1]['state'] == 'thinking')
+            release_held.set()
+            rows = await rows_until(lambda rows: rows[-1]['state'] not in ('thinking', 'speaking'))
+            self.assertEqual(rows[-1], {'speaker': 'kestrel', 'text': bot.capability_help(), 'state': 'complete'})
+            self.assertEqual(rows[-3], {'speaker': 'kestrel', 'text': '', 'state': 'interrupted'})
+        finally:
+            release_held.set()
+            writer.close()
+            await writer.wait_closed()
+            await close()
 
     async def test_panel_receives_final_turns_and_spoken_prefix(self):
         from desktop import conversation
@@ -10157,6 +10336,373 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             '(Warm, gentle and reassuring, speaking calmly) One fact.',
             'One fact.', 'Next step.', 'Fresh session.',
         ])
+
+
+class ReplyProgressTests(unittest.TestCase):
+    """The output mirror and reply records, stepped through in the order the output transport plays audio."""
+
+    def setUp(self):
+        self.feed = bot.ConversationFeed()
+        self.buffer = reply_progress.OutputBuffer(48000, 3840)
+
+    def reply(self):
+        return reply_progress.ReplyProgress(object(), feed=self.feed, feed_open=lambda: True)
+
+    def rows(self):
+        return [(row['text'], row['state']) for row in self.feed.turns]
+
+    def gen(self, section, frame):
+        section.reply.stream_frame(frame, section)
+        return frame
+
+    def audio(self, section, size, text=None):
+        frame = TTSAudioRawFrame(bytes(size), 48000, 1)
+        if text is not None:
+            section.reply.starts_text(frame, text)
+        return self.gen(section, frame)
+
+    def text(self, section, text):
+        return self.gen(section, TTSTextFrame(text, aggregated_by='sentence'))
+
+    def stop(self, section):
+        return self.gen(section, TTSStoppedFrame())
+
+    def enter(self, record, *frames):
+        for frame in frames:
+            self.buffer.enter(frame, record)
+
+    def chunk(self):
+        for entry in self.buffer.written(TTSAudioRawFrame(bytes(3840), 48000, 1)):
+            entry[0].reply.credit(*entry)
+
+    def out(self, *frames):
+        for frame in frames:
+            frame.reply_progress.output_frame(frame)
+
+    def pair(self):
+        downstream, upstream = BotStoppedSpeakingFrame(), BotStoppedSpeakingFrame()
+        upstream.broadcast_sibling_id = downstream.id
+        downstream.broadcast_sibling_id = upstream.id
+        return downstream, upstream
+
+    def out_pair(self):
+        for frame in self.pair():
+            self.buffer.stopped_speaking(frame)
+
+    def out_stop(self, stop):
+        # A section that wrote audio since the previous stop reaches its output stop after the stop-triggered pair.
+        self.out_pair()
+        self.out(stop)
+
+    def labelled(self, frame, record):
+        frame.reply_progress = record
+        return frame
+
+    def end(self, record):
+        self.out(self.labelled(LLMFullResponseEndFrame(), record))
+
+    def interrupt(self, record):
+        self.out(self.labelled(InterruptionFrame(), record))
+        self.buffer.queue_dropped()
+
+    def opened(self, record, size, text):
+        section = record.open_section('neutral')
+        return section, self.gen(section, TTSStartedFrame()), self.audio(section, size, text), self.text(section, text)
+
+    def section_a(self, record, size=3840):
+        a, start, a_audio, ta = self.opened(record, size, 'First.')
+        return a, start, a_audio, ta, self.stop(a)
+
+    def crossing(self, record, *, late_stop=None):
+        """Base output up to and including the chunk that crosses from section B into C; returns C."""
+        _, start, a_audio, ta, sa = self.section_a(record)
+        b = record.open_section('neutral')
+        b_audio, tb = self.audio(b, 3000, 'Second.'), self.text(b, 'Second.')
+        c = record.open_section('neutral')
+        c_audio = self.audio(c, 3840, 'Third.')
+        self.enter(record, a_audio, sa)
+        if late_stop is not None:
+            # The old reply's late chunk is first in the one first-in, first-out queue.
+            self.chunk()
+        self.out(start)
+        if late_stop is not None:
+            self.out(late_stop)
+        self.chunk()
+        self.out(ta)
+        self.out_stop(sa)
+        self.enter(record, b_audio, c_audio)
+        self.out(tb)
+        self.chunk()
+        return c
+
+    def close_section(self, section, text):
+        tc, sc = self.text(section, text), self.stop(section)
+        self.enter(section.reply, tc, sc)
+        self.out(tc)
+        self.chunk()
+        self.out_stop(sc)
+
+    def test_mirror_credits_output_across_sections(self):
+        with self.subTest('(1) crossing chunk'):
+            self.setUp()
+            record = self.reply()
+            c = self.crossing(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'speaking')])
+            self.close_section(c, 'Third.')
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'complete')])
+
+        with self.subTest("(2) reviewer's 3000 plus 600"):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record)
+            b = record.open_section('neutral')
+            b_audio, tb = self.audio(b, 3000, 'Second.'), self.text(b, 'Second.')
+            c = record.open_section('neutral')
+            c_audio, tc, sc = self.audio(c, 600, 'Third.'), self.text(c, 'Third.'), self.stop(c)
+            self.enter(record, a_audio, sa)
+            self.out(start)
+            self.chunk()
+            self.out(ta)
+            self.out_stop(sa)
+            self.enter(record, b_audio, c_audio, sc)
+            self.out(tb, tc)
+            self.chunk()
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'speaking')])
+            self.out_stop(sc)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'complete')])
+
+        with self.subTest('(4) stop padding'):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record, 3000)
+            b = record.open_section('neutral')
+            b_audio, tb, sb = self.audio(b, 3840, 'Second.'), self.text(b, 'Second.'), self.stop(b)
+            self.enter(record, a_audio, sa, b_audio, sb)
+            self.out(start, ta)
+            self.chunk()
+            self.out_stop(sa)
+            self.assertEqual(self.rows(), [('First.', 'speaking')])
+            self.chunk()
+            self.out(tb)
+            self.out_stop(sb)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second.', 'complete')])
+
+        with self.subTest('(5) discarded tail'):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record)
+            b = record.open_section('neutral')
+            b_audio, tb = self.audio(b, 3840, 'Second.'), self.text(b, 'Second.')
+            late_audio, tl = self.audio(b, 1000, 'Late.'), self.text(b, 'Late.')
+            c = record.open_section('neutral')
+            c_audio, tc, sc = self.audio(c, 3840, 'Third.'), self.text(c, 'Third.'), self.stop(c)
+            self.enter(record, a_audio, sa)
+            self.out(start)
+            self.chunk()
+            self.out(ta)
+            self.out_stop(sa)
+            self.enter(record, b_audio, late_audio)
+            self.chunk()
+            self.out(tb, tl)
+            self.assertEqual(self.rows(), [('First. Second.', 'speaking')])
+            # The 3 s idle fallback stops speaking and clears B's unchunked 1000 bytes.
+            self.out_pair()
+            self.assertEqual(self.rows(), [('First. Second.', 'speaking')])
+            self.enter(record, c_audio, sc)
+            self.chunk()
+            self.out(tc)
+            self.out_stop(sc)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'failed')])
+
+        with self.subTest('(6) discard after an exact boundary'):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record)
+            b = record.open_section('neutral')
+            b_audio, tb = self.audio(b, 3840, 'Second.'), self.text(b, 'Second.')
+            c = record.open_section('neutral')
+            c_audio, tc = self.audio(c, 3000, 'Third.'), self.text(c, 'Third.')
+            d = record.open_section('neutral')
+            d_audio, td, sd = self.audio(d, 600, 'Fourth.'), self.text(d, 'Fourth.'), self.stop(d)
+            self.enter(record, a_audio, sa)
+            self.out(start)
+            self.chunk()
+            self.out(ta)
+            self.out_stop(sa)
+            self.enter(record, b_audio)
+            self.chunk()
+            self.out(tb)
+            self.enter(record, c_audio)
+            self.out(tc)
+            self.assertEqual(self.rows(), [('First. Second.', 'speaking')])
+            self.out_pair()
+            self.enter(record, d_audio, sd)
+            self.chunk()
+            self.out(td)
+            self.out_stop(sd)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Fourth.', 'failed')])
+
+        with self.subTest('(7) one stop per sibling pair'):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record)
+            b = record.open_section('neutral')
+            b_audio, tb = self.audio(b, 3840, 'Second.'), self.text(b, 'Second.')
+            c = record.open_section('neutral')
+            c_audio, tc, sc = self.audio(c, 600, 'Third.'), self.text(c, 'Third.'), self.stop(c)
+            self.enter(record, a_audio, sa)
+            self.out(start)
+            self.chunk()
+            self.out(ta)
+            self.out_stop(sa)
+            self.enter(record, b_audio)
+            self.chunk()
+            self.out(tb)
+            downstream, upstream = self.pair()
+            self.buffer.stopped_speaking(downstream)
+            self.enter(record, c_audio)
+            self.buffer.stopped_speaking(upstream)
+            self.enter(record, sc)
+            self.chunk()
+            self.out(tc)
+            self.out_stop(sc)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'complete')])
+
+        with self.subTest('(8) stop-triggered clear inside a live section'):
+            self.setUp()
+            record = self.reply()
+            _, start, a_audio, ta, sa = self.section_a(record)
+            b = record.open_section('neutral')
+            b_audio, tb = self.audio(b, 1000, 'Second.'), self.text(b, 'Second.')
+            next_audio, tn, sb = self.audio(b, 3840, 'Next.'), self.text(b, 'Next.'), self.stop(b)
+            # Generation runs ahead of playback: B's first bytes are unchunked when A's stop is played.
+            self.enter(record, a_audio, sa, b_audio)
+            self.out(start)
+            self.chunk()
+            self.out(ta)
+            self.out_stop(sa)
+            self.out(tb)
+            self.enter(record, next_audio, sb)
+            self.chunk()
+            self.assertEqual(self.rows(), [('First. Next.', 'speaking')])
+            self.out(tn)
+            self.out_stop(sb)
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Next.', 'failed')])
+
+    def test_interruption_after_crossing_keeps_started_text(self):
+        record = self.reply()
+        c = self.crossing(record)
+        tc = self.text(c, 'Third.')
+        fourth = self.audio(c, 3840, 'Fourth.')
+        sc = self.stop(c)
+        self.enter(record, fourth)
+        self.out(self.labelled(InterruptionFrame(), record))
+        self.assertEqual(self.rows(), [('First. Second. Third.', 'interrupted')])
+        # The chunk the old audio task finished writing before it was cancelled, then the interruption's stop.
+        self.chunk()
+        self.out_pair()
+        self.buffer.queue_dropped()
+        self.out(tc, sc)
+        self.end(record)
+        self.assertEqual(self.rows(), [('First. Second. Third.', 'interrupted')])
+
+    def test_failed_stale_and_leftover_output(self):
+        with self.subTest('failed'):
+            self.setUp()
+            record = self.reply()
+            c = self.crossing(record)
+            self.out(reply_progress.ConversationSynthesisFailedFrame(reply_progress=record, section=record.sections[1]))
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'speaking')])
+            self.close_section(c, 'Third.')
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'failed')])
+            self.end(record)
+            self.assertEqual(self.rows(), [('First. Second. Third.', 'failed')])
+
+        with self.subTest('stale'):
+            self.setUp()
+            old = self.reply()
+            so, old_start, old_audio, to = self.opened(old, 7680, 'Old.')
+            old_stop = self.stop(so)
+            self.enter(old, old_audio)
+            self.out(old_start)
+            self.chunk()
+            self.out(to)
+            # Finished without a queue drop, so its second chunk stays queued.
+            old.finish(interrupted=True)
+            record = self.reply()
+            c = self.crossing(record, late_stop=old_stop)
+            self.close_section(c, 'Third.')
+            self.end(record)
+            self.assertEqual(self.rows(), [('Old.', 'interrupted'), ('First. Second. Third.', 'complete')])
+
+        with self.subTest('leftover'):
+            self.setUp()
+            old = self.reply()
+            _, old_start, old_audio, to = self.opened(old, 1000, 'Old.')
+            self.enter(old, old_audio)
+            self.out(old_start, to)
+            # Nothing was written, so the transport is not speaking and keeps the old reply's bytes.
+            self.interrupt(old)
+            record = self.reply()
+            n, start, first, tf = self.opened(record, 3000, 'First.')
+            future = self.audio(n, 3840, 'Future.')
+            self.text(n, 'Future.')
+            self.enter(record, first, future)
+            self.out(start)
+            self.chunk()
+            self.out(tf)
+            self.assertEqual(self.rows(), [('', 'interrupted'), ('First.', 'speaking')])
+            self.interrupt(record)
+            self.assertEqual(self.rows(), [('', 'interrupted'), ('First.', 'interrupted')])
+
+    def test_malformed_audio_fails_the_reply(self):
+        with self.subTest('(a) invalid span'):
+            self.setUp()
+            record = self.reply()
+            section, start, good, t_good = self.opened(record, 3840, 'Good.')
+            # An odd length is invalid source audio at the output rate, so the mirror stays aligned.
+            bad, t_bad, stop = self.audio(section, 3841, 'Bad.'), self.text(section, 'Bad.'), self.stop(section)
+            self.enter(record, good, bad, stop)
+            self.out(start)
+            self.chunk()
+            self.out(t_good)
+            self.chunk()
+            self.out(t_bad)
+            self.chunk()
+            self.out_stop(stop)
+            self.end(record)
+            self.assertEqual(self.rows(), [('Good.', 'failed')])
+
+        with self.subTest('(b) off-rate entry'):
+            self.setUp()
+            record = self.reply()
+            section, start, good, t_good = self.opened(record, 3840, 'Good.')
+            stop = self.stop(section)
+            # Foreign audio no section generated, entered while nothing is open.
+            self.enter(record, good, OutputAudioRawFrame(bytes(1000), 24000, 1), stop)
+            self.out(start)
+            self.chunk()
+            self.out(t_good)
+            self.out_stop(stop)
+            self.end(record)
+            self.assertEqual(self.rows(), [('Good.', 'failed')])
+            record = self.reply()
+            section, start, next_audio, t_next = self.opened(record, 3840, 'Next.')
+            stop = self.stop(section)
+            self.enter(record, next_audio, stop)
+            self.out(start)
+            self.chunk()
+            self.out(t_next)
+            self.out_stop(stop)
+            self.end(record)
+            self.assertEqual(self.rows(), [('Good.', 'failed'), ('', 'failed')])
 
 
 if __name__ == '__main__':

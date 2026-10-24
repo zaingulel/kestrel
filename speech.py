@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import stat
 import subprocess
 import sys
@@ -24,7 +24,7 @@ from loguru import logger
 from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
-    CancelFrame, DataFrame, EndFrame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
+    CancelFrame, DataFrame, EndFrame, Frame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
     TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
@@ -38,6 +38,9 @@ from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 
 from hermes_worker import DELIVERY_LABELS
+from reply_progress import (
+    REPLY_MESSAGES, ConversationSynthesisFailedFrame, OutputBuffer, SpeechAdvisoryFrame, token_of,
+)
 
 _ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
 _NUMBER_WORDS = inflect.engine()
@@ -178,23 +181,6 @@ def spoken_numbers(text: str) -> str:
         end = match.end()
     parts.append(text[end:])
     return ''.join(parts)
-
-
-@dataclass(eq=False)
-class ConversationAudioContext:
-    reply_token: object | None
-    source_bytes: int = 0
-    previous_text_end: int = 0
-    pending_text_starts: list[tuple[int, str]] = field(default_factory=list)
-    source_valid: bool = True
-    write_failed: bool = False
-    output_stopped: bool = False
-    delivery: str = 'neutral'
-
-
-@dataclass
-class ConversationSynthesisFailedFrame(DataFrame):
-    context: ConversationAudioContext
 
 
 @dataclass(frozen=True)
@@ -404,7 +390,8 @@ class LaptopOutput(BaseOutputTransport):
         self.playback_deadline: float | None = None
         self.write_gate = asyncio.Event()
         self.write_gate.set()
-        self.conversation_audio_context = None
+        self.output_buffer = OutputBuffer.for_params(params)
+        self.reply_progress = None
 
     async def start(self, frame):
         await super().start(frame)
@@ -416,7 +403,7 @@ class LaptopOutput(BaseOutputTransport):
             try:
                 # Native sender cancellation discards its queued audio and cancels the pacing wait.
                 await super().process_frame(frame, direction)
-                self.conversation_audio_context = None
+                self.reply_progress = None
                 async with self.write_lock:
                     if self.audio.playback is not None:
                         await self.audio._discard_playback()
@@ -428,46 +415,41 @@ class LaptopOutput(BaseOutputTransport):
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if direction == FrameDirection.DOWNSTREAM and self.audio.reply_admitted is not None:
-            context = getattr(frame, 'conversation_audio_context', None)
-            if isinstance(frame, TTSTextFrame):
-                span = getattr(frame, 'conversation_audio_span', None)
-                context = span[0] if span is not None else self.conversation_audio_context
-            context = context or self.conversation_audio_context
-            token = (getattr(frame, 'indicator_reply_token', None) if isinstance(frame, LLMFullResponseEndFrame)
-                     else context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None))
+            # Audio and frames of no reply play for the reply this output has bound.
+            record = getattr(frame, 'reply_progress', None) or self.reply_progress
+            token = record.token if record is not None else None
             if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
                                   LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.audio.reply_admitted(token):
                 return
         await super().push_frame(frame, direction)
 
     async def write_transport_frame(self, frame):
+        bound = self.reply_progress
         if isinstance(frame, TTSStartedFrame):
-            self.conversation_audio_context = getattr(frame, 'conversation_audio_context', None)
-        elif (isinstance(frame, LLMFullResponseEndFrame)
-              and self.conversation_audio_context is not None
-              and self.conversation_audio_context.reply_token is getattr(frame, 'indicator_reply_token', None)):
-            self.conversation_audio_context = None
+            self.reply_progress = getattr(frame, 'reply_progress', None)
+        elif isinstance(frame, LLMFullResponseEndFrame) and bound is not None and token_of(frame) is bound.token:
+            self.reply_progress = None
         await super().write_transport_frame(frame)
 
     async def cancel(self, frame):
         try:
             await super().cancel(frame)
         finally:
-            self.conversation_audio_context = None
+            self.reply_progress = None
 
     async def stop(self, frame):
         try:
             await super().stop(frame)
         finally:
-            self.conversation_audio_context = None
+            self.reply_progress = None
 
     async def write_audio_frame(self, frame) -> bool:
-        context = self.conversation_audio_context
+        record = self.reply_progress
         success = False
 
         def allowed():
             return self.audio.admitted() and (self.audio.reply_admitted is None or
-                   (context is not None and self.audio.reply_admitted(context.reply_token)))
+                   (record is not None and self.audio.reply_admitted(record.token)))
 
         try:
             await self.write_gate.wait()
@@ -494,8 +476,10 @@ class LaptopOutput(BaseOutputTransport):
                     self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
                     return False
         finally:
-            if context is not None and not success:
-                context.write_failed = True
+            if not success:
+                if record is not None:
+                    record.output_write_failed()
+                self.output_buffer.write_failed(frame)
 
 
 class LaptopAudioTransport:
@@ -1576,10 +1560,6 @@ class SpokenReplyText:
         return result
 
 
-class SpeechAdvisoryFrame(LLMTextFrame):
-    """Fixed application speech that generated syntax cannot suppress."""
-
-
 class ConversationTTS(TTSService):
     def __init__(self, model, *, settings: TTSSettings, generation_lock=None, admitted=lambda: True, reply_admitted=None):
         super().__init__(
@@ -1592,77 +1572,65 @@ class ConversationTTS(TTSService):
         self._generation_lock = generation_lock if generation_lock is not None else asyncio.Lock()
         self.generation_cleanup_failed = False
         self._spoken_reply = SpokenReplyText()
-        self._conversation_reply_token = None
-        self._conversation_turns = {}
-        self._conversation_delivery = 'neutral'
-        self._conversation_audio_contexts = {}
+        # The reply whose start or local speech this service processed last, and its expression setting.
+        self._reply = None
+        self._delivery = 'neutral'
+        self._turns = {}
+        self._sections = {}
+
+    def section(self, context_id):
+        return self._sections.get(context_id)
 
     async def on_turn_context_created(self, context_id: str):
         await super().on_turn_context_created(context_id)
-        self._conversation_turns.clear()
-        self._conversation_turns[context_id] = (self._conversation_reply_token, self._conversation_delivery)
+        self._turns.clear()
+        self._turns[context_id] = (self._reply, self._delivery)
+
+    def _open_section(self, context_id):
+        record, delivery = self._turns.get(context_id, (None, 'neutral'))
+        if record is not None:
+            self._sections[context_id] = record.open_section(delivery)
 
     async def create_audio_context(self, context_id: str):
-        token, delivery = self._conversation_turns.get(context_id, (None, 'neutral'))
-        self._conversation_audio_contexts[context_id] = ConversationAudioContext(token, delivery=delivery)
+        # Pipecat also calls this to recreate a retired context within the turn, which opens a new section.
+        self._open_section(context_id)
         await super().create_audio_context(context_id)
 
     async def on_audio_context_completed(self, context_id: str):
         await super().on_audio_context_completed(context_id)
-        self._conversation_audio_contexts.pop(context_id, None)
-
-    def _record_conversation_source(self, frame, context_id) -> None:
-        if not isinstance(frame, (TTSAudioRawFrame, TTSTextFrame)) or getattr(frame, '_conversation_source_recorded', False):
-            return
-        context = self._conversation_audio_contexts.get(context_id)
-        if isinstance(frame, TTSAudioRawFrame):
-            if context is not None:
-                context.source_valid &= frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0
-                text = getattr(frame, 'conversation_text_start', None)
-                if context.source_valid and text is not None:
-                    context.pending_text_starts.append((context.source_bytes, text))
-                context.source_bytes += len(frame.audio)
-        elif frame.text.strip():
-            frame.conversation_audio_span = ((context, context.previous_text_end, context.source_bytes, context.source_valid)
-                                             if context is not None else (None, 0, 0, False))
-            if context is not None:
-                context.previous_text_end = context.source_bytes
-        else:
-            return
-        frame._conversation_source_recorded = True
+        self._sections.pop(context_id, None)
 
     async def append_to_audio_context(self, context_id: str | None, frame):
         await super().append_to_audio_context(context_id, frame)
-        if self.audio_context_available(context_id):
-            self._record_conversation_source(frame, context_id)
+        section = self.section(context_id)
+        if self.audio_context_available(context_id) and section is not None and isinstance(frame, Frame):
+            section.reply.stream_frame(frame, section)
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
         if direction == FrameDirection.DOWNSTREAM:
             context_id = getattr(frame, 'context_id', None)
-            if isinstance(frame, TTSStartedFrame):
-                context = self._conversation_audio_contexts.get(context_id)
-                if context is None:
-                    token, delivery = self._conversation_turns.get(context_id, (None, 'neutral'))
-                    context = ConversationAudioContext(token, delivery=delivery)
-                    self._conversation_audio_contexts[context_id] = context
-                frame.conversation_audio_context = context
-            else:
-                self._record_conversation_source(frame, context_id)
-                if isinstance(frame, TTSStoppedFrame):
-                    frame.conversation_audio_context = self._conversation_audio_contexts.get(context_id)
-        if self.reply_admitted is not None and direction == FrameDirection.DOWNSTREAM:
-            context = self._conversation_audio_contexts.get(getattr(frame, 'context_id', None))
-            token = context.reply_token if context is not None else getattr(frame, 'indicator_reply_token', self._conversation_reply_token)
-            if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
-                                  LLMTextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.reply_admitted(token):
-                return
+            if isinstance(frame, TTSStartedFrame) and self.section(context_id) is None:
+                self._open_section(context_id)
+            section = self.section(context_id)
+            if section is not None:
+                section.reply.stream_frame(frame, section)
+            if isinstance(frame, REPLY_MESSAGES) and not hasattr(frame, 'reply_progress'):
+                frame.reply_progress = self._reply
+            if self.reply_admitted is not None:
+                token = section.reply.token if section is not None else token_of(frame)
+                if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
+                                      LLMTextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.reply_admitted(token):
+                    return
         await super().push_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
-        if direction == FrameDirection.DOWNSTREAM and isinstance(frame, (LLMFullResponseStartFrame, TTSSpeakFrame)):
-            self._conversation_reply_token = getattr(frame, 'conversation_reply_token', None)
-            self._conversation_delivery = (getattr(frame, 'speech_delivery', 'neutral')
-                                           if isinstance(frame, LLMFullResponseStartFrame) else 'neutral')
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, (LLMFullResponseStartFrame, TTSSpeakFrame)):
+                self._reply = getattr(frame, 'reply_progress', None)
+                self._delivery = (self._reply.delivery if isinstance(frame, LLMFullResponseStartFrame) and self._reply is not None
+                                  else 'neutral')
+            elif isinstance(frame, LLMTextFrame) and not hasattr(frame, 'reply_progress'):
+                frame.reply_progress = self._reply
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
             self._spoken_reply.reset()
         elif direction == FrameDirection.DOWNSTREAM:
@@ -1671,12 +1639,12 @@ class ConversationTTS(TTSService):
             elif isinstance(frame, SpeechAdvisoryFrame):
                 # Pipecat owns the active turn ID; older queued audio keeps its own delivery.
                 context_id = self._turn_context_id
-                if context_id in self._conversation_turns:
-                    token, _ = self._conversation_turns[context_id]
-                    self._conversation_turns[context_id] = (token, 'neutral')
-                context = self._conversation_audio_contexts.get(context_id)
-                if context is not None:
-                    context.delivery = 'neutral'
+                if context_id in self._turns:
+                    record, _ = self._turns[context_id]
+                    self._turns[context_id] = (record, 'neutral')
+                section = self.section(context_id)
+                if section is not None:
+                    section.delivery = 'neutral'
                 tail = self._spoken_reply.finish(failed=True)
                 if tail.strip():
                     separator = ' ' if tail.rstrip().endswith(('.', '!', '?')) else '. '
@@ -1686,20 +1654,22 @@ class ConversationTTS(TTSService):
             elif isinstance(frame, LLMFullResponseEndFrame):
                 tail = self._spoken_reply.finish()
                 if tail:
-                    await super().process_frame(LLMTextFrame(tail), direction)
+                    tail_frame = LLMTextFrame(tail)
+                    tail_frame.reply_progress = getattr(frame, 'reply_progress', None)
+                    await super().process_frame(tail_frame, direction)
         await super().process_frame(frame, direction)
         if isinstance(frame, (InterruptionFrame, CancelFrame, EndFrame)):
-            self._conversation_turns.clear()
-            self._conversation_audio_contexts.clear()
-            self._conversation_reply_token = None
+            self._turns.clear()
+            self._sections.clear()
+            self._reply = None
 
     async def run_tts(self, text, context_id):
-        context = self._conversation_audio_contexts.get(context_id)
-        delivery = context.delivery if context is not None else 'neutral'
+        section = self.section(context_id)
+        delivery = section.delivery if section is not None else 'neutral'
 
         def allowed():
             return self.admitted() and (self.reply_admitted is None or
-                   (context is not None and self.reply_admitted(context.reply_token)))
+                   (section is not None and self.reply_admitted(section.reply.token)))
 
         text_started = False
         try:
@@ -1727,7 +1697,8 @@ class ConversationTTS(TTSService):
                         pcm = (np.clip(chunk, -1, 1) * 32767).astype("<i2").tobytes()
                         frame = TTSAudioRawFrame(pcm, 48000, 1, context_id=context_id)
                         if pcm and not text_started:
-                            frame.conversation_text_start = text
+                            if section is not None:
+                                section.reply.starts_text(frame, text)
                             text_started = True
                         yield frame
                 finally:
@@ -1767,11 +1738,11 @@ class ConversationTTS(TTSService):
                     if cancelled and body_error is None:
                         raise asyncio.CancelledError
         except Exception:
-            live_context = self._conversation_audio_contexts.get(context_id)
-            if context is not None and live_context is not None and live_context.reply_token is context.reply_token:
-                live_context.previous_text_end = live_context.source_bytes
-            if context is not None and context.reply_token is not None:
-                await self.push_frame(ConversationSynthesisFailedFrame(context=context))
+            live = self.section(context_id)
+            if section is not None and live is not None and live.reply is section.reply:
+                live.skip_text()
+            if section is not None:
+                await self.push_frame(ConversationSynthesisFailedFrame(reply_progress=section.reply, section=section))
             raise
 
 

@@ -27,9 +27,9 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.frames.frames import (
-    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, StartFrame, UserStartedSpeakingFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, CancelFrame, StartFrame, UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame, ProposedUserStoppedSpeakingFrame, LLMMessagesAppendFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
-    TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame,
+    OutputAudioRawFrame, TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSStartedFrame,
 )
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import LLMSettings
@@ -44,11 +44,12 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from app_resolver import valid_app_text
+from reply_progress import AnnouncementMarkFrame, ConversationSynthesisFailedFrame, ReplyProgress, SpeechAdvisoryFrame, token_of
 from hermes_worker import (DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment, valid_desktop_arguments)
 from speech import (
-    ConversationSynthesisFailedFrame, ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
-    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, SpeechAdvisoryFrame, VoxCPMTTS, load_phonon, load_voice_preset,
+    ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
+    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset,
 )
 from tool_actions import (
     AppLaunchResult, AudioResult, DesktopResult, media_action, notify_audio_failure, open_app, resolve_app,
@@ -76,10 +77,6 @@ class LocalTool:
     spoken: str
     confirmation: str | None = None
     announcement: str | None = None
-
-
-class AnnouncementMarkFrame(DataFrame):
-    """Its output push follows the full synthesis and playback of the announcement pushed before it."""
 
 
 def match_app_name(text: str) -> str | None:
@@ -594,14 +591,7 @@ class HermesLLMService(LLMService):
         self.brain_turns = []
         self.status = status
         self.conversation = conversation
-        self._conversation_attempt = None
-        self._conversation_interrupting = None
-        self._conversation_output_context = None
-        self._conversation_output_bytes = 0
-        self._conversation_pending_spans = []
-        self._conversation_incomplete = False
-        self._conversation_synthesis_failed = False
-        self._conversation_delivered = False
+        self._reply = None
         # (token, marker, future) for the one announcement LocalActions.lock lets wait at a time.
         self._announcement = None
         self._indicator_ready = False
@@ -682,31 +672,27 @@ class HermesLLMService(LLMService):
             self._indicator_pending = False
             self.refresh_indicator()
 
-    def begin_conversation_reply(self, token):
-        self._conversation_attempt = token
-        self._conversation_incomplete = False
-        self._conversation_synthesis_failed = False
-        self._conversation_delivered = False
-        if self.conversation is not None:
-            self.conversation.begin_reply(token)
+    def begin_reply(self, token):
+        if self._reply is not None:
+            self._reply.finish(interrupted=True)
+        self._reply = ReplyProgress(token, feed=self.conversation, feed_open=self.admitted, on_finish=self._reply_closed)
 
-    def finish_conversation_reply(self, token, *, interrupted=False, failed=False):
-        delivered = (token is not None and token is self._conversation_attempt
-                     and self._conversation_delivered and not (interrupted or failed))
-        if self.admitted() and self.conversation is not None:
-            self.conversation.finish(token, interrupted=interrupted, failed=failed)
-        if self._conversation_attempt is token:
-            self._conversation_attempt = None
-            self._conversation_output_context = None
-            self._conversation_output_bytes = 0
-            self._conversation_pending_spans.clear()
-            self._conversation_incomplete = False
-            self._conversation_synthesis_failed = False
-            self._conversation_delivered = False
-        if self._conversation_interrupting is token:
-            self._conversation_interrupting = None
-        if delivered:
-            self.retire_outcomes(token)
+    def current_reply(self):
+        return self._reply
+
+    def _reply_for(self, token):
+        record = self._reply
+        return record if record is not None and record.token is token else ReplyProgress.silent(token)
+
+    def _reply_closed(self, record):
+        if self._reply is record:
+            self._reply = None
+        if record.completed:
+            self.retire_outcomes(record.token)
+
+    def _labelled(self, frame, token):
+        frame.reply_progress = self._reply_for(token)
+        return frame
 
     def remember_assistant_reply(self, text):
         token = self._assistant_reply_token
@@ -718,13 +704,20 @@ class HermesLLMService(LLMService):
 
     def conversation_output(self, frame):
         if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
-            context = getattr(frame, 'conversation_audio_context', None)
-            self._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
-        self._track_conversation_output(frame)
+            self._assistant_reply_token = token_of(frame)
+        record = getattr(frame, 'reply_progress', None)
+        if (record is not None and self.admitted()
+                and (isinstance(frame, InterruptionFrame) or self.owns_request(record.token))):
+            record.output_frame(frame)
         self.observe_announcement(frame)
         if self.owns_request(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             self.last_spoken_reply = frame.text
             self._last_spoken_token = self._assistant_reply_token
+
+    def conversation_audio(self, entries):
+        for section, start, end in entries:
+            if self.admitted() and self.owns_request(section.reply.token):
+                section.reply.credit(section, start, end)
 
     def observe_announcement(self, frame):
         if self._announcement is None:
@@ -732,113 +725,31 @@ class HermesLLMService(LLMService):
         token, marker, _ = self._announcement
         if frame is marker:
             # A TTSStoppedFrame alone can be Pipecat's idle-timeout stop while synthesis continues.
-            self.end_announcement('played' if self._conversation_attempt is token and self._conversation_delivered
-                                  and not self._conversation_output_failed() else 'not fully played')
-        elif isinstance(frame, InterruptionFrame) and getattr(frame, 'conversation_reply_token', None) is token:
-            # The turn's own earlier interruption carries the previous reply's stamp and must not release.
+            record = getattr(frame, 'reply_progress', None)
+            self.end_announcement('played' if record is not None and record is self.current_reply() and record.token is token
+                                  and record.delivered and not record.output_failed() else 'not fully played')
+        elif isinstance(frame, InterruptionFrame) and token_of(frame) is token:
+            # The turn's own earlier interruption carries the previous reply's record and must not release.
             self.end_announcement('interrupted')
-        elif isinstance(frame, ConversationSynthesisFailedFrame) and frame.context.reply_token is token:
+        elif isinstance(frame, ConversationSynthesisFailedFrame) and token_of(frame) is token:
             self.end_announcement('synthesis failed')
 
     def end_announcement(self, outcome):
         if self._announcement is not None and not self._announcement[2].done():
             self._announcement[2].set_result(outcome)
 
-    def _conversation_output_failed(self):
-        context = self._conversation_output_context
-        return (self._conversation_incomplete or self._conversation_synthesis_failed
-                or bool(self._conversation_pending_spans) or bool(context and context.write_failed))
-
-    def _track_conversation_output(self, frame):
-        if not self.admitted():
-            return
-        if not isinstance(frame, InterruptionFrame) and not self.owns_request(self._conversation_attempt):
-            return
-        if isinstance(frame, ConversationSynthesisFailedFrame):
-            token = frame.context.reply_token
-            if token is None or token is not self._conversation_attempt:
-                return
-            self._conversation_synthesis_failed = True
-            if frame.context.output_stopped and self._conversation_output_context is None:
-                self.finish_conversation_reply(token, failed=True, interrupted=token is self._conversation_interrupting)
-            return
-        if isinstance(frame, InterruptionFrame):
-            self.finish_conversation_reply(getattr(frame, 'conversation_reply_token', None), interrupted=True)
-            return
-        if isinstance(frame, LLMFullResponseEndFrame):
-            token = frame.indicator_reply_token
-            if token is self._conversation_attempt:
-                self.finish_conversation_reply(
-                    token, interrupted=token is self._conversation_interrupting,
-                    failed=frame.conversation_reply_failed or self._conversation_output_failed(),
-                )
-            return
-        if isinstance(frame, TTSStartedFrame):
-            context = getattr(frame, 'conversation_audio_context', None)
-            if context is not None and context.reply_token is not None and context.reply_token is self._conversation_attempt:
-                previous = self._conversation_output_context
-                self._conversation_incomplete |= bool(self._conversation_pending_spans) or bool(previous and previous.write_failed)
-                self._conversation_output_context = context
-                self._conversation_output_bytes = 0
-                self._conversation_pending_spans.clear()
-            return
-        context = self._conversation_output_context
-        if isinstance(frame, TTSTextFrame) and frame.text.strip():
-            span = getattr(frame, 'conversation_audio_span', None)
-            if span is not None and span[0] is not None and span[0] is not context:
-                return
-            if context is None and self._conversation_attempt is not None:
-                self._conversation_incomplete = True
-        if context is None or context.reply_token is not self._conversation_attempt:
-            return
-        if isinstance(frame, TTSAudioRawFrame):
-            if frame.sample_rate == 48000 and frame.num_channels == 1 and len(frame.audio) % 2 == 0:
-                self._conversation_output_bytes += len(frame.audio)
-            else:
-                self._conversation_incomplete = True
-        elif isinstance(frame, TTSTextFrame) and frame.text.strip():
-            if span is None or span[0] is not context or not span[3] or span[2] <= span[1]:
-                self._conversation_incomplete = True
-            else:
-                self._conversation_pending_spans.append(span[2])
-        elif isinstance(frame, TTSStoppedFrame):
-            if getattr(frame, 'conversation_audio_context', None) is not context:
-                return
-        else:
-            return
-        if not context.write_failed:
-            while context.pending_text_starts and self._conversation_output_bytes > context.pending_text_starts[0][0]:
-                _, text = context.pending_text_starts.pop(0)
-                if text.strip():
-                    self._conversation_delivered = True
-                if self.conversation is not None:
-                    self.conversation.spoken(context.reply_token, text)
-            while self._conversation_pending_spans and self._conversation_pending_spans[0] <= self._conversation_output_bytes:
-                self._conversation_pending_spans.pop(0)
-        if isinstance(frame, TTSStoppedFrame):
-            context.output_stopped = True
-            self._conversation_incomplete |= bool(self._conversation_pending_spans) or context.write_failed
-            self._conversation_pending_spans.clear()
-            self._conversation_output_context = None
-            self._conversation_output_bytes = 0
-            if self._conversation_synthesis_failed:
-                self.finish_conversation_reply(context.reply_token, failed=True, interrupted=context.reply_token is self._conversation_interrupting)
-
     async def push_reply_end(self, token, *, failed=False):
         if not self.owns_request(token):
             return
-        end = LLMFullResponseEndFrame()
+        end = self._labelled(LLMFullResponseEndFrame(), token)
         # The output queue, not generation completion, owns the visible reply's end.
-        end.indicator_reply_token = token
-        end.conversation_reply_failed = failed
+        end.reply_progress.answer_failed |= failed
         await self.push_frame(end)
 
     async def push_local_speech(self, message, token):
-        if self._conversation_attempt is not token:
-            self.begin_conversation_reply(token)
-        frame = TTSSpeakFrame(message, append_to_context=False)
-        frame.conversation_reply_token = token
-        await self.push_frame(frame)
+        if self._reply is None or self._reply.token is not token:
+            self.begin_reply(token)
+        await self.push_frame(self._labelled(TTSSpeakFrame(message, append_to_context=False), token))
 
     async def speak_local_reply(self, message, token):
         if not self.owns_request(token):
@@ -854,7 +765,8 @@ class HermesLLMService(LLMService):
             self._announcement = (token, marker, played)
             try:
                 await self.push_local_speech(message, token)
-                await self.push_frame(marker)
+                # Labelled once the announcement's record is open, so the marker carries that live record.
+                await self.push_frame(self._labelled(marker, token))
                 outcome = await asyncio.wait_for(played, ANNOUNCEMENT_TIMEOUT)
             except TimeoutError:
                 outcome = 'timed out'
@@ -945,8 +857,10 @@ class HermesLLMService(LLMService):
         if user_request and not self.valid_origin(frame):
             return
         if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
-            frame.conversation_reply_token = self._conversation_attempt
-            self._conversation_interrupting = self._conversation_attempt
+            # The first user turn ordinarily interrupts before any reply exists.
+            frame.reply_progress = self.current_reply()
+            if frame.reply_progress is not None:
+                frame.reply_progress.interrupting = True
         await super().process_frame(frame, direction)
         if not isinstance(frame, LLMContextFrame):
             await self.push_frame(frame, direction)
@@ -977,7 +891,8 @@ class HermesLLMService(LLMService):
             return
         if re.fullmatch(r'(stop|cancel)[.!]?', text.strip().lower()):
             self.stop_epoch += 1
-            self.finish_conversation_reply(self._conversation_attempt, interrupted=True)
+            if self._reply is not None:
+                self._reply.finish(interrupted=True)
             remove_original()
             self.outcomes = [item for item in self.outcomes
                              if item.result is None or effect_observed(item.result) or item.result.attempted]
@@ -1043,11 +958,10 @@ class HermesLLMService(LLMService):
         async def push_reply_start(delivery):
             if not self.owns_request(token):
                 return
-            if self._conversation_attempt is not token:
-                self.begin_conversation_reply(token)
-            start = LLMFullResponseStartFrame()
-            start.conversation_reply_token = token
-            start.speech_delivery = delivery
+            if self._reply is None or self._reply.token is not token:
+                self.begin_reply(token)
+            start = self._labelled(LLMFullResponseStartFrame(), token)
+            start.reply_progress.delivery = delivery
             await self.push_frame(start)
 
         try:
@@ -1057,7 +971,7 @@ class HermesLLMService(LLMService):
             await self.channel.drain()
             if not self.valid_origin(frame):
                 return
-            self.begin_conversation_reply(token)
+            self.begin_reply(token)
             await self.start_processing_metrics()
             if self.channel.failure:
                 raise RuntimeError(self.channel.failure)
@@ -1085,14 +999,14 @@ class HermesLLMService(LLMService):
                     if not started:
                         await push_reply_start('neutral')
                         started = True
-                    await self.push_frame(SpeechAdvisoryFrame(' ' + event['advisory']))
+                    await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + event['advisory']), token))
                     failed = True
                 elif not failed:
                     if 'delivery' in event:
                         await push_reply_start(event['delivery'])
                         started = True
                     else:
-                        await self.push_frame(LLMTextFrame(event['text']))
+                        await self.push_frame(self._labelled(LLMTextFrame(event['text']), token))
             await request
             if self.owns_request(token) and self.channel.failure:
                 raise RuntimeError(self.channel.failure)
@@ -1104,7 +1018,7 @@ class HermesLLMService(LLMService):
                 await push_reply_start('neutral')
                 started = True
             if self.owns_request(token):
-                await self.push_frame(SpeechAdvisoryFrame(' ' + advisory))
+                await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + advisory), token))
         finally:
             self.channel.detach(output)
             if self.output is output:
@@ -1237,15 +1151,16 @@ class VoiceConversations:
         self.changed.set()
         return 'accepted'
 
+    def typed_message_taken(self):
+        return self.submission_ack is not None and self.submission_ack.done() and not self.submission_ack.cancelled()
+
     def fail_submission(self):
         if self.pending_submit is None:
             return
         text, token = self.pending_submit
-        published = self.submission_ack is not None and self.submission_ack.done() and not self.submission_ack.cancelled()
-        if not published:
+        if not self.typed_message_taken():
             self.conversation.user(text, source='typed')
-        self.conversation.begin_reply(token)
-        self.conversation.finish(token, failed=True)
+        ReplyProgress.failed_before_speech(token, self.conversation)
 
     def request_admitted(self, token):
         if self.pending_submit is not None and self.pending_submit[1] is token:
@@ -1590,7 +1505,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
     @assistant.event_handler('on_before_process_frame')
     async def assistant_frame_starting(processor, frame):
         if isinstance(frame, InterruptionFrame):
-            llm._heard_prefix_token = getattr(frame, 'conversation_reply_token', None)
+            llm._heard_prefix_token = token_of(frame)
 
     @assistant.event_handler('on_after_process_frame')
     async def assistant_frame_completed(processor, frame):
@@ -1598,8 +1513,17 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             llm._heard_prefix_token = None
         llm.frame_completed('assistant', frame)
 
-    @transport.output().event_handler('on_after_process_frame')
+    output = transport.output()
+
+    @output.event_handler('on_before_process_frame')
+    async def output_frame_entering(processor, frame):
+        output.output_buffer.enter(frame, llm.current_reply())
+
+    @output.event_handler('on_after_process_frame')
     async def output_frame_completed(processor, frame):
+        # The transport drops its chunk queue for these, keeping the unchunked remainder.
+        if isinstance(frame, (InterruptionFrame, CancelFrame)):
+            output.output_buffer.queue_dropped()
         llm.frame_completed('output', frame)
 
     @assistant.event_handler('on_before_push_frame')
@@ -1609,10 +1533,13 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             if messages and messages[-1].get('role') == 'assistant':
                 llm.remember_assistant_reply(messages[-1].get('content'))
 
-    output = transport.output()
-
     @output.event_handler('on_after_push_frame')
     async def on_output_frame(processor, frame):
+        # The transport pushes audio only after its write succeeded.
+        if isinstance(frame, OutputAudioRawFrame):
+            llm.conversation_audio(output.output_buffer.written(frame))
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            output.output_buffer.stopped_speaking(frame)
         if voice.generation_cleanup_failed:
             llm.indicator_voice_failed()
         if status is not None or conversation is not None:
@@ -1621,10 +1548,10 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             elif isinstance(frame, BotStoppedSpeakingFrame):
                 llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
-                llm.indicator_reply_finished(frame.indicator_reply_token)
+                llm.indicator_reply_finished(token_of(frame))
         llm.conversation_output(frame)
         if isinstance(frame, LLMFullResponseEndFrame) and on_reply_finished is not None:
-            on_reply_finished(frame.indicator_reply_token)
+            on_reply_finished(token_of(frame))
 
     pipeline = Pipeline([
         transport.input(), stt, aggregators.user(), llm,
