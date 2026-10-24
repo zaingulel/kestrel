@@ -63,6 +63,11 @@ VOLUME_TIMEOUT = 5
 DESKTOP_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
 LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
+# An installed name casefolds to a request of at most 1,024 bytes. Full case folding shrinks a character's UTF-8
+# at most threefold (U+212A) and expands it at most threefold (U+0390), so a match is at most 9 * 1,024 bytes.
+APP_NAME_BYTES = 9 * 1024
+# JSON escaping at most doubles each admitted field; 64 bytes cover the object syntax.
+APP_RESOLUTION_BUDGET = 2 * (1024 + APP_NAME_BYTES) + 64
 SCREENSHOT_COMMAND = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
 
 
@@ -105,9 +110,14 @@ class AppLaunchResult:
 
 
 async def run_local_command(argv, *, stdin_data: bytes | None = None):
-    # Native media status may embed cover art; only that read needs a larger allowance.
-    budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
-              else 4096)
+    # Native media status may embed cover art, and the app resolver returns an installed name; only those reads
+    # need a larger allowance.
+    if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status'):
+        budget = 4 * 1024 * 1024
+    elif tuple(argv[-3:]) == ('/usr/bin/python', '-I', str(ROOT / 'app_resolver.py')):
+        budget = APP_RESOLUTION_BUDGET
+    else:
+        budget = 4096
     uid = os.getuid()
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8',
@@ -504,13 +514,14 @@ async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool
     discovery_env = app_discovery_environment()
     output = await command(('/usr/bin/env', *discovery_env, '/usr/bin/python', '-I',
                             str(ROOT / 'app_resolver.py')), stdin_data=name.encode('utf-8'))
-    desktop_id = json.loads(output)
-    if desktop_id is None:
+    match = json.loads(output)
+    if match is None:
         return None
-    if not valid_desktop_id(desktop_id):
+    if (not isinstance(match, dict) or match.keys() != {'id', 'name'} or not valid_desktop_id(match['id'])
+            or not valid_app_text(match['name'], APP_NAME_BYTES) or not match['name'].strip()):
         raise ValueError('invalid app resolution')
     tool = LOCAL_TOOLS['open app']
-    return replace(tool, run=partial(tool.run, desktop_id, discovery_env))
+    return replace(tool, run=partial(tool.run, match['id'], discovery_env), confirmation=f"Opening {match['name']}.")
 
 
 LOCAL_TOOLS = {

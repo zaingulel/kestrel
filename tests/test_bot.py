@@ -1077,6 +1077,8 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                      ['/usr/bin/omarchy-shell', 'media', 'status']):
             cases.extend([(argv, 4 * 1024 * 1024, 4 * 1024 * 1024, True),
                           (argv, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, False)])
+        resolver = ('/usr/bin/env', 'HOME=/fixture', '/usr/bin/python', '-I', str(bot.ROOT / 'app_resolver.py'))
+        cases.append((resolver, bot.APP_RESOLUTION_BUDGET, bot.APP_RESOLUTION_BUDGET, True))
         cases.extend((argv, 4096, 4097, False) for argv in (
             ('/usr/bin/omarchy-shell', 'media', 'pause'),
             ('/usr/bin/omarchy-shell', 'media', 'next'),
@@ -1139,11 +1141,12 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
         }, clear=True):
             for phrase in ('open Fixture App', ' OPEN Fixture App. ', 'Open Fixture App!'):
                 with self.subTest(phrase=phrase):
-                    command = AsyncMock(return_value=json.dumps(desktop_id))
+                    command = AsyncMock(return_value=json.dumps({'id': desktop_id, 'name': 'Fixture app'}))
                     name = bot.match_app_name(phrase)
                     self.assertEqual(name, 'Fixture App')
                     tool = await bot.resolve_app_tool(name, command=command)
                     self.assertIsNotNone(tool)
+                    self.assertEqual(tool.confirmation, 'Opening Fixture app.')
                     self.assertEqual(tool.permission, bot.PermissionTier.FREE)
                     command.assert_awaited_once_with((
                         '/usr/bin/env', *expected_env, '/usr/bin/python', '-I',
@@ -1175,10 +1178,14 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(command.await_count, 1, 'Unknown names cannot launch')
             selected_name = bot.match_app_name('open FixtureApp')
             self.assertEqual(selected_name, 'FixtureApp')
-            for output in ('', '{', 'null null', 'false', '42', '[]', '{}', '""',
-                           '"../fixture.desktop"', '"-fixture.desktop"', '".fixture.desktop"',
-                           '"fixture"', '"a:b.desktop"', '"a\\\\b.desktop"', '"a\\n.desktop"',
-                           json.dumps('é' * 510 + '.desktop')):
+            bad_ids = ('../fixture.desktop', '-fixture.desktop', '.fixture.desktop', 'fixture', 'a:b.desktop',
+                       'a\\b.desktop', 'a\n.desktop', 'é' * 510 + '.desktop')
+            bad_names = (None, 3, '', '  ', 'Fixture\nApp', 'x' * (bot.APP_NAME_BYTES + 1))
+            for output in ('', '{', 'null null', 'false', '42', '[]', '{}', '""', '"fixture.desktop"',
+                           *(json.dumps({'id': bad_id, 'name': 'FixtureApp'}) for bad_id in bad_ids),
+                           json.dumps({'id': 'fixture.desktop'}),
+                           json.dumps({'id': 'fixture.desktop', 'name': 'FixtureApp', 'extra': 1}),
+                           *(json.dumps({'id': 'fixture.desktop', 'name': bad_name}) for bad_name in bad_names)):
                 with self.subTest(output=output[:80]):
                     command = AsyncMock(return_value=output)
                     with self.assertRaises(ValueError):
@@ -1198,7 +1205,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
         defaults = (f'HOME={home}', f'XDG_DATA_HOME={home}/.local/share',
                     'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=')
         with patch.object(bot.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
-            command = AsyncMock(return_value='"fixture.desktop"')
+            command = AsyncMock(return_value='{"id": "fixture.desktop", "name": "FixtureApp"}')
             tool = await bot.resolve_app_tool(selected_name, command=command)
             with patch.dict(os.environ, {'XDG_DATA_HOME': '/changed', 'XDG_DATA_DIRS': '/changed'}):
                 await tool.run(command=command)
@@ -4041,7 +4048,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             ('Could you start FixtureApp for me?',
              [self.brain_tool_call('known', 'open_app', {'name': 'FixtureApp'}),
               [({'content': '[delivery:neutral] Asked it to open.'}, None), ({}, 'stop')]],
-             ['"fixture.desktop"', ''], [(lookup, b'FixtureApp'), (launch, None)],
+             ['{"id": "fixture.desktop", "name": "FixtureApp"}', ''], [(lookup, b'FixtureApp'), (launch, None)],
              [('known', {'confirmed': True, 'attempted': True, 'reason': 'launch accepted'})], 'Asked it to open.'),
             ('Grab a picture of my screen.',
              [self.brain_tool_call('saved', 'take_screenshot', {}),
@@ -4129,7 +4136,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if not release.is_set():
                     held.set()
                     await release.wait()
-                return '"fixture.desktop"'
+                return '{"id": "fixture.desktop", "name": "FixtureApp"}'
             self.assertIsNone(stdin_data)
             return ''
 
@@ -7182,7 +7189,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             calls.append(argv)
             if argv[0] == '/usr/bin/env':
                 self.assertIn(stdin_data, (b'UnknownApp', b'FixtureApp'))
-                return 'null' if stdin_data == b'UnknownApp' else '"fixture.desktop"'
+                return 'null' if stdin_data == b'UnknownApp' else '{"id": "fixture.desktop", "name": "Fixtureapp"}'
             self.assertIsNone(stdin_data)
             return ''
 
@@ -7206,6 +7213,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(brain.requests), 2, 'A known installed app must stay local')
             self.assertEqual([a[0] for a in calls], ['/usr/bin/env', '/usr/bin/env', '/usr/bin/uwsm-app'])
             self.assertEqual(calls[-1][-1], 'fixture.desktop')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Opening Fixtureapp.')
             self.assertTrue(spoken.empty(), 'Accepted dispatch does not claim a visible window')
             self.assertTrue(committed.empty())
         finally:
@@ -7220,6 +7228,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await transport.input().queue_frame(barrier)
                 self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
                 self.assertEqual([a[0] for a in calls], ['/usr/bin/env', '/usr/bin/uwsm-app'])
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Opening Fixtureapp.')
                 self.assertTrue(spoken.empty())
                 self.assertTrue(committed.empty())
                 self.assertIsNone(processes[0][0])
@@ -7241,7 +7250,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 return '{}'
             if argv[0] == '/usr/bin/env':
                 self.assertEqual(stdin_data, b'FixtureApp')
-                return '"fixture.desktop"'
+                return '{"id": "fixture.desktop", "name": "FixtureApp"}'
             self.assertIsNone(stdin_data)
             raise RuntimeError('PRIVATE launch failure')
 
@@ -7278,7 +7287,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 calls.append(argv)
                 if argv[0] == '/usr/bin/env':
                     self.assertEqual(stdin_data, b'FixtureApp')
-                    return '"fixture.desktop"'
+                    return '{"id": "fixture.desktop", "name": "FixtureApp"}'
                 self.assertIsNone(stdin_data)
                 owners.append(asyncio.current_task())
                 if len(owners) == 1:
@@ -7318,6 +7327,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     barrier = DataFrame()
                     await transport.input().queue_frame(barrier)
                     self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Opening FixtureApp.')
                     self.assertTrue(spoken.empty(), 'Interrupted failure cannot queue stale speech')
                     self.assertTrue(committed.empty())
                     self.assertEqual([a[0] for a in calls],
@@ -7325,7 +7335,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(owners, actions)
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await self.finish_user_turn(transport, 'repeat that')
-                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), "I haven't said anything to repeat yet.")
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Opening FixtureApp.')
                     self.assertEqual(len(calls), 4)
                     self.assertFalse(transport.llm.local_actions.tasks)
             finally:
@@ -7343,7 +7353,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         calls.append(argv)
                         self.assertEqual(stdin_data, b'FixtureApp' if argv[0] == '/usr/bin/env' else None)
                         if stage == 'launch' and argv[0] == '/usr/bin/env':
-                            return '"fixture.desktop"'
+                            return '{"id": "fixture.desktop", "name": "FixtureApp"}'
                         owners.append(asyncio.current_task())
                         entered.set()
                         try:
