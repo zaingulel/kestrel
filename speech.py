@@ -130,8 +130,8 @@ BOUND_TO_KESTREL = [
 ECHO_REMOVAL_STOP_WAIT = 5
 LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
-LAPTOP_PLAYBACK_FAILURE = "Laptop audio playback failed. Restart Kestrel."
-LAPTOP_CAPTURE_FAILURE = "Laptop microphone capture failed. Restart Kestrel."
+LAPTOP_PLAYBACK_FAILURE = "Audio playback failed. Restart Kestrel."
+LAPTOP_CAPTURE_FAILURE = "Microphone capture failed. Restart Kestrel."
 
 
 def _standalone_number(token: str, start: int, stop: int) -> bool:
