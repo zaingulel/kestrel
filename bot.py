@@ -1451,8 +1451,9 @@ class HermesLLMService(LLMService):
                 return
             message = local_result_message(tool, result)
             if message is None:
-                self.retire_outcomes(token)
                 message = tool.confirmation
+                if message is None:
+                    self.retire_outcomes(token)
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:

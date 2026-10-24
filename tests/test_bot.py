@@ -1079,7 +1079,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             cases.extend([(argv, 4 * 1024 * 1024, 4 * 1024 * 1024, True),
                           (argv, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, False)])
         resolver = ('/usr/bin/env', 'HOME=/fixture', '/usr/bin/python', '-I', str(bot.ROOT / 'app_resolver.py'))
-        cases.append((resolver, bot.APP_RESOLUTION_BUDGET, bot.APP_RESOLUTION_BUDGET, True))
+        cases.extend([(resolver, 20544, 20544, True), (resolver, 20544, 20545, False)])
         cases.extend((argv, 4096, 4097, False) for argv in (
             ('/usr/bin/omarchy-shell', 'media', 'pause'),
             ('/usr/bin/omarchy-shell', 'media', 'next'),
@@ -3654,6 +3654,67 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(spoken.empty(), 'A successfully delivered account is not repeated')
                     self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
                     self.assertEqual(len(brain.requests), 2)
+                finally:
+                    output.write_gate.set()
+                    await close()
+
+    async def test_exact_volume_outcome_retires_only_after_its_confirmation_delivers(self):
+        for scenario in ('undelivered', 'delivered'):
+            with self.subTest(scenario=scenario):
+                brain = ScriptedBrain([])
+                self.addCleanup(brain.close)
+                command = AsyncMock(side_effect=[
+                    'selected', 'physical', '{"volume":{"mono":{"value":65536}}}', 'Mute: no', '',
+                    '{"volume":{"mono":{"value":19660}}}', 'selected', 'physical',
+                    '{"volume":{"mono":{"value":19660}}}', 'Mute: no'])
+                transport, spoken, _, interrupted, _, close = await self.open_session(brain, local_command=command)
+                output = transport.output()
+                delivered_end = asyncio.Event()
+
+                @output.event_handler('on_after_push_frame')
+                async def ended(processor, frame):
+                    if (isinstance(frame, LLMFullResponseEndFrame)
+                            and frame.indicator_reply_token is transport.llm._indicator_reply):
+                        delivered_end.set()
+
+                async def stop():
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await self.finish_user_turn(transport, 'stop')
+
+                try:
+                    if scenario == 'undelivered':
+                        output.write_gate.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await self.finish_user_turn(transport, 'set volume to thirty')
+                    if scenario == 'undelivered':
+                        await asyncio.wait_for(output.generation_done.wait(), 5)
+                        self.assertEqual(output.audio_written, 0)
+                        self.assertEqual(len(transport.llm.outcomes), 1)
+                        self.assertTrue(transport.llm.outcomes[0].result.confirmed)
+                        output.generation_done.clear()
+                        await stop()
+                        await asyncio.wait_for(output.generation_done.wait(), 5)
+                        self.assertTrue(spoken.empty())
+                        delivered_end.clear()
+                        output.write_gate.set()
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5),
+                                         "Stopped. Done: volume. I won't undo anything.")
+                        await asyncio.wait_for(delivered_end.wait(), 5)
+                    else:
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Volume 30.')
+                        await asyncio.wait_for(delivered_end.wait(), 5)
+                        self.assertEqual(transport.llm.outcomes, [])
+                        await stop()
+                    self.assertEqual(transport.llm.outcomes, [])
+                    barrier = DataFrame()
+                    await transport.input().queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    self.assertTrue(spoken.empty(), 'A retired volume outcome is not reported again')
+                    self.assertEqual(command.await_args_list.count(
+                        call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'))), 1)
+                    self.assertEqual(brain.requests, [])
                 finally:
                     output.write_gate.set()
                     await close()
@@ -8808,7 +8869,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_user_turn(transport, 'An ordinary conversation turn.')
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Ordinary reply.')
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Ordinary reply.')
-        self.assertTrue(spoken.empty(), 'Confirmed mute emits no acknowledgement')
+        self.assertTrue(spoken.empty(), 'Mute speaks nothing after it runs')
         self.assertEqual(calls.count(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1')), 1)
         self.assertEqual(len(brain.requests), 1)
         request = brain.requests[0][2]
