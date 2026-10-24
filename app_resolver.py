@@ -19,8 +19,8 @@ def valid_desktop_id(value) -> bool:
             and value[0] not in '.-' and not any(c in '/\\:' for c in value))
 
 
-def resolve_app(name: str, apps) -> str | None:
-    matches = set()
+def resolve_app(name: str, apps) -> dict | None:
+    matches = {}
     for app in apps:
         if not app.should_show():
             continue
@@ -31,8 +31,8 @@ def resolve_app(name: str, apps) -> str | None:
             desktop_id = app.get_id()
             if not valid_desktop_id(desktop_id):
                 raise ValueError('invalid app metadata')
-            matches.add(desktop_id)
-    return next(iter(matches)) if len(matches) == 1 else None
+            matches.setdefault(desktop_id, app_name.strip())
+    return next({'id': i, 'name': n} for i, n in matches.items()) if len(matches) == 1 else None
 
 
 def main(argv=None) -> int:
@@ -54,11 +54,11 @@ def main(argv=None) -> int:
         print('Gio unavailable', file=sys.stderr)
         return 1
     try:
-        desktop_id = resolve_app(name, Gio.AppInfo.get_all())
+        match = resolve_app(name, Gio.AppInfo.get_all())
     except (ValueError, TypeError, AttributeError, RuntimeError):
         print('Invalid installed-app metadata', file=sys.stderr)
         return 1
-    print(json.dumps(desktop_id))
+    print(json.dumps(match, ensure_ascii=False))
     return 0
 
 

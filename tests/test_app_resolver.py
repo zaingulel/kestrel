@@ -60,7 +60,7 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(argv, ('/usr/bin/env', *expected_env, '/usr/bin/python', '-I',
                                             str(bot.ROOT / 'app_resolver.py')))
                     self.assertEqual(stdin_data, b'Fixture Query')
-                    return json.dumps(desktop_id)
+                    return json.dumps({'id': desktop_id, 'name': 'FixtureApp'})
                 self.assertIsNone(stdin_data)
                 self.assertEqual(argv[:5], ('/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env'))
                 self.assertEqual(argv[-2], '/usr/bin/gtk-launch')
@@ -106,15 +106,18 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
             return entry
 
         fixture = app('  Fixture App  ', 'fixture.desktop')
-        self.assertEqual(app_resolver.resolve_app('FIXTURE APP', [fixture]), 'fixture.desktop')
-        self.assertEqual(app_resolver.resolve_app('STRASSE', [app('Straße', 'street.desktop')]), 'street.desktop')
-        self.assertEqual(app_resolver.resolve_app('Fixture App', [fixture, fixture]), 'fixture.desktop')
+        self.assertEqual(app_resolver.resolve_app('FIXTURE APP', [fixture]), {'id': 'fixture.desktop', 'name': 'Fixture App'})
+        self.assertEqual(app_resolver.resolve_app('STRASSE', [app('Straße', 'street.desktop')]),
+                         {'id': 'street.desktop', 'name': 'Straße'})
+        self.assertEqual(app_resolver.resolve_app('Fixture App', [fixture, fixture]),
+                         {'id': 'fixture.desktop', 'name': 'Fixture App'})
         self.assertIsNone(app_resolver.resolve_app('Unknown', [fixture]))
         self.assertIsNone(app_resolver.resolve_app('Fixture  App', [fixture]), 'Internal whitespace is significant')
         self.assertIsNone(app_resolver.resolve_app('Fixture App', [app('Fixture App', 'hidden.desktop', False)]))
         self.assertIsNone(app_resolver.resolve_app('Fixture App', [fixture, app('Fixture App', 'other.desktop')]))
         literal_id = 'App ; $(literal) "Name".desktop'
-        self.assertEqual(app_resolver.resolve_app('Fixture App', [app('Fixture App', literal_id)]), literal_id)
+        self.assertEqual(app_resolver.resolve_app('Fixture App', [app('Fixture App', literal_id)]),
+                         {'id': literal_id, 'name': 'Fixture App'})
         for desktop_id in (None, 12, '', '.desktop', '-x.desktop', 'x', '/x.desktop', 'x/y.desktop',
                            'x\\y.desktop', 'x:y.desktop', 'x\x00.desktop', 'x\x7f.desktop',
                            'é' * 510 + '.desktop'):
@@ -127,12 +130,12 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
             app_resolver.resolve_app('Fixture App', [app(None, 'bad.desktop')])
         gio = SimpleNamespace(AppInfo=SimpleNamespace(get_all=Mock(return_value=[fixture])))
         with patch.dict(sys.modules, {'gi.repository': SimpleNamespace(Gio=gio)}):
-            for name, expected in (('Fixture App', 'fixture.desktop'), ('Unknown', None)):
+            for name, expected in (('Fixture App', {'id': 'fixture.desktop', 'name': 'Fixture App'}), ('Unknown', None)):
                 output, errors = io.StringIO(), io.StringIO()
                 with redirect_stdout(output), redirect_stderr(errors), \
                         patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(name.encode()))):
                     self.assertEqual(app_resolver.main([]), 0)
-                self.assertEqual(json.loads(output.getvalue()), expected)
+                self.assertEqual(output.getvalue(), json.dumps(expected) + '\n')
                 self.assertEqual(errors.getvalue(), '')
             gio.AppInfo.get_all.return_value = [app('Fixture App', '../bad.desktop')]
             output, errors = io.StringIO(), io.StringIO()
@@ -166,14 +169,23 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
             self.fail('Local native system Python is required')
         calls = []
         private_name = 'FixturePrivateQuery_3a61'
+        # Prosgegrammeni and combining marks fold to the iota with dialytika and tonos: the 3,524-byte name
+        # matches this 1,024-byte query, so the installed name exceeds the request's size.
+        installed_name = private_name + '\u1fbe\u0308\u0301' * 500
+        query = private_name.upper() + '\u0390' * 500
+        self.assertEqual(len(query.encode()), 1024)
+        self.assertGreater(len(installed_name.encode()), 1024)
+        nested_id = '-'.join(('d' * 250,) * 3) + '-fixture.desktop'
+        self.assertEqual(len(nested_id.encode()), 768)
         with tempfile.TemporaryDirectory(prefix='kestrel-apps-') as directory:
             root = Path(directory)
             caller, activation = root / 'caller ; literal', root / 'activation'
-            for base, name in ((caller, private_name), (activation, 'Impostor')):
+            for base, name, directories in ((caller, installed_name, ('d' * 250,) * 3), (activation, 'Impostor', ())):
                 apps = base / 'data' / 'applications'
-                apps.mkdir(parents=True)
-                (apps / 'fixture.desktop').write_text(
-                    f'[Desktop Entry]\nType=Application\nName={name}\nExec=/usr/bin/true\n',
+                entry_directory = apps.joinpath(*directories)
+                entry_directory.mkdir(parents=True)
+                (entry_directory / 'fixture.desktop').write_text(
+                    f'[Desktop Entry]\nType=Application\nName={name}\nExec=/usr/bin/true\n', encoding='utf-8',
                 )
             caller_env = {
                 'XDG_DATA_HOME': str(caller / 'data'), 'XDG_DATA_DIRS': str(caller / 'empty'),
@@ -216,30 +228,33 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
                             if parts[0] == b'/usr/bin/python' and str(bot.ROOT / 'app_resolver.py').encode() in parts:
                                 break
                             await asyncio.sleep(0)
-                    self.assertNotIn(private_name.encode(), cmdline, 'Private query must not enter process argv')
-                    self.assertEqual(stdin_data, b'FixturePrivateQuery_3a61')
+                    self.assertNotIn(query.encode(), cmdline, 'Private query must not enter process argv')
+                    self.assertEqual(stdin_data, query.encode())
                     stdout, stderr = process.communicate(input=stdin_data, timeout=5)
                     if process.returncode != 0 and os.environ.get('CI') == 'true' and b'Gio unavailable' in stderr:
                         self.skipTest('Hosted system Python/Gio unavailable; native evidence requires local execution')
                     self.assertEqual(process.returncode, 0, stderr)
-                    self.assertEqual(json.loads(stdout), 'fixture.desktop')
-                    self.assertNotIn(private_name.encode(), stdout + stderr)
+                    self.assertEqual(json.loads(stdout), {'id': nested_id, 'name': installed_name})
+                    self.assertIn(installed_name.encode(), stdout, 'The installed name must cross the wire as UTF-8')
+                    self.assertGreater(len(stdout), 4096)
+                    self.assertNotIn(query.encode(), stdout + stderr)
                     return stdout.decode()
                 finally:
                     cleanup()
 
             with patch.object(bot.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(caller))), \
                     patch.dict(os.environ, caller_env):
-                name = bot.match_app_name(f'open {private_name}')
-                self.assertEqual(name, 'FixturePrivateQuery_3a61')
+                name = bot.match_app_name(f'open {query}')
+                self.assertEqual(name, query)
                 tool = await bot.resolve_app_tool(name, command=command)
                 self.assertIsNotNone(tool)
+                self.assertEqual(tool.confirmation, f'Opening {installed_name}.')
                 result = await tool.run(command=command)
             self.assertTrue(result.accepted)
             self.assertEqual(len(calls), 2)
             launch = calls[1]
             self.assertEqual(launch[:5], ('/usr/bin/uwsm-app', '-t', 'service', '--', '/usr/bin/env'))
-            self.assertEqual(launch[-2:], ('/usr/bin/gtk-launch', 'fixture.desktop'))
+            self.assertEqual(launch[-2:], ('/usr/bin/gtk-launch', nested_id))
             # Execute the captured launch environment with a lookup probe, never the actual launcher.
             probe = (*launch[4:-2], '/usr/bin/python', '-I', str(bot.ROOT / 'app_resolver.py'))
             completed = subprocess.run(probe, input='Impostor', env=activation_env, capture_output=True, text=True, timeout=5)

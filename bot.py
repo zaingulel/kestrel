@@ -30,7 +30,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.frames.frames import (
-    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, StartFrame, UserStartedSpeakingFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, StartFrame, UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame, ProposedUserStoppedSpeakingFrame, LLMMessagesAppendFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame,
 )
@@ -59,10 +59,16 @@ ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
 TURN_TIMEOUT = 1800
 MUTE_TIMEOUT = 5
+ANNOUNCEMENT_TIMEOUT = 5
 VOLUME_TIMEOUT = 5
 DESKTOP_TIMEOUT = 5
 LOCAL_COMMAND_TIMEOUT = 2
 LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
+# An installed name casefolds to a request of at most 1,024 bytes. Full case folding shrinks a character's UTF-8
+# at most threefold (U+212A) and expands it at most threefold (U+0390), so a match is at most 9 * 1,024 bytes.
+APP_NAME_BYTES = 9 * 1024
+# JSON escaping at most doubles each admitted field; 64 bytes cover the object syntax.
+APP_RESOLUTION_BUDGET = 2 * (1024 + APP_NAME_BYTES) + 64
 SCREENSHOT_COMMAND = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
 
 
@@ -78,6 +84,12 @@ class LocalTool:
     run: object
     subject: str
     spoken: str
+    confirmation: str | None = None
+    announcement: str | None = None
+
+
+class AnnouncementMarkFrame(DataFrame):
+    """Its output push follows the full synthesis and playback of the announcement pushed before it."""
 
 
 @dataclass(frozen=True)
@@ -104,9 +116,14 @@ class AppLaunchResult:
 
 
 async def run_local_command(argv, *, stdin_data: bytes | None = None):
-    # Native media status may embed cover art; only that read needs a larger allowance.
-    budget = (4 * 1024 * 1024 if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status')
-              else 4096)
+    # Native media status may embed cover art, and the app resolver returns an installed name; only those reads
+    # need a larger allowance.
+    if tuple(argv) == ('/usr/bin/omarchy-shell', 'media', 'status'):
+        budget = 4 * 1024 * 1024
+    elif tuple(argv[-3:]) == ('/usr/bin/python', '-I', str(ROOT / 'app_resolver.py')):
+        budget = APP_RESOLUTION_BUDGET
+    else:
+        budget = 4096
     uid = os.getuid()
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8',
@@ -503,23 +520,25 @@ async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool
     discovery_env = app_discovery_environment()
     output = await command(('/usr/bin/env', *discovery_env, '/usr/bin/python', '-I',
                             str(ROOT / 'app_resolver.py')), stdin_data=name.encode('utf-8'))
-    desktop_id = json.loads(output)
-    if desktop_id is None:
+    match = json.loads(output)
+    if match is None:
         return None
-    if not valid_desktop_id(desktop_id):
+    if (not isinstance(match, dict) or match.keys() != {'id', 'name'} or not valid_desktop_id(match['id'])
+            or not valid_app_text(match['name'], APP_NAME_BYTES) or not match['name'].strip()):
         raise ValueError('invalid app resolution')
     tool = LOCAL_TOOLS['open app']
-    return replace(tool, run=partial(tool.run, desktop_id, discovery_env))
+    return replace(tool, run=partial(tool.run, match['id'], discovery_env), confirmation=f"Opening {match['name']}.")
 
 
 LOCAL_TOOLS = {
-    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute', 'mute'),
+    'mute': LocalTool(PermissionTier.FREE, mute_output, 'mute', 'mute', announcement='Muting.'),
     'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume', 'set the volume to thirty'),
     'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause', 'pause music'),
     'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track', 'next track'),
     'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace', 'workspace three'),
     'open app': LocalTool(PermissionTier.FREE, open_app, 'open app', "open followed by an installed app's exact name"),
-    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot'),
+    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot',
+                                    confirmation='Screenshot saved.'),
 }
 
 
@@ -625,7 +644,8 @@ def match_instant_tool(text):
     percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
     if percent is None:
         return None
-    return free_tool('volume', percent)
+    tool = free_tool('volume', percent)
+    return replace(tool, confirmation=f'Volume {percent}.') if tool is not None else None
 
 
 def stop_kestrel():
@@ -1006,6 +1026,8 @@ class HermesLLMService(LLMService):
         self._conversation_incomplete = False
         self._conversation_synthesis_failed = False
         self._conversation_delivered = False
+        # (token, marker, future) for the one announcement LocalActions.lock lets wait at a time.
+        self._announcement = None
         self._indicator_ready = False
         self._indicator_voice_failed = False
         self._indicator_user = False
@@ -1123,9 +1145,33 @@ class HermesLLMService(LLMService):
             context = getattr(frame, 'conversation_audio_context', None)
             self._assistant_reply_token = context.reply_token if context is not None else getattr(frame, 'conversation_reply_token', None)
         self._track_conversation_output(frame)
+        self.observe_announcement(frame)
         if self.owns_request(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             self.last_spoken_reply = frame.text
             self._last_spoken_token = self._assistant_reply_token
+
+    def observe_announcement(self, frame):
+        if self._announcement is None:
+            return
+        token, marker, _ = self._announcement
+        if frame is marker:
+            # A TTSStoppedFrame alone can be Pipecat's idle-timeout stop while synthesis continues.
+            self.end_announcement('played' if self._conversation_attempt is token and self._conversation_delivered
+                                  and not self._conversation_output_failed() else 'not fully played')
+        elif isinstance(frame, InterruptionFrame) and getattr(frame, 'conversation_reply_token', None) is token:
+            # The turn's own earlier interruption carries the previous reply's stamp and must not release.
+            self.end_announcement('interrupted')
+        elif isinstance(frame, ConversationSynthesisFailedFrame) and frame.context.reply_token is token:
+            self.end_announcement('synthesis failed')
+
+    def end_announcement(self, outcome):
+        if self._announcement is not None and not self._announcement[2].done():
+            self._announcement[2].set_result(outcome)
+
+    def _conversation_output_failed(self):
+        context = self._conversation_output_context
+        return (self._conversation_incomplete or self._conversation_synthesis_failed
+                or bool(self._conversation_pending_spans) or bool(context and context.write_failed))
 
     def _track_conversation_output(self, frame):
         if not self.admitted():
@@ -1146,11 +1192,9 @@ class HermesLLMService(LLMService):
         if isinstance(frame, LLMFullResponseEndFrame):
             token = frame.indicator_reply_token
             if token is self._conversation_attempt:
-                context = self._conversation_output_context
                 self.finish_conversation_reply(
                     token, interrupted=token is self._conversation_interrupting,
-                    failed=frame.conversation_reply_failed or self._conversation_incomplete or self._conversation_synthesis_failed
-                    or bool(self._conversation_pending_spans) or bool(context and context.write_failed),
+                    failed=frame.conversation_reply_failed or self._conversation_output_failed(),
                 )
             return
         if isinstance(frame, TTSStartedFrame):
@@ -1213,14 +1257,36 @@ class HermesLLMService(LLMService):
         end.conversation_reply_failed = failed
         await self.push_frame(end)
 
-    async def speak_local_reply(self, message, token):
-        if not self.owns_request(token):
-            return
-        self.begin_conversation_reply(token)
+    async def push_local_speech(self, message, token):
+        if self._conversation_attempt is not token:
+            self.begin_conversation_reply(token)
         frame = TTSSpeakFrame(message, append_to_context=False)
         frame.conversation_reply_token = token
         await self.push_frame(frame)
+
+    async def speak_local_reply(self, message, token):
+        if not self.owns_request(token):
+            return
+        await self.push_local_speech(message, token)
         await self.push_reply_end(token)
+
+    async def announce_first(self, token, message, run, *, command):
+        outcome = 'request superseded'
+        if self.owns_request(token):
+            marker = AnnouncementMarkFrame()
+            played = asyncio.get_running_loop().create_future()
+            self._announcement = (token, marker, played)
+            try:
+                await self.push_local_speech(message, token)
+                await self.push_frame(marker)
+                outcome = await asyncio.wait_for(played, ANNOUNCEMENT_TIMEOUT)
+            except TimeoutError:
+                outcome = 'timed out'
+            finally:
+                self._announcement = None
+        if outcome != 'played':
+            logger.warning(f'Playback of {message!r} was not confirmed: {outcome}')
+        return await run(command=command)
 
     def retire_outcomes(self, token):
         self.outcomes = [item for item in self.outcomes if item.reporter is not token or item.result is None]
@@ -1295,6 +1361,8 @@ class HermesLLMService(LLMService):
         self.last_spoken_reply = None
         if self.lookup is not None:
             self.lookup.cancel()
+        if not self.admitted():
+            self.end_announcement('conversation ended')
 
     async def process_frame(self, frame, direction):
         user_request = isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM and not frame.speculation
@@ -1372,6 +1440,8 @@ class HermesLLMService(LLMService):
             if not self.valid_origin(frame):
                 return
             remove_original()
+            if tool.announcement is not None:
+                tool = replace(tool, run=partial(self.announce_first, token, tool.announcement, tool.run))
             # LocalActions owns an accepted action independently of later reply ownership.
             if tool.subject in EXACT_STOP_SUBJECTS:
                 result = await self.run_shared(tool, epoch=self.stop_epoch, reporter=token)
@@ -1380,10 +1450,13 @@ class HermesLLMService(LLMService):
             if result is None or not self.owns_request(token):
                 return
             message = local_result_message(tool, result)
+            if message is None:
+                message = tool.confirmation
+                if message is None:
+                    self.retire_outcomes(token)
             if message is not None:
                 await self.speak_local_reply(message, token)
             else:
-                self.retire_outcomes(token)
                 await self.push_reply_end(token)
             return
         output = None
