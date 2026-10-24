@@ -74,8 +74,10 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(asyncio.wait((exited, arrived),
                                                           return_when=asyncio.FIRST_COMPLETED), 3)
                         if received.is_set():
-                            self.assertNotIn(b'private-cli-canary', Path(f'/proc/{process.pid}/cmdline').read_bytes())
-                            self.assertNotIn(b'private-cli-canary', Path(f'/proc/{process.pid}/environ').read_bytes())
+                            self.assertFalse(b'private-cli-canary' in Path(f'/proc/{process.pid}/cmdline').read_bytes(),
+                                             'canary reached the child command line')
+                            self.assertFalse(b'private-cli-canary' in Path(f'/proc/{process.pid}/environ').read_bytes(),
+                                             'canary reached the child environment')
                         release.set()
                         await asyncio.wait_for(exited, 3)
                         output, errors = await asyncio.gather(stdout, stderr)
@@ -87,6 +89,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.gather(stdout, stderr, exited, arrived, return_exceptions=True)
                 self.assertEqual(requests, [payload, payload])
             finally:
+                release.set()
                 server.close()
                 await server.wait_closed()
                 await cleanup()
