@@ -72,9 +72,9 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(tool_actions.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=home)), \
                     patch.dict(os.environ, {'XDG_DATA_HOME': data_home, 'XDG_DATA_DIRS': data_dirs,
                                             'XDG_CURRENT_DESKTOP': 'Fixture_1'}):
-                name = bot.match_app_name('open Fixture Query')
+                name = bot.match_local_phrase('open Fixture Query')[1]['name']
                 self.assertEqual(name, 'Fixture Query')
-                tool = await bot.resolve_app_tool(name, command=command)
+                tool = await bot.resolve_local_tool(bot.match_instant_tool(f'open {name}'), command=command)
                 self.assertIsNotNone(tool)
                 result = await tool.run(command=command)
             self.assertTrue(result.accepted, result.reason)
@@ -245,9 +245,9 @@ class AppResolverTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(tool_actions.pwd, 'getpwuid', return_value=SimpleNamespace(pw_dir=str(caller))), \
                     patch.dict(os.environ, caller_env):
-                name = bot.match_app_name(f'open {query}')
+                name = bot.match_local_phrase(f'open {query}')[1]['name']
                 self.assertEqual(name, query)
-                tool = await bot.resolve_app_tool(name, command=command)
+                tool = await bot.resolve_local_tool(bot.match_instant_tool(f'open {name}'), command=command)
                 self.assertIsNotNone(tool)
                 self.assertEqual(tool.confirmation, f'Opening {installed_name}.')
                 result = await tool.run(command=command)

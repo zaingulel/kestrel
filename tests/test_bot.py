@@ -1150,9 +1150,9 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             for phrase in ('open Fixture App', ' OPEN Fixture App. ', 'Open Fixture App!'):
                 with self.subTest(phrase=phrase):
                     command = AsyncMock(return_value=json.dumps({'id': desktop_id, 'name': 'Fixture app'}))
-                    name = bot.match_app_name(phrase)
+                    name = bot.match_local_phrase(phrase)[1]['name']
                     self.assertEqual(name, 'Fixture App')
-                    tool = await bot.resolve_app_tool(name, command=command)
+                    tool = await bot.resolve_local_tool(bot.match_instant_tool(phrase), command=command)
                     self.assertIsNotNone(tool)
                     self.assertEqual(tool.confirmation, 'Opening Fixture app.')
                     self.assertEqual(tool.permission, bot.PermissionTier.FREE)
@@ -1173,18 +1173,19 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
             for phrase in ('open', 'open  ', 'open FixtureApp?', 'please open FixtureApp',
                            '"open FixtureApp"', "'open FixtureApp'", 'open Fixture\nApp', 'do not open FixtureApp'):
                 with self.subTest(nonmatch=phrase):
-                    self.assertIsNone(bot.match_app_name(phrase))
+                    self.assertIsNone(bot.match_instant_tool(phrase))
             for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
                 with patch.dict(bot.LOCAL_TOOLS, {'open_app': bot.LocalTool(permission, AsyncMock(), 'open app', "open followed by an installed app's exact name")}):
-                    self.assertIsNone(bot.match_app_name('open FixtureApp'))
+                    self.assertIsNone(bot.match_instant_tool('open FixtureApp'))
             for phrase, expected_name in (('open UnknownApp', 'UnknownApp'), ('open AmbiguousApp', 'AmbiguousApp'),
                                           ('open FixtureApp and tell me a fact', 'FixtureApp and tell me a fact')):
                 command = AsyncMock(return_value='null\n')
-                name = bot.match_app_name(phrase)
+                name = bot.match_local_phrase(phrase)[1]['name']
                 self.assertEqual(name, expected_name)
-                self.assertIsNone(await bot.resolve_app_tool(name, command=command))
+                self.assertIsNone(await bot.resolve_local_tool(bot.match_instant_tool(phrase), command=command))
                 self.assertEqual(command.await_count, 1, 'Unknown names cannot launch')
-            selected_name = bot.match_app_name('open FixtureApp')
+            selected = bot.match_instant_tool('open FixtureApp')
+            selected_name = bot.match_local_phrase('open FixtureApp')[1]['name']
             self.assertEqual(selected_name, 'FixtureApp')
             bad_ids = ('../fixture.desktop', '-fixture.desktop', '.fixture.desktop', 'fixture', 'a:b.desktop',
                        'a\\b.desktop', 'a\n.desktop', 'é' * 510 + '.desktop')
@@ -1197,11 +1198,11 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(output=output[:80]):
                     command = AsyncMock(return_value=output)
                     with self.assertRaises(ValueError):
-                        await bot.resolve_app_tool(selected_name, command=command)
+                        await bot.resolve_local_tool(selected, command=command)
                     self.assertEqual(command.await_count, 1)
             command = AsyncMock(side_effect=RuntimeError('unavailable'))
             with self.assertRaises(RuntimeError):
-                await bot.resolve_app_tool(selected_name, command=command)
+                await bot.resolve_local_tool(selected, command=command)
             self.assertEqual(command.await_count, 1)
             for error in (RuntimeError('launch failed'), FileNotFoundError('missing'), TimeoutError()):
                 command = AsyncMock(side_effect=error)
@@ -1214,7 +1215,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                     'XDG_DATA_DIRS=/usr/local/share:/usr/share', 'XDG_CURRENT_DESKTOP=')
         with patch.object(tool_actions.pwd, 'getpwuid', return_value=Mock(pw_dir=home)), patch.dict(os.environ, {}, clear=True):
             command = AsyncMock(return_value='{"id": "fixture.desktop", "name": "FixtureApp"}')
-            tool = await bot.resolve_app_tool(selected_name, command=command)
+            tool = await bot.resolve_local_tool(selected, command=command)
             with patch.dict(os.environ, {'XDG_DATA_HOME': '/changed', 'XDG_DATA_DIRS': '/changed'}):
                 await tool.run(command=command)
             self.assertEqual(command.await_args_list[0].args[0][1:5], defaults)
@@ -1233,10 +1234,10 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(key=key, value=value[:80]), patch.dict(os.environ, {key: value}):
                     command = AsyncMock()
                     with self.assertRaises(ValueError):
-                        await bot.resolve_app_tool(selected_name, command=command)
+                        await bot.resolve_local_tool(selected, command=command)
                     command.assert_not_awaited()
             for name in ('x' * 1025, 'a\x00b', 'a\tb'):
-                self.assertIsNone(bot.match_app_name(f'open {name}'))
+                self.assertIsNone(bot.match_instant_tool(f'open {name}'))
 
         ordinary = 'Ordinary interrupted request.'
         context = bot.LLMContext([{'role': 'user', 'content': ordinary}])
@@ -1246,14 +1247,14 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
         pending = asyncio.get_running_loop().create_future()
         service.channel.reader = pending
         checkpoint, unreleased = asyncio.Event(), asyncio.Event()
-        real_resolve, real_shield = bot.resolve_app_tool, asyncio.shield
+        real_resolve, real_shield = bot.resolve_local_tool, asyncio.shield
         requests = []
 
-        async def resolve_at_checkpoint(text, *, command=tool_actions.run_local_command):
-            if text == ordinary:
+        async def resolve_at_checkpoint(tool, *, command=tool_actions.run_local_command):
+            if tool.lookup.args == (ordinary,):
                 checkpoint.set()
                 await unreleased.wait()
-            return await real_resolve(text, command=command)
+            return await real_resolve(tool, command=command)
 
         def shield_at_checkpoint(awaitable):
             if awaitable is pending:
@@ -1267,7 +1268,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
 
         processing = None
         try:
-            with (patch.object(bot, 'resolve_app_tool', resolve_at_checkpoint),
+            with (patch.object(bot, 'resolve_local_tool', resolve_at_checkpoint),
                   patch.object(bot.asyncio, 'shield', shield_at_checkpoint),
                   patch.object(service.channel, 'exchange', exchange)):
                 processing = asyncio.create_task(service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM))
