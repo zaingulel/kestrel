@@ -40,7 +40,7 @@ GGML_BASE = LIBRARY.parent / 'libggml-base.so.0'
 GGML_BASE_SIZE = 863168
 GGML_BASE_SHA256 = '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'
 # Owner capitalisation, because lowercase phrases inserted false words.
-BOOSTED_PHRASES = ('AlpGuard', 'Flowgauge', 'Fabraik')
+BOOSTED_PHRASES = ('AlpGuard', 'Flowgauge', 'Fabraik', 'Kestrel')
 BOOST = 2.0
 SPELLINGS = {phrase.lower(): phrase for phrase in BOOSTED_PHRASES}
 SPELLING_PATTERN = re.compile(rf"\b(?:{'|'.join(map(re.escape, BOOSTED_PHRASES))})\b", re.IGNORECASE)
