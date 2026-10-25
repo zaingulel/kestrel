@@ -5252,10 +5252,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await close()
 
     async def test_output_handover_quiesces_old_input_and_preserves_accepted_work(self):
-        for case in ('held_vad', 'queued_pcm', 'late_recognizer', 'stop_timer', 'accepted_submission', 'accepted_action', 'native_late_start'):
+        for case in ('held_vad', 'queued_pcm', 'late_recognizer', 'stop_timer', 'accepted_submission', 'accepted_action', 'native_late_start', 'held_aggregation'):
             with self.subTest(case=case):
                 entered, release, refreshed = asyncio.Event(), asyncio.Event(), asyncio.Event()
                 self.addCleanup(release.set)
+                prediction_release = None
                 analyzers, strategies, effects, late_start_notices = [], [], [], []
                 native_strategy = bot.TurnAnalyzerUserTurnStopStrategy
                 muted = False
@@ -5306,7 +5307,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(bot, 'TurnAnalyzerUserTurnStopStrategy', side_effect=strategy):
                     transport, spoken, committed, interrupted, _, close = await self.open_session(
                         brain, through_service=True, native_audio=True, vad_factory=vad_factory,
-                        production_turn_strategies=case in ('held_vad', 'stop_timer', 'native_late_start'), local_command=command,
+                        production_turn_strategies=case in ('held_vad', 'stop_timer', 'native_late_start', 'held_aggregation'), local_command=command,
                     )
                 try:
                     service, manager = transport.service, transport.service.manager
@@ -5398,6 +5399,36 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 await completed(user, InputAudioRawFrame(bytes(640), 16000, 1))
                                 await completed(user, self.transcription(transport, 'old accumulated speech'))
                                 await completed(user, VADUserStoppedSpeakingFrame())
+                        elif case == 'held_aggregation':
+                            await completed(user, VADUserStartedSpeakingFrame())
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            await completed(user, InputAudioRawFrame(bytes(640), 16000, 1))
+                            old_text = 'old aggregation sentinel'
+                            transcription = self.transcription(transport, old_text)
+                            self.assertTrue(transcription.finalized)
+                            await completed(user, transcription)
+                            prediction_release = threading.Event()
+                            prediction_samples = []
+                            loop = asyncio.get_running_loop()
+                            stop_done = asyncio.Event()
+
+                            def complete_prediction(audio):
+                                prediction_samples.append(audio.size)
+                                loop.call_soon_threadsafe(entered.set)
+                                prediction_release.wait()
+                                return {'prediction': 1, 'probability': 1.0}
+
+                            async def stopped(processor, frame, direction):
+                                stop_done.set()
+
+                            with patch.object(strategies[0]._turn_analyzer, '_predict_endpoint',
+                                              side_effect=complete_prediction):
+                                await user.queue_frame(VADUserStoppedSpeakingFrame(), callback=stopped)
+                                await asyncio.wait_for(entered.wait(), 5)
+                                self.assertFalse(stop_done.is_set())
+                                self.assertEqual(len(prediction_samples), 1)
+                                self.assertGreater(prediction_samples[0], 0)
+                            # The executor is already inside the controlled predictor until release.
                         elif case == 'native_late_start':
                             await user.queue_frame(InputAudioRawFrame(b'S' * 640, 16000, 1))
                             await asyncio.wait_for(interrupted.wait(), 5)
@@ -5452,6 +5483,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         if case == 'late_recognizer':
                             await asyncio.wait_for(reset_started.wait(), 5)
                             native.stdout.feed_data(b'{"text":"old microphone sentinel"}\n')
+                        if case == 'held_aggregation':
+                            prediction_release.set()
+                            await asyncio.wait_for(stop_done.wait(), 5)
                         await asyncio.wait_for(refreshed.wait(), 5)
                     self.assertIs(transport.input()._audio_task, old_audio_task)
                     self.assertIs(transport.input()._audio_in_queue, old_audio_queue)
@@ -5501,6 +5535,32 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         ])
                         self.assertTrue(spoken.empty())
                         self.assertTrue(committed.empty())
+                    elif case == 'held_aggregation':
+                        downstream = DataFrame()
+                        downstream_done = asyncio.Event()
+
+                        @transport.output().event_handler('on_after_process_frame')
+                        async def after_downstream(processor, frame):
+                            if frame is downstream:
+                                downstream_done.set()
+
+                        await user.queue_frame(downstream)
+                        await asyncio.wait_for(downstream_done.wait(), 5)
+                        self.assertNotIn(old_text, str(manager.ingress[2].get_messages()))
+                        self.assertNotIn(old_text, str(manager.conversation.turns))
+                        self.assertEqual(len(brain.requests), before_requests)
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        await self.finish_user_turn(transport, 'Fresh speech after held analysis')
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Accepted reply.')
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Accepted reply.')
+                        self.assertEqual(len(brain.requests), before_requests + 1)
+                        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+                            {'role': 'user', 'content': 'Fresh speech after held analysis'},
+                        ])
+                        self.assertNotIn(old_text, str(brain.requests))
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
                     else:
                         self.assertEqual(len(brain.requests), before_requests)
                     self.assertNotIn('old microphone sentinel', str(manager.conversation.turns))
@@ -5512,6 +5572,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await service.state('inactive')
                     self.assertFalse(manager.speech_admitted())
                 finally:
+                    if prediction_release is not None:
+                        prediction_release.set()
                     release.set()
                     await close()
 
