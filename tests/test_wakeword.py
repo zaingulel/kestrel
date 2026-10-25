@@ -133,55 +133,65 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
                 wakeword.wire_score(payload)
 
-    def test_burst_wakes_when_it_ends_above_the_bar(self):
+    def test_single_high_score_does_not_wake_and_listening_continues(self):
         lines = wake_lines(self)
         detected = Mock()
         detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
-        for score in (0.1, 0.3, 0.6, 0.4):
+        for score in (0.1, 0.3, 0.99, 0.4, 0.1):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.990: 0.300 0.990 0.400')])
+        detector.scored(0.85)
+        detected.assert_not_called()
+        detector.scored(0.85)
+        detected.assert_called_once_with()
+        self.assertEqual(lines[1:], [('wakeword', 'Wake scores: woke, peak 0.850: 0.850 0.850')])
+
+    def test_scores_above_the_bar_separated_by_a_lower_score_do_not_wake(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.9, 0.5, 0.9, 0.1):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.900: 0.900 0.500 0.900')])
+
+    def test_burst_cut_at_its_limit_without_a_pair_does_not_wake(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        scores = (0.9, 0.5) * 6
+        for score in scores[:11]:
+            detector.scored(score)
+        self.assertEqual(lines, [])
+        detector.scored(scores[11])
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.900:' + ' 0.900 0.500' * 6)])
+
+    def test_pair_at_exactly_the_bar_does_not_wake(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.8, 0.8, 0.1):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.800: 0.800 0.800')])
+
+    def test_wakes_on_the_second_consecutive_score_above_the_bar(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.3, 0.800001):
             detector.scored(score)
         detected.assert_not_called()
         self.assertEqual(lines, [])
-        detector.scored(0.1)
+        detector.scored(0.800001)
         detected.assert_called_once_with()
-        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400')])
-        for score in (0.1, 0.3, 0.2, 0.6, 0.1):
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.800: 0.300 0.800 0.800')])
+        for score in (0.95, 0.95, 0.1):
             detector.scored(score)
-        self.assertEqual(lines, [
-            ('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400'),
-            ('wakeword', 'Wake scores: did not wake, peak 0.300: 0.300'),
-            ('wakeword', 'Wake scores: woke, peak 0.600: 0.600'),
-        ])
-        self.assertEqual(detected.call_count, 2)
-
-    def test_burst_at_or_below_the_bar_does_not_wake(self):
-        lines = wake_lines(self)
-        detected = Mock()
-        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
-        for score in (0.3, 0.5, 0.2):
-            detector.scored(score)
-        detected.assert_not_called()
-        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.500: 0.300 0.500')])
-
-    def test_burst_just_above_the_bar_wakes(self):
-        lines = wake_lines(self)
-        detected = Mock()
-        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
-        detector.scored(0.500001)
-        detector.scored(0.1)
         detected.assert_called_once_with()
-        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.500: 0.500')])
-
-    def test_burst_is_cut_at_its_limit(self):
-        lines = wake_lines(self)
-        detected = Mock()
-        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
-        for _ in range(11):
-            detector.scored(0.75)
-        detected.assert_not_called()
-        self.assertEqual(lines, [])
-        detector.scored(0.75)
-        detected.assert_called_once_with()
-        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.750:' + ' 0.750' * 12)])
+        self.assertEqual(len(lines), 1)
 
     async def test_open_burst_is_logged_as_interrupted_on_close(self):
         lines = wake_lines(self)
@@ -268,8 +278,8 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
                     " else b'S\\x7f\\xc0\\x00\\x00' if data[0] == 2 else b'X' if data[0] == 4 else b'N')\n"
                     " sys.stdout.buffer.flush()")
                 await detector.start()
-                # Frames with no score neither end nor break the burst; the zero score ends it.
-                for frame in (1, 3, 1, 0):
+                # A frame with no score does not break the pair; the second 1.0 score wakes.
+                for frame in (1, 3, 1):
                     detector.submit(bytes([frame]) * 640)
                 await asyncio.wait_for(self.hits.wait(), 5)
                 self.assertFalse(self.failure.is_set())
