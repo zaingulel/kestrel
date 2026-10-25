@@ -250,47 +250,188 @@ def load_voice_preset(name: str, *, voices_dir: Path = ROOT / '.runtime/voices')
     return VoicePreset(reference, transcript, pcm)
 
 
+OUTPUT_SWITCH_FAILURE = 'Audio output handover failed. Restart Kestrel.'
+OUTPUT_WATCH_FAILURE = 'Audio output monitoring failed. Restart Kestrel.'
+
+
+class PipeWireGraphCleanupFailure(RuntimeError):
+    pass
+
+
+async def _close_pipewire(process):
+    if process.stdout is not None and process.stdout._transport is not None:
+        process.stdout._transport.close()
+    if process.returncode is None:
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), 5)
+    except TimeoutError:
+        process.kill()
+        await asyncio.wait_for(process.wait(), 5)
+
+
+async def _pipewire_graph():
+    process = None
+    try:
+        async with asyncio.timeout(5):
+            process = await asyncio.create_subprocess_exec(
+                'pw-dump', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            data = bytearray()
+            while block := await process.stdout.read(65536):
+                data.extend(block)
+                if len(data) > 8 * 1024 * 1024:
+                    raise ValueError
+            if await process.wait() != 0:
+                raise ValueError
+            try:
+                graph = json.loads(data)
+            except RecursionError:
+                raise ValueError from None
+            if not isinstance(graph, list):
+                raise ValueError
+            ids = set()
+            for item in graph:
+                if (not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] in ids
+                        or not isinstance(item.get('type'), str)):
+                    raise ValueError
+                ids.add(item['id'])
+                if item['type'] == 'PipeWire:Interface:Link':
+                    info = item.get('info')
+                    if (not isinstance(info, dict) or type(info.get('output-node-id')) is not int
+                            or type(info.get('input-node-id')) is not int or not isinstance(info.get('state'), str)):
+                        raise ValueError
+            return graph
+    finally:
+        if process is not None:
+            cleanup = asyncio.create_task(_close_pipewire(process))
+            try:
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
+            except Exception:
+                raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE) from None
+
+
+class OutputDeviceWatch:
+    def __init__(self):
+        self.process = None
+        self.reader = None
+        self.close_task = None
+        self.revision = 0
+        self.metadata_id = None
+        self.closed = False
+
+    async def start(self, on_change, on_failed):
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                *BOUND_TO_KESTREL, str(os.getpid()), 'stdbuf', '-oL', 'pw-dump',
+                '-m', '-N', '-R', 'default',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=8192,
+                start_new_session=True,
+            )
+            async with asyncio.timeout(5):
+                self.metadata_id = await self._record()
+                self.revision += 1
+            self.reader = asyncio.create_task(self._watch(on_change, on_failed))
+        except asyncio.CancelledError:
+            await self.close()
+            raise
+        except Exception:
+            await self.close()
+            raise RuntimeError(OUTPUT_WATCH_FAILURE) from None
+
+    async def _line(self):
+        line = await self.process.stdout.readline()
+        if not line.endswith(b'\n') or len(line) > 8192:
+            raise ValueError
+        text = line[:-1].decode('utf-8')
+        if any(ord(c) < 32 or ord(c) == 127 for c in text):
+            raise ValueError
+        return text
+
+    async def _record(self):
+        batch = json.loads(await self._line())
+        if not isinstance(batch, list) or len(batch) != 1:
+            raise ValueError
+        item = batch[0]
+        if (not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] < 0
+                or item.get('type') != 'PipeWire:Interface:Metadata'
+                or not isinstance(item.get('props'), dict) or item['props'].get('metadata.name') != 'default'
+                or not isinstance(item.get('metadata'), list)
+                or self.metadata_id is not None and item['id'] != self.metadata_id):
+            raise ValueError
+        return item['id']
+
+    async def _watch(self, on_change, on_failed):
+        try:
+            while True:
+                await self._record()
+                self.revision += 1
+                on_change()
+        except (Exception, asyncio.CancelledError):
+            pass
+        finally:
+            if not self.closed:
+                on_failed()
+
+    async def close(self):
+        if self.close_task is None:
+            self.closed = True
+            self.close_task = asyncio.create_task(self._close())
+        try:
+            try:
+                await asyncio.shield(self.close_task)
+            except asyncio.CancelledError:
+                await self.close_task
+                raise
+        except (OSError, TimeoutError):
+            raise RuntimeError(OUTPUT_WATCH_FAILURE) from None
+
+    async def _close(self):
+        if self.reader is not None:
+            self.reader.cancel()
+            await asyncio.gather(self.reader, return_exceptions=True)
+        if self.process is not None:
+            await _close_pipewire(self.process)
+
+
 class EchoRemoval:
     def __init__(self):
         self.process = None
-        self._closing = False
+        self._expected_exit = threading.Event()
 
     def start(self, on_stopped):
         # The parent-death signal follows the spawning thread, so this runs on the main thread,
         # and the new session keeps a terminal Ctrl+C from stopping echo removal first.
+        self._expected_exit = threading.Event()
         self.process = subprocess.Popen(
             [*BOUND_TO_KESTREL, str(os.getpid()), "pipewire", "-c", ECHO_REMOVAL_CONFIG],
             env={**os.environ, "PIPEWIRE_CONFIG_DIR": str(ROOT)}, start_new_session=True,
         )
-        threading.Thread(target=self._report_stop, args=(on_stopped,), daemon=True).start()
+        threading.Thread(target=self._report_stop, args=(self.process, self._expected_exit, on_stopped), daemon=True).start()
 
-    def _report_stop(self, on_stopped):
-        code = self.process.wait()
-        if not self._closing:
+    def _report_stop(self, process, expected_exit, on_stopped):
+        code = process.wait()
+        if not expected_exit.is_set():
             logger.error(
                 f"Echo removal stopped (exit code {code}); stopping Kestrel, which never listens without it"
             )
             on_stopped()
 
-    def microphone_serial(self, capture_pid=None) -> int:
+    async def microphone_serial(self, capture_pid=None, *, output_serial=None) -> int:
         """Resolve the owned echo source and, when supplied, its owned recorder."""
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("Echo removal has stopped. Restart Kestrel.")
         try:
-            graph = json.loads(subprocess.run(["pw-dump"], capture_output=True, check=True, timeout=5).stdout)
-            if not isinstance(graph, list):
-                raise ValueError
-            ids = set()
+            graph = await _pipewire_graph()
             clients = {}
             nodes = []
             links = []
             for item in graph:
-                if not isinstance(item, dict) or type(item.get("id")) is not int or item["id"] in ids:
-                    raise ValueError
-                ids.add(item["id"])
                 kind = item["type"]
-                if not isinstance(kind, str):
-                    raise ValueError
                 if kind in ("PipeWire:Interface:Client", "PipeWire:Interface:Node"):
                     props = item["info"]["props"]
                     if not isinstance(props, dict):
@@ -303,11 +444,7 @@ class EchoRemoval:
                     else:
                         nodes.append(item)
                 elif kind == "PipeWire:Interface:Link":
-                    info = item["info"]
-                    if (type(info["output-node-id"]) is not int or type(info["input-node-id"]) is not int
-                            or not isinstance(info["state"], str)):
-                        raise ValueError
-                    links.append(info)
+                    links.append(item["info"])
 
             def owner(node):
                 client_id = node["info"]["props"].get("client.id")
@@ -333,20 +470,79 @@ class EchoRemoval:
                     info["output-node-id"] == source["id"] and info["state"] == "active" for info in incoming
                 ):
                     raise ValueError
+            if output_serial is not None:
+                selected = self._selected_output(graph)
+                if selected["info"]["props"]["object.serial"] != output_serial:
+                    raise ValueError
+                references = [item for item in nodes if item["info"]["props"].get("node.name") ==
+                              "kestrel-echo-removal-reference"]
+                if len(references) != 1 or owner(references[0]) != self.process.pid:
+                    raise ValueError
+                incoming = [info for info in links if info["input-node-id"] == references[0]["id"]]
+                if not incoming or not all(info["output-node-id"] == selected["id"] and
+                                           info["state"] == "active" for info in incoming):
+                    raise ValueError
             return serial
-        except (OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError, AttributeError):
+        except (OSError, subprocess.SubprocessError, TimeoutError, ValueError, LookupError, TypeError, AttributeError):
             raise RuntimeError("The owned echo-removed microphone could not be verified. Restart Kestrel.") from None
 
-    def close(self):
-        if self.process is None:
-            return
-        self._closing = True
-        self.process.terminate()
+    @staticmethod
+    def _selected_output(graph):
+        metadata = [item for item in graph if item.get('type') == 'PipeWire:Interface:Metadata'
+                    and item.get('props', {}).get('metadata.name') == 'default']
+        if len(metadata) != 1 or not isinstance(metadata[0]['metadata'], list):
+            raise ValueError
+        entries = [entry for entry in metadata[0]['metadata']
+                   if entry['subject'] == 0 and entry['key'] == 'default.audio.sink']
+        if (len(entries) != 1 or type(entries[0]['subject']) is not int
+                or entries[0]['type'] != 'Spa:String:JSON' or not isinstance(entries[0]['value'], dict)):
+            raise ValueError
+        name = entries[0]['value']['name']
+        if not isinstance(name, str) or not name.strip() or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise ValueError
+        outputs = [item for item in graph if item.get('type') == 'PipeWire:Interface:Node'
+                   and item['info']['props'].get('node.name') == name
+                   and item['info']['props'].get('media.class') == 'Audio/Sink']
+        if len(outputs) != 1:
+            raise ValueError
+        serial = outputs[0]['info']['props']['object.serial']
+        if type(serial) is not int or serial <= 0:
+            raise ValueError
+        return outputs[0]
+
+    async def output_serial(self, playback_pid=None):
         try:
-            self.process.wait(timeout=ECHO_REMOVAL_STOP_WAIT)
+            graph = await _pipewire_graph()
+            selected = self._selected_output(graph)
+            if playback_pid is not None:
+                clients = [item['id'] for item in graph if item['type'] == 'PipeWire:Interface:Client'
+                           and type(item['info']['props']['pipewire.sec.pid']) is int
+                           and item['info']['props']['pipewire.sec.pid'] == playback_pid]
+                streams = [item for item in graph if item['type'] == 'PipeWire:Interface:Node'
+                           and type(item['info']['props'].get('client.id')) is int
+                           and item['info']['props']['client.id'] in clients]
+                if len(streams) != 1:
+                    raise ValueError
+                outgoing = [item['info'] for item in graph if item['type'] == 'PipeWire:Interface:Link'
+                            and item['info']['output-node-id'] == streams[0]['id']]
+                if not outgoing or not all(link['input-node-id'] == selected['id'] and link['state'] == 'active'
+                                           for link in outgoing):
+                    raise ValueError
+            return selected['info']['props']['object.serial']
+        except (OSError, TimeoutError, ValueError, LookupError, TypeError, AttributeError):
+            raise RuntimeError(OUTPUT_SWITCH_FAILURE) from None
+
+    def close(self):
+        process = self.process
+        if process is None:
+            return
+        self._expected_exit.set()
+        process.terminate()
+        try:
+            process.wait(timeout=ECHO_REMOVAL_STOP_WAIT)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
+            process.kill()
+            process.wait(timeout=ECHO_REMOVAL_STOP_WAIT)
 
 
 class LaptopInput(BaseInputTransport):
@@ -354,6 +550,15 @@ class LaptopInput(BaseInputTransport):
         super().__init__(params)
         self.admitted = admitted
         self.ready = False
+
+    async def drain_audio(self):
+        if not self.ready or not self._params.audio_in_enabled:
+            return
+        # Pipecat 1.12 acknowledges after push_frame, including empty audio.
+        # Keep its pump/queue alive; a failed pump cannot acknowledge quiescence.
+        if self._audio_task is None or self._audio_task.done():
+            raise RuntimeError(OUTPUT_SWITCH_FAILURE)
+        await self._audio_in_queue.join()
 
     async def process_frame(self, frame, direction):
         if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
@@ -524,12 +729,14 @@ class LaptopAudioTransport:
             logger.error(reason)
             self.on_stopped()
 
-    async def _source(self, capture_pid=None):
+    async def _source(self, capture_pid=None, *, output_serial=None):
         while True:
             if self.failure:
                 raise RuntimeError(self.failure)
             try:
-                return await asyncio.to_thread(self.echo_removal.microphone_serial, capture_pid)
+                return await self.echo_removal.microphone_serial(capture_pid, output_serial=output_serial)
+            except PipeWireGraphCleanupFailure:
+                raise
             except RuntimeError:
                 await asyncio.sleep(0.5)
 
@@ -541,7 +748,24 @@ class LaptopAudioTransport:
             *guard, str(os.getpid()), *command, start_new_session=True, **pipes,
         )
 
-    async def open(self):
+    async def open(self, *, output_serial=None):
+        await self._open_capture(output_serial=output_serial)
+
+    async def suspend_capture(self):
+        self.verified = False
+        if self.reader is not None:
+            self.reader.cancel()
+            await asyncio.gather(self.reader, return_exceptions=True)
+        await self._reap_audio(self.capture)
+        self.capture = self.reader = None
+        self.received_audio.clear()
+
+    async def resume_capture(self, *, output_serial):
+        if self.closed:
+            raise RuntimeError(OUTPUT_SWITCH_FAILURE)
+        await self._open_capture(output_serial=output_serial, refreshing=True)
+
+    async def _open_capture(self, *, output_serial=None, refreshing=False):
         if not self.capture_enabled:
             return
         try:
@@ -555,17 +779,29 @@ class LaptopAudioTransport:
                     "--format", "s16", "--latency", "20ms", "-", stdout=asyncio.subprocess.PIPE,
                 )
                 self.reader = asyncio.create_task(self._read())
-                await self._source(self.capture.pid)
+                if await self._source(self.capture.pid, output_serial=output_serial) != serial:
+                    raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
                 if self.failure:
                     raise RuntimeError(self.failure)
-                self.verified = True
                 await asyncio.wait_for(self.received_audio.wait(), LAPTOP_CAPTURE_STALL_TIMEOUT)
                 if self.failure:
                     raise RuntimeError(self.failure)
+                self.verified = True
         except asyncio.CancelledError:
-            await self.close()
+            if refreshing:
+                cleanup = asyncio.create_task(self.suspend_capture())
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+                    raise
+            else:
+                await self.close()
             raise
         except (OSError, RuntimeError, TimeoutError):
+            if refreshing:
+                await self.suspend_capture()
+                raise RuntimeError(LAPTOP_CAPTURE_FAILURE) from None
             self.fail(LAPTOP_CAPTURE_FAILURE)
             await self.close()
             raise RuntimeError(self.failure) from None
