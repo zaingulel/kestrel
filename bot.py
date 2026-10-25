@@ -4,7 +4,6 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from enum import Enum
 import json
 import os
 import re
@@ -43,30 +42,24 @@ from voxcpm import VoxCPM
 from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
-from app_resolver import valid_app_text
 from reply_progress import AnnouncementMarkFrame, ConversationSynthesisFailedFrame, ReplyProgress, SpeechAdvisoryFrame, token_of
-from hermes_worker import (DELIVERY_LABELS, DESKTOP_TOOLS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
-                           child_environment, valid_desktop_arguments)
+from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
+                           child_environment)
 from speech import (
     ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
     NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset,
 )
 from tool_actions import (
-    AppLaunchResult, AudioResult, DesktopResult, media_action, notify_audio_failure, open_app, resolve_app,
-    run_local_command, screenshot_action, set_output_mute, volume_output, workspace_action,
+    TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
+    validate_tool_actions,
 )
+from tool_catalogue import TOOL_CATALOGUE, PermissionTier, brain_result, valid_desktop_arguments
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
 TURN_TIMEOUT = 1800
 ANNOUNCEMENT_TIMEOUT = 5
-
-
-class PermissionTier(Enum):
-    FREE = 'free'
-    ASK = 'ask'
-    FORBIDDEN = 'forbidden'
 
 
 @dataclass(frozen=True)
@@ -83,42 +76,42 @@ def match_app_name(text: str) -> str | None:
     match = re.fullmatch(r'open ([^\r\n?!]+?)[.!]?', text.strip(), re.IGNORECASE)
     if not match:
         return None
-    tool = LOCAL_TOOLS['open app']
+    tool = LOCAL_TOOLS['open_app']
     if tool.permission is not PermissionTier.FREE:
         return None
     name = match[1].strip()
-    if not name or not valid_app_text(name, 1024):
+    if not valid_desktop_arguments('open_app', {'name': name}):
         return None
     return name
 
 
 async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool | None:
-    resolved = await resolve_app(name, command=command)
+    resolved = await TOOL_ACTIONS['open_app'].lookup(name, command=command)
     if resolved is None:
         return None
     match, discovery_env = resolved
-    tool = LOCAL_TOOLS['open app']
+    tool = LOCAL_TOOLS['open_app']
     return replace(tool, run=partial(tool.run, match['id'], discovery_env), confirmation=f"Opening {match['name']}.")
 
 
+validate_tool_actions()
+
 LOCAL_TOOLS = {
-    'mute': LocalTool(PermissionTier.FREE, partial(set_output_mute, True), 'mute', 'mute', announcement='Muting.'),
-    'unmute': LocalTool(PermissionTier.FREE, partial(set_output_mute, False), 'unmute', 'unmute',
+    'mute': LocalTool(TOOL_CATALOGUE['mute'].permission, TOOL_ACTIONS['mute'].run, 'mute', 'mute', announcement='Muting.'),
+    'unmute': LocalTool(TOOL_CATALOGUE['unmute'].permission, TOOL_ACTIONS['unmute'].run, 'unmute', 'unmute',
                          confirmation='Unmuted.'),
-    'volume': LocalTool(PermissionTier.FREE, volume_output, 'volume', 'set the volume to thirty'),
-    'pause music': LocalTool(PermissionTier.FREE, partial(media_action, 'pause'), 'pause', 'pause music'),
-    'next track': LocalTool(PermissionTier.FREE, partial(media_action, 'next'), 'next track', 'next track'),
-    'workspace': LocalTool(PermissionTier.FREE, workspace_action, 'workspace', 'workspace three'),
-    'open app': LocalTool(PermissionTier.FREE, open_app, 'open app', "open followed by an installed app's exact name"),
-    'take a screenshot': LocalTool(PermissionTier.FREE, screenshot_action, 'screenshot', 'take a screenshot',
+    'set_volume': LocalTool(TOOL_CATALOGUE['set_volume'].permission, TOOL_ACTIONS['set_volume'].run, 'volume', 'set the volume to thirty'),
+    'pause_media': LocalTool(TOOL_CATALOGUE['pause_media'].permission, TOOL_ACTIONS['pause_media'].run, 'pause', 'pause music'),
+    'next_track': LocalTool(TOOL_CATALOGUE['next_track'].permission, TOOL_ACTIONS['next_track'].run, 'next track', 'next track'),
+    'focus_workspace': LocalTool(TOOL_CATALOGUE['focus_workspace'].permission, TOOL_ACTIONS['focus_workspace'].run, 'workspace', 'workspace three'),
+    'open_app': LocalTool(TOOL_CATALOGUE['open_app'].permission, TOOL_ACTIONS['open_app'].run, 'open app', "open followed by an installed app's exact name"),
+    'take_screenshot': LocalTool(TOOL_CATALOGUE['take_screenshot'].permission, TOOL_ACTIONS['take_screenshot'].run, 'screenshot', 'take a screenshot',
                                     confirmation='Screenshot saved.'),
 }
 
 
-BRIDGED_TOOL_KEYS = {'mute': 'mute', 'unmute': 'unmute', 'set_volume': 'volume', 'pause_media': 'pause music', 'next_track': 'next track',
-                     'focus_workspace': 'workspace', 'open_app': 'open app', 'take_screenshot': 'take a screenshot'}
 # Exact app launches and screenshots stay outside stop accounting, as README's stop section says.
-EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace'))
+EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'))
 APP_LOOKUP_ADVISORY = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
 APP_MATCH_ADVISORY = "I couldn't find exactly one installed app with that name, so I didn't open anything."
 OUTSIDE_TEXT_ADVISORY = ("To keep you safe, I stop saving notes, opening apps and taking screenshots once I've read text "
@@ -185,17 +178,19 @@ def effect_observed(result) -> bool:
     return result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
 
 
-def brain_result(confirmed, attempted, reason) -> str:
-    return json.dumps({'confirmed': confirmed, 'attempted': attempted, 'reason': reason})
-
-
 def match_instant_tool(text):
     text = text.strip().lower()
     if text in ('mute', 'mute.', 'mute!'):
         return free_tool('mute')
     match = re.fullmatch(r'(unmute|pause music|next track|take a screenshot)[.!]?', text)
     if match:
-        return free_tool(match[1])
+        if match[1] == 'unmute':
+            return free_tool('unmute')
+        if match[1] == 'pause music':
+            return free_tool('pause_media')
+        if match[1] == 'next track':
+            return free_tool('next_track')
+        return free_tool('take_screenshot')
     match = re.fullmatch(r'workspace ([1-9][0-9]{0,9})[.!]?', text)
     if match:
         number = int(match[1])
@@ -203,7 +198,7 @@ def match_instant_tool(text):
         match = re.fullmatch(r'workspace ([a-z -]+)[.!]?', text)
         number = NUMBER_WORDS.get(match[1]) if match else None
     if number is not None and 1 <= number <= 2147483647:
-        return free_tool('workspace', number)
+        return free_tool('focus_workspace', number)
     match = re.fullmatch(
         r'(?:(?P<leading_please>please) )?'
         r'(?P<command>volume|set (?:the )?volume(?: to)?) '
@@ -217,7 +212,7 @@ def match_instant_tool(text):
     percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
     if percent is None:
         return None
-    tool = free_tool('volume', percent)
+    tool = free_tool('set_volume', percent)
     return replace(tool, confirmation=f'Volume {percent}.') if tool is not None else None
 
 
@@ -430,7 +425,7 @@ class HermesRequestChannel:
                           and isinstance(event['tool_call'], dict)
                           and set(event['tool_call']) == {'name', 'arguments'}
                           and isinstance(event['tool_call']['name'], str)
-                          and event['tool_call']['name'] in DESKTOP_TOOLS
+                          and event['tool_call']['name'] in TOOL_CATALOGUE
                           and isinstance(event['tool_call']['arguments'], dict)):
                         call = event['tool_call']
                         content = await desktop(call['name'], call['arguments'])
@@ -799,7 +794,7 @@ class HermesLLMService(LLMService):
             if self.channel.output is output and self.owns_request(token):
                 output.put_nowait({'advisory': text})
 
-        if not valid_desktop_arguments(name, arguments) or name == 'open_app' and not valid_app_text(arguments['name'], 1024):
+        if not valid_desktop_arguments(name, arguments):
             turn.closed = True
             advise("I couldn't use that request, so I didn't do it.")
             return brain_result(False, False, 'invalid arguments')
@@ -814,13 +809,13 @@ class HermesLLMService(LLMService):
 
         if turn.closed:
             return record(brain_result(False, False, 'turn closed'))
-        tool = free_tool(BRIDGED_TOOL_KEYS[name],
-                         *(() if name == 'open_app' else (arguments[key] for key in DESKTOP_TOOLS[name].bounds)))
+        spec = TOOL_CATALOGUE[name]
+        tool = free_tool(name, *(() if spec.needs_lookup else (arguments[key] for key in spec.bounds)))
         if tool is None:
             turn.closed = True
             advise("That needs permission, which isn't available by voice yet, so I didn't do it.")
             return record(brain_result(False, False, 'permission required'))
-        if name == 'open_app':
+        if spec.needs_lookup:
             try:
                 tool = await resolve_app_tool(arguments['name'], command=self.local_actions.command)
             except (ValueError, RuntimeError, OSError, TimeoutError):

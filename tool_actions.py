@@ -1,7 +1,9 @@
 """Kestrel's tool run steps, the open-app lookup step and the shared safe local-command runner; the engine process never loads this module."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ import time
 from loguru import logger
 
 from app_resolver import valid_app_text, valid_desktop_id
+from tool_catalogue import TOOL_CATALOGUE
 
 ROOT = Path(__file__).parent
 
@@ -454,3 +457,38 @@ async def resolve_app(name: str, *, command=run_local_command) -> tuple[dict, tu
             or not valid_app_text(match['name'], APP_NAME_BYTES) or not match['name'].strip()):
         raise ValueError('invalid app resolution')
     return match, discovery_env
+
+
+@dataclass(frozen=True)
+class ToolAction:
+    run: Callable
+    lookup: Callable | None = None
+
+
+TOOL_ACTIONS: dict[str, ToolAction] = {
+    'mute': ToolAction(partial(set_output_mute, True)),
+    'unmute': ToolAction(partial(set_output_mute, False)),
+    'set_volume': ToolAction(volume_output),
+    'pause_media': ToolAction(partial(media_action, 'pause')),
+    'next_track': ToolAction(partial(media_action, 'next')),
+    'focus_workspace': ToolAction(workspace_action),
+    'open_app': ToolAction(open_app, resolve_app),
+    'take_screenshot': ToolAction(screenshot_action),
+}
+
+
+def validate_tool_actions() -> None:
+    shared = TOOL_CATALOGUE.keys() & TOOL_ACTIONS.keys()
+    problems = {
+        'missing': TOOL_CATALOGUE.keys() - TOOL_ACTIONS.keys(),
+        'extra': TOOL_ACTIONS.keys() - TOOL_CATALOGUE.keys(),
+        'invalid run': {name for name in shared if not callable(TOOL_ACTIONS[name].run)},
+        'invalid lookup': {name for name in shared
+                           if (not callable(TOOL_ACTIONS[name].lookup) if TOOL_CATALOGUE[name].needs_lookup
+                               else TOOL_ACTIONS[name].lookup is not None)},
+    }
+    details = '; '.join(f"{problem}: {', '.join(sorted(names))[:256]}"
+                        for problem, names in problems.items() if names)
+    if details:
+        raise RuntimeError(f'Kestrel tool catalogue mismatch: {details}. '
+                           'Check the tool catalogue and run steps, then restart Kestrel.')

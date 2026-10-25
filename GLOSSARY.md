@@ -28,6 +28,9 @@ _Avoid_: runtime, which belongs to the workflow; agent framework, hands
 One bounded thing Kestrel can do, with a result it can observe.
 _Avoid_: skill, command, action
 
+**Tool catalogue**:
+The one list of every tool Kestrel provides, with each tool's facts.
+
 **Delegation**:
 Kestrel passing a spoken instruction to a coding agent after reading it back and hearing the owner confirm it.
 _Avoid_: handoff, which belongs to the workflow

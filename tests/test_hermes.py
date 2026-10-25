@@ -28,6 +28,63 @@ ROOT = Path(__file__).resolve().parents[1]
 NATIVE_PYTHON = HERMES_PYTHON
 BRAIN_KEY_SENTINEL = 'b7e2c4a9' * 8
 
+BASELINE_SYSTEM_PROMPT = (
+    "Speak naturally in concise English. "
+    "Never name the software you run on, and never point to a website or documentation for your abilities. "
+    "Usually answer in one or two short sentences, beginning with a short complete sentence. "
+    "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
+    "Use no markdown, lists, acting directions, accent changes or persona changes. "
+    "This session is a local conversation. You can talk, answer from general knowledge, and use these tools: "
+    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, unmute, set_volume, "
+    "pause_media, next_track, focus_workspace, open_app and take_screenshot. "
+    "Maintain notes automatically when useful, including updating or removing outdated notes. "
+    "Claim a save only after a successful memory tool result. You have no internet, web access or live "
+    "information such as news, weather or prices, and you cannot see the screen or any screenshot; "
+    "you cannot resume or go back in media. Say so plainly when asked. "
+    "When asked what you can do, name conversation and general knowledge, remembering notes and each desktop tool "
+    "in plain words (muting, unmuting, setting the volume, pausing media, skipping to the next track, switching to a "
+    "numbered workspace, opening an installed app by name and taking a screenshot), then state these limits, "
+    "then say this sentence word for word: You can also say repeat that, stop, that's all, or what can I say. "
+    "Call a desktop tool only when the owner clearly asks for that tool's effect, at most once per reply; "
+    "when a request is unclear or asks for something no tool does, ask instead of calling a tool. "
+    "Each desktop result is JSON with confirmed, attempted and reason. "
+    "Say an effect happened only when confirmed is true, never before its result arrives. "
+    "For open_app, confirmed means the launch request was accepted, not that a window is visible. "
+    "For take_screenshot, confirmed means a new screenshot file was saved; you never see it. "
+    "Never call a desktop tool again to retry it.\n\n"
+    'Choose the delivery for the meaning of the current reply, using the conversation as context. '
+    'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
+    'practical information and ordinary replies without a clear emotional cue. Curious suits an '
+    'invitation to discover something or genuine interest in an unanswered story. Use gently_pleased '
+    'for good news, an achievement or a success the user is sharing. Reassuring suits current worry, '
+    'distress or a request for comfort. A hard-earned success calls for gently_pleased; do not choose'
+    " reassuring merely because the work was difficult. Do not carry the previous reply's delivery "
+    'into a new subject.\n'
+    '\n'
+    'Format examples, illustrating delivery rather than words to copy:\n'
+    'A factual explanation:\n'
+    '[delivery:neutral]\n'
+    'A triangle has three sides.\n'
+    'An invitation to hear a discovery:\n'
+    '[delivery:curious]\n'
+    'That sounds interesting. What did you find?\n'
+    'Someone shares that they earned a qualification after working hard:\n'
+    '[delivery:gently_pleased]\n'
+    'Well done, that took real effort.\n'
+    'Someone is worried about an unfamiliar situation:\n'
+    '[delivery:reassuring]\n'
+    'You can take it one step at a time.\n'
+    '\n'
+    'Tool calls use their native format without a delivery header. For the first spoken text of each reply, whether before or after tool calls, begin immediately with exactly one of '
+    '[delivery:neutral], [delivery:curious], [delivery:gently_pleased] or [delivery:reassuring], then'
+    ' a newline, then your concise spoken reply. Never omit the header, even for a very short factual'
+    ' answer, a changed subject, or a replacement request after an interruption. Earlier assistant '
+    'messages have their headers removed before entering conversation history; do not imitate their '
+    'header-free format. Emit the header once at the beginning of the reply, not again within its '
+    'text or when continuing the same answer. Nothing comes before the header. After it, output only '
+    'the words to speak, with no delivery explanations or acting directions.'
+)
+
 
 def write_brain_key(path):
     with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as output:
@@ -290,6 +347,53 @@ def native_worker(replies, *, synthetic_default_home=None, memory_root=None, non
 
 
 class HermesWorkerTests(unittest.TestCase):
+    def test_system_prompt_matches_pre_catalogue_literal(self):
+        from hermes_worker import SYSTEM_PROMPT
+
+        self.assertEqual(SYSTEM_PROMPT, BASELINE_SYSTEM_PROMPT)
+
+    def test_tool_catalogue_names_and_outside_text_allowance_are_fixed(self):
+        from tool_catalogue import TOOL_CATALOGUE
+
+        self.assertEqual(list(TOOL_CATALOGUE), [
+            'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
+            'focus_workspace', 'open_app', 'take_screenshot',
+        ])
+        self.assertEqual({name for name, spec in TOOL_CATALOGUE.items() if spec.allowed_after_outside_text}, {
+            'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace',
+        })
+
+    def test_desktop_argument_validation_matches_host_app_limits(self):
+        from tool_catalogue import valid_desktop_arguments
+
+        valid = [
+            ('mute', {}), ('unmute', {}), ('pause_media', {}), ('next_track', {}),
+            ('take_screenshot', {}), ('set_volume', {'percent': 0}),
+            ('set_volume', {'percent': 100}), ('focus_workspace', {'number': 1}),
+            ('focus_workspace', {'number': 2147483647}), ('open_app', {'name': 'Editor'}),
+            ('open_app', {'name': '  Editor  '}), ('open_app', {'name': 'é' * 512}),
+            ('open_app', {'name': 'a' * 1024}),
+        ]
+        for name, arguments in valid:
+            with self.subTest(valid=(name, arguments)):
+                self.assertTrue(valid_desktop_arguments(name, arguments))
+
+        invalid = [
+            ('un_mute', {}), ([], {}), ('mute', []), ('mute', {'extra': 1}),
+            ('set_volume', {}), ('set_volume', {'percent': 30, 'extra': 1}),
+            ('focus_workspace', {}), ('focus_workspace', {'number': 2, 'extra': 1}),
+            ('open_app', {}), ('open_app', {'name': 'Editor', 'extra': 1}),
+        ]
+        invalid += [('set_volume', {'percent': value}) for value in (-1, 101, True, 30.5, '30')]
+        invalid += [('focus_workspace', {'number': value}) for value in (0, 2147483648, True, 1.5, '2')]
+        invalid += [('open_app', {'name': value}) for value in (
+            '', '   ', True, 1, None, 'é' * 512 + 'a', 'a' * 1025,
+            'é' * 600, 'Editor\x01', '\ud800',
+        )]
+        for name, arguments in invalid:
+            with self.subTest(invalid=(name, arguments)):
+                self.assertFalse(valid_desktop_arguments(name, arguments))
+
     def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
@@ -1921,6 +2025,38 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(worker.process.stdout.read(), b'')
                 self.assertEqual(len(brain.requests), 2)
 
+    def test_invalid_desktop_arguments_reject_a_contradictory_host_result(self):
+        arguments = {'name': 'Editor\x01'}
+        replies = []
+        for call_id, text in (('invalid-refusal', 'App request refused.'),
+                              ('invalid-success', 'Do not speak after corruption.')):
+            calls = [{'index': 0, 'id': call_id, 'type': 'function',
+                      'function': {'name': 'open_app', 'arguments': json.dumps(arguments)}}]
+            replies.extend([[({'tool_calls': calls}, None), ({}, 'tool_calls')],
+                            [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]])
+        canonical_result = '{"confirmed": false, "attempted": false, "reason": "invalid arguments"}'
+        contradictory_result = '{"confirmed": true, "attempted": true, "reason": "launch accepted"}'
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Open the installed editor.'}],
+                                    results=[json.dumps({'tool_result': canonical_result,
+                                                         'source': 'kestrel'}).encode() + b'\n'])
+            self.assertEqual(events, [{'tool_call': {'name': 'open_app', 'arguments': arguments}},
+                                      {'delivery': 'neutral'}, {'text': 'App request refused.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool'],
+                             [{'role': 'tool', 'tool_call_id': 'invalid-refusal', 'content': canonical_result}])
+            events = worker.request([{'role': 'user', 'content': 'Open the installed editor again.'}],
+                                    results=[json.dumps({'tool_result': contradictory_result,
+                                                         'source': 'kestrel'}).encode() + b'\n'])
+            self.assertEqual(events, [{'tool_call': {'name': 'open_app', 'arguments': arguments}},
+                                      {'error': 'Kestrel desktop bridge failed'}])
+            worker.process.wait(timeout=5)
+            self.assertIsNotNone(worker.process.returncode)
+            self.assertEqual(worker.buffer, b'')
+            self.assertEqual(worker.process.stdout.read(), b'')
+
     def test_desktop_history_records_become_native_tool_history(self):
         records = [
             {'role': 'tool', 'name': 'mute', 'arguments': {}, 'content': 'mute observed',
@@ -1993,6 +2129,8 @@ class NativeHermesTests(unittest.TestCase):
                                 for value in (-1, 101, True, 30.5)]
             invalid_records += [dict(records[4], arguments={'number': value})
                                 for value in (0, 2147483648, True, 1.5)]
+            invalid_records += [dict(records[0], name='open_app', arguments={'name': value})
+                                for value in ('é' * 600, 'Editor\x01', '\ud800')]
             for record in invalid_records:
                 with self.subTest(record=record):
                     events = worker.request([{'role': 'user', 'content': 'Before.'}, record,
@@ -2658,7 +2796,7 @@ class NativeHermesTests(unittest.TestCase):
 
     def test_conversation_source_confines_literal_endpoints(self):
         endpoints = []
-        for name in ('bot.py', 'tool_actions.py', 'reply_progress.py', 'hermes_worker.py'):
+        for name in ('bot.py', 'tool_actions.py', 'tool_catalogue.py', 'reply_progress.py', 'hermes_worker.py'):
             for node in ast.walk(ast.parse((ROOT / name).read_text())):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     endpoints.extend(re.findall(r"""https?://[^"'\s]*""", node.value))
@@ -2754,7 +2892,8 @@ class NativeHermesTests(unittest.TestCase):
             write_brain_key(runtime / 'brain-api-key')
             (runtime / 'hermes-0.22.2').symlink_to(ROOT / '.runtime/hermes-0.22.2', target_is_directory=True)
             worker_source = checkout / 'hermes_worker.py'
-            shutil.copyfile(ROOT / 'hermes_worker.py', worker_source)
+            for name in ('hermes_worker.py', 'tool_catalogue.py', 'app_resolver.py'):
+                shutil.copyfile(ROOT / name, checkout / name)
             result = subprocess.run(
                 [str(NATIVE_PYTHON), str(worker_source)],
                 env=child_environment(home), input='', capture_output=True, text=True, timeout=45,
@@ -2853,6 +2992,7 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(system['role'], 'system')
                 self.assertTrue(system['content'].startswith(identity + '\n\n'), system['content'][:200])
                 self.assertEqual(system['content'].count(SYSTEM_PROMPT), 1)
+                self.assertEqual(system['content'].count(BASELINE_SYSTEM_PROMPT), 1)
                 offered = [system['content'], *(tool['function']['description'] for tool in body.get('tools', []))]
                 for text in offered:
                     for forbidden in ('hermes', 'nous', 'http'):
