@@ -12,6 +12,10 @@ _Avoid_: the prototype, the bot
 The part that listens to speech and speaks replies.
 _Avoid_: speech stack, audio pipeline
 
+**Reply progress**:
+Kestrel's record of how far a reply's speech has reached audio output, and how the reply ended.
+_Avoid_: heard, which Kestrel cannot observe.
+
 **Brain**:
 The model that understands a request and chooses what to do. A role that different models can fill.
 _Avoid_: the model, the assistant, the name of whichever model fills the role

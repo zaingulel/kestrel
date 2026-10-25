@@ -501,11 +501,26 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conversation.same_uid(peer))
 
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+            self.assertEqual(conversation.address(), '\0kestrel.conversation.' + str(os.getuid()) + '.' +
+                             hashlib.sha256(runtime.encode()).hexdigest())
             feed = conversation.ConversationFeed()
             self.addAsyncCleanup(feed.close)
             await feed.start()
             self.assertIsNotNone(feed.server)
             feed.user('<b>Private canary</b>', source='spoken')
+            process = await asyncio.create_subprocess_exec(
+                '/usr/bin/python', str(ROOT / 'desktop/conversation.py'), '--watch', '--extra',
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                output, errors = await asyncio.wait_for(process.communicate(), 5)
+                self.assertEqual(process.returncode, 2)
+                self.assertEqual(output, b'')
+                self.assertEqual(errors, b'Usage: conversation.py --watch\n')
+            finally:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
             process = await asyncio.create_subprocess_exec(
                 '/usr/bin/python', str(ROOT / 'desktop/conversation.py'), '--watch',
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

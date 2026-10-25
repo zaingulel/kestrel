@@ -245,7 +245,7 @@ Under [closeout's existing cleanup rules](../.agents/skills/closeout/SKILL.md#cl
 Ruff requires `uvx` (provided by uv). From the repository root, run:
 
 ```sh
-node scripts/run-log.mjs quality ruff -- uvx --isolated --no-config --constraints requirements-test.txt ruff check --select F bot.py speech.py wakeword.py asr_worker.py hermes_worker.py app_resolver.py tool_actions.py codex_status.py desktop tests
+node scripts/run-log.mjs quality ruff -- uvx --isolated --no-config --constraints requirements-test.txt ruff check --select F bot.py speech.py wakeword.py asr_worker.py hermes_worker.py app_resolver.py tool_actions.py reply_progress.py codex_status.py desktop tests
 ```
 
 This uses the existing requirements pin and the hosted check's rules and source selection. `--isolated`
@@ -268,8 +268,8 @@ A commit added on top of one whose checks passed reruns a convergence check wher
 | `npm run lint` | A path under `scripts/`, `.claude/hooks/` or `.codex/hooks/`; `eslint.config.mjs`; or `package.json`, `package-lock.json` or `.npmrc` |
 | `npm run test:scripts` | Any path, and any new head even when no path changed: the suite reads the tracked tree as a whole and queries git about the repository itself |
 | `npm run lint:docs`, in a job that changes documentation | Any path: it resolves every cited path and link against the whole tracked tree |
-| `npm run test:speech` | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `tool_actions.py`, `codex_status.py`, `desktop/status.py`, `run-brain.sh`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt` or `package.json` |
-| Ruff command above | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `tool_actions.py`, `codex_status.py`, a Python path under `desktop/`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt`, or a change to the command or effective Ruff configuration |
+| `npm run test:speech` | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `tool_actions.py`, `reply_progress.py`, `codex_status.py`, `desktop/status.py`, `run-brain.sh`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt` or `package.json` |
+| Ruff command above | `bot.py`, `speech.py`, `wakeword.py`, `asr_worker.py`, `hermes_worker.py`, `app_resolver.py`, `tool_actions.py`, `reply_progress.py`, `codex_status.py`, a Python path under `desktop/`, a path under `tests/`, `requirements-test.txt`, `requirements-wakeword.txt`, or a change to the command or effective Ruff configuration |
 
 Command and configuration inputs always rerun the affected check, regardless of filename extension: this includes package commands, ESLint configuration and package or lockfile changes. An unchanged `package-lock.json` together with a preserved installed-package and tool environment establishes unchanged Node inputs; a preserved `.runtime/` establishes unchanged voice inputs. Reinstalling packages, upgrading tools or changing either environment after a receipt was written reruns the affected check.
 
