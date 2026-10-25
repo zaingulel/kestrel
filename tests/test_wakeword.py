@@ -7,9 +7,17 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from loguru import logger
 from numpy import float32
 
 import wakeword
+
+
+def wake_lines(test):
+    lines = []
+    sink = logger.add(lambda message: lines.append((message.record['name'], message.record['message'])), format='{message}')
+    test.addCleanup(logger.remove, sink)
+    return lines
 
 
 class WakeWordTests(unittest.IsolatedAsyncioTestCase):
@@ -125,13 +133,56 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
                 wakeword.wire_score(payload)
 
-    def test_a_score_above_the_bar_wakes(self):
+    def test_burst_wakes_when_it_ends_above_the_bar(self):
+        lines = wake_lines(self)
         detected = Mock()
         detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
-        detector.scored(0.5)
+        for score in (0.1, 0.3, 0.6, 0.4):
+            detector.scored(score)
         detected.assert_not_called()
-        detector.scored(0.500001)
+        self.assertEqual(lines, [])
+        detector.scored(0.1)
         detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400')])
+        for score in (0.1, 0.3, 0.2, 0.6, 0.1):
+            detector.scored(score)
+        self.assertEqual(lines, [
+            ('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400'),
+            ('wakeword', 'Wake scores: did not wake, peak 0.300: 0.300'),
+            ('wakeword', 'Wake scores: woke, peak 0.600: 0.600'),
+        ])
+        self.assertEqual(detected.call_count, 2)
+
+    def test_burst_at_or_below_the_bar_does_not_wake(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.3, 0.5, 0.2):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.500: 0.300 0.500')])
+
+    def test_burst_is_cut_at_its_limit(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for _ in range(11):
+            detector.scored(0.75)
+        detected.assert_not_called()
+        self.assertEqual(lines, [])
+        detector.scored(0.75)
+        detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.750:' + ' 0.750' * 12)])
+
+    async def test_open_burst_is_logged_as_interrupted_on_close(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        detector.scored(0.3)
+        detector.scored(0.6)
+        await detector.close()
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: interrupted, peak 0.600: 0.300 0.600')])
 
     def test_worker_refuses_truncated_frames_and_closes_both_resources(self):
         runtime, identities, sdk, _ = self.runtime()
@@ -198,24 +249,31 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
         return detector
 
     async def test_worker_wire_rejects_malformed_and_truncated_responses(self):
-        detector = self.child(
-            "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
-            "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
-            " sys.stdout.buffer.write(b'S\\x3f\\x80\\x00\\x00' if data[0] == 1 else b'S\\x7f\\xc0\\x00\\x00' if data[0] == 2 else b'N')\n"
-            " sys.stdout.buffer.flush()")
-        await detector.start()
-        detector.submit(bytes(640))
-        detector.submit(bytes([1]) * 640)
-        await asyncio.wait_for(self.hits.wait(), 5)
-        self.assertFalse(self.failure.is_set())
-        detector.submit(bytes([2]) * 640)
-        await asyncio.wait_for(self.failure.wait(), 5)
-        await detector.close()
-        self.assertIsNotNone(detector.process.returncode)
-        self.assertTrue(detector.task.done())
-        self.assertTrue(detector.queue.empty())
-        self.assertTrue(detector.process.stdin.is_closing())
-        self.assertTrue(detector.process.stdout._transport.is_closing())
+        for malformed in (2, 4):
+            with self.subTest(malformed=malformed):
+                lines = wake_lines(self)
+                detector = self.child(
+                    "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
+                    "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
+                    " sys.stdout.buffer.write(b'S\\x3f\\x80\\x00\\x00' if data[0] == 1 else b'S\\x00\\x00\\x00\\x00' if data[0] == 0"
+                    " else b'S\\x7f\\xc0\\x00\\x00' if data[0] == 2 else b'X' if data[0] == 4 else b'N')\n"
+                    " sys.stdout.buffer.flush()")
+                await detector.start()
+                # Frames with no score neither end nor break the burst; the zero score ends it.
+                for frame in (1, 3, 1, 0):
+                    detector.submit(bytes([frame]) * 640)
+                await asyncio.wait_for(self.hits.wait(), 5)
+                self.assertFalse(self.failure.is_set())
+                self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 1.000: 1.000 1.000')])
+                detector.submit(bytes([malformed]) * 640)
+                await asyncio.wait_for(self.failure.wait(), 5)
+                await detector.close()
+                self.assertIsNotNone(detector.process.returncode)
+                self.assertTrue(detector.task.done())
+                self.assertTrue(detector.queue.empty())
+                self.assertTrue(detector.process.stdin.is_closing())
+                self.assertTrue(detector.process.stdout._transport.is_closing())
+                self.spawn_binding.stop()
 
     async def test_truncated_score_is_refused_and_reaped(self):
         detector = self.child(

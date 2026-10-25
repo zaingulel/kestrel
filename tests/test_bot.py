@@ -166,6 +166,8 @@ MEASURED_FIRST_HI_SCORES = (
     (0.035856425762176514, 0.11044817624999621),
     (0.0331246554851532, 0.08835854099999697),
 )
+# One 1.0 score then a 0.0 score: the burst ends and the wake fires.
+WAKE_PHRASE_PCM = bytes([1]) * 640 + bytes(640)
 # Production worker-startup budget, read at import so tests that patch bot.ENGINE_TIMEOUT cannot shrink it.
 ENGINE_STARTUP = bot.ENGINE_TIMEOUT
 
@@ -5806,7 +5808,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
             with patch.object(service.recognizer, 'transcribe', wraps=service.recognizer.transcribe) as recognition:
                 waiting.capture.stdout.feed_data(bytes(640))
-                waiting.capture.stdout.feed_data(bytes([1]) * 640)
+                waiting.capture.stdout.feed_data(WAKE_PHRASE_PCM)
                 active = await asyncio.wait_for(service.started.get(), 5)
                 self.assertTrue(waiting.capture.reaped.is_set(), 'Waiting recorder must exit before recognition')
                 self.assertTrue(waiting.reader.done())
@@ -5845,7 +5847,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError('Wake capture cleanup failed. Restart Kestrel.')
 
             with patch.object(detector, 'close', side_effect=refuse_close):
-                waiting.capture.stdout.feed_data(bytes([1]) * 640)
+                waiting.capture.stdout.feed_data(WAKE_PHRASE_PCM)
                 await asyncio.wait_for(refused.wait(), 5)
                 self.assertEqual(manager.failure, 'Wake capture cleanup failed. Restart Kestrel.')
                 self.assertEqual(manager.status._state, 'trouble')
@@ -5872,7 +5874,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         service = handle.service
         waiting = await asyncio.wait_for(service.waiting.get(), 5)
         late_hit = service.manager.wake_detector.on_detected
-        waiting.capture.stdout.feed_data(bytes([1]) * 640)
+        waiting.capture.stdout.feed_data(WAKE_PHRASE_PCM)
         active = await asyncio.wait_for(service.started.get(), 5)
         late_hit()
         late_hit()

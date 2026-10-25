@@ -14,6 +14,9 @@ import struct
 ROOT = Path(__file__).parent
 RUNTIME = ROOT / '.runtime/wakeword'
 WAKE_BAR = 0.5
+BURST_FLOOR = 0.2
+# About one second of 80-millisecond scores; bounds the line and the delay.
+BURST_LIMIT = 12
 ADVICE = 'Wake phrase unavailable. Press Super + Shift + K to start. Check the service log and restart Kestrel.'
 CLEANUP_ADVICE = 'Wake capture cleanup failed. Restart Kestrel.'
 PACKAGE = Path("venv/lib/python3.12/site-packages/pyopen_wakeword")
@@ -87,6 +90,10 @@ def wire_score(payload: bytes) -> float:
     return score
 
 
+def burst_line(outcome: str, burst: list[float]) -> str:
+    return f'Wake scores: {outcome}, peak {max(burst):.3f}:' + ''.join(f' {score:.3f}' for score in burst)
+
+
 def serve(requests, protocol):
     model = features = None
     refused = False
@@ -138,9 +145,21 @@ class WakeWordDetector:
         self.failed = False
         self.closed = False
         self.close_task = None
+        self.burst = []
 
     def scored(self, score: float):
-        if score > WAKE_BAR:
+        if score > BURST_FLOOR:
+            self.burst.append(score)
+            if len(self.burst) < BURST_LIMIT:
+                return
+        elif not self.burst:
+            return
+        burst, self.burst = self.burst, []
+        woke = max(burst) > WAKE_BAR
+        # imported here: the isolated wake interpreter has no loguru
+        from loguru import logger
+        logger.info(burst_line('woke' if woke else 'did not wake', burst))
+        if woke:
             self.on_detected()
 
     def fail(self):
@@ -207,6 +226,11 @@ class WakeWordDetector:
             raise
 
     async def _close(self):
+        if self.burst:
+            # imported here: the isolated wake interpreter has no loguru
+            from loguru import logger
+            logger.info(burst_line('interrupted', self.burst))
+            self.burst = []
         if self.task is not None:
             self.task.cancel()
             await asyncio.wait_for(asyncio.gather(self.task, return_exceptions=True), 5)
