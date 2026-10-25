@@ -1,6 +1,7 @@
 """Local Kestrel conversation orchestration."""
 
 import asyncio
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -53,7 +54,7 @@ from tool_actions import (
     TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
     validate_tool_actions,
 )
-from tool_catalogue import TOOL_CATALOGUE, PermissionTier, brain_result, valid_desktop_arguments
+from tool_catalogue import TOOL_CATALOGUE, PermissionTier, brain_result, match_local_phrase, valid_desktop_arguments
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
@@ -71,70 +72,27 @@ class LocalTool:
     confirmation: str | None = None
     announcement: str | None = None
 
-
-def match_app_name(text: str) -> str | None:
-    match = re.fullmatch(r'open ([^\r\n?!]+?)[.!]?', text.strip(), re.IGNORECASE)
-    if not match:
-        return None
-    tool = LOCAL_TOOLS['open_app']
-    if tool.permission is not PermissionTier.FREE:
-        return None
-    name = match[1].strip()
-    if not valid_desktop_arguments('open_app', {'name': name}):
-        return None
-    return name
-
-
-async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool | None:
-    resolved = await TOOL_ACTIONS['open_app'].lookup(name, command=command)
-    if resolved is None:
-        return None
-    match, discovery_env = resolved
-    tool = LOCAL_TOOLS['open_app']
-    return replace(tool, run=partial(tool.run, match['id'], discovery_env), confirmation=f"Opening {match['name']}.")
+    lookup: Callable | None = None
+    counts_toward_stop: bool = False
+    failure_message: str | None = None
+    lookup_failure: tuple[str, str] | None = None
+    lookup_miss: tuple[str, str] | None = None
 
 
 validate_tool_actions()
 
 LOCAL_TOOLS = {
-    'mute': LocalTool(TOOL_CATALOGUE['mute'].permission, TOOL_ACTIONS['mute'].run, 'mute', 'mute', announcement='Muting.'),
-    'unmute': LocalTool(TOOL_CATALOGUE['unmute'].permission, TOOL_ACTIONS['unmute'].run, 'unmute', 'unmute',
-                         confirmation='Unmuted.'),
-    'set_volume': LocalTool(TOOL_CATALOGUE['set_volume'].permission, TOOL_ACTIONS['set_volume'].run, 'volume', 'set the volume to thirty'),
-    'pause_media': LocalTool(TOOL_CATALOGUE['pause_media'].permission, TOOL_ACTIONS['pause_media'].run, 'pause', 'pause music'),
-    'next_track': LocalTool(TOOL_CATALOGUE['next_track'].permission, TOOL_ACTIONS['next_track'].run, 'next track', 'next track'),
-    'focus_workspace': LocalTool(TOOL_CATALOGUE['focus_workspace'].permission, TOOL_ACTIONS['focus_workspace'].run, 'workspace', 'workspace three'),
-    'open_app': LocalTool(TOOL_CATALOGUE['open_app'].permission, TOOL_ACTIONS['open_app'].run, 'open app', "open followed by an installed app's exact name"),
-    'take_screenshot': LocalTool(TOOL_CATALOGUE['take_screenshot'].permission, TOOL_ACTIONS['take_screenshot'].run, 'screenshot', 'take a screenshot',
-                                    confirmation='Screenshot saved.'),
+    name: LocalTool(spec.permission, TOOL_ACTIONS[name].run, spec.subject, spec.spoken,
+                    confirmation=spec.confirmation, announcement=spec.announcement,
+                    lookup=TOOL_ACTIONS[name].lookup, counts_toward_stop=spec.counts_toward_stop,
+                    failure_message=spec.failure_message, lookup_failure=spec.lookup_failure,
+                    lookup_miss=spec.lookup_miss)
+    for name, spec in TOOL_CATALOGUE.items()
 }
 
 
-# Exact app launches and screenshots stay outside stop accounting, as README's stop section says.
-EXACT_STOP_SUBJECTS = frozenset(LOCAL_TOOLS[key].subject for key in ('mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'))
-APP_LOOKUP_ADVISORY = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
-APP_MATCH_ADVISORY = "I couldn't find exactly one installed app with that name, so I didn't open anything."
 OUTSIDE_TEXT_ADVISORY = ("To keep you safe, I stop saving notes, opening apps and taking screenshots once I've read text "
                          "that didn't come from you. Say the exact command, or ask again in a new conversation.")
-
-NUMBER_BASE_WORDS = (
-    'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
-    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
-    'seventeen', 'eighteen', 'nineteen',
-)
-NUMBER_TENS = ('twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety')
-NUMBER_WORDS = {
-    **{name: value for value, name in enumerate(NUMBER_BASE_WORDS)},
-    **{name: value * 10 for value, name in enumerate(NUMBER_TENS, 2)},
-    **{
-        f'{name}{separator}{unit}': value * 10 + digit
-        for value, name in enumerate(NUMBER_TENS, 2)
-        for digit, unit in enumerate(NUMBER_BASE_WORDS[1:10], 1)
-        for separator in (' ', '-')
-    },
-    'one hundred': 100,
-}
-
 
 HELP_INTRO = "I can talk with you, answer general knowledge questions and keep short notes between conversations."
 HELP_PHRASES = "You can also say repeat that, stop, that's all, or what can I say."
@@ -165,12 +123,18 @@ def free_tool(key, *arguments) -> LocalTool | None:
     tool = LOCAL_TOOLS[key]
     if tool.permission is not PermissionTier.FREE:
         return None
-    return replace(tool, run=partial(tool.run, *arguments)) if arguments else tool
+    if tool.lookup is not None:
+        return replace(tool, lookup=partial(tool.lookup, *arguments))
+    if not arguments:
+        return tool
+    confirmation = (tool.confirmation.format(**dict(zip(TOOL_CATALOGUE[key].bounds, arguments)))
+                    if tool.confirmation is not None else None)
+    return replace(tool, run=partial(tool.run, *arguments), confirmation=confirmation)
 
 
 def local_result_message(tool, result) -> str | None:
     return (result.message if isinstance(result, (DesktopResult, AppLaunchResult)) else
-            f"I couldn't confirm {tool.subject}. Check the audio control. I won't retry."
+            tool.failure_message
             if not result.confirmed else None)
 
 
@@ -178,42 +142,21 @@ def effect_observed(result) -> bool:
     return result.accepted if isinstance(result, AppLaunchResult) else result.confirmed
 
 
-def match_instant_tool(text):
-    text = text.strip().lower()
-    if text in ('mute', 'mute.', 'mute!'):
-        return free_tool('mute')
-    match = re.fullmatch(r'(unmute|pause music|next track|take a screenshot)[.!]?', text)
-    if match:
-        if match[1] == 'unmute':
-            return free_tool('unmute')
-        if match[1] == 'pause music':
-            return free_tool('pause_media')
-        if match[1] == 'next track':
-            return free_tool('next_track')
-        return free_tool('take_screenshot')
-    match = re.fullmatch(r'workspace ([1-9][0-9]{0,9})[.!]?', text)
-    if match:
-        number = int(match[1])
-    else:
-        match = re.fullmatch(r'workspace ([a-z -]+)[.!]?', text)
-        number = NUMBER_WORDS.get(match[1]) if match else None
-    if number is not None and 1 <= number <= 2147483647:
-        return free_tool('focus_workspace', number)
-    match = re.fullmatch(
-        r'(?:(?P<leading_please>please) )?'
-        r'(?P<command>volume|set (?:the )?volume(?: to)?) '
-        r'(?P<level>0|[1-9][0-9]?|100|[a-z]+(?:[ -][a-z]+)*?)'
-        r'(?P<unit> percent| ?%)?(?: (?P<trailing_please>please))?[.!]?', text,
-    )
-    if not match or (match['leading_please'] and match['trailing_please']):
+def match_instant_tool(text: str) -> LocalTool | None:
+    matched = match_local_phrase(text)
+    if matched is None:
         return None
-    if match['command'] == 'volume' and match['unit'] is None:
+    name, arguments = matched
+    return free_tool(name, *(arguments[key] for key in TOOL_CATALOGUE[name].bounds))
+
+
+async def resolve_local_tool(tool: LocalTool, *, command=run_local_command) -> LocalTool | None:
+    resolved = await tool.lookup(command=command)
+    if resolved is None:
         return None
-    percent = int(match['level']) if match['level'].isdecimal() else NUMBER_WORDS.get(match['level'])
-    if percent is None:
-        return None
-    tool = free_tool('set_volume', percent)
-    return replace(tool, confirmation=f'Volume {percent}.') if tool is not None else None
+    operands, values = resolved
+    confirmation = tool.confirmation.format(**values) if tool.confirmation is not None else None
+    return replace(tool, run=partial(tool.run, *operands), confirmation=confirmation)
 
 
 def stop_kestrel():
@@ -810,22 +753,25 @@ class HermesLLMService(LLMService):
         if turn.closed:
             return record(brain_result(False, False, 'turn closed'))
         spec = TOOL_CATALOGUE[name]
-        tool = free_tool(name, *(() if spec.needs_lookup else (arguments[key] for key in spec.bounds)))
+        tool = free_tool(name, *(arguments[key] for key in spec.bounds))
         if tool is None:
             turn.closed = True
             advise("That needs permission, which isn't available by voice yet, so I didn't do it.")
             return record(brain_result(False, False, 'permission required'))
-        if spec.needs_lookup:
+        if tool.lookup is not None:
+            selected = tool
             try:
-                tool = await resolve_app_tool(arguments['name'], command=self.local_actions.command)
+                tool = await resolve_local_tool(selected, command=self.local_actions.command)
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 turn.closed = True
-                advise(APP_LOOKUP_ADVISORY)
-                return record(brain_result(False, False, 'app lookup failed'))
+                reason, advisory = selected.lookup_failure
+                advise(advisory)
+                return record(brain_result(False, False, reason))
             if tool is None:
                 turn.closed = True
-                advise(APP_MATCH_ADVISORY)
-                return record(brain_result(False, False, 'no unique installed app'))
+                reason, advisory = selected.lookup_miss
+                advise(advisory)
+                return record(brain_result(False, False, reason))
         result = await self.run_shared(
             tool, epoch=turn.epoch, reporter=token,
             finished=lambda result: record(brain_result(effect_observed(result), result.attempted, result.reason)),
@@ -909,9 +855,9 @@ class HermesLLMService(LLMService):
             await self.speak_local_reply(capability_help(), token)
             return
         tool = match_instant_tool(text)
-        name = match_app_name(text) if tool is None else None
-        if name is not None:
-            lookup = asyncio.create_task(resolve_app_tool(name, command=self.local_actions.command))
+        if tool is not None and tool.lookup is not None:
+            selected = tool
+            lookup = asyncio.create_task(resolve_local_tool(selected, command=self.local_actions.command))
             self.lookup = self.local_actions.retain(lookup)
             try:
                 tool = await lookup
@@ -920,7 +866,7 @@ class HermesLLMService(LLMService):
                 raise
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 remove_original()
-                await self.speak_local_reply(APP_LOOKUP_ADVISORY, token)
+                await self.speak_local_reply(selected.lookup_failure[1], token)
                 return
         if tool is not None:
             if not self.valid_origin(frame):
@@ -929,7 +875,7 @@ class HermesLLMService(LLMService):
             if tool.announcement is not None:
                 tool = replace(tool, run=partial(self.announce_first, token, tool.announcement, tool.run))
             # LocalActions owns an accepted action independently of later reply ownership.
-            if tool.subject in EXACT_STOP_SUBJECTS:
+            if tool.counts_toward_stop:
                 result = await self.run_shared(tool, epoch=self.stop_epoch, reporter=token)
             else:
                 result = await self.local_actions.run(tool, admitted=self.admitted)

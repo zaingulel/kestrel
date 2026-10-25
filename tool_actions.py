@@ -328,14 +328,14 @@ async def read_media_status(*, command=run_local_command) -> dict:
 async def media_action(action: str, *, command=run_local_command) -> DesktopResult:
     if action not in ('pause', 'next'):
         raise ValueError('invalid media action')
-    subject = 'pause' if action == 'pause' else 'next track'
-    advisory = f"I couldn't confirm {subject}. Check the media player. I won't retry."
+    spec = TOOL_CATALOGUE['pause_media' if action == 'pause' else 'next_track']
+    advisory = spec.failure_message
     attempted = False
     try:
         async with asyncio.timeout(DESKTOP_TIMEOUT):
             before = await read_media_status(command=command)
             if not before['hasPlayer'] or not before['playing']:
-                return DesktopResult(False, False, 'not playing', "I couldn't find a playing media player.")
+                return DesktopResult(False, False, 'not playing', spec.unavailable_message)
             identity = (before['identity'], before['desktopEntry'])
             metadata = tuple(before[key] for key in ('title', 'artist', 'album'))
             if action == 'next' and (not before['canGoNext'] or not all(part.strip() for part in identity) or not before['title'].strip()):
@@ -367,7 +367,7 @@ async def media_action(action: str, *, command=run_local_command) -> DesktopResu
 async def workspace_action(number: int, *, command=run_local_command) -> DesktopResult:
     if type(number) is not int or not 1 <= number <= 2147483647:
         raise ValueError('invalid workspace')
-    advisory = f"I couldn't confirm workspace {number}. Check the desktop. I won't retry."
+    advisory = TOOL_CATALOGUE['focus_workspace'].failure_message.format(number=number)
     attempted = False
 
     async def current_workspace():
@@ -399,7 +399,7 @@ async def workspace_action(number: int, *, command=run_local_command) -> Desktop
 
 
 async def screenshot_action(*, command=run_local_command) -> DesktopResult:
-    advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
+    advisory = TOOL_CATALOGUE['take_screenshot'].failure_message
     started = time.time_ns()
     try:
         path = (await command(SCREENSHOT_COMMAND)).removesuffix('\n')
@@ -443,10 +443,10 @@ async def open_app(desktop_id: str, discovery_env: tuple[str, ...], *, command=r
         return AppLaunchResult(True, True, 'launch accepted', None)
     except (RuntimeError, OSError, TimeoutError):
         return AppLaunchResult(False, True, 'launch unconfirmed',
-                               "I couldn't confirm the app opened. Check the desktop. I won't retry.")
+                               TOOL_CATALOGUE['open_app'].failure_message)
 
 
-async def resolve_app(name: str, *, command=run_local_command) -> tuple[dict, tuple[str, ...]] | None:
+async def resolve_app(name: str, *, command=run_local_command) -> tuple[tuple[object, ...], dict[str, str]] | None:
     discovery_env = app_discovery_environment()
     output = await command(('/usr/bin/env', *discovery_env, '/usr/bin/python', '-I',
                             str(ROOT / 'app_resolver.py')), stdin_data=name.encode('utf-8'))
@@ -456,7 +456,7 @@ async def resolve_app(name: str, *, command=run_local_command) -> tuple[dict, tu
     if (not isinstance(match, dict) or match.keys() != {'id', 'name'} or not valid_desktop_id(match['id'])
             or not valid_app_text(match['name'], APP_NAME_BYTES) or not match['name'].strip()):
         raise ValueError('invalid app resolution')
-    return match, discovery_env
+    return (match['id'], discovery_env), {'name': match['name']}
 
 
 @dataclass(frozen=True)
