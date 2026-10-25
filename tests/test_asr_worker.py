@@ -61,6 +61,8 @@ class CPUWorkerTests(unittest.TestCase):
         self.native.write_bytes(b'native')
         self.engine = Path(directory.name) / 'libnemo_speech_asr.so'
         self.engine.write_bytes(b'engine')
+        self.base = Path(directory.name) / 'libggml-base.so.0.25.1'
+        self.base.write_bytes(b'shared')
         self.library = FakeLibrary()
 
     @staticmethod
@@ -89,6 +91,9 @@ class CPUWorkerTests(unittest.TestCase):
             patch.object(asr_worker, 'ENGINE', self.engine),
             patch.object(asr_worker, 'ENGINE_SIZE', 6),
             patch.object(asr_worker, 'ENGINE_SHA256', 'ed9f6f25068608efd412958da4dfc19328ca3511251fa6d5f9c42baf230e32f8'),
+            patch.object(asr_worker, 'GGML_BASE', self.base),
+            patch.object(asr_worker, 'GGML_BASE_SIZE', 6),
+            patch.object(asr_worker, 'GGML_BASE_SHA256', 'a4d26868017c0ccffe2efe50944ef4211834660cca834c6e9f86dec6a88246fa'),
             patch.object(asr_worker.C, 'CDLL', return_value=self.library) as load,
         ):
             status = asr_worker.serve(io.BytesIO(requests), protocol)
@@ -178,7 +183,7 @@ class CPUWorkerTests(unittest.TestCase):
                 self.assertIn('FileNotFoundError' if content is None else 'Model identity mismatch', diagnostics.getvalue())
 
     def test_unpinned_native_library_refuses_before_loading(self):
-        for name in ('native', 'engine'):
+        for name in ('native', 'engine', 'base'):
             for change in ('size', 'hash'):
                 with self.subTest(library=name, change=change):
                     path = getattr(self, name)
@@ -389,6 +394,9 @@ class WordBoostingModelTests(unittest.TestCase):
         self.assertEqual(
             (asr_worker.ENGINE, asr_worker.ENGINE_SIZE, asr_worker.ENGINE_SHA256),
             (libraries / 'libnemo_speech_asr.so', 2265256, '596c0e0dd3da78e959e850ed3e90911524a6051d8f4405324d70a570c427e246'))
+        self.assertEqual(
+            (asr_worker.GGML_BASE, asr_worker.GGML_BASE_SIZE, asr_worker.GGML_BASE_SHA256),
+            (libraries / 'libggml-base.so.0.25.1', 863168, '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'))
         self.assertEqual(
             (asr_worker.SPLICE_METADATA_END, asr_worker.SPLICE_TENSOR_INFO_END, asr_worker.SPLICE_DATA_START),
             (14098, 64216, 64224))
