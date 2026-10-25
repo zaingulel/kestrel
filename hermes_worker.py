@@ -11,10 +11,10 @@ import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
-from typing import NamedTuple
 import uuid
 
-from app_resolver import valid_app_text
+from tool_catalogue import (TOOL_CATALOGUE, brain_result, desktop_schema, desktop_tool_instructions,
+                            valid_desktop_arguments, valid_desktop_result)
 
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
@@ -125,38 +125,10 @@ class ReplyReasoningFilter:
             self.refuse()
 
 
-class DesktopToolSchema(NamedTuple):
-    description: str
-    bounds: dict[str, tuple[type, int, int]]
-
-
-DESKTOP_TOOLS = {
-    'mute': DesktopToolSchema('Mute the selected audio output.', {}),
-    'unmute': DesktopToolSchema('Unmute the selected audio output.', {}),
-    'set_volume': DesktopToolSchema('Set the selected audio output volume.', {'percent': (int, 0, 100)}),
-    'pause_media': DesktopToolSchema('Pause current media.', {}),
-    'next_track': DesktopToolSchema('Advance to the next media track.', {}),
-    'focus_workspace': DesktopToolSchema('Focus a numbered workspace.', {'number': (int, 1, 2147483647)}),
-    'open_app': DesktopToolSchema('Open one installed app by its visible name.', {'name': (str, 1, 1024)}),
-    'take_screenshot': DesktopToolSchema('Save a screenshot to the screenshot folder; its content is never shown to you.', {}),
-}
 KESTREL_SOURCE = 'kestrel'
-HARMLESS_TOOLS = frozenset({'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace'})
-OUTSIDE_TEXT_RESULT = json.dumps({'confirmed': False, 'attempted': False, 'reason': 'outside text'})
+OUTSIDE_TEXT_RESULT = brain_result(False, False, 'outside text')
 OUTSIDE_TEXT_REFUSAL = ('Refused: this conversation contains outside text, so notes cannot change '
                         'until a fresh conversation.')
-
-
-def valid_desktop_arguments(name: str, arguments: dict) -> bool:
-    if not isinstance(name, str) or name not in DESKTOP_TOOLS or not isinstance(arguments, dict):
-        return False
-    bounds = DESKTOP_TOOLS[name].bounds
-    return set(arguments) == set(bounds) and all(
-        type(arguments[key]) is kind and (
-            low <= arguments[key] <= high if kind is int
-            else low <= len(arguments[key]) <= high and bool(arguments[key].strip()))
-        for key, (kind, low, high) in bounds.items()
-    ) and (name != 'open_app' or valid_app_text(arguments['name'], 1024))
 
 
 class ReplyDeliveryPrefix:
@@ -233,24 +205,8 @@ SYSTEM_PROMPT = (
     "Ask a follow-up question only when it helps the current conversation. If you first make a statement, end it with a full stop before asking the question as a separate sentence. "
     "Use no markdown, lists, acting directions, accent changes or persona changes. "
     "This session is a local conversation. You can talk, answer from general knowledge, and use these tools: "
-    "native local memory for small facts and preferences, and Kestrel's desktop tools mute, unmute, set_volume, "
-    "pause_media, next_track, focus_workspace, open_app and take_screenshot. "
-    "Maintain notes automatically when useful, including updating or removing outdated notes. "
-    "Claim a save only after a successful memory tool result. You have no internet, web access or live "
-    "information such as news, weather or prices, and you cannot see the screen or any screenshot; "
-    "you cannot resume or go back in media. Say so plainly when asked. "
-    "When asked what you can do, name conversation and general knowledge, remembering notes and each desktop tool "
-    "in plain words (muting, unmuting, setting the volume, pausing media, skipping to the next track, switching to a "
-    "numbered workspace, opening an installed app by name and taking a screenshot), then state these limits, "
-    "then say this sentence word for word: You can also say repeat that, stop, that's all, or what can I say. "
-    "Call a desktop tool only when the owner clearly asks for that tool's effect, at most once per reply; "
-    "when a request is unclear or asks for something no tool does, ask instead of calling a tool. "
-    "Each desktop result is JSON with confirmed, attempted and reason. "
-    "Say an effect happened only when confirmed is true, never before its result arrives. "
-    "For open_app, confirmed means the launch request was accepted, not that a window is visible. "
-    "For take_screenshot, confirmed means a new screenshot file was saved; you never see it. "
-    "Never call a desktop tool again to retry it.\n\n"
-    'Choose the delivery for the meaning of the current reply, using the conversation as context. '
+    + desktop_tool_instructions()
+    + 'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '
     'practical information and ordinary replies without a clear emotional cue. Curious suits an '
     'invitation to discover something or genuine interest in an unanswered story. Use gently_pleased '
@@ -589,7 +545,7 @@ def main(*, base_url=BONSAI_URL):
                     check_privacy()
                     if bridge_failed:
                         return 'Kestrel desktop bridge failed'
-                    if outside and name not in HARMLESS_TOOLS:
+                    if outside and not TOOL_CATALOGUE[name].allowed_after_outside_text:
                         emit({'tool_refused': True})
                         return OUTSIDE_TEXT_RESULT
                     valid_arguments = valid_desktop_arguments(name, args)
@@ -600,13 +556,11 @@ def main(*, base_url=BONSAI_URL):
                         if (len(line) == 4096 and not line.endswith(b'\n')
                                 or not isinstance(reply, dict)
                                 or set(reply) not in ({'tool_result'}, {'tool_result', 'source'})
-                                or not isinstance(reply['tool_result'], str)
-                                or not reply['tool_result'].strip() or len(reply['tool_result']) > 1024):
+                                or not valid_desktop_result(reply['tool_result'])):
                             raise ValueError('Invalid desktop result')
                         if reply.get('source') != KESTREL_SOURCE:
                             outside = True
-                        if not valid_arguments and reply['tool_result'] != json.dumps({
-                                'confirmed': False, 'attempted': False, 'reason': 'invalid arguments'}):
+                        if not valid_arguments and reply['tool_result'] != brain_result(False, False, 'invalid arguments'):
                             raise ValueError('Invalid desktop result')
                         return reply['tool_result']
                     except ValueError:
@@ -626,16 +580,10 @@ def main(*, base_url=BONSAI_URL):
 
             INLINE_TOOL_EXECUTORS['memory'] = gated_memory
 
-            for name, (description, bounds) in DESKTOP_TOOLS.items():
+            for name in TOOL_CATALOGUE:
                 registry.register(
                     name=name, toolset='kestrel_desktop', handler=desktop_handler(name),
-                    schema={'name': name, 'description': description, 'parameters': {
-                        'type': 'object',
-                        'properties': {key: {'type': 'integer', 'minimum': low, 'maximum': high} if kind is int
-                                       else {'type': 'string', 'minLength': low, 'maxLength': high}
-                                       for key, (kind, low, high) in bounds.items()},
-                        'required': list(bounds), 'additionalProperties': False,
-                    }},
+                    schema=desktop_schema(name),
                 )
 
             try:
@@ -685,8 +633,8 @@ def main(*, base_url=BONSAI_URL):
                 built._repair_tool_call = exact_repair
                 refusal = REASONING_CONFIGURATION_ERROR if answer_in_reasoning_capability(built) else None
                 if memory:
-                    if (built.valid_tool_names != {'memory', *DESKTOP_TOOLS}
-                            or {tool['function']['name'] for tool in built.tools} != {'memory', *DESKTOP_TOOLS}):
+                    if (built.valid_tool_names != {'memory', *TOOL_CATALOGUE}
+                            or {tool['function']['name'] for tool in built.tools} != {'memory', *TOOL_CATALOGUE}):
                         refusal = TOOL_SURFACE_ERROR
                     elif built._memory_store is None or built._memory_manager is not None:
                         refusal = MEMORY_ERROR
@@ -765,8 +713,7 @@ def main(*, base_url=BONSAI_URL):
                             if (set(message) not in ({'role', 'name', 'arguments', 'content'},
                                                      {'role', 'name', 'arguments', 'content', 'source'})
                                     or not valid_desktop_arguments(message['name'], message['arguments'])
-                                    or not isinstance(message['content'], str) or not message['content'].strip()
-                                    or len(message['content']) > 1024):
+                                    or not valid_desktop_result(message['content'])):
                                 raise ValueError('Invalid desktop tool history')
                             if index == 0 or messages[index - 1]['role'] not in ('user', 'tool'):
                                 raise ValueError('Invalid desktop tool history')

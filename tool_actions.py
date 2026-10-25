@@ -1,7 +1,9 @@
 """Kestrel's tool run steps, the open-app lookup step and the shared safe local-command runner; the engine process never loads this module."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -454,3 +456,21 @@ async def resolve_app(name: str, *, command=run_local_command) -> tuple[dict, tu
             or not valid_app_text(match['name'], APP_NAME_BYTES) or not match['name'].strip()):
         raise ValueError('invalid app resolution')
     return match, discovery_env
+
+
+@dataclass(frozen=True)
+class ToolAction:
+    run: Callable
+    lookup: Callable | None = None
+
+
+TOOL_ACTIONS: dict[str, ToolAction] = {
+    'mute': ToolAction(partial(set_output_mute, True)),
+    'unmute': ToolAction(partial(set_output_mute, False)),
+    'set_volume': ToolAction(volume_output),
+    'pause_media': ToolAction(partial(media_action, 'pause')),
+    'next_track': ToolAction(partial(media_action, 'next')),
+    'focus_workspace': ToolAction(workspace_action),
+    'open_app': ToolAction(open_app, resolve_app),
+    'take_screenshot': ToolAction(screenshot_action),
+}

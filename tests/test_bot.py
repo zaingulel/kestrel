@@ -452,10 +452,10 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tool.permission, bot.PermissionTier.FREE)
                 self.assertEqual(tool.subject, 'volume')
                 self.assertEqual(tool.confirmation, f'Volume {percent}.')
-                self.assertIsNot(tool, bot.LOCAL_TOOLS['volume'])
+                self.assertIsNot(tool, bot.LOCAL_TOOLS['set_volume'])
                 command = AsyncMock()
                 action = AsyncMock()
-                with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(bot.PermissionTier.FREE, action, 'volume', 'set the volume to thirty')):
+                with patch.dict(bot.LOCAL_TOOLS, set_volume=bot.LocalTool(bot.PermissionTier.FREE, action, 'volume', 'set the volume to thirty')):
                     tool = bot.match_instant_tool(text)
                     await tool.run(command=command)
                     action.assert_awaited_once_with(percent, command=command)
@@ -485,7 +485,7 @@ class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, volume=bot.LocalTool(permission, AsyncMock(), 'volume', 'set the volume to thirty')):
+            with patch.dict(bot.LOCAL_TOOLS, set_volume=bot.LocalTool(permission, AsyncMock(), 'volume', 'set the volume to thirty')):
                 self.assertIsNone(bot.match_instant_tool('set the volume to 30'))
 
 
@@ -499,7 +499,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
     async def test_screenshot_requires_fresh_file_without_reading_content(self):
         phrase = 'take a screenshot'
         self.assertIsNotNone(bot.match_instant_tool(phrase), 'Exact screenshot turns must select local work')
-        tool = bot.LOCAL_TOOLS[phrase]
+        tool = bot.LOCAL_TOOLS['take_screenshot']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         for text in (phrase, ' TAKE A SCREENSHOT. ', phrase + '!'):
             self.assertIs(bot.match_instant_tool(text), tool)
@@ -507,7 +507,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                      phrase + ' please', 'take a\nscreenshot', phrase + '; echo bad'):
             self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
+            with patch.dict(bot.LOCAL_TOOLS, {'take_screenshot': bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
                 self.assertIsNone(bot.match_instant_tool(phrase))
         argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
         advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
@@ -563,9 +563,9 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             command.assert_awaited_once_with(argv)
 
     async def test_media_actions_require_observed_state(self):
-        for phrase, action in (('pause music', 'pause'), ('next track', 'next')):
+        for key, phrase, action in (('pause_media', 'pause music', 'pause'), ('next_track', 'next track', 'next')):
             self.assertIsNotNone(bot.match_instant_tool(phrase), 'Exact media turns must select local work')
-            tool = bot.LOCAL_TOOLS[phrase]
+            tool = bot.LOCAL_TOOLS[key]
             self.assertEqual(tool.permission, bot.PermissionTier.FREE)
             for text in (phrase, ' ' + phrase.upper() + '. ', phrase + '!'):
                 self.assertIs(bot.match_instant_tool(text), tool)
@@ -573,7 +573,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                          phrase + ' please', phrase.replace(' ', '\n'), phrase + '; echo bad'):
                 self.assertIsNone(bot.match_instant_tool(text))
             for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-                with patch.dict(bot.LOCAL_TOOLS, {phrase: bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
+                with patch.dict(bot.LOCAL_TOOLS, {key: bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
                     self.assertIsNone(bot.match_instant_tool(phrase))
             status = ('/usr/bin/omarchy-shell', 'media', 'status')
             write = ('/usr/bin/omarchy-shell', 'media', action)
@@ -932,7 +932,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                      'workspace one hundred one', 'workspace 1' + '0' * 5000):
             self.assertIsNone(bot.match_instant_tool(text))
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-            with patch.dict(bot.LOCAL_TOOLS, workspace=bot.LocalTool(permission, AsyncMock(), 'workspace', 'workspace three')):
+            with patch.dict(bot.LOCAL_TOOLS, focus_workspace=bot.LocalTool(permission, AsyncMock(), 'workspace', 'workspace three')):
                 self.assertIsNone(bot.match_instant_tool('workspace three'))
         command = AsyncMock()
         for value in (True, False, 0, -1, 2147483648, '3', 3.0, None):
@@ -1174,7 +1174,7 @@ class LocalAppTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(nonmatch=phrase):
                     self.assertIsNone(bot.match_app_name(phrase))
             for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
-                with patch.dict(bot.LOCAL_TOOLS, {'open app': bot.LocalTool(permission, AsyncMock(), 'open app', "open followed by an installed app's exact name")}):
+                with patch.dict(bot.LOCAL_TOOLS, {'open_app': bot.LocalTool(permission, AsyncMock(), 'open app', "open followed by an installed app's exact name")}):
                     self.assertIsNone(bot.match_app_name('open FixtureApp'))
             for phrase, expected_name in (('open UnknownApp', 'UnknownApp'), ('open AmbiguousApp', 'AmbiguousApp'),
                                           ('open FixtureApp and tell me a fact', 'FixtureApp and tell me a fact')):
@@ -1344,7 +1344,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(tool=key):
                 self.assertIsInstance(tool.spoken, str)
                 self.assertTrue(tool.spoken.strip())
-                if tool.permission is bot.PermissionTier.FREE and key != 'open app':
+                if tool.permission is bot.PermissionTier.FREE and key != 'open_app':
                     matched = bot.match_instant_tool(tool.spoken)
                     self.assertIsNotNone(matched)
                     self.assertEqual(matched.subject, tool.subject)
@@ -1407,7 +1407,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -1609,7 +1609,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'volume', 'pause music', 'next track', 'workspace', 'open app', 'take a screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -2378,7 +2378,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         for name, arguments in cases:
             with self.subTest(name=name, arguments=arguments):
                 # An unknown name is refused before any argument check, so each case must name a desktop tool.
-                self.assertIn(name, bot.DESKTOP_TOOLS)
+                self.assertIn(name, bot.TOOL_CATALOGUE)
                 turn = bot.BrainTurn(names=set(), user={'role': 'user', 'content': 'Open it.'},
                                      epoch=service.stop_epoch, records=[])
                 result = await service.desktop_call(turn, object(), asyncio.Queue(), name, arguments)

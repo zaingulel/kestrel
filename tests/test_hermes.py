@@ -353,18 +353,18 @@ class HermesWorkerTests(unittest.TestCase):
         self.assertEqual(SYSTEM_PROMPT, BASELINE_SYSTEM_PROMPT)
 
     def test_tool_catalogue_names_and_outside_text_allowance_are_fixed(self):
-        from hermes_worker import DESKTOP_TOOLS, HARMLESS_TOOLS
+        from tool_catalogue import TOOL_CATALOGUE
 
-        self.assertEqual(list(DESKTOP_TOOLS), [
+        self.assertEqual(list(TOOL_CATALOGUE), [
             'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
             'focus_workspace', 'open_app', 'take_screenshot',
         ])
-        self.assertEqual(HARMLESS_TOOLS, {
+        self.assertEqual({name for name, spec in TOOL_CATALOGUE.items() if spec.allowed_after_outside_text}, {
             'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace',
         })
 
     def test_desktop_argument_validation_matches_host_app_limits(self):
-        from hermes_worker import valid_desktop_arguments
+        from tool_catalogue import valid_desktop_arguments
 
         valid = [
             ('mute', {}), ('unmute', {}), ('pause_media', {}), ('next_track', {}),
