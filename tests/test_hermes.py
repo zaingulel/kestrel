@@ -2892,7 +2892,8 @@ class NativeHermesTests(unittest.TestCase):
             write_brain_key(runtime / 'brain-api-key')
             (runtime / 'hermes-0.22.2').symlink_to(ROOT / '.runtime/hermes-0.22.2', target_is_directory=True)
             worker_source = checkout / 'hermes_worker.py'
-            shutil.copyfile(ROOT / 'hermes_worker.py', worker_source)
+            for name in ('hermes_worker.py', 'tool_catalogue.py', 'app_resolver.py'):
+                shutil.copyfile(ROOT / name, checkout / name)
             result = subprocess.run(
                 [str(NATIVE_PYTHON), str(worker_source)],
                 env=child_environment(home), input='', capture_output=True, text=True, timeout=45,
