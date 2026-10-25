@@ -211,16 +211,16 @@ class CPUWorkerTests(unittest.TestCase):
             self.assertIn(f'Library identity mismatch: {self.base}', diagnostics.getvalue())
 
     def test_every_request_boosts_the_owner_words_and_restores_their_spelling(self):
-        self.library.nemo_speech_asr_result_transcript.side_effect = [b'ask alpguard and flowgauge about fabraik', b'garden fabric']
+        self.library.nemo_speech_asr_result_transcript.side_effect = [b'ask kestrel about alpguard and flowgauge and fabraik', b'garden fabric']
         status, values, _ = self.serve(self.request(self.wav()) * 2)
-        self.assertEqual((status, values), (0, [{'ready': True}, {'text': 'ask AlpGuard and Flowgauge about Fabraik'}, {'text': 'garden fabric'}]))
-        context = [(ctypes.sizeof(asr_worker.SpeechContext), [b'AlpGuard', b'Flowgauge', b'Fabraik'], 2.0)]
+        self.assertEqual((status, values), (0, [{'ready': True}, {'text': 'ask Kestrel about AlpGuard and Flowgauge and Fabraik'}, {'text': 'garden fabric'}]))
+        context = [(ctypes.sizeof(asr_worker.SpeechContext), [b'AlpGuard', b'Flowgauge', b'Fabraik', b'Kestrel'], 2.0)]
         self.assertEqual(self.library.contexts, [context, context])
 
     def test_spelling_restoration_changes_only_whole_word_matches(self):
-        self.assertEqual(asr_worker.restore_spelling('ALPGUARD flowGauge Fabraik'), 'AlpGuard Flowgauge Fabraik')
-        self.assertEqual(asr_worker.restore_spelling("fabraik's"), "Fabraik's")
-        for unchanged in ('fabraiks', 'xalpguard', 'flowgauge2', 'fabraiké', 'garden fabric', ''):
+        self.assertEqual(asr_worker.restore_spelling('ALPGUARD flowGauge Fabraik KESTREL'), 'AlpGuard Flowgauge Fabraik Kestrel')
+        self.assertEqual(asr_worker.restore_spelling("fabraik's kestrel's"), "Fabraik's Kestrel's")
+        for unchanged in ('fabraiks', 'xalpguard', 'flowgauge2', 'fabraiké', 'kestrels', 'castro', 'garden fabric', ''):
             with self.subTest(unchanged=unchanged):
                 self.assertEqual(asr_worker.restore_spelling(unchanged), unchanged)
 
