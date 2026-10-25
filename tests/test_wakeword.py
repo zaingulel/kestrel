@@ -7,9 +7,17 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from loguru import logger
 from numpy import float32
 
 import wakeword
+
+
+def wake_lines(test):
+    lines = []
+    sink = logger.add(lambda message: lines.append((message.record['name'], message.record['message'])), format='{message}')
+    test.addCleanup(logger.remove, sink)
+    return lines
 
 
 class WakeWordTests(unittest.IsolatedAsyncioTestCase):
@@ -89,16 +97,101 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
                     if not model.exists():
                         model.write_bytes(b'good')
 
-    def test_scores_require_finite_probabilities_and_strict_threshold(self):
+    def test_scores_require_finite_probabilities(self):
         model, features = Mock(), Mock()
         features.process_streaming.return_value = [object()]
-        for scores, expected in (([], False), ([0, 0.5], False), ([0.500001], True), ([1.0], True), ([float32(0.6)], True)):
+        for scores, expected in (([], []), ([0, 0.5, 1.0], [0, 0.5, 1.0]), ([float32(0.75)], [0.75])):
             model.process_streaming.return_value = scores
-            self.assertEqual(wakeword.detected(model, features, bytes(640)), expected)
+            returned = wakeword.scores(model, features, bytes(640))
+            self.assertEqual(returned, expected)
+            self.assertTrue(all(type(score) is float for score in returned))
         for scores in ([True], [float('nan')], [float('inf')], [-0.1], [1.1], ['private'], [0.1] * 1001):
             model.process_streaming.return_value = scores
             with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
-                wakeword.detected(model, features, bytes(640))
+                wakeword.scores(model, features, bytes(640))
+
+    def test_worker_sends_one_score_per_frame(self):
+        runtime, identities, sdk, _ = self.runtime()
+        sdk.OpenWakeWord.from_model.side_effect = None
+        model = sdk.OpenWakeWord.from_model.return_value
+        features = sdk.OpenWakeWordFeatures.from_builtin.return_value
+        features.process_streaming.return_value = [object()]
+        for scored, response in (([0.75], b'RS\x3f\x40\x00\x00'), ([0.75, 0.25], b'RE')):
+            model.process_streaming.return_value = scored
+            output = io.BytesIO()
+            with patch.object(wakeword, 'RUNTIME', runtime), patch.object(wakeword, 'ASSET_IDENTITIES', identities), \
+                    patch.dict(sys.modules, pyopen_wakeword=sdk), patch.object(wakeword.resource, 'setrlimit'), \
+                    patch('sys.stderr', new_callable=io.StringIO) as diagnostics:
+                wakeword.serve(io.BytesIO(bytes(640)), output)
+            self.assertEqual(output.getvalue(), response)
+            self.assertNotIn('private', diagnostics.getvalue())
+
+    def test_wire_scores_must_be_probabilities(self):
+        for payload, expected in ((b'\x3f\x40\x00\x00', 0.75), (bytes(4), 0.0), (b'\x3f\x80\x00\x00', 1.0)):
+            self.assertEqual(wakeword.wire_score(payload), expected)
+        for payload in (b'\x7f\xc0\x00\x00', b'\x7f\x80\x00\x00', b'\xbf\x00\x00\x00', b'\x3f\xc0\x00\x00'):
+            with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
+                wakeword.wire_score(payload)
+
+    def test_burst_wakes_when_it_ends_above_the_bar(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.1, 0.3, 0.6, 0.4):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [])
+        detector.scored(0.1)
+        detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400')])
+        for score in (0.1, 0.3, 0.2, 0.6, 0.1):
+            detector.scored(score)
+        self.assertEqual(lines, [
+            ('wakeword', 'Wake scores: woke, peak 0.600: 0.300 0.600 0.400'),
+            ('wakeword', 'Wake scores: did not wake, peak 0.300: 0.300'),
+            ('wakeword', 'Wake scores: woke, peak 0.600: 0.600'),
+        ])
+        self.assertEqual(detected.call_count, 2)
+
+    def test_burst_at_or_below_the_bar_does_not_wake(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for score in (0.3, 0.5, 0.2):
+            detector.scored(score)
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.500: 0.300 0.500')])
+
+    def test_burst_just_above_the_bar_wakes(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        detector.scored(0.500001)
+        detector.scored(0.1)
+        detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.500: 0.500')])
+
+    def test_burst_is_cut_at_its_limit(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        for _ in range(11):
+            detector.scored(0.75)
+        detected.assert_not_called()
+        self.assertEqual(lines, [])
+        detector.scored(0.75)
+        detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.750:' + ' 0.750' * 12)])
+
+    async def test_open_burst_is_logged_as_interrupted_on_close(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        detector.scored(0.3)
+        detector.scored(0.6)
+        await detector.close()
+        detected.assert_not_called()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: interrupted, peak 0.600: 0.300 0.600')])
 
     def test_worker_refuses_truncated_frames_and_closes_both_resources(self):
         runtime, identities, sdk, _ = self.runtime()
@@ -165,23 +258,42 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
         return detector
 
     async def test_worker_wire_rejects_malformed_and_truncated_responses(self):
+        for malformed in (2, 4):
+            with self.subTest(malformed=malformed):
+                lines = wake_lines(self)
+                detector = self.child(
+                    "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
+                    "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
+                    " sys.stdout.buffer.write(b'S\\x3f\\x80\\x00\\x00' if data[0] == 1 else b'S\\x00\\x00\\x00\\x00' if data[0] == 0"
+                    " else b'S\\x7f\\xc0\\x00\\x00' if data[0] == 2 else b'X' if data[0] == 4 else b'N')\n"
+                    " sys.stdout.buffer.flush()")
+                await detector.start()
+                # Frames with no score neither end nor break the burst; the zero score ends it.
+                for frame in (1, 3, 1, 0):
+                    detector.submit(bytes([frame]) * 640)
+                await asyncio.wait_for(self.hits.wait(), 5)
+                self.assertFalse(self.failure.is_set())
+                self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 1.000: 1.000 1.000')])
+                detector.submit(bytes([malformed]) * 640)
+                await asyncio.wait_for(self.failure.wait(), 5)
+                await detector.close()
+                self.assertIsNotNone(detector.process.returncode)
+                self.assertTrue(detector.task.done())
+                self.assertTrue(detector.queue.empty())
+                self.assertTrue(detector.process.stdin.is_closing())
+                self.assertTrue(detector.process.stdout._transport.is_closing())
+                self.spawn_binding.stop()
+
+    async def test_truncated_score_is_refused_and_reaped(self):
         detector = self.child(
-            "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
-            "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
-            " sys.stdout.buffer.write(b'W' if data[0] == 1 else b'X' if data[0] == 2 else b'N'); sys.stdout.buffer.flush()")
+            "import sys; sys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush(); sys.stdin.buffer.read(640)\n"
+            "sys.stdout.buffer.write(b'S\\x3f'); sys.stdout.buffer.flush()")
         await detector.start()
         detector.submit(bytes(640))
-        detector.submit(bytes([1]) * 640)
-        await asyncio.wait_for(self.hits.wait(), 5)
-        self.assertFalse(self.failure.is_set())
-        detector.submit(bytes([2]) * 640)
         await asyncio.wait_for(self.failure.wait(), 5)
+        self.assertFalse(self.hits.is_set())
         await detector.close()
         self.assertIsNotNone(detector.process.returncode)
-        self.assertTrue(detector.task.done())
-        self.assertTrue(detector.queue.empty())
-        self.assertTrue(detector.process.stdin.is_closing())
-        self.assertTrue(detector.process.stdout._transport.is_closing())
 
     async def test_startup_death_timeout_and_cancel_reap(self):
         native_timeout = asyncio.timeout
@@ -350,15 +462,17 @@ class NativeWakeWordTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(process.wait(), 5)
                 self.addAsyncCleanup(close)
                 self.assertEqual(await asyncio.wait_for(process.stdout.readexactly(1), 30), b'R')
-                responses = []
+                hit = Mock()
+                detector = wakeword.WakeWordDetector(on_detected=hit, on_failed=Mock())
                 for offset in range(0, len(payload), 640):
                     process.stdin.write(payload[offset:offset + 640])
                     await asyncio.wait_for(process.stdin.drain(), 1)
                     result = await asyncio.wait_for(process.stdout.readexactly(1), 1)
-                    self.assertIn(result, (b'N', b'W'))
-                    responses.append(result)
+                    self.assertIn(result, (b'N', b'S'))
+                    if result == b'S':
+                        detector.scored(wakeword.wire_score(await asyncio.wait_for(process.stdout.readexactly(4), 1)))
                 process.stdin.close()
                 await asyncio.wait_for(process.stdin.wait_closed(), 5)
                 self.assertEqual(await asyncio.wait_for(process.wait(), 5), 0)
                 self.assertEqual(await asyncio.wait_for(process.stdout.read(), 5), b'')
-                self.assertEqual(b'W' in responses, kind == 'positive')
+                self.assertEqual(hit.called, kind == 'positive')
