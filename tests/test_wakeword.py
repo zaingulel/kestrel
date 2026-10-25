@@ -89,16 +89,49 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
                     if not model.exists():
                         model.write_bytes(b'good')
 
-    def test_scores_require_finite_probabilities_and_strict_threshold(self):
+    def test_scores_require_finite_probabilities(self):
         model, features = Mock(), Mock()
         features.process_streaming.return_value = [object()]
-        for scores, expected in (([], False), ([0, 0.5], False), ([0.500001], True), ([1.0], True), ([float32(0.6)], True)):
+        for scores, expected in (([], []), ([0, 0.5, 1.0], [0, 0.5, 1.0]), ([float32(0.75)], [0.75])):
             model.process_streaming.return_value = scores
-            self.assertEqual(wakeword.detected(model, features, bytes(640)), expected)
+            returned = wakeword.scores(model, features, bytes(640))
+            self.assertEqual(returned, expected)
+            self.assertTrue(all(type(score) is float for score in returned))
         for scores in ([True], [float('nan')], [float('inf')], [-0.1], [1.1], ['private'], [0.1] * 1001):
             model.process_streaming.return_value = scores
             with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
-                wakeword.detected(model, features, bytes(640))
+                wakeword.scores(model, features, bytes(640))
+
+    def test_worker_sends_one_score_per_frame(self):
+        runtime, identities, sdk, _ = self.runtime()
+        sdk.OpenWakeWord.from_model.side_effect = None
+        model = sdk.OpenWakeWord.from_model.return_value
+        features = sdk.OpenWakeWordFeatures.from_builtin.return_value
+        features.process_streaming.return_value = [object()]
+        for scored, response in (([0.75], b'RS\x3f\x40\x00\x00'), ([0.75, 0.25], b'RE')):
+            model.process_streaming.return_value = scored
+            output = io.BytesIO()
+            with patch.object(wakeword, 'RUNTIME', runtime), patch.object(wakeword, 'ASSET_IDENTITIES', identities), \
+                    patch.dict(sys.modules, pyopen_wakeword=sdk), patch.object(wakeword.resource, 'setrlimit'), \
+                    patch('sys.stderr', new_callable=io.StringIO) as diagnostics:
+                wakeword.serve(io.BytesIO(bytes(640)), output)
+            self.assertEqual(output.getvalue(), response)
+            self.assertNotIn('private', diagnostics.getvalue())
+
+    def test_wire_scores_must_be_probabilities(self):
+        for payload, expected in ((b'\x3f\x40\x00\x00', 0.75), (bytes(4), 0.0), (b'\x3f\x80\x00\x00', 1.0)):
+            self.assertEqual(wakeword.wire_score(payload), expected)
+        for payload in (b'\x7f\xc0\x00\x00', b'\x7f\x80\x00\x00', b'\xbf\x00\x00\x00', b'\x3f\xc0\x00\x00'):
+            with self.assertRaisesRegex(ValueError, 'Invalid wake score'):
+                wakeword.wire_score(payload)
+
+    def test_a_score_above_the_bar_wakes(self):
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        detector.scored(0.5)
+        detected.assert_not_called()
+        detector.scored(0.500001)
+        detected.assert_called_once_with()
 
     def test_worker_refuses_truncated_frames_and_closes_both_resources(self):
         runtime, identities, sdk, _ = self.runtime()
@@ -168,7 +201,8 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
         detector = self.child(
             "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
             "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
-            " sys.stdout.buffer.write(b'W' if data[0] == 1 else b'X' if data[0] == 2 else b'N'); sys.stdout.buffer.flush()")
+            " sys.stdout.buffer.write(b'S\\x3f\\x80\\x00\\x00' if data[0] == 1 else b'S\\x7f\\xc0\\x00\\x00' if data[0] == 2 else b'N')\n"
+            " sys.stdout.buffer.flush()")
         await detector.start()
         detector.submit(bytes(640))
         detector.submit(bytes([1]) * 640)
@@ -182,6 +216,17 @@ class WakeWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(detector.queue.empty())
         self.assertTrue(detector.process.stdin.is_closing())
         self.assertTrue(detector.process.stdout._transport.is_closing())
+
+    async def test_truncated_score_is_refused_and_reaped(self):
+        detector = self.child(
+            "import sys; sys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush(); sys.stdin.buffer.read(640)\n"
+            "sys.stdout.buffer.write(b'S\\x3f'); sys.stdout.buffer.flush()")
+        await detector.start()
+        detector.submit(bytes(640))
+        await asyncio.wait_for(self.failure.wait(), 5)
+        self.assertFalse(self.hits.is_set())
+        await detector.close()
+        self.assertIsNotNone(detector.process.returncode)
 
     async def test_startup_death_timeout_and_cancel_reap(self):
         native_timeout = asyncio.timeout
@@ -350,15 +395,17 @@ class NativeWakeWordTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(process.wait(), 5)
                 self.addAsyncCleanup(close)
                 self.assertEqual(await asyncio.wait_for(process.stdout.readexactly(1), 30), b'R')
-                responses = []
+                hit = Mock()
+                detector = wakeword.WakeWordDetector(on_detected=hit, on_failed=Mock())
                 for offset in range(0, len(payload), 640):
                     process.stdin.write(payload[offset:offset + 640])
                     await asyncio.wait_for(process.stdin.drain(), 1)
                     result = await asyncio.wait_for(process.stdout.readexactly(1), 1)
-                    self.assertIn(result, (b'N', b'W'))
-                    responses.append(result)
+                    self.assertIn(result, (b'N', b'S'))
+                    if result == b'S':
+                        detector.scored(wakeword.wire_score(await asyncio.wait_for(process.stdout.readexactly(4), 1)))
                 process.stdin.close()
                 await asyncio.wait_for(process.stdin.wait_closed(), 5)
                 self.assertEqual(await asyncio.wait_for(process.wait(), 5), 0)
                 self.assertEqual(await asyncio.wait_for(process.stdout.read(), 5), b'')
-                self.assertEqual(b'W' in responses, kind == 'positive')
+                self.assertEqual(hit.called, kind == 'positive')

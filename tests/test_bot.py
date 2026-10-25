@@ -4629,7 +4629,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 process = await native_spawn(sys.executable, '-u', '-c', wake_wire or
                     "import sys\nsys.stdout.buffer.write(b'R'); sys.stdout.buffer.flush()\n"
                     "while True:\n data=sys.stdin.buffer.read(640)\n if not data: break\n"
-                    " sys.stdout.buffer.write(b'W' if data == bytes([1])*640 else b'N'); sys.stdout.buffer.flush()", **kwargs)
+                    " sys.stdout.buffer.write(b'S\\x3f\\x80\\x00\\x00' if data == bytes([1])*640 else b'S\\x00\\x00\\x00\\x00'); sys.stdout.buffer.flush()", **kwargs)
                 wake_children.append(process)
                 return process
             self.assertEqual(command, (str(bot.HERMES_PYTHON), str(ROOT / 'hermes_worker.py')))

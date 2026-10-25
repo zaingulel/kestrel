@@ -9,9 +9,11 @@ from pathlib import Path
 import resource
 import sys
 import stat
+import struct
 
 ROOT = Path(__file__).parent
 RUNTIME = ROOT / '.runtime/wakeword'
+WAKE_BAR = 0.5
 ADVICE = 'Wake phrase unavailable. Press Super + Shift + K to start. Check the service log and restart Kestrel.'
 CLEANUP_ADVICE = 'Wake capture cleanup failed. Restart Kestrel.'
 PACKAGE = Path("venv/lib/python3.12/site-packages/pyopen_wakeword")
@@ -67,17 +69,22 @@ def load_detector(runtime: Path):
         raise
 
 
-def detected(model, features, pcm: bytes) -> bool:
-    hit = False
-    count = 0
+def scores(model, features, pcm: bytes) -> list[float]:
+    found = []
     for embedding in features.process_streaming(pcm):
         for score in model.process_streaming(embedding):
-            count += 1
             if (isinstance(score, bool) or not isinstance(score, numbers.Real)
-                    or not math.isfinite(score) or not 0 <= score <= 1 or count > 1000):
+                    or not math.isfinite(score) or not 0 <= score <= 1 or len(found) >= 1000):
                 raise ValueError('Invalid wake score')
-            hit |= score > 0.5
-    return hit
+            found.append(float(score))
+    return found
+
+
+def wire_score(payload: bytes) -> float:
+    score, = struct.unpack('>f', payload)
+    if not 0 <= score <= 1:
+        raise ValueError('Invalid wake score')
+    return score
 
 
 def serve(requests, protocol):
@@ -87,7 +94,7 @@ def serve(requests, protocol):
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         model, features = load_detector(RUNTIME)
         # Complete native streaming autofill before admitting microphone frames.
-        detected(model, features, bytes(640))
+        scores(model, features, bytes(640))
         protocol.write(b'R')
         protocol.flush()
         while True:
@@ -96,7 +103,10 @@ def serve(requests, protocol):
                 break
             if len(pcm) != 640:
                 raise ValueError('Invalid wake frame')
-            protocol.write(b'W' if detected(model, features, pcm) else b'N')
+            found = scores(model, features, pcm)
+            if len(found) > 1:
+                raise ValueError('Invalid wake score')
+            protocol.write(b'S' + struct.pack('>f', found[0]) if found else b'N')
             protocol.flush()
     except Exception:
         refused = True
@@ -128,6 +138,10 @@ class WakeWordDetector:
         self.failed = False
         self.closed = False
         self.close_task = None
+
+    def scored(self, score: float):
+        if score > WAKE_BAR:
+            self.on_detected()
 
     def fail(self):
         if not self.failed and not self.closed:
@@ -173,10 +187,12 @@ class WakeWordDetector:
                     self.process.stdin.write(pcm)
                     await self.process.stdin.drain()
                     result = await self.process.stdout.readexactly(1)
-                if result not in (b'N', b'W'):
+                    if result == b'S':
+                        payload = await self.process.stdout.readexactly(4)
+                if result == b'S':
+                    self.scored(wire_score(payload))
+                elif result != b'N':
                     raise ValueError('Invalid wake response')
-                if result == b'W':
-                    self.on_detected()
         except (OSError, ValueError, RuntimeError, TimeoutError, asyncio.IncompleteReadError):
             self.fail()
 
