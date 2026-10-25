@@ -5252,11 +5252,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await close()
 
     async def test_output_handover_quiesces_old_input_and_preserves_accepted_work(self):
-        for case in ('held_vad', 'queued_pcm', 'late_recognizer', 'stop_timer', 'accepted_submission', 'accepted_action'):
+        for case in ('held_vad', 'queued_pcm', 'late_recognizer', 'stop_timer', 'accepted_submission', 'accepted_action', 'native_late_start'):
             with self.subTest(case=case):
                 entered, release, refreshed = asyncio.Event(), asyncio.Event(), asyncio.Event()
                 self.addCleanup(release.set)
-                analyzers, strategies, effects = [], [], []
+                analyzers, strategies, effects, late_start_notices = [], [], [], []
                 native_strategy = bot.TurnAnalyzerUserTurnStopStrategy
                 muted = False
 
@@ -5285,6 +5285,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     analyzer = Mock(params=params, sample_rate=16000, cleanup=AsyncMock())
 
                     async def analyze(audio):
+                        if case == 'native_late_start' and audio in (b'S' * 640, b'N' * 640):
+                            return VADState.SPEAKING
                         if case == 'held_vad' and audio == b'V' * 640:
                             entered.set()
                             await release.wait()
@@ -5304,7 +5306,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(bot, 'TurnAnalyzerUserTurnStopStrategy', side_effect=strategy):
                     transport, spoken, committed, interrupted, _, close = await self.open_session(
                         brain, through_service=True, native_audio=True, vad_factory=vad_factory,
-                        production_turn_strategies=case in ('held_vad', 'stop_timer'), local_command=command,
+                        production_turn_strategies=case in ('held_vad', 'stop_timer', 'native_late_start'), local_command=command,
                     )
                 try:
                     service, manager = transport.service, transport.service.manager
@@ -5358,7 +5360,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     native_sleep = asyncio.sleep
 
                     async def hold_timer(delay, result=None):
-                        if case == 'stop_timer' and strategies and asyncio.current_task() is strategies[0]._timeout_task:
+                        if case in ('stop_timer', 'native_late_start') and strategies and asyncio.current_task() is strategies[0]._timeout_task:
                             entered.set()
                             await release.wait()
                             return result
@@ -5396,16 +5398,49 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 await completed(user, InputAudioRawFrame(bytes(640), 16000, 1))
                                 await completed(user, self.transcription(transport, 'old accumulated speech'))
                                 await completed(user, VADUserStoppedSpeakingFrame())
+                        elif case == 'native_late_start':
+                            await user.queue_frame(InputAudioRawFrame(b'S' * 640, 16000, 1))
+                            await asyncio.wait_for(interrupted.wait(), 5)
+                            self.assertEqual(user._vad_controller._vad_state, VADState.SPEAKING)
+                            self.assertEqual(await service.submit('Accepted request'), 'accepted')
+                            original_epoch = manager.input_epoch
+                            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Accepted reply.')
+                            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Accepted reply.')
+                            if manager.submission_task is not None:
+                                await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
+                            self.assertFalse(user._user_turn_controller._user_turn)
+                            self.assertEqual(user._vad_controller._vad_state, VADState.SPEAKING)
+                            with patch.object(strategies[0]._turn_analyzer, '_predict_endpoint',
+                                              return_value={'prediction': 0, 'probability': 0.0}):
+                                await user.queue_frame(InputAudioRawFrame(b'Q' * 640, 16000, 1))
+                                await asyncio.wait_for(entered.wait(), 5)
+                            timer = strategies[0]._timeout_task
+                            self.assertIsNotNone(timer)
+                            self.assertFalse(timer.done())
+                            self.assertFalse(user._user_turn_controller._user_turn)
+                            self.assertEqual(user._vad_controller._vad_state, VADState.QUIET)
+                            interrupted.clear()
+                            refreshed.clear()
+
+                            def output_notice(done):
+                                late_start_notices.append((done.cancelling(), user._user_turn_controller._user_turn,
+                                                           manager.speech_admitted()))
+                                service.output_watch.emit()
+
+                            timer.add_done_callback(output_notice)
+                            await user.queue_frame(InputAudioRawFrame(b'N' * 640, 16000, 1))
+                            await asyncio.wait_for(handover_entered.wait(), 5)
                         elif case == 'accepted_action':
                             self.assertEqual(await service.submit('mute'), 'accepted')
                             original_epoch = manager.input_epoch
                         else:
                             self.assertEqual(await service.submit('Accepted request'), 'accepted')
                             original_epoch = manager.input_epoch
-                        await asyncio.wait_for(entered.wait(), 5)
-                        interrupted.clear()
-                        refreshed.clear()
-                        service.output_watch.emit()
+                        if case != 'native_late_start':
+                            await asyncio.wait_for(entered.wait(), 5)
+                            interrupted.clear()
+                            refreshed.clear()
+                            service.output_watch.emit()
                         self.assertFalse(manager.speech_admitted())
                         old_audio_task = transport.input()._audio_task
                         old_audio_queue = transport.input()._audio_in_queue
@@ -5422,6 +5457,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIs(transport.input()._audio_in_queue, old_audio_queue)
                     self.assertEqual(manager.input_epoch, original_epoch)
                     self.assertTrue(capture.reaped.is_set())
+                    if case == 'native_late_start':
+                        await completed(transport.output(), DataFrame())
+                        self.assertTrue(timer.done())
+                        self.assertEqual(len(late_start_notices), 1)
+                        self.assertGreater(late_start_notices[0][0], 0)
+                        self.assertEqual(late_start_notices[0][1:], (True, True))
                     if case not in ('accepted_submission', 'accepted_action'):
                         self.assertFalse(interrupted.is_set(), 'Old microphone work must not interrupt the reply')
                     if case == 'queued_pcm':
@@ -5442,6 +5483,24 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Accepted reply.')
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Accepted reply.')
                         self.assertEqual(sum(m['content'] == 'Accepted request' for m in brain.requests[-1][2]['messages']), 1)
+                    elif case == 'native_late_start':
+                        self.assertEqual(reset_owners, [True, False])
+                        self.assertEqual(len(brain.requests), before_requests + 1)
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
+                        await user.queue_frame(InputAudioRawFrame(b'N' * 640, 16000, 1))
+                        await asyncio.wait_for(interrupted.wait(), 5)
+                        await self.finish_user_turn(transport, 'Fresh speech after handover')
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Fresh reply.')
+                        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Fresh reply.')
+                        self.assertEqual(len(brain.requests), before_requests + 2)
+                        self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
+                            {'role': 'user', 'content': 'Accepted request'},
+                            {'role': 'assistant', 'content': 'Accepted reply.'},
+                            {'role': 'user', 'content': 'Fresh speech after handover'},
+                        ])
+                        self.assertTrue(spoken.empty())
+                        self.assertTrue(committed.empty())
                     else:
                         self.assertEqual(len(brain.requests), before_requests)
                     self.assertNotIn('old microphone sentinel', str(manager.conversation.turns))

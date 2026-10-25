@@ -997,7 +997,7 @@ class ConversationUserAggregator(LLMUserAggregator):
         await super().process_frame(frame, direction)
 
     async def _on_user_turn_started(self, controller, strategy, params):
-        # A VAD analysis already awaiting its result can outlive upstream admission.
+        # An admitted turn start can outlive input admission while cancelling its native stop timer.
         if not self.input_paused():
             await super()._on_user_turn_started(controller, strategy, params)
 
