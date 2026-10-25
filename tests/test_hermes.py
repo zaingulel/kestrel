@@ -363,6 +363,37 @@ class HermesWorkerTests(unittest.TestCase):
             'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace',
         })
 
+    def test_desktop_argument_validation_matches_host_app_limits(self):
+        from hermes_worker import valid_desktop_arguments
+
+        valid = [
+            ('mute', {}), ('unmute', {}), ('pause_media', {}), ('next_track', {}),
+            ('take_screenshot', {}), ('set_volume', {'percent': 0}),
+            ('set_volume', {'percent': 100}), ('focus_workspace', {'number': 1}),
+            ('focus_workspace', {'number': 2147483647}), ('open_app', {'name': 'Editor'}),
+            ('open_app', {'name': '  Editor  '}), ('open_app', {'name': 'é' * 512}),
+            ('open_app', {'name': 'a' * 1024}),
+        ]
+        for name, arguments in valid:
+            with self.subTest(valid=(name, arguments)):
+                self.assertTrue(valid_desktop_arguments(name, arguments))
+
+        invalid = [
+            ('un_mute', {}), ([], {}), ('mute', []), ('mute', {'extra': 1}),
+            ('set_volume', {}), ('set_volume', {'percent': 30, 'extra': 1}),
+            ('focus_workspace', {}), ('focus_workspace', {'number': 2, 'extra': 1}),
+            ('open_app', {}), ('open_app', {'name': 'Editor', 'extra': 1}),
+        ]
+        invalid += [('set_volume', {'percent': value}) for value in (-1, 101, True, 30.5, '30')]
+        invalid += [('focus_workspace', {'number': value}) for value in (0, 2147483648, True, 1.5, '2')]
+        invalid += [('open_app', {'name': value}) for value in (
+            '', '   ', True, 1, None, 'é' * 512 + 'a', 'a' * 1025,
+            'é' * 600, 'Editor\x01', '\ud800',
+        )]
+        for name, arguments in invalid:
+            with self.subTest(invalid=(name, arguments)):
+                self.assertFalse(valid_desktop_arguments(name, arguments))
+
     def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
@@ -1994,6 +2025,38 @@ class NativeHermesTests(unittest.TestCase):
                 self.assertEqual(worker.process.stdout.read(), b'')
                 self.assertEqual(len(brain.requests), 2)
 
+    def test_invalid_desktop_arguments_reject_a_contradictory_host_result(self):
+        arguments = {'name': 'Editor\x01'}
+        replies = []
+        for call_id, text in (('invalid-refusal', 'App request refused.'),
+                              ('invalid-success', 'Do not speak after corruption.')):
+            calls = [{'index': 0, 'id': call_id, 'type': 'function',
+                      'function': {'name': 'open_app', 'arguments': json.dumps(arguments)}}]
+            replies.extend([[({'tool_calls': calls}, None), ({}, 'tool_calls')],
+                            [({'content': '[delivery:neutral] ' + text}, None), ({}, 'stop')]])
+        canonical_result = '{"confirmed": false, "attempted": false, "reason": "invalid arguments"}'
+        contradictory_result = '{"confirmed": true, "attempted": true, "reason": "launch accepted"}'
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Open the installed editor.'}],
+                                    results=[json.dumps({'tool_result': canonical_result,
+                                                         'source': 'kestrel'}).encode() + b'\n'])
+            self.assertEqual(events, [{'tool_call': {'name': 'open_app', 'arguments': arguments}},
+                                      {'delivery': 'neutral'}, {'text': 'App request refused.'}, {'done': True}])
+            self.assertEqual(len(brain.requests), 2)
+            self.assertEqual([m for m in brain.requests[1][2]['messages'] if m['role'] == 'tool'],
+                             [{'role': 'tool', 'tool_call_id': 'invalid-refusal', 'content': canonical_result}])
+            events = worker.request([{'role': 'user', 'content': 'Open the installed editor again.'}],
+                                    results=[json.dumps({'tool_result': contradictory_result,
+                                                         'source': 'kestrel'}).encode() + b'\n'])
+            self.assertEqual(events, [{'tool_call': {'name': 'open_app', 'arguments': arguments}},
+                                      {'error': 'Kestrel desktop bridge failed'}])
+            worker.process.wait(timeout=5)
+            self.assertIsNotNone(worker.process.returncode)
+            self.assertEqual(worker.buffer, b'')
+            self.assertEqual(worker.process.stdout.read(), b'')
+
     def test_desktop_history_records_become_native_tool_history(self):
         records = [
             {'role': 'tool', 'name': 'mute', 'arguments': {}, 'content': 'mute observed',
@@ -2066,6 +2129,8 @@ class NativeHermesTests(unittest.TestCase):
                                 for value in (-1, 101, True, 30.5)]
             invalid_records += [dict(records[4], arguments={'number': value})
                                 for value in (0, 2147483648, True, 1.5)]
+            invalid_records += [dict(records[0], name='open_app', arguments={'name': value})
+                                for value in ('é' * 600, 'Editor\x01', '\ud800')]
             for record in invalid_records:
                 with self.subTest(record=record):
                     events = worker.request([{'role': 'user', 'content': 'Before.'}, record,

@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from typing import NamedTuple
 import uuid
 
+from app_resolver import valid_app_text
+
 HERMES_PYTHON = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/venv/bin/python'
 HERMES_SOURCE = Path(__file__).resolve().parent / '.runtime/hermes-0.22.2/source'
 HERMES_COMMIT = 'd923a5eb487a17c0a68801bba9ef0f56c81040a8'
@@ -154,7 +156,7 @@ def valid_desktop_arguments(name: str, arguments: dict) -> bool:
             low <= arguments[key] <= high if kind is int
             else low <= len(arguments[key]) <= high and bool(arguments[key].strip()))
         for key, (kind, low, high) in bounds.items()
-    )
+    ) and (name != 'open_app' or valid_app_text(arguments['name'], 1024))
 
 
 class ReplyDeliveryPrefix:
@@ -590,6 +592,7 @@ def main(*, base_url=BONSAI_URL):
                     if outside and name not in HARMLESS_TOOLS:
                         emit({'tool_refused': True})
                         return OUTSIDE_TEXT_RESULT
+                    valid_arguments = valid_desktop_arguments(name, args)
                     emit({'tool_call': {'name': name, 'arguments': args}})
                     try:
                         line = sys.stdin.buffer.readline(4096)
@@ -602,6 +605,9 @@ def main(*, base_url=BONSAI_URL):
                             raise ValueError('Invalid desktop result')
                         if reply.get('source') != KESTREL_SOURCE:
                             outside = True
+                        if not valid_arguments and reply['tool_result'] != json.dumps({
+                                'confirmed': False, 'attempted': False, 'reason': 'invalid arguments'}):
+                            raise ValueError('Invalid desktop result')
                         return reply['tool_result']
                     except ValueError:
                         bridge_failed = True
