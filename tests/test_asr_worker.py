@@ -22,6 +22,7 @@ class FakeLibrary:
         self.text = b'  recognized words  '
         self.options_size = ctypes.sizeof(asr_worker.Options)
         self.config = None
+        self.contexts = []
         self.nemo_speech_asr_create = Mock(side_effect=self.create)
         self.nemo_speech_asr_destroy = Mock()
         self.nemo_speech_asr_recognition_options_default = Mock(side_effect=self.options)
@@ -39,6 +40,11 @@ class FakeLibrary:
         return asr_worker.Options(size=self.options_size)
 
     def recognize(self, recognizer, options, samples, count, rate, result):
+        # The worker owns this memory, so it is read at call time.
+        options = ctypes.cast(options, ctypes.POINTER(asr_worker.Options)).contents
+        self.contexts.append([
+            (context.size, [context.phrases[index] for index in range(context.phrase_count)], context.boost)
+            for context in (options.speech_contexts[index] for index in range(options.speech_context_count))])
         ctypes.cast(result, ctypes.POINTER(ctypes.c_void_p)).contents.value = self.result_handle
         return self.recognize_status
 
@@ -158,6 +164,20 @@ class CPUWorkerTests(unittest.TestCase):
                 load.assert_not_called()
                 self.assertIn(str(self.model), diagnostics.getvalue())
                 self.assertIn('FileNotFoundError' if content is None else 'Model identity mismatch', diagnostics.getvalue())
+
+    def test_every_request_boosts_the_owner_words_and_restores_their_spelling(self):
+        self.library.nemo_speech_asr_result_transcript.side_effect = [b'ask alpguard and flowgauge about fabraik', b'garden fabric']
+        status, values, _ = self.serve(self.request(self.wav()) * 2)
+        self.assertEqual((status, values), (0, [{'ready': True}, {'text': 'ask AlpGuard and Flowgauge about Fabraik'}, {'text': 'garden fabric'}]))
+        context = [(ctypes.sizeof(asr_worker.SpeechContext), [b'AlpGuard', b'Flowgauge', b'Fabraik'], 2.0)]
+        self.assertEqual(self.library.contexts, [context, context])
+
+    def test_spelling_restoration_changes_only_whole_word_matches(self):
+        self.assertEqual(asr_worker.restore_spelling('ALPGUARD flowGauge Fabraik'), 'AlpGuard Flowgauge Fabraik')
+        self.assertEqual(asr_worker.restore_spelling("fabraik's"), "Fabraik's")
+        for unchanged in ('fabraiks', 'xalpguard', 'flowgauge2', 'fabraiké', 'garden fabric', ''):
+            with self.subTest(unchanged=unchanged):
+                self.assertEqual(asr_worker.restore_spelling(unchanged), unchanged)
 
     def test_response_limit_refuses_oversize_instead_of_truncating(self):
         self.library.text = b'x' * 65536

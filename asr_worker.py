@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import wave
 
@@ -15,6 +16,11 @@ MODEL = ROOT / '.runtime/models/nemotron-q8/nemotron-speech-streaming-en-0.6b.q8
 MODEL_SIZE = 699872960
 MODEL_SHA256 = 'd9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d'
 LIBRARY = ROOT / '.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib/libnemo_speech_asr_c.so.1'
+# Owner capitalisation, because lowercase phrases inserted false words.
+BOOSTED_PHRASES = ('AlpGuard', 'Flowgauge', 'Fabraik')
+BOOST = 2.0
+SPELLINGS = {phrase.lower(): phrase for phrase in BOOSTED_PHRASES}
+SPELLING_PATTERN = re.compile(rf"\b(?:{'|'.join(map(re.escape, BOOSTED_PHRASES))})\b", re.IGNORECASE)
 RESPONSE_LIMIT = 64 * 1024
 ADVICE = 'CPU recognition failed. Check the pinned local recognition assets and restart Kestrel.'
 
@@ -64,6 +70,10 @@ def samples(line):
     return (C.c_float * frames)(*(value / 32768 for value in integers))
 
 
+def restore_spelling(text):
+    return SPELLING_PATTERN.sub(lambda match: SPELLINGS[match.group().lower()], text)
+
+
 def emit(protocol, value):
     encoded = (json.dumps(value, ensure_ascii=True) + '\n').encode()
     if len(encoded) > RESPONSE_LIMIT:
@@ -103,6 +113,10 @@ def serve(requests, protocol):
         options = library.nemo_speech_asr_recognition_options_default()
         if options.size != C.sizeof(Options):
             raise RuntimeError(f'Native options ABI mismatch (size={options.size}, expected={C.sizeof(Options)})')
+        # ctypes does not own the memory these point to, so they live as long as the worker.
+        phrases = (C.c_char_p * len(BOOSTED_PHRASES))(*map(str.encode, BOOSTED_PHRASES))
+        context = SpeechContext(C.sizeof(SpeechContext), phrases, len(BOOSTED_PHRASES), BOOST)
+        options.speech_contexts, options.speech_context_count = C.pointer(context), 1
         emit(protocol, {'ready': True})
         startup = False
         for line in requests:
@@ -122,7 +136,7 @@ def serve(requests, protocol):
                     if raw is None:
                         raise RuntimeError('Native transcript handle missing')
                     text = raw.decode('utf-8')
-                emit(protocol, {'text': text.strip()})
+                emit(protocol, {'text': restore_spelling(text.strip())})
             except (ValueError, RuntimeError, EOFError, wave.Error) as exc:
                 detail = type(exc).__name__
                 if operation == 'native recognition':
