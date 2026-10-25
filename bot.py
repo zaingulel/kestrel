@@ -51,6 +51,7 @@ from speech import (
 )
 from tool_actions import (
     TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
+    validate_tool_actions,
 )
 from tool_catalogue import TOOL_CATALOGUE, PermissionTier, brain_result, valid_desktop_arguments
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
@@ -92,6 +93,8 @@ async def resolve_app_tool(name: str, *, command=run_local_command) -> LocalTool
     tool = LOCAL_TOOLS['open_app']
     return replace(tool, run=partial(tool.run, match['id'], discovery_env), confirmation=f"Opening {match['name']}.")
 
+
+validate_tool_actions()
 
 LOCAL_TOOLS = {
     'mute': LocalTool(TOOL_CATALOGUE['mute'].permission, TOOL_ACTIONS['mute'].run, 'mute', 'mute', announcement='Muting.'),
@@ -1572,6 +1575,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
 
 
 async def run_voice_service():
+    validate_tool_actions()
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     stopping = False

@@ -2608,6 +2608,59 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await command.close()
 
+    async def test_catalogue_mismatch_refuses_startup_before_resources(self):
+        actions = tool_actions.TOOL_ACTIONS.copy()
+        cases = [
+            ('missing: mute', {key: action for key, action in actions.items() if key != 'mute'}),
+            ('extra: extra_tool', actions | {'extra_tool': tool_actions.ToolAction(AsyncMock())}),
+            ('invalid run: mute', actions | {'mute': tool_actions.ToolAction(None)}),
+            ('invalid lookup: open_app', actions | {'open_app': bot.replace(actions['open_app'], lookup=None)}),
+            ('invalid lookup: open_app', actions | {'open_app': bot.replace(actions['open_app'], lookup=1)}),
+            ('invalid lookup: mute', actions | {'mute': bot.replace(actions['mute'], lookup=AsyncMock())}),
+        ]
+        self.audio.capture = None
+        stt = Mock(load=AsyncMock(), close=AsyncMock())
+        loop = asyncio.get_running_loop()
+        with (
+            patch.object(bot, 'IndicatorStatus', wraps=bot.IndicatorStatus) as status,
+            patch.object(bot, 'ConversationFeed', wraps=bot.ConversationFeed) as feed,
+            patch.object(bot, 'ConversationControl', wraps=bot.ConversationControl) as control,
+            patch.object(bot, 'NemotronSTT', return_value=stt),
+            patch.object(bot, 'NemotronRecognizer', return_value=stt),
+            patch.object(bot, 'run_conversation', new=AsyncMock()) as conversation,
+            patch.object(bot.ECHO_REMOVAL, 'start') as echo_start,
+            patch.object(bot.ECHO_REMOVAL, 'close'),
+            patch.object(loop, 'add_signal_handler'),
+            patch.object(loop, 'remove_signal_handler'),
+            patch.object(bot.torch, 'set_num_threads'),
+        ):
+            await bot.run_voice_service()
+            status.assert_called_once()
+            feed.assert_called_once()
+            control.assert_called_once()
+            echo_start.assert_called_once()
+            stt.load.assert_awaited_once()
+            bot.VoxCPM.from_pretrained.assert_called_once()
+            conversation.assert_awaited_once()
+            for observer in (status, feed, control, echo_start, stt.load, bot.VoxCPM.from_pretrained, conversation):
+                observer.reset_mock()
+
+            for problem, corrupted in cases:
+                with self.subTest(problem=problem, lookup=corrupted.get('open_app')):
+                    with patch.dict(tool_actions.TOOL_ACTIONS, corrupted, clear=True):
+                        with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
+                            await bot.run_voice_service()
+                    self.assertIn(problem, str(refused.exception))
+                    self.assertIn('Check the tool catalogue and run steps, then restart Kestrel.',
+                                  str(refused.exception))
+                    status.assert_not_called()
+                    feed.assert_not_called()
+                    control.assert_not_called()
+                    echo_start.assert_not_called()
+                    stt.load.assert_not_awaited()
+                    bot.VoxCPM.from_pretrained.assert_not_called()
+                    conversation.assert_not_awaited()
+
     async def test_indicator_startup_and_release_order(self):
         with tempfile.TemporaryDirectory() as runtime:
             snapshot = Path(runtime) / 'kestrel/indicator.json'

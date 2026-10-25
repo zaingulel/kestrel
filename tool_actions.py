@@ -16,6 +16,7 @@ import time
 from loguru import logger
 
 from app_resolver import valid_app_text, valid_desktop_id
+from tool_catalogue import TOOL_CATALOGUE
 
 ROOT = Path(__file__).parent
 
@@ -474,3 +475,20 @@ TOOL_ACTIONS: dict[str, ToolAction] = {
     'open_app': ToolAction(open_app, resolve_app),
     'take_screenshot': ToolAction(screenshot_action),
 }
+
+
+def validate_tool_actions() -> None:
+    shared = TOOL_CATALOGUE.keys() & TOOL_ACTIONS.keys()
+    problems = {
+        'missing': TOOL_CATALOGUE.keys() - TOOL_ACTIONS.keys(),
+        'extra': TOOL_ACTIONS.keys() - TOOL_CATALOGUE.keys(),
+        'invalid run': {name for name in shared if not callable(TOOL_ACTIONS[name].run)},
+        'invalid lookup': {name for name in shared
+                           if (not callable(TOOL_ACTIONS[name].lookup) if TOOL_CATALOGUE[name].needs_lookup
+                               else TOOL_ACTIONS[name].lookup is not None)},
+    }
+    details = '; '.join(f"{problem}: {', '.join(sorted(names))[:256]}"
+                        for problem, names in problems.items() if names)
+    if details:
+        raise RuntimeError(f'Kestrel tool catalogue mismatch: {details}. '
+                           'Check the tool catalogue and run steps, then restart Kestrel.')
