@@ -8,6 +8,7 @@ import struct
 import wave
 from functools import partial
 import os
+import runpy
 import signal
 import socket
 import sys
@@ -2618,48 +2619,68 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             ('invalid lookup: open_app', actions | {'open_app': bot.replace(actions['open_app'], lookup=1)}),
             ('invalid lookup: mute', actions | {'mute': bot.replace(actions['mute'], lookup=AsyncMock())}),
         ]
-        self.audio.capture = None
-        stt = Mock(load=AsyncMock(), close=AsyncMock())
-        loop = asyncio.get_running_loop()
-        with (
-            patch.object(bot, 'IndicatorStatus', wraps=bot.IndicatorStatus) as status,
-            patch.object(bot, 'ConversationFeed', wraps=bot.ConversationFeed) as feed,
-            patch.object(bot, 'ConversationControl', wraps=bot.ConversationControl) as control,
-            patch.object(bot, 'NemotronSTT', return_value=stt),
-            patch.object(bot, 'NemotronRecognizer', return_value=stt),
-            patch.object(bot, 'run_conversation', new=AsyncMock()) as conversation,
-            patch.object(bot.ECHO_REMOVAL, 'start') as echo_start,
-            patch.object(bot.ECHO_REMOVAL, 'close'),
-            patch.object(loop, 'add_signal_handler'),
-            patch.object(loop, 'remove_signal_handler'),
-            patch.object(bot.torch, 'set_num_threads'),
-        ):
-            await bot.run_voice_service()
-            status.assert_called_once()
-            feed.assert_called_once()
-            control.assert_called_once()
-            echo_start.assert_called_once()
-            stt.load.assert_awaited_once()
-            bot.VoxCPM.from_pretrained.assert_called_once()
-            conversation.assert_awaited_once()
-            for observer in (status, feed, control, echo_start, stt.load, bot.VoxCPM.from_pretrained, conversation):
-                observer.reset_mock()
+        original_bot = sys.modules['bot']
+        original_tool = bot.LocalTool
+        module_name = '_kestrel_catalogue_startup_test'
+        missing = object()
+        original_slot = sys.modules.get(module_name, missing)
+        original_argv0 = sys.argv[0]
+        echoes = []
+        stt = Mock(load=AsyncMock())
 
-            for problem, corrupted in cases:
-                with self.subTest(problem=problem, lookup=corrupted.get('open_app')):
-                    with patch.dict(tool_actions.TOOL_ACTIONS, corrupted, clear=True):
-                        with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
-                            await bot.run_voice_service()
-                    self.assertIn(problem, str(refused.exception))
-                    self.assertIn('Check the tool catalogue and run steps, then restart Kestrel.',
-                                  str(refused.exception))
-                    status.assert_not_called()
-                    feed.assert_not_called()
-                    control.assert_not_called()
-                    echo_start.assert_not_called()
-                    stt.load.assert_not_awaited()
-                    bot.VoxCPM.from_pretrained.assert_not_called()
-                    conversation.assert_not_awaited()
+        def echo_removal():
+            echo = Mock(start=Mock())
+            echoes.append(echo)
+            return echo
+
+        with (
+            patch('desktop.status.IndicatorStatus') as status,
+            patch('desktop.conversation.ConversationFeed') as feed,
+            patch('desktop.control.ConversationControl') as control,
+            patch.object(speech, 'EchoRemoval', side_effect=echo_removal) as echo_factory,
+            patch.object(speech, 'NemotronSTT', return_value=stt) as recognizer_adapter,
+            patch.object(speech, 'NemotronRecognizer', return_value=stt) as recognizer,
+            patch('voxcpm.VoxCPM.from_pretrained') as voxcpm,
+            patch.object(speech, 'load_phonon') as phonon,
+        ):
+            for problem, configured in [(None, actions), *cases]:
+                with self.subTest(problem=problem, lookup=configured.get('open_app')):
+                    try:
+                        try:
+                            with patch.dict(tool_actions.TOOL_ACTIONS, configured, clear=True):
+                                if problem is None:
+                                    namespace = runpy.run_module('bot', run_name='_kestrel_catalogue_startup_test', alter_sys=True)
+                                    self.assertEqual(set(namespace['LOCAL_TOOLS']), {
+                                        'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
+                                        'focus_workspace', 'open_app', 'take_screenshot',
+                                    })
+                                else:
+                                    with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
+                                        runpy.run_module('bot', run_name='_kestrel_catalogue_startup_test', alter_sys=True)
+                                    self.assertIn(problem, str(refused.exception))
+                                    self.assertIn('Check the tool catalogue and run steps, then restart Kestrel.',
+                                                  str(refused.exception))
+                        finally:
+                            self.assertIs(sys.modules['bot'], original_bot)
+                            self.assertIs(bot.LocalTool, original_tool)
+                            self.assertIs(sys.modules.get(module_name, missing), original_slot)
+                            self.assertEqual(sys.argv[0], original_argv0)
+                        status.assert_not_called()
+                        feed.assert_not_called()
+                        control.assert_not_called()
+                        echo_factory.assert_called_once_with()
+                        self.assertEqual(len(echoes), 1)
+                        echoes[0].start.assert_not_called()
+                        recognizer_adapter.assert_not_called()
+                        recognizer.assert_not_called()
+                        stt.load.assert_not_awaited()
+                        voxcpm.assert_not_called()
+                        phonon.assert_not_called()
+                    finally:
+                        for observer in (status, feed, control, echo_factory, recognizer_adapter, recognizer,
+                                         stt.load, voxcpm, phonon):
+                            observer.reset_mock()
+                        echoes.clear()
 
     async def test_indicator_startup_and_release_order(self):
         with tempfile.TemporaryDirectory() as runtime:
