@@ -2649,14 +2649,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         try:
                             with patch.dict(tool_actions.TOOL_ACTIONS, configured, clear=True):
                                 if problem is None:
-                                    namespace = runpy.run_module('bot', run_name='_kestrel_catalogue_startup_test', alter_sys=True)
+                                    namespace = runpy.run_module('bot', run_name=module_name, alter_sys=True)
                                     self.assertEqual(set(namespace['LOCAL_TOOLS']), {
                                         'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
                                         'focus_workspace', 'open_app', 'take_screenshot',
                                     })
                                 else:
                                     with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
-                                        runpy.run_module('bot', run_name='_kestrel_catalogue_startup_test', alter_sys=True)
+                                        runpy.run_module('bot', run_name=module_name, alter_sys=True)
                                     self.assertIn(problem, str(refused.exception))
                                     self.assertIn('Check the tool catalogue and run steps, then restart Kestrel.',
                                                   str(refused.exception))
