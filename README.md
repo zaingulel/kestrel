@@ -8,12 +8,12 @@ Bonsai uses the laptop's NVIDIA RTX 5080. Speech recognition and default Phonon 
 | Component | Model directory | Runtime |
 | --- | --- | --- |
 | Bonsai 2 27B, conversation | `.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf` | `.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/llama-prism-b10787-73bfe6c/llama-server` |
-| [Nemotron Speech Streaming English 0.6B](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b), Q8 CPU speech to text | `.runtime/models/nemotron-q8` | `.runtime/voice-venv` with the pinned native CPU library |
+| [Nemotron Speech Streaming English 0.6B](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b), Q8 CPU speech to text | [`.runtime/models/nemotron-q8`](#recognition-model-and-word-boosting) | `.runtime/voice-venv` with the pinned native CPU library |
 | [Phonon 31M English](https://huggingface.co/gradium/phonon-31m-en/blob/541f5752bc3c79583068bb205bfda5eb39aaa08a/README.md), q8 CPU text to speech, public Bryony British English female voice | `.runtime/models/phonon-31m-en-q8` and `.runtime/models/phonon-bryony-gfP44RlHwr2kEwk7.safetensors` | `.runtime/voice-venv` with `ptts==0.4.0` |
 | [VoxCPM2](https://github.com/OpenBMB/VoxCPM), explicit GPU text-to-speech rollback | `.runtime/models/voxcpm2` | `.runtime/voice-venv` |
 | Hey Kestrel, local wake phrase | `.runtime/wakeword/hey_kestrel.tflite` | `.runtime/wakeword/venv` |
 
-The voice environment uses project-local Python 3.12, `ptts==0.4.0`, CUDA-enabled PyTorch 2.11 and Transformers 4.57. Phonon uses its native CPU runtime; VoxCPM2 retains the CUDA stack for explicit rollback. Recognition runs a standard-library worker in that voice interpreter, loading the pinned Q8 model through the native CPU library under `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu`. It needs no separate Python dependency environment. The worker pins the recognition model's size and SHA-256 hash; [Phonon assets](#phonon-assets-and-package) have their own fixed pins. Existing VoxCPM2 model revisions are recorded in `.runtime/models/manifest.json` and voice package versions in `.runtime/voice-installed.txt`. Keep the old GPU (graphics processing unit) recognition assets and `.runtime/asr-venv` intact; startup does not download or repair recognition assets. Runtime files are excluded from Git.
+The voice environment uses project-local Python 3.12, `ptts==0.4.0`, CUDA-enabled PyTorch 2.11 and Transformers 4.57. Phonon uses its native CPU runtime; VoxCPM2 retains the CUDA stack for explicit rollback. Recognition runs a standard-library worker in that voice interpreter, loading the pinned word-boosting Q8 model through the native CPU library under `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu`. It needs no separate Python dependency environment. The worker pins the size and SHA-256 hash of the word-boosting recognition model and of its two native libraries; [Phonon assets](#phonon-assets-and-package) have their own fixed pins. Existing VoxCPM2 model revisions are recorded in `.runtime/models/manifest.json` and voice package versions in `.runtime/voice-installed.txt`. Keep the old GPU (graphics processing unit) recognition assets and `.runtime/asr-venv` intact; startup does not download or repair recognition assets. Runtime files are excluded from Git.
 
 Provision the brain assets into the existing stable checkout's ignored `.runtime/models/` and `.runtime/tools/` directories. Use the immutable sources below and verify both size and SHA-256 before extraction or execution. Keep existing assets, refuse unexpected destinations, and inspect archive members before extracting: paths and library links must remain inside the new destination, with no traversal, cycles, hardlinks or special files. New directories are mode `0700`, data files `0600` and executable binaries `0700`.
 
@@ -299,9 +299,55 @@ MPLCONFIGDIR="$PWD/.runtime/cache/matplotlib" \
   --output .runtime/samples/voice-demo.wav
 ```
 
-The service launches `asr_worker.py` through `.runtime/voice-venv/bin/python`. It loads `.runtime/models/nemotron-q8/nemotron-speech-streaming-en-0.6b.q8_0.gguf` through `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib/libnemo_speech_asr_c.so.1`, explicitly selecting CPU recognition. Missing or mismatched assets refuse startup with advice; the worker does not download or repair them. The caller bounds each recognition exchange, including pipe drainage and response reading, to 60 seconds.
+The service launches `asr_worker.py` through `.runtime/voice-venv/bin/python`. It loads `.runtime/models/nemotron-q8/nemotron-speech-streaming-en-0.6b.q8_0.word-boosting.gguf`, which [provisioning](#recognition-model-and-word-boosting) creates, through `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib/libnemo_speech_asr_c.so.1`, explicitly selecting CPU recognition. Missing or mismatched assets refuse startup with advice; the worker does not download or repair them. The caller bounds each recognition exchange, including pipe drainage and response reading, to 60 seconds.
 
 Recorded-sample recognition has no verified runnable recipe here; do not count it as current evidence. Shortcut installation and actual dispatch, native visual and accessible-tree acceptance, microphone/speaker behaviour, live Bonsai replies and the quality of its automatic note decisions require separate installed and live acceptance. Automated boundary checks do not establish those results. Controlled-provider tests do not prove live Bonsai answers or actual login execution after reboot. Live recognition accuracy, physical playback and microphone-to-speaker latency require a spoken check. The service logs a numeric pipeline-response duration in seconds for each reply, measured by Pipecat from detected user silence to its bot-speaking frame. That frame is a pipeline proxy, not physical speaker onset; audible responsiveness still needs a spoken check.
+
+### Recognition model and word boosting
+
+Recognition loads `.runtime/models/nemotron-q8/nemotron-speech-streaming-en-0.6b.q8_0.word-boosting.gguf` (700,207,744 bytes, SHA-256 `926495522ccd2626d8665283b4c9225f704ed2b45e82158984d1823f7e528b52`). It is the published Q8 model with one metadata entry added, `asr.tokenizer.spm_model`, which holds the model's SentencePiece tokenizer encoded in Base64. The tokenizer is the file that splits text into the word pieces the model recognises. Every weight is the published one. The native library boosts phrases only when the model file carries that tokenizer, and otherwise disables boosting and says so only in its own log. The worker therefore loads no other model file: the pinned identity of this one is what guarantees that boosting is active. The published file stays where it is, unchanged and unused by this version.
+
+Every recognition request boosts **AlpGuard**, **Flowgauge** and **Fabraik** at strength 2.0, and the worker restores their spelling in the transcript. A whole-word match of one of them in any capitalisation is respelled as above, so `fabraik's` becomes `Fabraik's`, while `fabraiks` and `xalpguard` stay as recognised. Nothing else in the transcript changes. The boost words use the capitalisation above because lowercase phrases inserted false words, such as "garden fabraik".
+
+Both inputs must be in `.runtime/models/nemotron-q8` before provisioning:
+
+| Input | Immutable source | Bytes | SHA-256 |
+| --- | --- | ---: | --- |
+| `nemotron-speech-streaming-en-0.6b.q8_0.gguf`, the published model | [Revision ebe59e5a817142986528bbbee5dba8db7b38ed50](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/resolve/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.q8_0.gguf) | 699,872,960 | `d9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d` |
+| `tokenizer.model`, member `./e8dc9587bf16427491071501d9080e4e_tokenizer.model` of the [same revision's `.nemo` archive](https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/resolve/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.nemo) | Bytes 21504 to 272559 of that archive | 251,056 | `07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9` |
+
+The published model is already present where an earlier version provisioned it. Fetch the tokenizer once, from the checkout root, by reading only its byte range of the 2.47 GB archive. Stage it as a new file, check its size and hash against the table, and rename it only if the destination is absent:
+
+```sh
+curl -fL --range 21504-272559 --max-filesize 251056 \
+  -o .runtime/models/nemotron-q8/tokenizer.model.partial \
+  https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b/resolve/ebe59e5a817142986528bbbee5dba8db7b38ed50/nemotron-speech-streaming-en-0.6b.nemo
+wc -c .runtime/models/nemotron-q8/tokenizer.model.partial
+sha256sum .runtime/models/nemotron-q8/tokenizer.model.partial
+test ! -e .runtime/models/nemotron-q8/tokenizer.model && mv .runtime/models/nemotron-q8/tokenizer.model.partial .runtime/models/nemotron-q8/tokenizer.model
+```
+
+Discard the staged file if either check differs. Then build the model once:
+
+```sh
+.runtime/voice-venv/bin/python asr_worker.py provision
+```
+
+`provision` verifies the published model and the tokenizer against their pins before reading any bytes to copy. It writes the new file next to them as a private staging file, checks the finished file against the pinned size and hash, and publishes it only if nothing exists at that path. It never overwrites a file, and it removes its staging file whether or not it succeeds. It downloads nothing and does not touch the published model or the tokenizer.
+
+| Exit code | Meaning |
+| ---: | --- |
+| 0 | `Provisioned <path>` or, when the correct file already exists, `Already provisioned: <path>`, on standard output |
+| 1 | `Provisioning refused: <type>: <message>` on standard error. Causes are a missing input, an input or finished file that fails its pin, such as `Tokenizer identity mismatch: <path>`, and an existing file at the destination with a different identity. Nothing is installed, and the existing file is left as it is |
+| 2 | Any other argument. `Usage: asr_worker.py [provision]` is written to standard error |
+
+Provision from a checkout or retained installation at this version. Their `.runtime/models` is the shared stable directory, so one run serves all of them. A retained installation must be provisioned before it switches to this version, because the worker refuses startup without the file.
+
+Startup refuses a missing model with `CPU recognition startup failed: FileNotFoundError: ...` naming the path, and a model whose size or hash differs with `Model identity mismatch: <path>` after the same prefix, both in the service log. It also pins `libnemo_speech_asr_c.so.1` (68,208 bytes, SHA-256 `b16719ac6c8614e43a9bed224b21dd17b9bfb59b5215cc7fe29482712090dc52`) and `libnemo_speech_asr.so` (2,265,256 bytes, SHA-256 `596c0e0dd3da78e959e850ed3e90911524a6051d8f4405324d70a570c427e246`) in `.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib`, and a different build refuses startup with `Library identity mismatch: <path>` before anything loads. The second library holds the boosting code, which is why it is pinned. A library update needs new pins in `asr_worker.py` and a repeat spoken check. Each refusal reaches the caller as the recognition advice, and the speech adapter reports `Nemotron failed to load; see the service log`. Restore the exact pinned files and restart; the worker repairs nothing.
+
+To change the boosted words or the strength, edit `BOOSTED_PHRASES` or `BOOST` in `asr_worker.py` and update `test_every_request_boosts_the_owner_words_and_restores_their_spelling` in `tests/test_asr_worker.py` in the same change. The words travel with each request, so the provisioned model stays valid. Then repeat a spoken check: say each word several times in sentences, confirm the three spellings appear in the panel, and confirm everyday sentences gain no inserted words. If a word is still missed, raise the strength to 3.0; if words are inserted, lower it to 1.5.
+
+To roll back, restart an earlier commit's installation. Earlier commits pin the published model, which this version never changes, so they run as before without boosting. The word-boosting file and tokenizer can stay in place and need no deletion.
 
 ## Local mute
 
