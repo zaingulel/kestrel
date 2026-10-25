@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 from enum import Enum
 import json
-import unicodedata
+
+from app_resolver import valid_app_text
 
 
 class PermissionTier(Enum):
@@ -21,7 +22,7 @@ class ToolSpec:
     needs_lookup: bool
     plain_words: str
     extra_guidance: str = ''
-    name_byte_limit: int | None = None
+    app_name_byte_limit: int | None = None
 
 
 TOOL_CATALOGUE: dict[str, ToolSpec] = {
@@ -37,7 +38,7 @@ TOOL_CATALOGUE: dict[str, ToolSpec] = {
     'open_app': ToolSpec('Open one installed app by its visible name.', {'name': (str, 1, 1024)},
                          PermissionTier.FREE, False, True, 'opening an installed app by name',
                          'For open_app, confirmed means the launch request was accepted, not that a window is visible. ',
-                         name_byte_limit=1024),
+                         app_name_byte_limit=1024),
     'take_screenshot': ToolSpec('Save a screenshot to the screenshot folder; its content is never shown to you.', {},
                                 PermissionTier.FREE, False, False, 'taking a screenshot',
                                 'For take_screenshot, confirmed means a new screenshot file was saved; you never see it. '),
@@ -55,15 +56,8 @@ def valid_desktop_arguments(name: object, arguments: object) -> bool:
         for key, (kind, low, high) in spec.bounds.items()
     )):
         return False
-    if spec.name_byte_limit is not None:
-        name_text = arguments['name']
-        try:
-            if len(name_text.encode('utf-8')) > spec.name_byte_limit:
-                return False
-        except UnicodeEncodeError:
-            return False
-        if any(unicodedata.category(char) == 'Cc' for char in name_text):
-            return False
+    if spec.app_name_byte_limit is not None:
+        return valid_app_text(arguments['name'], spec.app_name_byte_limit)
     return True
 
 

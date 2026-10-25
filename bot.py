@@ -1575,7 +1575,6 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
 
 
 async def run_voice_service():
-    validate_tool_actions()
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     stopping = False
