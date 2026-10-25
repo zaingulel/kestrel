@@ -856,8 +856,7 @@ class HermesLLMService(LLMService):
             return
         tool = match_instant_tool(text)
         if tool is not None and tool.lookup is not None:
-            selected = tool
-            lookup = asyncio.create_task(resolve_local_tool(selected, command=self.local_actions.command))
+            lookup = asyncio.create_task(resolve_local_tool(tool, command=self.local_actions.command))
             self.lookup = self.local_actions.retain(lookup)
             try:
                 tool = await lookup
@@ -866,7 +865,7 @@ class HermesLLMService(LLMService):
                 raise
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 remove_original()
-                await self.speak_local_reply(selected.lookup_failure[1], token)
+                await self.speak_local_reply(tool.lookup_failure[1], token)
                 return
         if tool is not None:
             if not self.valid_origin(frame):
