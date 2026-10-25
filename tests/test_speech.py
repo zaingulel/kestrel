@@ -1646,9 +1646,15 @@ class EchoRemovalTests(unittest.TestCase):
         }
 
     def graph(self):
+        selected = self.node(10, 'selected-output', 30, 910)
+        selected['info']['props']['media.class'] = 'Audio/Sink'
         return [self.client(30, 3100), self.client(31, 3200),
                 self.node(8, "kestrel-microphone", 30, 900),
-                self.node(9, "kestrel-capture", 31, 901), self.link(8, 9, "active")]
+                self.node(9, "kestrel-capture", 31, 901), self.link(8, 9, "active"),
+                {'id': 50, 'type': 'PipeWire:Interface:Metadata', 'props': {'metadata.name': 'default'},
+                 'metadata': [{'subject': 0, 'key': 'default.audio.sink', 'type': 'Spa:String:JSON',
+                               'value': {'name': 'selected-output'}}]},
+                selected, self.node(11, 'kestrel-echo-removal-reference'), self.link(10, 11, 'active')]
 
     @contextmanager
     def graph_output(self, graph):
@@ -1796,19 +1802,32 @@ class EchoRemovalTests(unittest.TestCase):
                 await watch.close()
             watch.process.kill.assert_called_once_with()
 
-            graph = self.graph() + [
-                {'id': 50, 'type': 'PipeWire:Interface:Metadata', 'props': {'metadata.name': 'default'},
-                 'metadata': [{'subject': 0, 'key': 'default.audio.sink', 'type': 'Spa:String:JSON',
-                               'value': {'name': 'selected-output'}}]},
-                self.node(10, 'selected-output', 30, 910),
-                self.node(11, 'kestrel-echo-removal-reference'), self.link(10, 11, 'active'),
-            ]
-            graph[-3]['info']['props']['media.class'] = 'Audio/Sink'
+            graph = self.graph()
             echo = speech.EchoRemoval()
             echo.process = Mock(pid=3100, poll=Mock(return_value=None))
             with self.graph_output(graph):
                 self.assertEqual(await echo.output_serial(), 910)
                 self.assertEqual(await echo.microphone_serial(3200, output_serial=910), 900)
+            # Normal startup has no saved output serial, but still proves the live reference.
+            with self.graph_output(graph):
+                self.assertEqual(await echo.microphone_serial(3200), 900)
+            for case in ('foreign_source_owner', 'foreign_reference_owner', 'missing_reference', 'wrong_current_reference'):
+                with self.subTest(current_reference=case):
+                    broken = json.loads(json.dumps(graph))
+                    if case in ('foreign_source_owner', 'foreign_reference_owner'):
+                        broken.append(self.client(33, 3300))
+                        node = broken[2] if case == 'foreign_source_owner' else broken[-3]
+                        node['info']['props']['client.id'] = 33
+                    elif case == 'missing_reference':
+                        broken.pop(-2)
+                    else:
+                        broken[-1]['info']['output-node-id'] = 8
+                    with self.graph_output(broken):
+                        with self.assertRaisesRegex(RuntimeError, 'owned echo-removed microphone could not be verified'):
+                            await echo.microphone_serial(3200)
+            # Before the recorder exists a passive reference need not be active.
+            with self.graph_output(self.graph()[:5]):
+                self.assertEqual(await echo.microphone_serial(), 900)
             playback_graph = graph + [self.client(32, 3300), self.node(1, 'owned-playback', 32, 912), self.link(1, 10, 'active')]
             with self.graph_output(playback_graph):
                 self.assertEqual(await echo.output_serial(3300), 910)
@@ -1848,7 +1867,8 @@ class EchoRemovalTests(unittest.TestCase):
                     elif case == 'paused_reference':
                         broken[-1]['info']['state'] = 'paused'
                     else:
-                        broken[-2]['info']['props']['client.id'] = 31
+                        broken[-2]['info']['props']['client.id'] = 33
+                        broken.append(self.client(33, 3300))
                     with self.graph_output(broken):
                         with self.assertRaisesRegex(RuntimeError, 'Restart Kestrel'):
                             await echo.microphone_serial(3200, output_serial=910)
@@ -1956,19 +1976,20 @@ class EchoRemovalTests(unittest.TestCase):
             with self.subTest(case=case):
                 graph = self.graph()
                 if case == "foreign_source":
-                    graph[0]["info"]["props"]["pipewire.sec.pid"] = 9999
+                    graph.append(self.client(33, 3300))
+                    graph[2]["info"]["props"]["client.id"] = 33
                 elif case == "foreign_capture":
                     graph[1]["info"]["props"]["pipewire.sec.pid"] = 9999
                 elif case == "extra_incoming":
-                    graph += [self.node(10, "raw-microphone", 30, 902), self.link(10, 9, "active")]
+                    graph += [self.node(12, "raw-microphone", 30, 902), self.link(12, 9, "active")]
                 elif case == "paused":
-                    graph[-1]["info"]["state"] = "paused"
+                    graph[4]["info"]["state"] = "paused"
                 elif case == "paused_second":
                     second_channel = self.link(8, 9, "paused")
                     second_channel["id"] = 109
                     graph.append(second_channel)
                 elif case == "no_incoming":
-                    graph.pop()
+                    graph.pop(4)
                 else:
                     graph.pop(2)
                 with self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
@@ -1985,23 +2006,23 @@ class EchoRemovalTests(unittest.TestCase):
             if change == "duplicate_id":
                 graph.append(self.client(30, 3100))
             elif change == "ambiguous_source":
-                graph.append(self.node(10, "kestrel-microphone", 31, 902))
+                graph.append(self.node(12, "kestrel-microphone", 31, 902))
             elif change == "ambiguous_capture":
-                graph.append(self.node(10, "other", 31, 902))
+                graph.append(self.node(12, "other", 31, 902))
             elif change == "pid_boolean":
                 graph[0]["info"]["props"]["pipewire.sec.pid"] = True
             elif change == "missing_owner":
                 graph.pop(0)
             else:
-                graph[-1]["info"]["output-node-id"] = "8"
+                graph[4]["info"]["output-node-id"] = "8"
             bad.append(graph)
         for graph in bad:
             with self.subTest(graph=graph), self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
                 self.serial(graph)
         echo = speech.EchoRemoval()
         echo.process = Mock(pid=3100, poll=Mock(return_value=None))
-        for outcome in (FileNotFoundError("private payload"), subprocess.TimeoutExpired("pw-dump", 5),
-                        subprocess.CalledProcessError(1, "pw-dump")):
+        for outcome in (FileNotFoundError("private payload"), TimeoutError("Controlled graph deadline"),
+                        OSError("Controlled graph spawn failure")):
             with patch.object(speech.asyncio, "create_subprocess_exec", new=AsyncMock(side_effect=outcome)), \
                     self.assertRaisesRegex(RuntimeError, "Restart Kestrel"):
                 asyncio.run(echo.microphone_serial(3200))
@@ -2120,7 +2141,13 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                         graphs = []
                         graph = [EchoRemovalTests.client(30, 3100), EchoRemovalTests.client(31, replacement.pid),
                                  EchoRemovalTests.node(8, 'kestrel-microphone', 30, 900),
-                                 EchoRemovalTests.node(9, 'owned-capture', 31, 901), EchoRemovalTests.link(8, 9, 'active')]
+                                 EchoRemovalTests.node(9, 'owned-capture', 31, 901), EchoRemovalTests.link(8, 9, 'active'),
+                                 {'id': 50, 'type': 'PipeWire:Interface:Metadata', 'props': {'metadata.name': 'default'},
+                                  'metadata': [{'subject': 0, 'key': 'default.audio.sink', 'type': 'Spa:String:JSON',
+                                                'value': {'name': 'selected-output'}}]},
+                                 EchoRemovalTests.node(10, 'selected-output', 30, 910),
+                                 EchoRemovalTests.node(11, 'kestrel-echo-removal-reference'), EchoRemovalTests.link(10, 11, 'active')]
+                        graph[6]['info']['props']['media.class'] = 'Audio/Sink'
 
                         async def graph_process(*args, **kwargs):
                             self.assertEqual(args, ('pw-dump',))

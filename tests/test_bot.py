@@ -4828,8 +4828,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 transport._spawn = spawn_audio
                 original_open = transport.open
 
-                async def open_audio(*, output_serial=None):
-                    await original_open(output_serial=output_serial)
+                async def open_audio():
+                    await original_open()
                     transport.llm = controller.llm
                     if capture_pcm is not None:
                         waiting.put_nowait(transport)
@@ -5099,6 +5099,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             bindings.append(binding)
             self.addCleanup(binding.stop)
         service_task = asyncio.create_task(bot.run_voice_service())
+        service_handle.task = service_task
+        service_handle.stop = lambda: handlers[signal.SIGTERM][0](*handlers[signal.SIGTERM][1])
         await asyncio.wait_for(prepared.wait(), 5)
         # Worker startup is CPU-bound and gets the production budget; later waits keep five seconds so a hang fails.
         await asyncio.wait_for(engine_opened.wait(), ENGINE_STARTUP)
@@ -5195,7 +5197,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         async def serial(pid=None, *, output_serial=None):
             if pid is not None and output_serial is not None:
-                observations.append((service.output_watch.revision, manager.speech_admitted()))
+                observations.append((service.output_watch.revision, output_serial, manager.speech_admitted()))
                 if service.output_watch.revision == 1:
                     old_verification.set()
                     await asyncio.Event().wait()
@@ -5226,9 +5228,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(superseded_capture.reaped.is_set())
         self.assertIs(transport.playback, original_playback)
         self.assertEqual(original_playback.writes[:len(initial_writes)], initial_writes)
-        self.assertEqual(observations, [(1, False), (2, False)])
+        self.assertEqual(observations, [(1, 1001, False), (2, 1002, False)])
         self.assertEqual(manager.echo_revision, 2)
-        self.assertEqual(manager.output_serial, 1002)
+        self.assertTrue(transport.verified)
+        self.assertEqual(len(service.echo_generations), 3)
+        self.assertIsNot(transport.capture, superseded_capture)
         self.assertEqual(route_attempts, [2, 2])
         self.assertTrue(original_capture.reaped.is_set())
         self.assertIsNot(transport.capture, original_capture)
@@ -5578,7 +5582,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await close()
 
     async def test_output_handover_inactive_failure_and_dismissal_stay_closed(self):
-        for case in ('inactive', 'typed_inactive', 'watcher_loss', 'verification_failure', 'dismissal', 'deferred_source', 'initial_capture_failure', 'waiting_capture_failure', 'persistent_route', 'graph_cleanup_route'):
+        for case in ('inactive', 'typed_inactive', 'watcher_loss', 'verification_failure', 'dismissal', 'deferred_source', 'initial_capture_failure', 'waiting_capture_failure', 'persistent_route', 'graph_cleanup_route', 'superseded_shutdown', 'superseded_deadline', 'startup_selection_active', 'startup_selection_waiting'):
             with self.subTest(case=case):
                 releases = []
                 brain = ScriptedBrain([
@@ -5587,7 +5591,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 ])
                 self.addCleanup(brain.close)
                 handle, spoken, committed, _, _, close = await self.open_session(
-                    brain, through_service=True, native_audio=True, activate=case not in ('inactive', 'typed_inactive', 'deferred_source', 'persistent_route', 'graph_cleanup_route'),
+                    brain, through_service=True, native_audio=True, activate=case not in ('inactive', 'typed_inactive', 'deferred_source', 'persistent_route', 'graph_cleanup_route', 'startup_selection_active', 'startup_selection_waiting'),
                 )
                 try:
                     service, manager = handle.service, handle.service.manager
@@ -5658,7 +5662,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             if not export_ready.is_set():
                                 raise RuntimeError('Replacement source is not exported yet. Restart Kestrel.')
                             if pid is not None:
-                                self.assertEqual(output_serial, 800)
+                                self.assertIsNone(output_serial)
                                 verifying.set()
                                 await release_verification.wait()
                             return 900
@@ -5693,7 +5697,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             fresh = await asyncio.wait_for(service.waiting.get(), 5)
                             self.assertIs(fresh, waiting)
                             self.assertTrue(fresh.verified)
-                            resolve.assert_any_await(fresh.capture.pid, output_serial=800)
+                            resolve.assert_any_await(fresh.capture.pid, output_serial=None)
                             fresh.capture.stdout.feed_data(b'N' * 640)
                             self.assertEqual(await asyncio.wait_for(detector_pcm.get(), 5), b'N' * 640)
                             self.assertIsNone(service.recognizer.reader)
@@ -5710,7 +5714,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             service.output_watch.emit()
                             await asyncio.wait_for(switched.wait(), 5)
                         self.assertIsNone(manager.failure)
-                        self.assertIsNotNone(manager.output_serial)
+                        self.assertTrue(manager.transport.verified)
+                        self.assertEqual(manager.echo_revision, service.output_watch.revision)
+                        self.assertEqual(len(service.echo_generations), 2)
                         while not service.waiting.empty():
                             service.waiting.get_nowait()
                         if case == 'initial_capture_failure':
@@ -5753,6 +5759,144 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(manager.wake_disabled)
                             self.assertIsNone(manager.failure)
                         self.assertFalse(manager.speech_admitted())
+                    elif case in ('startup_selection_active', 'startup_selection_waiting'):
+                        await asyncio.wait_for(service.waiting.get(), 5)
+                        service.output_watch.emit()
+                        prior_waiting = await asyncio.wait_for(service.waiting.get(), 5)
+                        self.assertTrue(prior_waiting.verified)
+                        self.assertEqual(len(service.echo_generations), 2)
+                        if case == 'startup_selection_waiting':
+                            self.assertEqual(await service.toggle(), 'starting')
+                            active = await asyncio.wait_for(service.started.get(), 5)
+                            self.assertTrue(active.verified)
+                        verifying, release_verification, refreshed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                        releases.append(release_verification)
+                        selected, captures, observations = [800], [], []
+                        detector_pcm = asyncio.Queue()
+                        refresh = manager.refresh_output
+
+                        async def observed_refresh():
+                            await refresh()
+                            refreshed.set()
+
+                        async def source(pid=None, *, output_serial=None):
+                            if pid is not None:
+                                if not captures:
+                                    captures.append(manager.transport if case == 'startup_selection_active' else manager.waiting_transport)
+                                    verifying.set()
+                                    await release_verification.wait()
+                                observations.append((pid, output_serial, selected[0], manager.speech_admitted()))
+                                if output_serial is not None and output_serial != selected[0]:
+                                    raise RuntimeError('The current reference does not match the old selected output. Restart Kestrel.')
+                            return 900
+
+                        def private_pcm(detector, pcm):
+                            detector_pcm.put_nowait(pcm)
+
+                        with patch.object(manager, 'refresh_output', side_effect=observed_refresh), \
+                                patch.object(bot.ECHO_REMOVAL, 'microphone_serial', new=AsyncMock(side_effect=source)), \
+                                patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=lambda playback_pid=None: selected[0])), \
+                                patch.object(bot.WakeWordDetector, 'submit', autospec=True, side_effect=private_pcm):
+                            self.assertEqual(await service.toggle(), 'starting' if case == 'startup_selection_active' else 'inactive')
+                            await asyncio.wait_for(verifying.wait(), 5)
+                            starting = captures[0]
+                            old_capture = starting.capture
+                            interval = manager.wake_interval
+                            self.assertFalse(starting.verified)
+                            self.assertTrue(detector_pcm.empty())
+                            self.assertIsNone(service.recognizer.reader)
+                            selected[0] = 801
+                            service.output_watch.emit()
+                            self.assertFalse(manager.speech_admitted())
+                            if case == 'startup_selection_waiting':
+                                manager.wake_start(interval)
+                                self.assertFalse(manager.desired_active)
+                            release_verification.set()
+                            await asyncio.wait_for(refreshed.wait(), 5)
+                            fresh = (await asyncio.wait_for(service.started.get(), 5) if case == 'startup_selection_active'
+                                     else await asyncio.wait_for(service.waiting.get(), 5))
+                            self.assertIsNone(manager.failure, 'Normal startup must follow the current selected output')
+                            self.assertTrue(old_capture.reaped.is_set())
+                            self.assertTrue(fresh.verified)
+                            self.assertEqual(manager.echo_revision, service.output_watch.revision)
+                            self.assertEqual(len(service.echo_generations), 3)
+                            self.assertTrue(all(not admitted for _, _, _, admitted in observations))
+                            self.assertTrue(any(pid == fresh.capture.pid and current == 801
+                                                for pid, _, current, _ in observations))
+                            self.assertTrue(detector_pcm.empty())
+                            self.assertIsNone(service.recognizer.reader)
+                            if case == 'startup_selection_active':
+                                self.assertTrue(manager.speech_admitted())
+                            else:
+                                self.assertFalse(manager.speech_admitted())
+                                fresh.capture.stdout.feed_data(b'N' * 640)
+                                self.assertEqual(await asyncio.wait_for(detector_pcm.get(), 5), b'N' * 640)
+                    elif case in ('superseded_shutdown', 'superseded_deadline'):
+                        verifying, reaping, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                        releases.append(release_cleanup)
+                        refresh_done = asyncio.Event()
+                        refresh = manager.refresh_output
+                        deadlines = []
+                        native_timeout = asyncio.timeout
+
+                        def timeout(delay):
+                            deadline = native_timeout(delay)
+                            if delay == 30:
+                                deadlines.append(deadline)
+                            return deadline
+
+                        async def observed_refresh():
+                            try:
+                                await refresh()
+                            finally:
+                                refresh_done.set()
+
+                        async def serial(pid=None, *, output_serial=None):
+                            if pid is not None and output_serial is not None:
+                                verifying.set()
+                                await asyncio.Event().wait()
+                            return 900
+
+                        with patch.object(manager, 'refresh_output', side_effect=observed_refresh), \
+                                patch.object(bot.ECHO_REMOVAL, 'microphone_serial', new=AsyncMock(side_effect=serial)), \
+                                patch.object(bot.asyncio, 'timeout', side_effect=timeout):
+                            service.output_watch.emit()
+                            await asyncio.wait_for(verifying.wait(), 5)
+                            replacement = handle.capture
+                            native_wait = replacement.wait.side_effect
+
+                            async def held_wait():
+                                reaping.set()
+                                await release_cleanup.wait()
+                                return await native_wait()
+
+                            replacement.wait.side_effect = held_wait
+                            service.output_watch.emit()
+                            await asyncio.wait_for(reaping.wait(), 5)
+                            generations = len(service.echo_generations)
+                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(replacement.reaped.is_set())
+                            if case == 'superseded_shutdown':
+                                service.stop()
+                                # Cancellation is delivered while the actual child cleanup is retained.
+                                await asyncio.sleep(0)
+                            else:
+                                self.assertEqual(len(deadlines), 1)
+                                deadlines[0].reschedule(asyncio.get_running_loop().time())
+                                await asyncio.sleep(0)
+                            release_cleanup.set()
+                            await asyncio.wait_for(refresh_done.wait(), 5)
+                            self.assertTrue(replacement.reaped.is_set())
+                            self.assertEqual(len(service.echo_generations), generations,
+                                             'Outer cancellation must not start another echo generation')
+                            self.assertFalse(manager.speech_admitted())
+                            if case == 'superseded_shutdown':
+                                await close()
+                                self.assertTrue(service.task.done())
+                            else:
+                                await service.state('trouble')
+                                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                                self.assertFalse(manager.desired_active)
                     elif case in ('persistent_route', 'graph_cleanup_route'):
                         await asyncio.wait_for(service.waiting.get(), 5)
                         self.assertEqual(await service.submit('Typed reply before silent output switch'), 'accepted')

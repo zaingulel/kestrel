@@ -470,9 +470,9 @@ class EchoRemoval:
                     info["output-node-id"] == source["id"] and info["state"] == "active" for info in incoming
                 ):
                     raise ValueError
-            if output_serial is not None:
+            if capture_pid is not None or output_serial is not None:
                 selected = self._selected_output(graph)
-                if selected["info"]["props"]["object.serial"] != output_serial:
+                if output_serial is not None and selected["info"]["props"]["object.serial"] != output_serial:
                     raise ValueError
                 references = [item for item in nodes if item["info"]["props"].get("node.name") ==
                               "kestrel-echo-removal-reference"]
@@ -483,7 +483,7 @@ class EchoRemoval:
                                            info["state"] == "active" for info in incoming):
                     raise ValueError
             return serial
-        except (OSError, subprocess.SubprocessError, TimeoutError, ValueError, LookupError, TypeError, AttributeError):
+        except (OSError, TimeoutError, ValueError, LookupError, TypeError, AttributeError):
             raise RuntimeError("The owned echo-removed microphone could not be verified. Restart Kestrel.") from None
 
     @staticmethod
@@ -748,8 +748,8 @@ class LaptopAudioTransport:
             *guard, str(os.getpid()), *command, start_new_session=True, **pipes,
         )
 
-    async def open(self, *, output_serial=None):
-        await self._open_capture(output_serial=output_serial)
+    async def open(self):
+        await self._open_capture()
 
     async def suspend_capture(self):
         self.verified = False

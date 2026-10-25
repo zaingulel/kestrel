@@ -1069,7 +1069,6 @@ class VoiceConversations:
         self.echo_revision = 0
         self.echo_owner = None
         self.echo_cleanup = None
-        self.output_serial = None
 
     def invalidate_wake(self):
         self.wake_interval = None
@@ -1100,7 +1099,7 @@ class VoiceConversations:
             admitted=lambda: self.wake_interval is interval, input_admitted=lambda: False,
             capture_pcm=lambda pcm: detector.submit(pcm) if self.wake_interval is interval else None,
         )
-        await self.waiting_transport.open(output_serial=self.output_serial)
+        await self.waiting_transport.open()
         if self.waiting_transport.capture is not None:
             self.waiting_owner = self.status.remember_owner(self.waiting_transport.capture.pid)
 
@@ -1249,7 +1248,7 @@ class VoiceConversations:
 
         self.session_ready.add_done_callback(readiness_finished)
         self.voice = self.voice_factory(admitted=admitted, reply_admitted=self.llm.owns_request)
-        await self.transport.open(output_serial=self.output_serial)
+        await self.transport.open()
         if self.transport.capture is not None:
             self.capture_owner = self.status.remember_owner(self.transport.capture.pid)
         if not admitted():
@@ -1417,7 +1416,8 @@ class VoiceConversations:
             try:
                 await resume
             except asyncio.CancelledError:
-                pass
+                if asyncio.current_task().cancelling():
+                    raise
         return not (self.closed or self.failure or self.lifecycle_changed
                     or self.output_watch.revision != self.echo_revision)
 
@@ -1514,7 +1514,6 @@ class VoiceConversations:
                         # Playback can appear during graph I/O; verify that exact child too.
                         if transport is not None and transport.playback is not playback:
                             continue
-                        self.output_serial = selected
                         self.switching_output = False
                         if self.llm is not None:
                             self.llm.refresh_indicator()
