@@ -1,9 +1,11 @@
 import base64
 import ctypes
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
+import hashlib
 import io
 import json
 from pathlib import Path
+import stat
 import struct
 import subprocess
 import sys
@@ -22,6 +24,7 @@ class FakeLibrary:
         self.text = b'  recognized words  '
         self.options_size = ctypes.sizeof(asr_worker.Options)
         self.config = None
+        self.contexts = []
         self.nemo_speech_asr_create = Mock(side_effect=self.create)
         self.nemo_speech_asr_destroy = Mock()
         self.nemo_speech_asr_recognition_options_default = Mock(side_effect=self.options)
@@ -39,6 +42,11 @@ class FakeLibrary:
         return asr_worker.Options(size=self.options_size)
 
     def recognize(self, recognizer, options, samples, count, rate, result):
+        # The worker owns this memory, so it is read at call time.
+        options = ctypes.cast(options, ctypes.POINTER(asr_worker.Options)).contents
+        self.contexts.append([
+            (context.size, [context.phrases[index] for index in range(context.phrase_count)], context.boost)
+            for context in (options.speech_contexts[index] for index in range(options.speech_context_count))])
         ctypes.cast(result, ctypes.POINTER(ctypes.c_void_p)).contents.value = self.result_handle
         return self.recognize_status
 
@@ -49,6 +57,14 @@ class CPUWorkerTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.model = Path(directory.name) / 'model.gguf'
         self.model.write_bytes(b'hello')
+        self.native = Path(directory.name) / 'libnemo_speech_asr_c.so.1'
+        self.native.write_bytes(b'native')
+        self.engine = Path(directory.name) / 'libnemo_speech_asr.so'
+        self.engine.write_bytes(b'engine')
+        self.versioned = Path(directory.name) / 'libggml-base.so.0.25.1'
+        self.versioned.write_bytes(b'shared')
+        self.base = Path(directory.name) / 'libggml-base.so.0'
+        self.base.symlink_to(self.versioned.name)
         self.library = FakeLibrary()
 
     @staticmethod
@@ -71,6 +87,15 @@ class CPUWorkerTests(unittest.TestCase):
             patch.object(asr_worker, 'MODEL', self.model),
             patch.object(asr_worker, 'MODEL_SIZE', 5),
             patch.object(asr_worker, 'MODEL_SHA256', '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'),
+            patch.object(asr_worker, 'LIBRARY', self.native),
+            patch.object(asr_worker, 'LIBRARY_SIZE', 6),
+            patch.object(asr_worker, 'LIBRARY_SHA256', 'bef32d2c315a289576f2a6828d27edb16bb316a4d85c271f2d794045f3ea668d'),
+            patch.object(asr_worker, 'ENGINE', self.engine),
+            patch.object(asr_worker, 'ENGINE_SIZE', 6),
+            patch.object(asr_worker, 'ENGINE_SHA256', 'ed9f6f25068608efd412958da4dfc19328ca3511251fa6d5f9c42baf230e32f8'),
+            patch.object(asr_worker, 'GGML_BASE', self.base),
+            patch.object(asr_worker, 'GGML_BASE_SIZE', 6),
+            patch.object(asr_worker, 'GGML_BASE_SHA256', 'a4d26868017c0ccffe2efe50944ef4211834660cca834c6e9f86dec6a88246fa'),
             patch.object(asr_worker.C, 'CDLL', return_value=self.library) as load,
         ):
             status = asr_worker.serve(io.BytesIO(requests), protocol)
@@ -106,7 +131,7 @@ class CPUWorkerTests(unittest.TestCase):
         self.library.nemo_speech_asr_result_transcript.side_effect = [b'  recognized words  ', b'']
         status, values, load = self.serve(self.request(self.wav()) * 2)
         self.assertEqual((status, values), (0, [{'ready': True}, {'text': 'recognized words'}, {'text': ''}]))
-        load.assert_called_once_with(str(asr_worker.LIBRARY))
+        load.assert_called_once_with(str(self.native))
         self.library.nemo_speech_asr_create.assert_called_once()
         self.library.nemo_speech_asr_recognition_options_default.assert_called_once()
         config = self.library.config
@@ -159,6 +184,46 @@ class CPUWorkerTests(unittest.TestCase):
                 self.assertIn(str(self.model), diagnostics.getvalue())
                 self.assertIn('FileNotFoundError' if content is None else 'Model identity mismatch', diagnostics.getvalue())
 
+    def test_unpinned_native_library_refuses_before_loading(self):
+        for name in ('native', 'engine', 'base'):
+            for change in ('size', 'hash'):
+                with self.subTest(library=name, change=change):
+                    path = getattr(self, name)
+                    original = path.read_bytes()
+                    path.write_bytes(original + b'!' if change == 'size' else original[:-1] + b'x')
+                    diagnostics = io.StringIO()
+                    with redirect_stderr(diagnostics):
+                        code, values, load = self.serve(b'')
+                    path.write_bytes(original)
+                    self.assertEqual((code, values), (1, [{'error': asr_worker.ADVICE}]))
+                    load.assert_not_called()
+                    self.assertIn(f'Library identity mismatch: {path}', diagnostics.getvalue())
+        with self.subTest(library='base', change='retargeted loader name'):
+            other = self.base.parent / 'libggml-base-other.so'
+            other.write_bytes(b'hacked')
+            self.base.unlink()
+            self.base.symlink_to(other.name)
+            diagnostics = io.StringIO()
+            with redirect_stderr(diagnostics):
+                code, values, load = self.serve(b'')
+            self.assertEqual((code, values), (1, [{'error': asr_worker.ADVICE}]))
+            load.assert_not_called()
+            self.assertIn(f'Library identity mismatch: {self.base}', diagnostics.getvalue())
+
+    def test_every_request_boosts_the_owner_words_and_restores_their_spelling(self):
+        self.library.nemo_speech_asr_result_transcript.side_effect = [b'ask alpguard and flowgauge about fabraik', b'garden fabric']
+        status, values, _ = self.serve(self.request(self.wav()) * 2)
+        self.assertEqual((status, values), (0, [{'ready': True}, {'text': 'ask AlpGuard and Flowgauge about Fabraik'}, {'text': 'garden fabric'}]))
+        context = [(ctypes.sizeof(asr_worker.SpeechContext), [b'AlpGuard', b'Flowgauge', b'Fabraik'], 2.0)]
+        self.assertEqual(self.library.contexts, [context, context])
+
+    def test_spelling_restoration_changes_only_whole_word_matches(self):
+        self.assertEqual(asr_worker.restore_spelling('ALPGUARD flowGauge Fabraik'), 'AlpGuard Flowgauge Fabraik')
+        self.assertEqual(asr_worker.restore_spelling("fabraik's"), "Fabraik's")
+        for unchanged in ('fabraiks', 'xalpguard', 'flowgauge2', 'fabraiké', 'garden fabric', ''):
+            with self.subTest(unchanged=unchanged):
+                self.assertEqual(asr_worker.restore_spelling(unchanged), unchanged)
+
     def test_response_limit_refuses_oversize_instead_of_truncating(self):
         self.library.text = b'x' * 65536
         code, values, _ = self.serve(self.request(self.wav()))
@@ -196,3 +261,155 @@ raise SystemExit(asr_worker.main())
         )
         self.assertEqual(result.stdout, b'{"ready":true}\n')
         self.assertEqual(result.stderr, b'native diagnostic\nstderr diagnostic\n')
+
+
+def gguf_string(value):
+    return struct.pack('<Q', len(value)) + value
+
+
+def gguf_pair(key, kind, value):
+    return gguf_string(key) + struct.pack('<I', kind) + value
+
+
+def gguf(pairs, infos, data):
+    """A version 3 GGUF file with the default 32-byte alignment, and where its sections end."""
+    content = b'GGUF' + struct.pack('<IQQ', 3, len(infos), len(pairs)) + b''.join(pairs)
+    metadata_end = len(content)
+    content += b''.join(infos)
+    tensor_info_end = len(content)
+    content += bytes(-len(content) % 32)
+    return content + data, metadata_end, tensor_info_end, len(content)
+
+
+class WordBoostingModelTests(unittest.TestCase):
+    TOKENIZER = b'tokenizer-bytes'
+    PAIRS = [
+        gguf_pair(b'general.architecture', 8, gguf_string(b'nemo')),
+        gguf_pair(b'tokenizer.vocab', 9, struct.pack('<IQ', 8, 3) + b''.join(map(gguf_string, (b'a', b'bc', b'def')))),
+        gguf_pair(b'nemo.layers', 4, struct.pack('<I', 7)),
+    ]
+    INFOS = [gguf_string(b'weights') + struct.pack('<IQQIQ', 2, 3, 4, 8, 0)]
+    DATA = bytes(range(1, 25))
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.directory = Path(directory.name)
+        source, metadata_end, tensor_info_end, data_start = gguf(self.PAIRS, self.INFOS, self.DATA)
+        tokenizer_pair = gguf_pair(b'asr.tokenizer.spm_model', 8, gguf_string(base64.b64encode(self.TOKENIZER)))
+        self.expected = gguf(self.PAIRS + [tokenizer_pair], self.INFOS, self.DATA)[0]
+        self.model = self.directory / 'model.gguf'
+        self.source = self.directory / 'source.gguf'
+        self.tokenizer = self.directory / 'tokenizer.model'
+        self.source.write_bytes(source)
+        self.tokenizer.write_bytes(self.TOKENIZER)
+        self.pins = {
+            'MODEL': self.model, 'MODEL_SIZE': len(self.expected), 'MODEL_SHA256': hashlib.sha256(self.expected).hexdigest(),
+            'PUBLISHED_MODEL': self.source, 'PUBLISHED_MODEL_SIZE': len(source), 'PUBLISHED_MODEL_SHA256': hashlib.sha256(source).hexdigest(),
+            'TOKENIZER': self.tokenizer, 'TOKENIZER_SIZE': len(self.TOKENIZER), 'TOKENIZER_SHA256': hashlib.sha256(self.TOKENIZER).hexdigest(),
+            'SPLICE_METADATA_END': metadata_end, 'SPLICE_TENSOR_INFO_END': tensor_info_end, 'SPLICE_DATA_START': data_start,
+        }
+        self.inputs = [self.source.name, self.tokenizer.name]
+
+    def provision(self, **overrides):
+        output, diagnostics = io.StringIO(), io.StringIO()
+        with patch.multiple(asr_worker, **{**self.pins, **overrides}), redirect_stdout(output), redirect_stderr(diagnostics):
+            code = asr_worker.provision()
+        return code, output.getvalue(), diagnostics.getvalue()
+
+    def listing(self, *extra):
+        return sorted(path.name for path in self.directory.iterdir()), sorted([*self.inputs, *extra])
+
+    def test_provision_embeds_the_tokenizer_and_keeps_tensor_data(self):
+        source, tokenizer = self.source.read_bytes(), self.tokenizer.read_bytes()
+        self.assertEqual(self.provision(), (0, f'Provisioned {self.model}\n', ''))
+        self.assertEqual(self.model.read_bytes(), self.expected)
+        self.assertEqual(stat.S_IMODE(self.model.stat().st_mode), 0o600)
+        self.assertEqual(*self.listing(self.model.name))
+        self.assertEqual((self.source.read_bytes(), self.tokenizer.read_bytes()), (source, tokenizer))
+
+    def test_provision_refuses_unverified_inputs_and_output_without_installing(self):
+        wrong = '0' * 64
+        for name, overrides, cause in (
+            ('wrong source hash', {'PUBLISHED_MODEL_SHA256': wrong}, f'Published model identity mismatch: {self.source}'),
+            ('wrong tokenizer hash', {'TOKENIZER_SHA256': wrong}, f'Tokenizer identity mismatch: {self.tokenizer}'),
+            ('missing source', {'PUBLISHED_MODEL': self.directory / 'absent.gguf'}, 'FileNotFoundError'),
+            ('wrong output pin', {'MODEL_SHA256': wrong}, f'Provisioned model identity mismatch: {self.model}'),
+        ):
+            with self.subTest(name):
+                code, output, diagnostics = self.provision(**overrides)
+                self.assertEqual((code, output), (1, ''))
+                self.assertTrue(diagnostics.startswith('Provisioning refused: '), diagnostics)
+                self.assertIn(cause, diagnostics)
+                self.assertEqual(*self.listing())
+
+    def test_provision_keeps_an_existing_model(self):
+        with self.subTest('matching file'):
+            self.model.write_bytes(self.expected)
+            self.assertEqual(self.provision(), (0, f'Already provisioned: {self.model}\n', ''))
+            self.assertEqual(self.model.read_bytes(), self.expected)
+            self.assertEqual(*self.listing(self.model.name))
+        with self.subTest('mismatching file'):
+            self.model.write_bytes(b'other')
+            code, output, diagnostics = self.provision()
+            self.assertEqual((code, output), (1, ''))
+            self.assertIn(f'Model identity mismatch: {self.model}', diagnostics)
+            self.assertEqual(self.model.read_bytes(), b'other')
+            self.assertEqual(*self.listing(self.model.name))
+        with self.subTest('file created before publication'):
+            self.model.unlink()
+            matches = asr_worker.matches
+
+            def create_sentinel_after_output_check(file, size, digest):
+                verified = matches(file, size, digest)
+                if digest == self.pins['MODEL_SHA256']:
+                    self.model.write_bytes(b'sentinel')
+                return verified
+
+            with patch.object(asr_worker, 'matches', create_sentinel_after_output_check):
+                code, output, diagnostics = self.provision()
+            self.assertEqual((code, output), (1, ''))
+            self.assertIn('Provisioning refused: FileExistsError', diagnostics)
+            self.assertEqual(self.model.read_bytes(), b'sentinel')
+            self.assertEqual(*self.listing(self.model.name))
+
+    def test_main_dispatches_provision_and_refuses_unknown_arguments(self):
+        with patch.object(asr_worker, 'provision', return_value=7) as provision, patch.object(asr_worker, 'serve') as serve:
+            with patch.object(sys, 'argv', ['asr_worker.py', 'provision']):
+                self.assertEqual(asr_worker.main(), 7)
+            provision.assert_called_once_with()
+            for arguments in (['PROVISION'], ['provision', 'again'], ['--help']):
+                with self.subTest(arguments=arguments), patch.object(sys, 'argv', ['asr_worker.py', *arguments]):
+                    diagnostics = io.StringIO()
+                    with redirect_stderr(diagnostics):
+                        self.assertEqual(asr_worker.main(), 2)
+                    self.assertEqual(diagnostics.getvalue(), 'Usage: asr_worker.py [provision]\n')
+            provision.assert_called_once_with()
+            serve.assert_not_called()
+
+    def test_worker_pins_the_word_boosting_model_and_its_sources(self):
+        models = asr_worker.ROOT / '.runtime/models/nemotron-q8'
+        self.assertEqual(
+            (asr_worker.MODEL, asr_worker.MODEL_SIZE, asr_worker.MODEL_SHA256),
+            (models / 'nemotron-speech-streaming-en-0.6b.q8_0.word-boosting.gguf', 700207744,
+             '926495522ccd2626d8665283b4c9225f704ed2b45e82158984d1823f7e528b52'))
+        self.assertEqual(
+            (asr_worker.PUBLISHED_MODEL, asr_worker.PUBLISHED_MODEL_SIZE, asr_worker.PUBLISHED_MODEL_SHA256),
+            (models / 'nemotron-speech-streaming-en-0.6b.q8_0.gguf', 699872960,
+             'd9a01898d2a611c8764e23a1c2f45e70bbd5a425dc4de93692ac951dd603812d'))
+        self.assertEqual(
+            (asr_worker.TOKENIZER, asr_worker.TOKENIZER_SIZE, asr_worker.TOKENIZER_SHA256),
+            (models / 'tokenizer.model', 251056, '07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9'))
+        libraries = asr_worker.ROOT / '.runtime/tools/nemo-speech-0.2.0-linux-x86_64-cpu/lib'
+        self.assertEqual(
+            (asr_worker.LIBRARY, asr_worker.LIBRARY_SIZE, asr_worker.LIBRARY_SHA256),
+            (libraries / 'libnemo_speech_asr_c.so.1', 68208, 'b16719ac6c8614e43a9bed224b21dd17b9bfb59b5215cc7fe29482712090dc52'))
+        self.assertEqual(
+            (asr_worker.ENGINE, asr_worker.ENGINE_SIZE, asr_worker.ENGINE_SHA256),
+            (libraries / 'libnemo_speech_asr.so', 2265256, '596c0e0dd3da78e959e850ed3e90911524a6051d8f4405324d70a570c427e246'))
+        self.assertEqual(
+            (asr_worker.GGML_BASE, asr_worker.GGML_BASE_SIZE, asr_worker.GGML_BASE_SHA256),
+            (libraries / 'libggml-base.so.0', 863168, '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'))
+        self.assertEqual(
+            (asr_worker.SPLICE_METADATA_END, asr_worker.SPLICE_TENSOR_INFO_END, asr_worker.SPLICE_DATA_START),
+            (14098, 64216, 64224))
