@@ -166,8 +166,8 @@ MEASURED_FIRST_HI_SCORES = (
     (0.035856425762176514, 0.11044817624999621),
     (0.0331246554851532, 0.08835854099999697),
 )
-# One 1.0 score then a 0.0 score: the burst ends and the wake fires.
-WAKE_PHRASE_PCM = bytes([1]) * 640 + bytes(640)
+# Two 1.0 scores in a row: the wake fires at the second.
+WAKE_PHRASE_PCM = bytes([1]) * 1280
 # Production worker-startup budget, read at import so tests that patch bot.ENGINE_TIMEOUT cannot shrink it.
 ENGINE_STARTUP = bot.ENGINE_TIMEOUT
 

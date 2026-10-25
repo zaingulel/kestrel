@@ -13,9 +13,11 @@ import struct
 
 ROOT = Path(__file__).parent
 RUNTIME = ROOT / '.runtime/wakeword'
-WAKE_BAR = 0.5
+WAKE_BAR = 0.8
+# Consecutive burst scores above WAKE_BAR that wake.
+WAKE_RUN = 2
 BURST_FLOOR = 0.2
-# About one second of 80-millisecond scores; bounds the line and the delay.
+# About one second of 80-millisecond scores; bounds the line.
 BURST_LIMIT = 12
 ADVICE = 'Wake phrase unavailable. Press Super + Shift + K to start. Check the service log and restart Kestrel.'
 CLEANUP_ADVICE = 'Wake capture cleanup failed. Restart Kestrel.'
@@ -146,20 +148,25 @@ class WakeWordDetector:
         self.closed = False
         self.close_task = None
         self.burst = []
+        self.woke = False
 
     def scored(self, score: float):
+        # One wake per detector: the phrase's remaining scores must not log as another burst.
+        if self.woke:
+            return
         if score > BURST_FLOOR:
             self.burst.append(score)
-            if len(self.burst) < BURST_LIMIT:
+            run = self.burst[-WAKE_RUN:]
+            self.woke = len(run) == WAKE_RUN and min(run) > WAKE_BAR
+            if not self.woke and len(self.burst) < BURST_LIMIT:
                 return
         elif not self.burst:
             return
         burst, self.burst = self.burst, []
-        woke = max(burst) > WAKE_BAR
         # imported here: the isolated wake interpreter has no loguru
         from loguru import logger
-        logger.info(burst_line('woke' if woke else 'did not wake', burst))
-        if woke:
+        logger.info(burst_line('woke' if self.woke else 'did not wake', burst))
+        if self.woke:
             self.on_detected()
 
     def fail(self):
