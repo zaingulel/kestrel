@@ -162,6 +162,15 @@ class WakeWordTests(unittest.IsolatedAsyncioTestCase):
         detected.assert_not_called()
         self.assertEqual(lines, [('wakeword', 'Wake scores: did not wake, peak 0.500: 0.300 0.500')])
 
+    def test_burst_just_above_the_bar_wakes(self):
+        lines = wake_lines(self)
+        detected = Mock()
+        detector = wakeword.WakeWordDetector(on_detected=detected, on_failed=Mock())
+        detector.scored(0.500001)
+        detector.scored(0.1)
+        detected.assert_called_once_with()
+        self.assertEqual(lines, [('wakeword', 'Wake scores: woke, peak 0.500: 0.500')])
+
     def test_burst_is_cut_at_its_limit(self):
         lines = wake_lines(self)
         detected = Mock()
