@@ -246,6 +246,7 @@ Product discovery and drilling with the owner must precede any further product i
 
 - `bot.py` owns conversation orchestration.
 - `app_resolver.py` owns native installed-app lookup.
+- `tool_catalogue.py` owns the shared desktop tool facts, argument admission, schemas, instructions and brain result contract.
 - `tool_actions.py` owns how Kestrel's tools run: each tool's run step, the open-app lookup step and the shared safe local-command runner; the engine process never loads it.
 - `reply_progress.py` owns reply progress: how far each reply's speech has reached audio output and how the reply ended.
 - `speech.py` owns speech adapters.
