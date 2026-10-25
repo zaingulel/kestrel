@@ -61,8 +61,10 @@ class CPUWorkerTests(unittest.TestCase):
         self.native.write_bytes(b'native')
         self.engine = Path(directory.name) / 'libnemo_speech_asr.so'
         self.engine.write_bytes(b'engine')
-        self.base = Path(directory.name) / 'libggml-base.so.0.25.1'
-        self.base.write_bytes(b'shared')
+        self.versioned = Path(directory.name) / 'libggml-base.so.0.25.1'
+        self.versioned.write_bytes(b'shared')
+        self.base = Path(directory.name) / 'libggml-base.so.0'
+        self.base.symlink_to(self.versioned.name)
         self.library = FakeLibrary()
 
     @staticmethod
@@ -196,6 +198,17 @@ class CPUWorkerTests(unittest.TestCase):
                     self.assertEqual((code, values), (1, [{'error': asr_worker.ADVICE}]))
                     load.assert_not_called()
                     self.assertIn(f'Library identity mismatch: {path}', diagnostics.getvalue())
+        with self.subTest(library='base', change='retargeted loader name'):
+            other = self.base.parent / 'libggml-base-other.so'
+            other.write_bytes(b'hacked')
+            self.base.unlink()
+            self.base.symlink_to(other.name)
+            diagnostics = io.StringIO()
+            with redirect_stderr(diagnostics):
+                code, values, load = self.serve(b'')
+            self.assertEqual((code, values), (1, [{'error': asr_worker.ADVICE}]))
+            load.assert_not_called()
+            self.assertIn(f'Library identity mismatch: {self.base}', diagnostics.getvalue())
 
     def test_every_request_boosts_the_owner_words_and_restores_their_spelling(self):
         self.library.nemo_speech_asr_result_transcript.side_effect = [b'ask alpguard and flowgauge about fabraik', b'garden fabric']
@@ -396,7 +409,7 @@ class WordBoostingModelTests(unittest.TestCase):
             (libraries / 'libnemo_speech_asr.so', 2265256, '596c0e0dd3da78e959e850ed3e90911524a6051d8f4405324d70a570c427e246'))
         self.assertEqual(
             (asr_worker.GGML_BASE, asr_worker.GGML_BASE_SIZE, asr_worker.GGML_BASE_SHA256),
-            (libraries / 'libggml-base.so.0.25.1', 863168, '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'))
+            (libraries / 'libggml-base.so.0', 863168, '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'))
         self.assertEqual(
             (asr_worker.SPLICE_METADATA_END, asr_worker.SPLICE_TENSOR_INFO_END, asr_worker.SPLICE_DATA_START),
             (14098, 64216, 64224))

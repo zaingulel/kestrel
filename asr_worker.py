@@ -36,7 +36,7 @@ LIBRARY_SHA256 = 'b16719ac6c8614e43a9bed224b21dd17b9bfb59b5215cc7fe29482712090dc
 ENGINE = LIBRARY.parent / 'libnemo_speech_asr.so'
 ENGINE_SIZE = 2265256
 ENGINE_SHA256 = '596c0e0dd3da78e959e850ed3e90911524a6051d8f4405324d70a570c427e246'
-GGML_BASE = LIBRARY.parent / 'libggml-base.so.0.25.1'
+GGML_BASE = LIBRARY.parent / 'libggml-base.so.0'
 GGML_BASE_SIZE = 863168
 GGML_BASE_SHA256 = '79c5512818e2a6936cdeba03b5d0ecaf1b27fb0671afff8f8d22a4d5903f1062'
 # Owner capitalisation, because lowercase phrases inserted false words.
