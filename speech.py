@@ -1845,6 +1845,12 @@ class SpokenReplyText:
         return result
 
 
+@dataclass(frozen=True)
+class PreparedAcknowledgement:
+    text: str
+    pcm: bytes
+
+
 class ConversationTTS(TTSService):
     def __init__(self, model, *, settings: TTSSettings, generation_lock=None, admission=None):
         super().__init__(
@@ -2093,3 +2099,29 @@ class PhononTTS(ConversationTTS):
                     native.close()
                 except Exception as error:
                     raise RuntimeError('Phonon native cleanup failed. Restart Kestrel.') from error
+
+
+async def prepare_acknowledgements(voice: ConversationTTS) -> tuple[PreparedAcknowledgement, ...]:
+    clips = []
+    try:
+        for text in ('One moment.', 'Just a moment.', 'Give me a moment.'):
+            pcm = bytearray()
+            async with asyncio.timeout(45):
+                stream = voice.run_tts(text, 'warmup')
+                try:
+                    async for frame in stream:
+                        if (not isinstance(frame.audio, bytes) or frame.sample_rate != 48000
+                                or frame.num_channels != 1 or len(frame.audio) % 2):
+                            raise RuntimeError('voice audio must be mono 48000 Hz PCM16 bytes')
+                        if len(pcm) + len(frame.audio) > 288000:
+                            raise RuntimeError('voice clip exceeds 288000 bytes')
+                        pcm.extend(frame.audio)
+                finally:
+                    await stream.aclose()
+            if not pcm:
+                raise RuntimeError('voice produced no audio')
+            clips.append(PreparedAcknowledgement(text, bytes(pcm)))
+    except Exception as error:
+        cause = str(error) or type(error).__name__
+        raise RuntimeError(f'Acknowledgement preparation failed: {cause}. Check the voice log, then restart Kestrel.') from error
+    return tuple(clips)

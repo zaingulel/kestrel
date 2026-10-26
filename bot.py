@@ -52,7 +52,7 @@ from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMOR
 from speech import (
     ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
-    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset,
+    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset, prepare_acknowledgements,
 )
 from tool_actions import (
     TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
@@ -1052,6 +1052,7 @@ class VoiceConversations:
         self.trouble = None
         self.closed = False
         self.prepared = False
+        self.prepared_acknowledgements = ()
         self.transitioning = False
         self.lifecycle_changed = False
         self.handover = None
@@ -1208,11 +1209,7 @@ class VoiceConversations:
             self.voice_factory = partial(VoxCPMTTS, self.model, self.preset, generation_lock=self.generation_lock)
             logger.info('Kestrel speech provider: VoxCPM2 CUDA, selected local reference voice.')
         voice = self.voice_factory()
-        has_audio = False
-        async for frame in voice.run_tts('Hello.', 'warmup'):
-            has_audio |= bool(frame.audio)
-        if not has_audio:
-            raise RuntimeError(f'{self.tts_model} preparation produced no audio')
+        self.prepared_acknowledgements = await prepare_acknowledgements(voice)
         self.prepared = True
 
     async def activate(self, *, capture_enabled=True):

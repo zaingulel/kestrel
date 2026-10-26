@@ -3004,7 +3004,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 async def conversation(recognition, voice, **kwargs):
                     self.assertIs(recognition, stt)
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
-                    self.assertEqual(self.voice.generate_streaming.call_count, 1)
+                    self.assertEqual(self.voice.generate_streaming.call_count, 3)
                     os.environ['KESTREL_VOICE'] = 'unknown'
                     start = bot.LLMFullResponseStartFrame()
                     start.reply_progress = reply_progress.ReplyProgress(
@@ -3025,7 +3025,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     await self.run_bot()
                 stt.load.assert_awaited_once_with(self.reference_pcm)
                 calls = self.voice.generate_streaming.call_args_list
-                self.assertEqual([item.kwargs['text'] for item in calls], ['Hello.', 'First reply.', 'Second reply.'])
+                self.assertEqual([item.kwargs['text'] for item in calls], ['One moment.', 'Just a moment.', 'Give me a moment.', 'First reply.', 'Second reply.'])
                 for item in calls:
                     self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / (name + '.wav')))
                     self.assertEqual(item.kwargs['reference_wav_path'], str(self.voices / (name + '.wav')))
@@ -3087,12 +3087,16 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                             str(bot.ROOT / '.runtime/models/voxcpm2'), load_denoiser=False,
                             optimize=False, device='cuda', local_files_only=True,
                         )
-                        self.assertEqual(self.voice.generate_streaming.call_count, 3)
+                        self.assertEqual([item.kwargs['text'] for item in self.voice.generate_streaming.call_args_list],
+                                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Reply.', 'Reply.'])
+                        for item in self.voice.generate_streaming.call_args_list:
+                            self.assertEqual(item.kwargs['prompt_text'], 'Irish fixture.')
+                            self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / 'irish-female.wav'))
                     else:
                         load.assert_called_once_with()
                         bot.VoxCPM.from_pretrained.assert_not_called()
                         self.assertEqual([item.args[0] for item in phonon.stream.call_args_list],
-                                         ['Hello.', 'Reply.', 'Reply.'])
+                                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Reply.', 'Reply.'])
                         for native in streams:
                             native.close.assert_called_once_with()
 
@@ -3157,9 +3161,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             await self.run_bot()
             await self.run_bot()
             self.assertEqual(load.call_count, 2)
-            self.assertEqual(model.generate_streaming.call_count, 2)
-            self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
-            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'load', 'warm', 'closed', 'conversation'])
+            self.assertEqual(model.generate_streaming.call_count, 6)
+            self.assertEqual([item.kwargs['text'] for item in model.generate_streaming.call_args_list],
+                             ['One moment.', 'Just a moment.', 'Give me a moment.',
+                              'One moment.', 'Just a moment.', 'Give me a moment.'])
+            self.assertEqual(events, ['load', 'warm', 'closed', 'warm', 'closed', 'warm', 'closed', 'conversation',
+                                      'load', 'warm', 'closed', 'warm', 'closed', 'warm', 'closed', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
             self.assertIs(conversation.await_args.args[1].model, model)
             self.assertIsNot(conversation.await_args_list[0].args[1], conversation.await_args_list[1].args[1])
@@ -3171,24 +3178,33 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         activity = asyncio.Event()
         release = threading.Event()
         events = []
+        managers = []
+        construct = bot.VoiceConversations.side_effect
+
+        def manager(**kwargs):
+            value = construct(**kwargs)
+            managers.append(value)
+            return value
 
         def gated_chunks(**kwargs):
+            text = kwargs['text']
             try:
-                events.append('first_chunk')
+                events.append((text, 'first_chunk'))
                 yield np.zeros(8, dtype=np.float32)
-                events.append('gated')
-                loop.call_soon_threadsafe(activity.set)
-                if not release.wait(5):
-                    raise AssertionError('Voice preparation gate was not released')
-                events.append('remaining_chunk')
+                if text == 'Give me a moment.':
+                    events.append((text, 'gated'))
+                    loop.call_soon_threadsafe(activity.set)
+                    if not release.wait(5):
+                        raise AssertionError('Voice preparation gate was not released')
                 yield np.zeros(8, dtype=np.float32)
-                events.append('exhausted')
+                events.append((text, 'exhausted'))
             finally:
-                events.append('closed')
+                events.append((text, 'closed'))
 
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         model = Mock(generate_streaming=Mock(side_effect=gated_chunks))
         with (
+            patch.object(bot, 'VoiceConversations', side_effect=manager),
             patch.object(bot, 'NemotronSTT', return_value=stt),
             patch.object(bot, 'NemotronRecognizer', return_value=stt),
             patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
@@ -3202,12 +3218,28 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(activity.wait(), 5)
                 conversation.assert_not_awaited()
                 self.assertFalse(task.done())
-                self.assertEqual(events, ['first_chunk', 'gated'])
+                self.assertFalse(managers[0].prepared)
+                self.assertEqual(managers[0].prepared_acknowledgements, ())
+                self.audio.open.assert_not_awaited()
+                self.assertEqual(events, [
+                    ('One moment.', 'first_chunk'), ('One moment.', 'exhausted'), ('One moment.', 'closed'),
+                    ('Just a moment.', 'first_chunk'), ('Just a moment.', 'exhausted'), ('Just a moment.', 'closed'),
+                    ('Give me a moment.', 'first_chunk'), ('Give me a moment.', 'gated'),
+                ])
                 release.set()
                 await asyncio.wait_for(task, 5)
-                self.assertEqual(events, [
-                    'first_chunk', 'gated', 'remaining_chunk', 'exhausted', 'closed', 'conversation',
+                self.assertEqual(events[-3:], [
+                    ('Give me a moment.', 'exhausted'), ('Give me a moment.', 'closed'), 'conversation',
                 ])
+                self.assertTrue(managers[0].prepared)
+                clips = managers[0].prepared_acknowledgements
+                self.assertIsInstance(clips, tuple)
+                self.assertEqual([(clip.text, clip.pcm) for clip in clips], [
+                    ('One moment.', bytes(32)), ('Just a moment.', bytes(32)), ('Give me a moment.', bytes(32)),
+                ])
+                with self.assertRaises(AttributeError):
+                    clips[0].text = 'Changed.'
+                self.assertEqual(managers[0].conversation.turns, [])
                 conversation.assert_awaited_once()
             finally:
                 release.set()
@@ -3246,6 +3278,144 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(failed_events, ['first_chunk', 'closed'])
                     stt.close.assert_awaited_once()
                     self.audio.close.assert_not_awaited()
+
+    async def test_acknowledgement_preparation_refuses_invalid_audio(self):
+        preset = speech.load_voice_preset('irish-female', voices_dir=self.voices)
+        for provider in ('phonon', 'voxcpm2'):
+            for case in ('empty', 'rate', 'channels', 'nonbytes', 'odd', 'oversized', 'overflow', 'generation', 'valid'):
+                with self.subTest(provider=provider, case=case):
+                    closed = []
+
+                    def chunks():
+                        try:
+                            if case == 'empty':
+                                return
+                            yield np.zeros(2400, dtype=np.float32)
+                            if case == 'generation':
+                                raise RuntimeError('fixture generation failed')
+                        finally:
+                            closed.append(True)
+
+                    def stream(*args, **kwargs):
+                        source = chunks()
+                        native = Mock(sample_rate=24000, close=Mock(side_effect=source.close))
+                        native.__iter__ = Mock(return_value=source)
+                        return native
+
+                    model = Mock(stream=Mock(side_effect=stream),
+                                 generate_streaming=Mock(side_effect=lambda **kwargs: chunks()))
+                    lock = asyncio.Lock()
+                    voice = (speech.PhononTTS(model, generation_lock=lock) if provider == 'phonon' else
+                             speech.VoxCPMTTS(model, preset, generation_lock=lock))
+                    voice.push_frame = AsyncMock()
+                    original = voice.run_tts
+
+                    async def frames(text, context_id):
+                        source = original(text, context_id)
+                        try:
+                            first = True
+                            async for frame in source:
+                                if case in ('empty', 'generation'):
+                                    yield frame
+                                    continue
+                                if not first:
+                                    continue
+                                first = False
+                                # Inject malformed provider output after the real adapter's generation boundary.
+                                yield TTSAudioRawFrame(b'', 48000, 1)
+                                frame.audio = bytes(288000 if case == 'valid' else 288002 if case == 'oversized' else
+                                                    144000 if case == 'overflow' else 1 if case == 'odd' else 16)
+                                if case == 'rate':
+                                    frame.sample_rate = 24000
+                                elif case == 'channels':
+                                    frame.num_channels = 2
+                                elif case == 'nonbytes':
+                                    frame.audio = bytearray(16)
+                                yield frame
+                                if case == 'overflow':
+                                    yield TTSAudioRawFrame(bytes(144002), 48000, 1)
+                        finally:
+                            await source.aclose()
+
+                    voice.run_tts = frames
+                    if case == 'valid':
+                        clips = await speech.prepare_acknowledgements(voice)
+                        self.assertEqual([(clip.text, len(clip.pcm)) for clip in clips], [
+                            ('One moment.', 288000), ('Just a moment.', 288000), ('Give me a moment.', 288000),
+                        ])
+                        self.assertEqual(sum(len(clip.pcm) for clip in clips), 864000)
+                        self.assertEqual(len(closed), 3)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'preparation failed:') as failed:
+                            await speech.prepare_acknowledgements(voice)
+                        self.assertIn('Check the voice log, then restart Kestrel.', str(failed.exception))
+                        self.assertIsNotNone(failed.exception.__cause__)
+                        self.assertEqual(len(closed), 1)
+                        calls = model.stream if provider == 'phonon' else model.generate_streaming
+                        self.assertEqual(calls.call_count, 1, 'Invalid preparation must not retry or continue')
+                    self.assertFalse(lock.locked())
+                    voice.push_frame.assert_not_awaited()
+
+        loop = asyncio.get_running_loop()
+        native_timeout = asyncio.timeout
+        for case in ('timeout', 'cancellation'):
+            with self.subTest(case=case):
+                entered = asyncio.Event()
+                release = threading.Event()
+                closed = threading.Event()
+                deadlines = []
+
+                def held_chunks(**kwargs):
+                    try:
+                        yield np.zeros(8, dtype=np.float32)
+                        loop.call_soon_threadsafe(entered.set)
+                        if not release.wait(5):
+                            raise AssertionError('Preparation cleanup gate was not released')
+                    finally:
+                        closed.set()
+
+                def timeout(delay):
+                    self.assertEqual(delay, 45)
+                    deadline = native_timeout(delay)
+                    deadlines.append(deadline)
+                    return deadline
+
+                model = Mock(generate_streaming=Mock(side_effect=held_chunks))
+                lock = asyncio.Lock()
+                voice = speech.VoxCPMTTS(model, preset, generation_lock=lock)
+                voice.push_frame = AsyncMock()
+                with patch.object(speech.asyncio, 'timeout', side_effect=timeout):
+                    task = asyncio.create_task(speech.prepare_acknowledgements(voice))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        self.assertEqual(len(deadlines), 1)
+                        if case == 'timeout':
+                            deadlines[0].reschedule(loop.time())
+                        else:
+                            task.cancel()
+                        await asyncio.sleep(0)
+                        await asyncio.sleep(0)
+                        self.assertGreater(task.cancelling(), 0)
+                        self.assertFalse(task.done(), 'Native generation must finish before failure escapes')
+                        self.assertTrue(lock.locked())
+                        self.assertFalse(closed.is_set())
+                        release.set()
+                        if case == 'timeout':
+                            with self.assertRaisesRegex(RuntimeError, 'preparation failed: TimeoutError') as failed:
+                                await asyncio.wait_for(task, 5)
+                            self.assertIn('Check the voice log, then restart Kestrel.', str(failed.exception))
+                        else:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(task, 5)
+                        self.assertTrue(closed.is_set())
+                        self.assertFalse(lock.locked())
+                        self.assertEqual(model.generate_streaming.call_count, 1)
+                        voice.push_frame.assert_not_awaited()
+                    finally:
+                        release.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
 
     async def test_model_load_failure_closes_recognition_and_audio(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())
@@ -3668,7 +3838,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(sum(len(data) for child in service.audio_children for data in child.writes), before)
             local.assert_not_awaited()
             synthesis = [item.args[0] for item in service.model.stream.call_args_list]
-            self.assertEqual(synthesis, ['Hello.', 'Answer.', 'Next.'])
+            self.assertEqual(synthesis, ['One moment.', 'Just a moment.', 'Give me a moment.', 'Answer.', 'Next.'])
             self.assertEqual(transport.llm.last_spoken_reply, 'Next.')
             for visible in (native_events, synthesis, context.get_messages(), service.manager.conversation.turns):
                 self.assertNotIn('PRIVATE', json.dumps(visible))
@@ -4710,8 +4880,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         def chunks(**kwargs):
             nonlocal calls
             calls += 1
-            if calls == 1:
-                self.assertEqual(kwargs['text'], 'Hello.')
+            if calls <= 3:
+                self.assertEqual(kwargs['text'], ('One moment.', 'Just a moment.', 'Give me a moment.')[calls - 1])
                 yield np.zeros(4800, dtype=np.float32)
             elif synthesis_chunks is not None:
                 yield from synthesis_chunks(**kwargs)
@@ -6096,7 +6266,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'Fresh voice question'}])
         self.assertEqual([item.args[0] for item in service.model.stream.call_args_list],
-                         ['Hello.', 'Typed reply.', 'Fresh reply.'])
+                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Typed reply.', 'Fresh reply.'])
         await close()
 
     async def test_typed_inactive_preserves_voice_and_context(self):
