@@ -249,6 +249,7 @@ Product discovery and drilling with the owner must precede any further product i
 - `tool_catalogue.py` owns the shared desktop tool facts, argument admission, schemas, instructions and brain result contract.
 - `tool_actions.py` owns how Kestrel's tools run: each tool's run step, the open-app lookup step and the shared safe local-command runner; the engine process never loads it.
 - `reply_progress.py` owns reply progress: how far each reply's speech has reached audio output and how the reply ended.
+- `admission.py` owns admission: which input enters the conversation and which request may still speak.
 - `speech.py` owns speech adapters.
 - `wakeword.py` owns the isolated local wake detector, pinned asset admission and bounded worker protocol.
 - `asr_worker.py` is the speech recognition process boundary.

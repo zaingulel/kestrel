@@ -6476,7 +6476,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(timer.done())
             self.assertTrue(analyzer._audio_buffer)
             self.assertEqual(await service.submit('stop'), 'accepted')
-            # A barrier at the public LLM admission callback observes the forced stop/reset first.
+            # A barrier at the Admission's typed take observes the forced stop/reset first.
             admitted = asyncio.Event()
             original_admitted = manager.admission.take_typed
 
