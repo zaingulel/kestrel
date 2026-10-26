@@ -29,7 +29,6 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
@@ -5016,38 +5015,30 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await super().process_frame(frame, direction)
                         await self.push_frame(frame, direction)
 
-                class Output(BaseOutputTransport):
+                class Output(speech.LaptopOutput):
                     def __init__(self):
                         params = TransportParams(audio_out_enabled=True, audio_out_sample_rate=48000)
-                        super().__init__(params)
-                        self.output_buffer = reply_progress.OutputBuffer.for_params(params)
-                        self.write_gate = asyncio.Event()
-                        self.write_gate.set()
-                        self.reply_progress = None
+                        super().__init__(transport, params)
 
-                    async def write_transport_frame(self, frame):
-                        if isinstance(frame, TTSStartedFrame):
-                            self.reply_progress = getattr(frame, "reply_progress", None)
-                        await super().write_transport_frame(frame)
-
-                    async def start(self, frame):
-                        await super().start(frame)
-                        await self.set_transport_ready(frame)
-
-                    async def write_audio_frame(self, frame):
-                        await self.write_gate.wait()
-                        record = self.reply_progress if hasattr(self, 'reply_progress') else None
+                    async def _write_audio_locked(self, frame, record):
                         written = active() and not transport.closed and (admission is None or
                                   (record is not None and admission.may_speak(record.token)))
                         if written:
                             self.audio_written += 1
-                        else:
-                            self.output_buffer.write_failed(frame)
                         return written
 
-                transport = Mock(capture=None, failure=None, closed=False, admission=admission)
+                transport = Mock(capture=None, playback=None, failure=None, closed=False, admission=admission)
                 transport.input.return_value = Input()
                 transport.output.return_value = Output()
+
+                async def open_playback():
+                    transport.playback = object()
+
+                async def discard_playback():
+                    transport.playback = None
+
+                transport._open_playback = AsyncMock(side_effect=open_playback)
+                transport._discard_playback = AsyncMock(side_effect=discard_playback)
 
                 async def open_audio():
                     transport.llm = controller.llm
@@ -5055,6 +5046,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 async def close_audio():
                     transport.closed = True
                     transport.output().write_gate.set()
+                    await transport.output()._observe_acknowledgement_tasks()
+                    await transport._discard_playback()
 
                 transport.open = AsyncMock(side_effect=open_audio)
                 transport.close = AsyncMock(side_effect=close_audio)

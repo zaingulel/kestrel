@@ -46,7 +46,8 @@ from admission import Admission
 from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
-from reply_progress import AnnouncementMarkFrame, ConversationSynthesisFailedFrame, ReplyProgress, SpeechAdvisoryFrame, token_of
+from reply_progress import (AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
+                            ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
 from speech import (
@@ -1686,8 +1687,9 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
     async def on_output_frame(processor, frame):
         # The transport pushes audio only after its write succeeded.
         if isinstance(frame, OutputAudioRawFrame):
-            llm.conversation_audio(output.output_buffer.written(frame))
-        elif isinstance(frame, BotStoppedSpeakingFrame):
+            prepared = getattr(frame, 'prepared_credit', None)
+            llm.conversation_audio([prepared] if prepared is not None else output.output_buffer.written(frame))
+        elif isinstance(frame, BotStoppedSpeakingFrame) and not isinstance(frame, AcknowledgementStoppedFrame):
             output.output_buffer.stopped_speaking(frame)
         if voice.generation_cleanup_failed:
             llm.indicator_voice_failed()

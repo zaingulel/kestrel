@@ -24,7 +24,7 @@ from loguru import logger
 from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
 from pipecat.frames.frames import (
-    CancelFrame, DataFrame, EndFrame, Frame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
+    BotStartedSpeakingFrame, CancelFrame, DataFrame, EndFrame, Frame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
     TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
@@ -39,7 +39,8 @@ from pipecat.transports.base_transport import TransportParams
 
 from hermes_worker import DELIVERY_LABELS
 from reply_progress import (
-    REPLY_MESSAGES, ConversationSynthesisFailedFrame, OutputBuffer, SpeechAdvisoryFrame, token_of,
+    REPLY_MESSAGES, AcknowledgementDueFrame, AcknowledgementStoppedFrame, ConversationSynthesisFailedFrame,
+    OutputBuffer, ReplyProgress, SpeechAdvisoryFrame, token_of,
 )
 
 _ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
@@ -635,6 +636,9 @@ class LaptopInput(BaseInputTransport):
         await super().stop(frame)
 
 
+ACKNOWLEDGEMENT_DELAY = 2.0
+
+
 class LaptopOutput(BaseOutputTransport):
     def __init__(self, audio, params):
         super().__init__(params)
@@ -645,13 +649,134 @@ class LaptopOutput(BaseOutputTransport):
         self.write_gate.set()
         self.output_buffer = OutputBuffer.for_params(params)
         self.reply_progress = None
+        self.prepared_acknowledgements = ()
+        self.acknowledgement_record = None
+        self.acknowledgement_deadline = None
+        self.acknowledgement_timer = None
+        self.acknowledgement_tasks = set()
+        self.acknowledgement_index = 0
+
+    def arm_acknowledgement(self, record: ReplyProgress) -> None:
+        self.cancel_acknowledgement()
+        self.acknowledgement_record = record
+        previous_finish = record.on_finish
+
+        def finished(closed):
+            self.cancel_acknowledgement(closed)
+            if previous_finish is not None:
+                previous_finish(closed)
+
+        record.on_finish = finished
+        self.acknowledgement_deadline = monotonic() + ACKNOWLEDGEMENT_DELAY
+        self.acknowledgement_timer = asyncio.get_running_loop().call_later(
+            ACKNOWLEDGEMENT_DELAY, self._acknowledgement_due, record,
+        )
+
+    def cancel_acknowledgement(self, record: ReplyProgress | None = None) -> None:
+        if record is not None and self.acknowledgement_record is not record:
+            return
+        if self.acknowledgement_timer is not None:
+            self.acknowledgement_timer.cancel()
+            self.acknowledgement_timer = None
+        self.acknowledgement_record = None
+        self.acknowledgement_deadline = None
+        for task in self.acknowledgement_tasks:
+            task.cancel()
+
+    async def _observe_acknowledgement_tasks(self):
+        self.cancel_acknowledgement()
+        await asyncio.gather(*self.acknowledgement_tasks, return_exceptions=True)
+
+    def _acknowledgement_due(self, record):
+        if self.acknowledgement_record is not record:
+            return
+        if record.closed or not self._allowed(record):
+            self.cancel_acknowledgement(record)
+            return
+        task = asyncio.create_task(self.queue_frame(AcknowledgementDueFrame(record)))
+        self.acknowledgement_tasks.add(task)
+
+        def observed(done):
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                record.output_write_failed()
+                self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+            finally:
+                self.acknowledgement_tasks.discard(done)
+
+        task.add_done_callback(observed)
+
+    def _allowed(self, record):
+        return (not self.audio.closed and not self.audio.failure and self.write_gate.is_set()
+                and (record is None or not record.closed)
+                and (self.audio.admission is None or
+                     (record is not None and self.audio.admission.may_speak(record.token))))
+
+    async def _play_acknowledgement_locked(self, record, *, answer_pending: bool) -> bool:
+        if self.acknowledgement_record is not record or not self._allowed(record) or record.closed:
+            return False
+        clip = self.prepared_acknowledgements[self.acknowledgement_index]
+        section = record.open_section('neutral')
+        start = TTSStartedFrame()
+        record.stream_frame(start, section)
+        success = False
+        marker_started = False
+        try:
+            await self.push_frame(start)
+            if not answer_pending:
+                marker_started = True
+                await self.broadcast_frame(BotStartedSpeakingFrame)
+            for offset in range(0, len(clip.pcm), self.audio_chunk_size):
+                if self.acknowledgement_record is not record or record.closed or not self._allowed(record):
+                    return False
+                frame = TTSAudioRawFrame(clip.pcm[offset:offset + self.audio_chunk_size], 48000, 1)
+                frame.reply_progress = record
+                if offset == 0:
+                    record.starts_text(frame, clip.text)
+                record.stream_frame(frame, section)
+                frame.prepared_credit = record.source_range(frame)
+                try:
+                    written = await asyncio.wait_for(
+                        self._write_audio_locked(frame, record), self._params.audio_out_write_timeout_secs,
+                    )
+                except TimeoutError as error:
+                    await self.push_error('Prepared acknowledgement audio write timed out', exception=error,
+                                          force_treat_as_permanent=True)
+                    self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+                    return False
+                if not written or record.closed or not self._allowed(record):
+                    return False
+                if offset == 0:
+                    self.acknowledgement_index = (self.acknowledgement_index + 1) % len(self.prepared_acknowledgements)
+                await self.push_frame(frame)
+            text = TTSTextFrame(clip.text, aggregated_by='sentence')
+            text.append_to_context = False
+            record.stream_frame(text, section)
+            await self.push_frame(text)
+            stop = TTSStoppedFrame()
+            record.stream_frame(stop, section)
+            await self.push_frame(stop)
+            success = True
+            return True
+        finally:
+            if not success:
+                record.output_write_failed()
+            self.cancel_acknowledgement(record)
+            if marker_started:
+                await self.broadcast_frame(AcknowledgementStoppedFrame, reply_progress=record)
 
     async def start(self, frame):
         await super().start(frame)
         await self.set_transport_ready(frame)
 
     async def process_frame(self, frame, direction):
+        if isinstance(frame, SpeechAdvisoryFrame):
+            self.cancel_acknowledgement()
         if isinstance(frame, InterruptionFrame):
+            self.cancel_acknowledgement()
             self.write_gate.clear()
             try:
                 # Native sender cancellation discards its queued audio and cancels the pacing wait.
@@ -677,61 +802,96 @@ class LaptopOutput(BaseOutputTransport):
         await super().push_frame(frame, direction)
 
     async def write_transport_frame(self, frame):
+        if isinstance(frame, AcknowledgementDueFrame):
+            record = frame.reply_progress
+            await self.write_gate.wait()
+            async with self.write_lock:
+                if self.acknowledgement_record is record and not record.closed and self._allowed(record):
+                    if self.audio.playback is None:
+                        try:
+                            await self.audio._open_playback()
+                        except (OSError, RuntimeError):
+                            record.output_write_failed()
+                            self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+                            return
+                    if self._allowed(record):
+                        await self._play_acknowledgement_locked(record, answer_pending=False)
+            return
         bound = self.reply_progress
         if isinstance(frame, TTSStartedFrame):
             self.reply_progress = getattr(frame, 'reply_progress', None)
         elif isinstance(frame, LLMFullResponseEndFrame) and bound is not None and token_of(frame) is bound.token:
+            self.cancel_acknowledgement(bound)
             self.reply_progress = None
         await super().write_transport_frame(frame)
 
     async def cancel(self, frame):
+        await self._observe_acknowledgement_tasks()
         try:
             await super().cancel(frame)
         finally:
             self.reply_progress = None
 
     async def stop(self, frame):
+        await self._observe_acknowledgement_tasks()
         try:
             await super().stop(frame)
         finally:
             self.reply_progress = None
 
+    async def cleanup(self):
+        await self._observe_acknowledgement_tasks()
+        await super().cleanup()
+
     async def write_audio_frame(self, frame) -> bool:
         record = self.reply_progress
         success = False
-
-        def allowed():
-            return self.audio.admission is None or (record is not None and self.audio.admission.may_speak(record.token))
-
         try:
             await self.write_gate.wait()
             async with self.write_lock:
-                if self.audio.closed or self.audio.failure or not allowed() or not self.write_gate.is_set():
+                if not self._allowed(record):
                     return False
-                try:
-                    if self.audio.playback is None:
+                if self.audio.playback is None:
+                    try:
                         await self.audio._open_playback()
-                    duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
-                    deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
-                    if not allowed():
+                    except (OSError, RuntimeError):
+                        self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
                         return False
-                    self.audio.playback.stdin.write(frame.audio)
-                    await self.audio.playback.stdin.drain()
-                    now = monotonic()
-                    if deadline <= now:
-                        deadline = now + duration
-                    await sleep(deadline - now)
-                    self.playback_deadline = deadline
-                    success = True
-                    return True
-                except (OSError, RuntimeError):
-                    self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+                if not self._allowed(record):
                     return False
+                if frame.audio and record is not None and self.acknowledgement_record is record:
+                    if monotonic() >= self.acknowledgement_deadline:
+                        if not await self._play_acknowledgement_locked(record, answer_pending=True):
+                            return False
+                    else:
+                        self.cancel_acknowledgement(record)
+                success = await self._write_audio_locked(frame, record)
+                return success
         finally:
             if not success:
+                self.cancel_acknowledgement(record)
                 if record is not None:
                     record.output_write_failed()
                 self.output_buffer.write_failed(frame)
+
+    async def _write_audio_locked(self, frame, record) -> bool:
+        try:
+            duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+            deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
+            if (not self._allowed(record) or
+                    (getattr(frame, 'prepared_credit', None) is not None and self.acknowledgement_record is not record)):
+                return False
+            self.audio.playback.stdin.write(frame.audio)
+            await self.audio.playback.stdin.drain()
+            now = monotonic()
+            if deadline <= now:
+                deadline = now + duration
+            await sleep(deadline - now)
+            self.playback_deadline = deadline
+            return True
+        except (OSError, RuntimeError):
+            self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+            return False
 
 
 class LaptopAudioTransport:
@@ -771,6 +931,7 @@ class LaptopAudioTransport:
         return self._output
 
     def fail(self, reason: str) -> None:
+        self._output.cancel_acknowledgement()
         if self.failure is None and not self.closed:
             self.failure = reason
             self.verified = False
@@ -909,6 +1070,7 @@ class LaptopAudioTransport:
         await self._reap_audio(process)
 
     async def close(self):
+        self._output.cancel_acknowledgement()
         if self.close_task is None:
             self.closed = True
             self.verified = False
@@ -923,6 +1085,7 @@ class LaptopAudioTransport:
             raise
 
     async def _close(self):
+        await self._output._observe_acknowledgement_tasks()
         if self.reader is not None:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from pipecat.frames.frames import (
-    DataFrame, InterruptionFrame, LLMAssistantPushAggregationFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
+    BotStoppedSpeakingFrame, DataFrame, InterruptionFrame, LLMAssistantPushAggregationFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
     LLMTextFrame, OutputAudioRawFrame, StartFrame, TTSAudioRawFrame, TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame,
     TTSTextFrame,
 )
@@ -22,6 +22,17 @@ class AnnouncementMarkFrame(DataFrame):
 
 
 @dataclass
+class AcknowledgementDueFrame(DataFrame):
+    reply_progress: 'ReplyProgress'
+
+
+@dataclass
+class AcknowledgementStoppedFrame(BotStoppedSpeakingFrame):
+    """Prepared speech stops without discarding the sender's pending answer tail."""
+    reply_progress: 'ReplyProgress'
+
+
+@dataclass
 class ConversationSynthesisFailedFrame(DataFrame):
     reply_progress: 'ReplyProgress'
     section: 'ReplySection'
@@ -29,7 +40,7 @@ class ConversationSynthesisFailedFrame(DataFrame):
 
 # Every non-audio frame of a reply carries its record as `frame.reply_progress`; a frame of no reply carries None.
 REPLY_MESSAGES = (LLMFullResponseStartFrame, LLMTextFrame, SpeechAdvisoryFrame, TTSSpeakFrame,
-                  AnnouncementMarkFrame, InterruptionFrame, TTSStartedFrame, TTSTextFrame, TTSStoppedFrame,
+                  AnnouncementMarkFrame, AcknowledgementDueFrame, AcknowledgementStoppedFrame, InterruptionFrame, TTSStartedFrame, TTSTextFrame, TTSStoppedFrame,
                   LLMFullResponseEndFrame, LLMAssistantPushAggregationFrame, ConversationSynthesisFailedFrame)
 
 
@@ -57,10 +68,11 @@ class ReplySection:
     source_valid: bool = True
     output_bytes: int = 0
     output_stopped: bool = False
+    sentence_audible: bool = False
 
     def skip_text(self) -> None:
         self.previous_text_end = self.source_bytes
-        self.reply._sentence_audible = False
+        self.sentence_audible = False
 
 
 class ReplyProgress:
@@ -83,7 +95,6 @@ class ReplyProgress:
         self.delivered = False
         self.closed = False
         self.completed = False
-        self._sentence_audible = False
         self._streamed = set()
         self._text_starts = {}
         self._sources = {}
@@ -129,15 +140,15 @@ class ReplyProgress:
             section.source_bytes += len(frame.audio)
             self._sources[frame.id] = (section, start, section.source_bytes)
             if frame.audio:
-                self._sentence_audible = True
+                section.sentence_audible = True
             return
         frame.reply_progress = self
         self._frame_sections[frame.id] = section
         if isinstance(frame, TTSTextFrame) and frame.text.strip():
             self._text_spans[frame.id] = TextSpan(section, section.previous_text_end, section.source_bytes,
-                                                  section.source_valid, self._sentence_audible)
+                                                  section.source_valid, section.sentence_audible)
             section.previous_text_end = section.source_bytes
-            self._sentence_audible = False
+            section.sentence_audible = False
 
     def section_of(self, frame) -> ReplySection | None:
         return self._frame_sections.get(frame.id)

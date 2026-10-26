@@ -2340,6 +2340,288 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, kind):
                     return frame
 
+    async def test_acknowledgement_deadline_orders_native_bytes(self):
+        now = 100.0
+        timers = []
+        playback = self.child(3300)
+        admission = Admission(voice=True, output_switching=lambda: False)
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=admission)
+        self.addAsyncCleanup(transport.close)
+        output = transport.output()
+        output.prepared_acknowledgements = (
+            speech.PreparedAcknowledgement('One moment.', b'K' * 3840),
+            speech.PreparedAcknowledgement('Just a moment.', b'L' * 3840),
+            speech.PreparedAcknowledgement('Give me a moment.', b'M' * 3840),
+        )
+        loop = asyncio.get_running_loop()
+        call_later = loop.call_later
+
+        def timer(delay, callback, *args, **kwargs):
+            if delay == 2.0:
+                handle = Mock()
+                timers.append((callback, args, handle))
+                return handle
+            return call_later(delay, callback, *args, **kwargs)
+
+        async def paced(duration):
+            nonlocal now
+            now += duration
+
+        async def opening():
+            nonlocal now
+            if opening_late:
+                now += 2.0
+                callback, args, _ = timers[-1]
+                callback(*args)
+            transport.playback = playback
+
+        opening_late = False
+        with (patch.object(loop, 'call_later', timer), patch.object(speech, 'monotonic', lambda: now),
+              patch.object(speech, 'sleep', paced), patch.object(transport, '_open_playback', opening)):
+            worker, observed = await self.pipeline(output)
+            for case, expected in (('early', [b'A' * 3840]),
+                                   ('metadata', [b'K' * 3840, b'A' * 3840]),
+                                   ('opening', [b'L' * 3840, b'A' * 3840])):
+                with self.subTest(case=case):
+                    token, _ = admission.accept_spoken()
+                    record = reply_record(token)
+                    output.arm_acknowledgement(record)
+                    callback, args, handle = timers[-1]
+                    start = TTSStartedFrame()
+                    start.reply_progress = record
+                    await worker.queue_frame(start)
+                    await self.next_frame(observed, TTSStartedFrame)
+                    if case == 'metadata':
+                        await worker.queue_frame(LLMTextFrame('Answer text is not audio.'))
+                        await self.next_frame(observed, LLMTextFrame)
+                        now += 2.0
+                        callback(*args)
+                        acknowledged = await self.next_frame(observed, TTSTextFrame)
+                        self.assertEqual(acknowledged.text, 'One moment.')
+                        self.assertFalse(acknowledged.append_to_context)
+                    if case == 'opening':
+                        transport.playback = None
+                        opening_late = True
+                    before = playback.stdin.write.call_count - (1 if case == 'metadata' else 0)
+                    await worker.queue_frames([TTSAudioRawFrame(b'A' * 3840, 48000, 1),
+                                               TTSTextFrame('Answer.', aggregated_by='sentence')])
+                    while (await self.next_frame(observed, TTSTextFrame)).text != 'Answer.':
+                        pass
+                    self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list[before:]], expected)
+                    handle.cancel.assert_called()
+                    callback(*args)
+                    mark = reply_progress.AnnouncementMarkFrame()
+                    await output.queue_frame(mark)
+                    self.assertIs(await self.next_frame(observed, reply_progress.AnnouncementMarkFrame), mark)
+                    self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list[before:]], expected)
+                    await worker.queue_frame(TTSStoppedFrame())
+                    await self.next_frame(observed, TTSStoppedFrame)
+                    end = LLMFullResponseEndFrame()
+                    end.reply_progress = record
+                    await worker.queue_frame(end)
+                    await self.next_frame(observed, LLMFullResponseEndFrame)
+            await worker.cancel()
+
+    async def test_acknowledgement_revocation_discards_unwritten_audio(self):
+        now = 100.0
+        waiting = asyncio.Queue()
+        release = asyncio.Event()
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=None)
+        self.addAsyncCleanup(transport.close)
+        output = transport.output()
+        output.prepared_acknowledgements = (
+            speech.PreparedAcknowledgement('One moment.', b'K' * 7680),
+            speech.PreparedAcknowledgement('Just a moment.', b'K' * 7680),
+            speech.PreparedAcknowledgement('Give me a moment.', b'K' * 7680),
+        )
+        pushed = []
+
+        @output.event_handler('on_after_push_frame')
+        async def credited(processor, frame):
+            if isinstance(frame, TTSAudioRawFrame):
+                pushed.append(frame)
+            elif isinstance(frame, TTSTextFrame) and case == 'answer_revoked':
+                admission.close()
+
+        async def paced(duration):
+            nonlocal now
+            waiting.put_nowait(duration)
+            await release.wait()
+            now += duration
+
+        with patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced):
+            worker, observed = await self.pipeline(output)
+            for case in ('closed', 'superseded', 'interrupted', 'failed', 'finished', 'answer_revoked'):
+                with self.subTest(case=case):
+                    while not waiting.empty():
+                        waiting.get_nowait()
+                    release.clear()
+                    admission = Admission(voice=True, output_switching=lambda: False)
+                    transport.admission = admission
+                    playback = self.child(3300)
+                    transport.playback = playback
+                    token, _ = admission.accept_spoken()
+                    record = reply_record(token)
+                    previous_finish = Mock()
+                    record.on_finish = previous_finish
+                    output.arm_acknowledgement(record)
+                    handle = output.acknowledgement_timer
+                    if case == 'answer_revoked':
+                        now += 2.0
+                        release.set()
+                        start = TTSStartedFrame()
+                        start.reply_progress = record
+                        await output.queue_frame(start)
+                        await output.queue_frame(TTSAudioRawFrame(b'A' * 3840, 48000, 1))
+                    elif case == 'finished':
+                        record.finish(interrupted=True)
+                        self.assertTrue(handle.cancelled())
+                        previous_finish.assert_called_once_with(record)
+                    else:
+                        now += 2.0
+                        output._acknowledgement_due(record)
+                        await asyncio.wait_for(waiting.get(), 5)
+                        self.assertEqual(playback.stdin.write.call_args_list, [((b'K' * 3840,), {})])
+                        if case == 'closed':
+                            admission.close()
+                        elif case == 'superseded':
+                            admission.accept_spoken()
+                        elif case == 'interrupted':
+                            await worker.queue_frame(InterruptionFrame())
+                            await self.next_frame(observed, InterruptionFrame)
+                            # A marker barrier below observes the native sender's completed cancellation.
+                        else:
+                            playback.stdin.write.side_effect = OSError('Controlled playback failure')
+                        release.set()
+                    barrier = reply_progress.AnnouncementMarkFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await self.next_frame(observed, reply_progress.AnnouncementMarkFrame), barrier)
+                    self.assertTrue(handle.cancelled())
+                    self.assertIsNone(output.acknowledgement_record)
+                    self.assertFalse(output.acknowledgement_tasks)
+                    expected_index = 0 if case in ('closed', 'superseded', 'interrupted') else (2 if case == 'answer_revoked' else 1)
+                    self.assertEqual(output.acknowledgement_index, expected_index)
+                    if case == 'answer_revoked':
+                        self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list],
+                                         [b'K' * 3840, b'K' * 3840])
+                        self.assertTrue(record.output_failed())
+                    elif case == 'failed':
+                        self.assertEqual(transport.failure, speech.LAPTOP_PLAYBACK_FAILURE)
+                        self.assertTrue(record.output_failed())
+                        self.assertEqual(len(pushed), 1, 'Only the completed first chunk receives output credit')
+                        transport.failure = None
+                    elif case == 'interrupted':
+                        self.assertIsNotNone(playback.returncode)
+                        playback.stdin.close.assert_called_once_with()
+                        playback.wait.assert_awaited()
+                    if case in ('closed', 'superseded', 'interrupted'):
+                        self.assertEqual(playback.stdin.write.call_args_list, [((b'K' * 3840,), {})])
+                        self.assertEqual(pushed, [])
+                    before = playback.stdin.write.call_count
+                    output._acknowledgement_due(record)
+                    await output.queue_frame(barrier)
+                    await self.next_frame(observed, reply_progress.AnnouncementMarkFrame)
+                    self.assertEqual(playback.stdin.write.call_count, before)
+                    if transport.playback is not None:
+                        await transport._discard_playback()
+                    pushed.clear()
+            await worker.cancel()
+            self.assertFalse(output.acknowledgement_tasks)
+
+    async def test_acknowledgement_credit_does_not_consume_answer_ranges(self):
+        import bot
+        from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
+
+        now = 100.0
+        ready = asyncio.Event()
+        observed = asyncio.Queue()
+        feed = bot.ConversationFeed()
+        admission = Admission(voice=True, output_switching=lambda: False)
+        token, _ = admission.accept_spoken()
+        playback = self.child(3300)
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=admission)
+        self.addAsyncCleanup(transport.close)
+        transport.playback = playback
+        output = transport.output()
+        output.prepared_acknowledgements = (speech.PreparedAcknowledgement('One moment.', b'K' * 3840),)
+        llm = bot.HermesLLMService(Mock(), local_actions=Mock(), admission=admission,
+                                   session_ready=AsyncMock(), dismiss=AsyncMock(), conversation=feed)
+        llm.begin_reply(token)
+        record = llm.current_reply()
+        answer_section = record.open_section('neutral')
+
+        class Forward(FrameProcessor):
+            generation_cleanup_failed = False
+
+            async def process_frame(self, frame, direction):
+                await super().process_frame(frame, direction)
+                await self.push_frame(frame, direction)
+
+        def completed(stage, frame):
+            if stage == 'output' and isinstance(frame, StartFrame):
+                ready.set()
+
+        @output.event_handler('on_after_push_frame')
+        async def pushed(processor, frame):
+            observed.put_nowait(frame)
+
+        async def paced(duration):
+            nonlocal now
+            now += duration
+
+        params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
+        task = None
+
+        async def close():
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.addAsyncCleanup(close)
+        with patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced):
+            task = asyncio.create_task(bot.run_conversation(
+                Forward(), Forward(), llm=llm, transport=transport, user_params=params,
+                on_frame_completed=completed, typed_origin=Mock(return_value=None),
+            ))
+            await asyncio.wait_for(ready.wait(), 5)
+            output.arm_acknowledgement(record)
+            start = TTSStartedFrame()
+            record.stream_frame(start, answer_section)
+            answer = TTSAudioRawFrame(b'A' * 960, 48000, 1)
+            record.starts_text(answer, 'Answer.')
+            record.stream_frame(answer, answer_section)
+            mark = reply_progress.AnnouncementMarkFrame()
+            await output.queue_frame(start)
+            await output.queue_frame(answer)
+            await output.queue_frame(mark)
+            await self.next_frame(observed, reply_progress.AnnouncementMarkFrame)
+            playback.stdin.write.assert_not_called()
+            now += 2.0
+            output._acknowledgement_due(record)
+            self.assertEqual((await self.next_frame(observed, TTSTextFrame)).text, 'One moment.')
+            await self.next_frame(observed, reply_progress.AcknowledgementStoppedFrame)
+            self.assertEqual(feed.turns[-1]['text'], 'One moment.')
+            text = TTSTextFrame('Answer.', aggregated_by='sentence')
+            record.stream_frame(text, answer_section)
+            stop = TTSStoppedFrame()
+            record.stream_frame(stop, answer_section)
+            end = LLMFullResponseEndFrame()
+            end.reply_progress = record
+            for frame in (text, stop, end):
+                await output.queue_frame(frame)
+            await self.next_frame(observed, LLMFullResponseEndFrame)
+            self.assertTrue(record.span_of(text).audible, 'Prepared text cannot clear pending answer audio evidence')
+            self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list],
+                             [b'K' * 3840, b'A' * 960 + bytes(2880)])
+            self.assertEqual(answer_section.output_bytes, 960)
+            self.assertEqual(record.sections[1].output_bytes, 3840)
+            self.assertFalse(record.output_failed())
+            self.assertTrue(record.completed)
+            self.assertEqual(feed.turns[-1], {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'complete'})
+            self.assertFalse(output.output_buffer.misaligned)
+            self.assertFalse(output.acknowledgement_tasks)
+            await close()
+
     async def test_capture_refresh_requires_fresh_audio_and_owned_links(self):
         for case in ('fresh', 'no_fresh_audio', 'changed_source', 'foreign_reference', 'cancelled', 'failed_reap', 'failed_pump', 'graph_cleanup_failure', 'graph_query_recovers'):
             with self.subTest(case=case):
