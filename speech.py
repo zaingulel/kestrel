@@ -667,12 +667,12 @@ class LaptopOutput(BaseOutputTransport):
             await super().process_frame(frame, direction)
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
-        if direction == FrameDirection.DOWNSTREAM and self.audio.reply_admitted is not None:
+        if direction == FrameDirection.DOWNSTREAM and self.audio.admission is not None:
             # Audio and frames of no reply play for the reply this output has bound.
             record = getattr(frame, 'reply_progress', None) or self.reply_progress
             token = record.token if record is not None else None
             if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
-                                  LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.audio.reply_admitted(token):
+                                  LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.audio.admission.may_speak(token):
                 return
         await super().push_frame(frame, direction)
 
@@ -701,8 +701,7 @@ class LaptopOutput(BaseOutputTransport):
         success = False
 
         def allowed():
-            return self.audio.admitted() and (self.audio.reply_admitted is None or
-                   (record is not None and self.audio.reply_admitted(record.token)))
+            return self.audio.admission is None or (record is not None and self.audio.admission.may_speak(record.token))
 
         try:
             await self.write_gate.wait()
@@ -736,13 +735,11 @@ class LaptopOutput(BaseOutputTransport):
 
 
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None, capture_pcm=None):
+    def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
         self.echo_removal = echo_removal
-        self.admitted = admitted
-        self.input_admitted = input_admitted or admitted
+        self.admission = admission
         self.capture_pcm = capture_pcm
         self.capture_enabled = capture_enabled
-        self.reply_admitted = reply_admitted
         self.on_stopped = on_stopped
         self.failure: str | None = None
         self.capture = None
@@ -762,6 +759,10 @@ class LaptopAudioTransport:
         async def on_output_error(processor, frame):
             if not processor.is_usable:
                 self.fail(LAPTOP_PLAYBACK_FAILURE)
+
+    def input_admitted(self):
+        # Capture handed to capture_pcm never enters the conversation.
+        return self.capture_pcm is None and (self.admission is None or self.admission.admits_microphone())
 
     def input(self):
         return self._input
@@ -1021,14 +1022,13 @@ class NemotronRecognizer:
 
 
 class NemotronSTT(SegmentedSTTService):
-    def __init__(self, recognizer: NemotronRecognizer, *, admitted, input_epoch=None):
+    def __init__(self, recognizer: NemotronRecognizer, *, admission):
         super().__init__(
             sample_rate=16000,
             settings=STTSettings(model="nemotron-speech-streaming-en-0.6b", language=None),
         )
         self.recognizer = recognizer
-        self.admitted = admitted
-        self.input_epoch = input_epoch or (lambda: 0)
+        self.admission = admission
         self.awaiting_fresh_vad = False
 
     async def discard_pending(self):
@@ -1050,7 +1050,7 @@ class NemotronSTT(SegmentedSTTService):
             await super().process_audio_frame(frame, direction)
 
     async def process_frame(self, frame, direction):
-        if not self.admitted() and isinstance(frame, (
+        if not self.admission.admits_microphone() and isinstance(frame, (
             DataFrame, InputAudioRawFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
         )):
             return
@@ -1061,20 +1061,21 @@ class NemotronSTT(SegmentedSTTService):
         await super().process_frame(frame, direction)
 
     async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
-        if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admitted():
+        if isinstance(frame, (DataFrame, InputAudioRawFrame)) and not self.admission.admits_microphone():
             return
-        if isinstance(frame, TranscriptionFrame) and getattr(frame, 'input_epoch', None) != self.input_epoch():
+        if isinstance(frame, TranscriptionFrame) and not self.admission.is_current(getattr(frame, 'input_mark', None)):
             return
         await super().push_frame(frame, direction)
 
     async def run_stt(self, audio):
-        if not self.admitted():
+        if not self.admission.admits_microphone():
             return
-        epoch = self.input_epoch()
-        text = await self.recognizer.transcribe(audio, admitted=lambda: self.admitted() and epoch == self.input_epoch())
-        if self.admitted() and epoch == self.input_epoch() and text:
+        mark = self.admission.input_mark()
+        text = await self.recognizer.transcribe(
+            audio, admitted=lambda: self.admission.admits_microphone() and self.admission.is_current(mark))
+        if self.admission.admits_microphone() and self.admission.is_current(mark) and text:
             frame = TranscriptionFrame(text, "", time_now_iso8601(), finalized=True)
-            frame.input_epoch = epoch
+            frame.input_mark = mark
             yield frame
 
 
@@ -1845,14 +1846,13 @@ class SpokenReplyText:
 
 
 class ConversationTTS(TTSService):
-    def __init__(self, model, *, settings: TTSSettings, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+    def __init__(self, model, *, settings: TTSSettings, generation_lock=None, admission=None):
         super().__init__(
             sample_rate=48000, push_start_frame=True, push_stop_frames=True,
             settings=settings,
         )
         self.model = model
-        self.admitted = admitted
-        self.reply_admitted = reply_admitted
+        self.admission = admission
         self._generation_lock = generation_lock if generation_lock is not None else asyncio.Lock()
         self.generation_cleanup_failed = False
         self._spoken_reply = SpokenReplyText()
@@ -1900,10 +1900,10 @@ class ConversationTTS(TTSService):
                 section.reply.stream_frame(frame, section)
             if isinstance(frame, REPLY_MESSAGES) and not hasattr(frame, 'reply_progress'):
                 frame.reply_progress = self._reply
-            if self.reply_admitted is not None:
+            if self.admission is not None:
                 token = section.reply.token if section is not None else token_of(frame)
                 if isinstance(frame, (TTSAudioRawFrame, TTSTextFrame, TTSStartedFrame, TTSStoppedFrame,
-                                      LLMTextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.reply_admitted(token):
+                                      LLMTextFrame, LLMFullResponseStartFrame, LLMFullResponseEndFrame)) and not self.admission.may_speak(token):
                     return
         await super().push_frame(frame, direction)
 
@@ -1952,8 +1952,7 @@ class ConversationTTS(TTSService):
         delivery = section.delivery if section is not None else 'neutral'
 
         def allowed():
-            return self.admitted() and (self.reply_admitted is None or
-                   (section is not None and self.reply_admitted(section.reply.token)))
+            return self.admission is None or (section is not None and self.admission.may_speak(section.reply.token))
 
         text_started = False
         try:
@@ -2031,9 +2030,9 @@ class ConversationTTS(TTSService):
 
 
 class VoxCPMTTS(ConversationTTS):
-    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+    def __init__(self, model, preset: VoicePreset, *, generation_lock=None, admission=None):
         super().__init__(model, settings=TTSSettings(model="VoxCPM2", voice=None, language=None),
-                         generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
+                         generation_lock=generation_lock, admission=admission)
         self.preset = preset
 
     def _generate_chunks(self, text: str, *, delivery: str):
@@ -2058,9 +2057,9 @@ class VoxCPMTTS(ConversationTTS):
 
 
 class PhononTTS(ConversationTTS):
-    def __init__(self, model, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
+    def __init__(self, model, *, generation_lock=None, admission=None):
         super().__init__(model, settings=TTSSettings(model="Phonon 31M q8", voice=PHONON_VOICE, language=None),
-                         generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
+                         generation_lock=generation_lock, admission=admission)
 
     def _generate_chunks(self, text: str, *, delivery: str):
         if delivery not in DELIVERY_LABELS:
