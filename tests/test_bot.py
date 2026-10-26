@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, call, create_autospec, patch
 
 import numpy as np
 from loguru import logger
@@ -3561,7 +3561,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.input.return_value = Forward()
                 output = Forward(output=True)
                 output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
-                output.cancel_acknowledgement = Mock(spec=speech.LaptopOutput.cancel_acknowledgement)
+                output.cancel_acknowledgement = create_autospec(speech.LaptopOutput, instance=True).cancel_acknowledgement
                 self.audio.output.return_value = output
                 native_conversation = bot.run_conversation
 
