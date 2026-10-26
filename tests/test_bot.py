@@ -6111,16 +6111,18 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             brain, through_service=True, activate=False, native_audio=True,
         )
         service = handle.service
-        self.assertEqual(await service.submit('Typed A'), 'accepted')
-        transport = await asyncio.wait_for(service.started.get(), 5)
-        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
-        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
-        self.assertIsNone(transport.capture)
-        self.assertFalse(service.manager.desired_active)
-        self.assertEqual(service.manager.status._state, 'inactive')
-        self.assertEqual(await service.submit('Typed B'), 'accepted')
-        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
-        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        with patch.object(service.manager.status, 'set_state', wraps=service.manager.status.set_state) as set_state:
+            self.assertEqual(await service.submit('Typed A'), 'accepted')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
+            self.assertIsNone(transport.capture)
+            self.assertFalse(service.manager.desired_active)
+            self.assertEqual(service.manager.status._state, 'inactive')
+            self.assertEqual(await service.submit('Typed B'), 'accepted')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        self.assertEqual({item.args[0] for item in set_state.call_args_list}, {'inactive'})
         self.assertEqual(len(service.sessions), 1)
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'Typed A'}, {'role': 'assistant', 'content': 'First.'},
