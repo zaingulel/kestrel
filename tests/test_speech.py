@@ -2342,6 +2342,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_acknowledgement_deadline_orders_native_bytes(self):
         now = 100.0
+        acknowledgement_now = 100.0
         timers = []
         playback = self.child(3300)
         admission = Admission(voice=True, output_switching=lambda: False)
@@ -2357,7 +2358,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         call_later = loop.call_later
 
         def timer(delay, callback, *args, **kwargs):
-            if delay == 2.0:
+            if (getattr(callback, '__self__', None) is output
+                    and getattr(callback, '__func__', None) is speech.LaptopOutput._acknowledgement_due):
                 handle = Mock()
                 timers.append((callback, args, handle))
                 return handle
@@ -2368,15 +2370,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             now += duration
 
         async def opening():
-            nonlocal now
+            nonlocal acknowledgement_now
             if opening_late:
-                now += 2.0
-                callback, args, _ = timers[-1]
-                callback(*args)
+                acknowledgement_now = max(acknowledgement_now, output.acknowledgement_deadline)
             transport.playback = playback
 
         opening_late = False
         with (patch.object(loop, 'call_later', timer), patch.object(speech, 'monotonic', lambda: now),
+              patch.object(output, '_acknowledgement_now', lambda: acknowledgement_now),
               patch.object(speech, 'sleep', paced), patch.object(transport, '_open_playback', opening)):
             worker, observed = await self.pipeline(output)
             for case, expected in (('early', [b'A' * 3840]),
@@ -2387,6 +2388,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     record = reply_record(token)
                     output.arm_acknowledgement(record)
                     callback, args, handle = timers[-1]
+                    if case == 'early':
+                        now += 1000.0
                     start = TTSStartedFrame()
                     start.reply_progress = record
                     await worker.queue_frame(start)
@@ -2394,7 +2397,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     if case == 'metadata':
                         await worker.queue_frame(LLMTextFrame('Answer text is not audio.'))
                         await self.next_frame(observed, LLMTextFrame)
-                        now += 2.0
+                        acknowledgement_now = max(acknowledgement_now, output.acknowledgement_deadline)
                         callback(*args)
                         acknowledged = await self.next_frame(observed, TTSTextFrame)
                         self.assertEqual(acknowledged.text, 'One moment.')

@@ -656,6 +656,9 @@ class LaptopOutput(BaseOutputTransport):
         self.acknowledgement_tasks = set()
         self.acknowledgement_index = 0
 
+    def _acknowledgement_now(self) -> float:
+        return monotonic()
+
     def arm_acknowledgement(self, record: ReplyProgress) -> None:
         self.cancel_acknowledgement()
         self.acknowledgement_record = record
@@ -667,7 +670,7 @@ class LaptopOutput(BaseOutputTransport):
                 previous_finish(finished_record)
 
         record.on_finish = finished
-        self.acknowledgement_deadline = monotonic() + ACKNOWLEDGEMENT_DELAY
+        self.acknowledgement_deadline = self._acknowledgement_now() + ACKNOWLEDGEMENT_DELAY
         self.acknowledgement_timer = asyncio.get_running_loop().call_later(
             ACKNOWLEDGEMENT_DELAY, self._acknowledgement_due, record,
         )
@@ -849,7 +852,7 @@ class LaptopOutput(BaseOutputTransport):
                 if not self._allowed(record):
                     return False
                 if frame.audio and record is not None and self.acknowledgement_record is record:
-                    if monotonic() >= self.acknowledgement_deadline:
+                    if self._acknowledgement_now() >= self.acknowledgement_deadline:
                         if not await self._play_acknowledgement_locked(record, answer_pending=True):
                             return False
                     else:
