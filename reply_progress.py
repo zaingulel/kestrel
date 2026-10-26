@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from pipecat.frames.frames import (
-    BotStoppedSpeakingFrame, DataFrame, InterruptionFrame, LLMAssistantPushAggregationFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
+    BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame, InterruptionFrame, LLMAssistantPushAggregationFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame,
     LLMTextFrame, OutputAudioRawFrame, StartFrame, TTSAudioRawFrame, TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame,
     TTSTextFrame,
 )
@@ -27,6 +27,11 @@ class AcknowledgementDueFrame(DataFrame):
 
 
 @dataclass
+class AcknowledgementStartedFrame(BotStartedSpeakingFrame):
+    reply_progress: 'ReplyProgress'
+
+
+@dataclass
 class AcknowledgementStoppedFrame(BotStoppedSpeakingFrame):
     """Prepared speech stops without discarding the sender's pending answer tail."""
     reply_progress: 'ReplyProgress'
@@ -40,7 +45,7 @@ class ConversationSynthesisFailedFrame(DataFrame):
 
 # Every non-audio frame of a reply carries its record as `frame.reply_progress`; a frame of no reply carries None.
 REPLY_MESSAGES = (LLMFullResponseStartFrame, LLMTextFrame, SpeechAdvisoryFrame, TTSSpeakFrame,
-                  AnnouncementMarkFrame, AcknowledgementDueFrame, AcknowledgementStoppedFrame, InterruptionFrame, TTSStartedFrame, TTSTextFrame, TTSStoppedFrame,
+                  AnnouncementMarkFrame, AcknowledgementDueFrame, AcknowledgementStartedFrame, AcknowledgementStoppedFrame, InterruptionFrame, TTSStartedFrame, TTSTextFrame, TTSStoppedFrame,
                   LLMFullResponseEndFrame, LLMAssistantPushAggregationFrame, ConversationSynthesisFailedFrame)
 
 

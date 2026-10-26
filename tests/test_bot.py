@@ -28,7 +28,6 @@ from pipecat.frames.frames import (
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.transports.base_transport import TransportParams
 from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
@@ -3719,7 +3718,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         output = Forward()
         output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
         transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=output))
-        observer = UserBotLatencyObserver(time_source=lambda: 100.25)
+        observer = bot.AnswerLatencyObserver(time_source=lambda: 100.25)
 
         def log(message):
             messages.append(message)
@@ -3733,7 +3732,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm.remember_assistant_reply = Mock()
         llm._assistant_reply_token = None
         llm.current_reply = Mock(return_value=None)
-        with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
+        with (patch.object(bot, "AnswerLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,

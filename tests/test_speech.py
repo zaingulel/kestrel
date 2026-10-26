@@ -2533,6 +2533,30 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
         now = 100.0
+        latency_now = 100.0
+        latency_messages = []
+        observer = None
+        latency_barrier = None
+        observer_drained = asyncio.Event()
+        native_observer_init = bot.UserBotLatencyObserver.__init__
+
+        def timed_observer(instance, *args, **kwargs):
+            nonlocal observer
+            native_observer_init(instance, *args, time_source=lambda: latency_now, **kwargs)
+            observer = instance
+            native_push = observer.on_push_frame
+
+            async def push(data):
+                await native_push(data)
+                if data.frame is latency_barrier:
+                    observer_drained.set()
+
+            observer.on_push_frame = push
+
+        def logged(message):
+            if isinstance(message, str) and message.replace('.', '', 1).isdigit():
+                latency_messages.append(message)
+
         ready = asyncio.Event()
         observed = asyncio.Queue()
         feed = bot.ConversationFeed()
@@ -2569,6 +2593,13 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             nonlocal now
             now += duration
 
+        async def drain_observer():
+            nonlocal latency_barrier
+            observer_drained.clear()
+            latency_barrier = reply_progress.AnnouncementMarkFrame()
+            await output.queue_frame(latency_barrier)
+            await asyncio.wait_for(observer_drained.wait(), 5)
+
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         task = None
 
@@ -2578,12 +2609,17 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(task, return_exceptions=True)
 
         self.addAsyncCleanup(close)
-        with patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced):
+        with (patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced),
+              patch.object(bot.UserBotLatencyObserver, '__init__', timed_observer),
+              patch.object(bot.logger, 'info', side_effect=logged)):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), Forward(), llm=llm, transport=transport, user_params=params,
                 on_frame_completed=completed, typed_origin=Mock(return_value=None),
             ))
             await asyncio.wait_for(ready.wait(), 5)
+            self.assertIsNotNone(observer)
+            await output.queue_frame(VADUserStoppedSpeakingFrame(timestamp=100.0, stop_secs=0))
+            await drain_observer()
             output.arm_acknowledgement(record)
             start = TTSStartedFrame()
             record.stream_frame(start, answer_section)
@@ -2597,10 +2633,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             await self.next_frame(observed, reply_progress.AnnouncementMarkFrame)
             playback.stdin.write.assert_not_called()
             now += 2.0
+            latency_now = 102.0
             output._acknowledgement_due(record)
             self.assertEqual((await self.next_frame(observed, TTSTextFrame)).text, 'One moment.')
             await self.next_frame(observed, reply_progress.AcknowledgementStoppedFrame)
             self.assertEqual(feed.turns[-1]['text'], 'One moment.')
+            await drain_observer()
+            self.assertEqual(latency_messages, [], 'Prepared speech cannot consume answer latency')
+            latency_now = 106.0
             text = TTSTextFrame('Answer.', aggregated_by='sentence')
             record.stream_frame(text, answer_section)
             stop = TTSStoppedFrame()
@@ -2610,6 +2650,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             for frame in (text, stop, end):
                 await output.queue_frame(frame)
             await self.next_frame(observed, LLMFullResponseEndFrame)
+            await drain_observer()
+            self.assertEqual(latency_messages, ['6.000'])
             self.assertTrue(record.span_of(text).audible, 'Prepared text cannot clear pending answer audio evidence')
             self.assertEqual([call.args[0] for call in playback.stdin.write.call_args_list],
                              [b'K' * 3840, b'A' * 960 + bytes(2880)])

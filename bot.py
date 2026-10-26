@@ -17,6 +17,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams, VADState
+from pipecat.observers.base_observer import FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -46,7 +47,7 @@ from admission import Admission
 from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
-from reply_progress import (AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
+from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
                             ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
@@ -1618,6 +1619,13 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
+class AnswerLatencyObserver(UserBotLatencyObserver):
+    async def on_push_frame(self, data: FramePushed):
+        if isinstance(data.frame, AcknowledgementStartedFrame) or getattr(data.frame, 'prepared_credit', None) is not None:
+            return
+        await super().on_push_frame(data)
+
+
 async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_frame_completed, typed_origin, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
@@ -1718,7 +1726,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
         transport.input(), stt, user, llm,
         voice, output, assistant,
     ])
-    latency_observer = UserBotLatencyObserver()
+    latency_observer = AnswerLatencyObserver()
 
     @latency_observer.event_handler("on_latency_measured")
     async def on_latency_measured(observer, latency_seconds):
