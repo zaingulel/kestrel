@@ -2576,6 +2576,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         llm.begin_reply(token)
         record = llm.current_reply()
         answer_section = record.open_section('neutral')
+        published = []
+        native_publish = feed.publish
+
+        def publish():
+            native_publish()
+            published.append(json.loads(feed.payload)['turns'][-1])
+
+        feed.publish = publish
 
         class Forward(FrameProcessor):
             generation_cleanup_failed = False
@@ -2642,6 +2650,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             await self.next_frame(observed, reply_progress.AcknowledgementStoppedFrame)
             self.assertEqual(feed.turns[-1]['text'], 'One moment.')
             await drain_observer()
+            # A completed acknowledgement must not leave the silent wait labelled Speaking.
+            self.assertEqual(feed.turns[-1]['state'], 'thinking')
             self.assertEqual(latency_messages, [], 'Prepared speech cannot consume answer latency')
             latency_now = 106.0
             text = TTSTextFrame('Answer.', aggregated_by='sentence')
@@ -2663,6 +2673,15 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(record.output_failed())
             self.assertTrue(record.completed)
             self.assertEqual(feed.turns[-1], {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'complete'})
+            self.assertEqual(published, [
+                {'speaker': 'kestrel', 'text': 'One moment.', 'state': 'speaking'},
+                {'speaker': 'kestrel', 'text': 'One moment.', 'state': 'thinking'},
+                {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'speaking'},
+                {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'complete'},
+            ])
+            completed_payload = feed.payload
+            record.output_frame(reply_progress.AcknowledgementStoppedFrame(record))
+            self.assertEqual(feed.payload, completed_payload)
             self.assertFalse(output.output_buffer.misaligned)
             self.assertFalse(output.acknowledgement_tasks)
             await close()

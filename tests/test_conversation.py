@@ -417,6 +417,80 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
+    def test_waiting_preserves_text_and_ignores_stale_tokens(self):
+        feed = conversation.ConversationFeed()
+        token = object()
+        feed.begin_reply(token)
+        row = feed.reply
+        snapshots = [json.loads(feed.payload)['turns'][-1]]
+
+        def unchanged(stale):
+            before = feed.payload
+            feed.waiting(stale)
+            self.assertEqual(feed.payload, before)
+
+        unchanged(token)
+        feed.spoken(token, 'One moment.')
+        snapshots.append(json.loads(feed.payload)['turns'][-1])
+        unchanged(None)
+        unchanged(object())
+        feed.waiting(token)
+        snapshots.append(json.loads(feed.payload)['turns'][-1])
+        self.assertIs(feed.active, token)
+        self.assertIs(feed.reply, row)
+        self.assertIs(feed.turns[-1], row)
+        self.assertEqual(len(feed.turns), 1)
+        feed.spoken(token, 'Answer.')
+        snapshots.append(json.loads(feed.payload)['turns'][-1])
+        feed.finish(token)
+        snapshots.append(json.loads(feed.payload)['turns'][-1])
+        self.assertEqual(snapshots, [
+            {'speaker': 'kestrel', 'text': '', 'state': 'thinking'},
+            {'speaker': 'kestrel', 'text': 'One moment.', 'state': 'speaking'},
+            {'speaker': 'kestrel', 'text': 'One moment.', 'state': 'thinking'},
+            {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'speaking'},
+            {'speaker': 'kestrel', 'text': 'One moment. Answer.', 'state': 'complete'},
+        ])
+        unchanged(token)
+
+        cancelled = object()
+        feed.begin_reply(cancelled)
+        feed.spoken(cancelled, 'One moment.')
+        feed.finish(cancelled, interrupted=True)
+        self.assertEqual(feed.turns[-1]['state'], 'interrupted')
+        unchanged(cancelled)
+
+        old, current = object(), object()
+        feed.begin_reply(old)
+        feed.spoken(old, 'Old acknowledgement.')
+        feed.begin_reply(current)
+        feed.spoken(current, 'Current acknowledgement.')
+        unchanged(old)
+        self.assertIs(feed.active, current)
+        self.assertEqual(feed.turns[-1], {
+            'speaker': 'kestrel', 'text': 'Current acknowledgement.', 'state': 'speaking',
+        })
+        feed.finish(current, interrupted=True)
+
+        for text in ('One moment.', ''):
+            with self.subTest(failed_text=text):
+                failed = object()
+                feed.begin_reply(failed)
+                if text:
+                    feed.spoken(failed, text)
+                feed.finish(failed, failed=True)
+                self.assertEqual(feed.turns[-1], {'speaker': 'kestrel', 'text': text, 'state': 'failed'})
+                unchanged(failed)
+
+        cleared = object()
+        feed.begin_reply(cleared)
+        feed.spoken(cleared, 'One moment.')
+        feed.clear()
+        unchanged(cleared)
+        self.assertEqual(json.loads(feed.payload)['turns'], [])
+        self.assertIsNone(feed.active)
+        self.assertIsNone(feed.reply)
+
     async def test_source_is_explicit_and_wire_validation_is_closed(self):
         old = {'version': 1, 'session': 'source-fixture', 'turns': [
             {'speaker': 'you', 'text': 'Old unlabelled input', 'state': 'complete'},

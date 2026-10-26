@@ -176,6 +176,9 @@ class ReplyProgress:
             self.idle = True
             if self.synthesis_failed:
                 self.finish(failed=True, interrupted=self.interrupting)
+        elif isinstance(frame, AcknowledgementStoppedFrame):
+            if self.feed is not None:
+                self.feed.waiting(self.token)
         elif isinstance(frame, TTSTextFrame):
             if frame.text.strip():
                 span = self.span_of(frame)

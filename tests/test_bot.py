@@ -6373,12 +6373,30 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         )
         service, manager = handle.service, handle.service.manager
         timers, acknowledgement_time = service.acknowledgement_timers, service.acknowledgement_time
+        published = []
+        expected_token = None
+        thinking = asyncio.Event()
+        native_publish = manager.conversation.publish
+
+        def publish():
+            native_publish()
+            snapshot = json.loads(manager.conversation.payload)
+            published.append(snapshot)
+            if (expected_token is not None and manager.conversation.active is expected_token
+                    and snapshot['turns'] and snapshot['turns'][-1]['text']
+                    and snapshot['turns'][-1]['state'] == 'thinking'):
+                thinking.set()
+
+        manager.conversation.publish = publish
         waiting = await asyncio.wait_for(service.waiting.get(), 5)
         try:
             for index, (question, answer, phrase) in enumerate((
                 ('Typed first question', 'First answer.', 'One moment.'),
                 ('Typed second question', 'Second answer.', 'Just a moment.'),
             )):
+                thinking.clear()
+                expected_token = None
+                published_start = len(published)
                 self.assertEqual(await service.submit(question), 'accepted')
                 if index == 0:
                     transport = await asyncio.wait_for(service.started.get(), 5)
@@ -6387,6 +6405,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(entered[answer].wait(), 5)
                 callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
                 record = args[0]
+                expected_token = record.token
                 self.assertIs(manager.llm.current_reply(), record)
                 self.assertFalse(record.closed)
                 self.assertIsNone(transport.capture)
@@ -6399,9 +6418,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
                 callback(*args)
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), phrase)
+                await asyncio.wait_for(thinking.wait(), 5)
                 self.assertEqual(manager.llm.last_spoken_reply, phrase)
                 self.assertEqual(manager.conversation.turns[-1]['text'], phrase)
-                self.assertEqual(manager.conversation.turns[-1]['state'], 'speaking')
+                self.assertEqual(manager.conversation.turns[-1]['state'], 'thinking')
                 pcm = b''.join(data for child in service.audio_children for data in child.writes)
                 self.assertEqual(pcm[before:], bytes(9600))
                 self.assertTrue(committed.empty())
@@ -6412,6 +6432,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(manager.llm.last_spoken_reply, answer)
                 self.assertEqual(manager.conversation.turns[-1]['state'], 'complete')
                 self.assertTrue(closed[answer].is_set())
+                reply_rows = [snapshot['turns'][-1] for snapshot in published[published_start:]
+                              if snapshot['turns'] and snapshot['turns'][-1]['speaker'] == 'kestrel'
+                              and snapshot['turns'][-1]['text']]
+                self.assertEqual(reply_rows, [
+                    {'speaker': 'kestrel', 'text': phrase, 'state': 'speaking'},
+                    {'speaker': 'kestrel', 'text': phrase, 'state': 'thinking'},
+                    {'speaker': 'kestrel', 'text': phrase + ' ' + answer, 'state': 'speaking'},
+                    {'speaker': 'kestrel', 'text': phrase + ' ' + answer, 'state': 'complete'},
+                ])
             self.assertEqual([m for m in brain.requests[2][2]['messages'] if m['role'] != 'system'], [
                 {'role': 'user', 'content': 'Typed first question'},
                 {'role': 'assistant', 'content': 'First answer.'},
@@ -6467,6 +6496,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             acknowledgement_time[0] = max(acknowledgement_time[0], obsolete_deadline)
             obsolete_callback(*obsolete_args)
             self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), before)
+            self.assertEqual(manager.conversation.turns, [])
             self.assertTrue(spoken.empty())
             self.assertTrue(committed.empty())
 

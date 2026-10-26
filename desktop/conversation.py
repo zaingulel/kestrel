@@ -195,6 +195,12 @@ class ConversationFeed:
         self.reply['state'] = 'speaking'
         self.publish()
 
+    def waiting(self, token: object) -> None:
+        if token is None or token is not self.active or self.reply['state'] != 'speaking':
+            return
+        self.reply['state'] = 'thinking'
+        self.publish()
+
     def finish(self, token: object, *, interrupted: bool = False, failed: bool = False):
         if token is None or token is not self.active:
             return

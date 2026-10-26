@@ -607,6 +607,21 @@ TestCase {
                 compare(findChild(findChild(marks, "mark" + i), "speakDriver" + i).running, running)
         }
         loops(true)
+        const speakingMarks = marks
+        accept([earlier, {speaker: "kestrel", text: literal, state: "thinking"}])
+        verify(marks === speakingMarks, "the same live row returns to thinking without replacing its marks")
+        compare(findChild(content, "turnText1").text, literal)
+        compare(word.text, "Thinking")
+        compare(marks.kind, "thinking")
+        loops(false)
+        compare(findChild(marks, "rippleDriver").running, true)
+        accept([earlier, {speaker: "kestrel", text: literal, state: "speaking"}])
+        verify(marks === speakingMarks)
+        compare(findChild(content, "turnText1").text, literal)
+        compare(word.text, "Speaking")
+        compare(marks.kind, "speaking")
+        loops(true)
+        compare(findChild(marks, "rippleDriver").running, false)
         content.motionEnabled = false
         loops(false)
         compare(word.visible, true)
