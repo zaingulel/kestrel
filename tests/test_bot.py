@@ -3561,6 +3561,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.input.return_value = Forward()
                 output = Forward(output=True)
                 output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
+                output.cancel_acknowledgement = Mock(spec=speech.LaptopOutput.cancel_acknowledgement)
                 self.audio.output.return_value = output
                 native_conversation = bot.run_conversation
 
