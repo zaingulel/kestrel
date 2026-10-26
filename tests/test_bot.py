@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, call, create_autospec, patch
 
 import numpy as np
 from loguru import logger
@@ -28,8 +28,6 @@ from pipecat.frames.frames import (
     ProposedUserStoppedSpeakingFrame, StartFrame, TranscriptionFrame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import TransportParams
 from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
@@ -2070,6 +2068,99 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 error.assert_not_called()
 
 
+
+class AcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_turn_deadline_survives_readiness_and_generation(self):
+        for outcome in ('complete', 'failure', 'revoke'):
+            with self.subTest(outcome=outcome):
+                service = hermes_service()
+                output = speech.LaptopOutput(Mock(admission=service.admission), TransportParams(
+                    audio_out_enabled=True, audio_out_sample_rate=48000,
+                ))
+                service.acknowledgement_output = output
+                armed, draining, generating = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                release_drain, release_generation = asyncio.Event(), asyncio.Event()
+                ready = service.session_ready = asyncio.get_running_loop().create_future()
+                native_arm = output.arm_acknowledgement
+                output.cancel_acknowledgement = Mock(wraps=output.cancel_acknowledgement)
+
+                def arm(record):
+                    native_arm(record)
+                    output.acknowledgement_timer.cancel()
+                    output.cancel_acknowledgement.reset_mock()
+                    armed.set()
+
+                output.arm_acknowledgement = Mock(side_effect=arm)
+
+                async def drain():
+                    draining.set()
+                    await release_drain.wait()
+
+                async def exchange(history, events, *, admitted, desktop):
+                    events.put_nowait({'delivery': 'neutral'})
+                    events.put_nowait({'text': 'An answer.'})
+                    generating.set()
+                    await release_generation.wait()
+                    if outcome == 'failure':
+                        events.put_nowait({'advisory': 'The engine failed.'})
+                    events.put_nowait(None)
+
+                service.channel.drain = drain
+                service.channel.exchange = exchange
+                service.push_frame = AsyncMock()
+                service.start_processing_metrics = AsyncMock()
+                service.stop_processing_metrics = AsyncMock()
+                task = asyncio.create_task(service.process_frame(
+                    request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'An ordinary question.'}])),
+                    FrameDirection.DOWNSTREAM,
+                ))
+                try:
+                    await asyncio.wait_for(armed.wait(), 5)
+                    record = output.arm_acknowledgement.call_args.args[0]
+                    self.assertIs(service.current_reply(), record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    ready.set_result(True)
+                    await asyncio.wait_for(draining.wait(), 5)
+                    self.assertIs(service.current_reply(), record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    release_drain.set()
+                    await asyncio.wait_for(generating.wait(), 5)
+                    self.assertIs(service.current_reply(), record)
+                    output.arm_acknowledgement.assert_called_once_with(record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    if outcome == 'revoke':
+                        service.admission.close()
+                        service.revoke()
+                        self.assertTrue(output.cancel_acknowledgement.called)
+                    release_generation.set()
+                    await asyncio.wait_for(task, 5)
+                    if outcome == 'complete':
+                        output.cancel_acknowledgement.assert_not_called()
+                        record.finish()
+                        output.cancel_acknowledgement.assert_called_with(record)
+                    elif outcome == 'failure':
+                        output.cancel_acknowledgement.assert_called_with(record)
+                    else:
+                        self.assertTrue(output.cancel_acknowledgement.called)
+                finally:
+                    release_drain.set()
+                    release_generation.set()
+                    if not ready.done():
+                        ready.set_result(True)
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    await output._observe_acknowledgement_tasks()
+        service = hermes_service()
+        service.acknowledgement_output = output = Mock(spec=speech.LaptopOutput)
+        service.push_frame = AsyncMock()
+        await service.process_frame(
+            request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'What can I say?'}])),
+            FrameDirection.DOWNSTREAM,
+        )
+        output.arm_acknowledgement.assert_not_called()
+
+
 class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def configured_analyzer(self):
         analyzer = None
@@ -2560,12 +2651,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation):
+            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation, acknowledgement_output):
                 prototype.session_ready = session_ready
                 prototype.dismiss = dismiss
                 prototype.admission = admission
                 prototype.status = status
                 prototype.conversation = conversation
+                prototype.acknowledgement_output = acknowledgement_output
                 return prototype
 
             async def activate_fixture(*, capture_enabled=True):
@@ -3004,7 +3096,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 async def conversation(recognition, voice, **kwargs):
                     self.assertIs(recognition, stt)
                     self.assertIsInstance(voice, speech.VoxCPMTTS)
-                    self.assertEqual(self.voice.generate_streaming.call_count, 1)
+                    self.assertEqual(self.voice.generate_streaming.call_count, 3)
                     os.environ['KESTREL_VOICE'] = 'unknown'
                     start = bot.LLMFullResponseStartFrame()
                     start.reply_progress = reply_progress.ReplyProgress(
@@ -3025,7 +3117,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     await self.run_bot()
                 stt.load.assert_awaited_once_with(self.reference_pcm)
                 calls = self.voice.generate_streaming.call_args_list
-                self.assertEqual([item.kwargs['text'] for item in calls], ['Hello.', 'First reply.', 'Second reply.'])
+                self.assertEqual([item.kwargs['text'] for item in calls], ['One moment.', 'Just a moment.', 'Give me a moment.', 'First reply.', 'Second reply.'])
                 for item in calls:
                     self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / (name + '.wav')))
                     self.assertEqual(item.kwargs['reference_wav_path'], str(self.voices / (name + '.wav')))
@@ -3087,12 +3179,16 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                             str(bot.ROOT / '.runtime/models/voxcpm2'), load_denoiser=False,
                             optimize=False, device='cuda', local_files_only=True,
                         )
-                        self.assertEqual(self.voice.generate_streaming.call_count, 3)
+                        self.assertEqual([item.kwargs['text'] for item in self.voice.generate_streaming.call_args_list],
+                                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Reply.', 'Reply.'])
+                        for item in self.voice.generate_streaming.call_args_list:
+                            self.assertEqual(item.kwargs['prompt_text'], 'Irish fixture.')
+                            self.assertEqual(item.kwargs['prompt_wav_path'], str(self.voices / 'irish-female.wav'))
                     else:
                         load.assert_called_once_with()
                         bot.VoxCPM.from_pretrained.assert_not_called()
                         self.assertEqual([item.args[0] for item in phonon.stream.call_args_list],
-                                         ['Hello.', 'Reply.', 'Reply.'])
+                                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Reply.', 'Reply.'])
                         for native in streams:
                             native.close.assert_called_once_with()
 
@@ -3157,9 +3253,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             await self.run_bot()
             await self.run_bot()
             self.assertEqual(load.call_count, 2)
-            self.assertEqual(model.generate_streaming.call_count, 2)
-            self.assertEqual(model.generate_streaming.call_args.kwargs['text'], 'Hello.')
-            self.assertEqual(events, ['load', 'warm', 'closed', 'conversation', 'load', 'warm', 'closed', 'conversation'])
+            self.assertEqual(model.generate_streaming.call_count, 6)
+            self.assertEqual([item.kwargs['text'] for item in model.generate_streaming.call_args_list],
+                             ['One moment.', 'Just a moment.', 'Give me a moment.',
+                              'One moment.', 'Just a moment.', 'Give me a moment.'])
+            self.assertEqual(events, ['load', 'warm', 'closed', 'warm', 'closed', 'warm', 'closed', 'conversation',
+                                      'load', 'warm', 'closed', 'warm', 'closed', 'warm', 'closed', 'conversation'])
             self.assertEqual(conversation.await_count, 2)
             self.assertIs(conversation.await_args.args[1].model, model)
             self.assertIsNot(conversation.await_args_list[0].args[1], conversation.await_args_list[1].args[1])
@@ -3171,24 +3270,33 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         activity = asyncio.Event()
         release = threading.Event()
         events = []
+        managers = []
+        construct = bot.VoiceConversations.side_effect
+
+        def manager(**kwargs):
+            value = construct(**kwargs)
+            managers.append(value)
+            return value
 
         def gated_chunks(**kwargs):
+            text = kwargs['text']
             try:
-                events.append('first_chunk')
+                events.append((text, 'first_chunk'))
                 yield np.zeros(8, dtype=np.float32)
-                events.append('gated')
-                loop.call_soon_threadsafe(activity.set)
-                if not release.wait(5):
-                    raise AssertionError('Voice preparation gate was not released')
-                events.append('remaining_chunk')
+                if text == 'Give me a moment.':
+                    events.append((text, 'gated'))
+                    loop.call_soon_threadsafe(activity.set)
+                    if not release.wait(5):
+                        raise AssertionError('Voice preparation gate was not released')
                 yield np.zeros(8, dtype=np.float32)
-                events.append('exhausted')
+                events.append((text, 'exhausted'))
             finally:
-                events.append('closed')
+                events.append((text, 'closed'))
 
         stt = Mock(load=AsyncMock(), close=AsyncMock())
         model = Mock(generate_streaming=Mock(side_effect=gated_chunks))
         with (
+            patch.object(bot, 'VoiceConversations', side_effect=manager),
             patch.object(bot, 'NemotronSTT', return_value=stt),
             patch.object(bot, 'NemotronRecognizer', return_value=stt),
             patch.object(bot.VoxCPM, 'from_pretrained', return_value=model),
@@ -3202,12 +3310,28 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(activity.wait(), 5)
                 conversation.assert_not_awaited()
                 self.assertFalse(task.done())
-                self.assertEqual(events, ['first_chunk', 'gated'])
+                self.assertFalse(managers[0].prepared)
+                self.assertEqual(managers[0].prepared_acknowledgements, ())
+                self.audio.open.assert_not_awaited()
+                self.assertEqual(events, [
+                    ('One moment.', 'first_chunk'), ('One moment.', 'exhausted'), ('One moment.', 'closed'),
+                    ('Just a moment.', 'first_chunk'), ('Just a moment.', 'exhausted'), ('Just a moment.', 'closed'),
+                    ('Give me a moment.', 'first_chunk'), ('Give me a moment.', 'gated'),
+                ])
                 release.set()
                 await asyncio.wait_for(task, 5)
-                self.assertEqual(events, [
-                    'first_chunk', 'gated', 'remaining_chunk', 'exhausted', 'closed', 'conversation',
+                self.assertEqual(events[-3:], [
+                    ('Give me a moment.', 'exhausted'), ('Give me a moment.', 'closed'), 'conversation',
                 ])
+                self.assertTrue(managers[0].prepared)
+                clips = managers[0].prepared_acknowledgements
+                self.assertIsInstance(clips, tuple)
+                self.assertEqual([(clip.text, clip.pcm) for clip in clips], [
+                    ('One moment.', bytes(32)), ('Just a moment.', bytes(32)), ('Give me a moment.', bytes(32)),
+                ])
+                with self.assertRaises(AttributeError):
+                    clips[0].text = 'Changed.'
+                self.assertEqual(managers[0].conversation.turns, [])
                 conversation.assert_awaited_once()
             finally:
                 release.set()
@@ -3246,6 +3370,144 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(failed_events, ['first_chunk', 'closed'])
                     stt.close.assert_awaited_once()
                     self.audio.close.assert_not_awaited()
+
+    async def test_acknowledgement_preparation_refuses_invalid_audio(self):
+        preset = speech.load_voice_preset('irish-female', voices_dir=self.voices)
+        for provider in ('phonon', 'voxcpm2'):
+            for case in ('empty', 'rate', 'channels', 'nonbytes', 'odd', 'oversized', 'overflow', 'generation', 'valid'):
+                with self.subTest(provider=provider, case=case):
+                    closed = []
+
+                    def chunks():
+                        try:
+                            if case == 'empty':
+                                return
+                            yield np.zeros(2400, dtype=np.float32)
+                            if case == 'generation':
+                                raise RuntimeError('fixture generation failed')
+                        finally:
+                            closed.append(True)
+
+                    def stream(*args, **kwargs):
+                        source = chunks()
+                        native = Mock(sample_rate=24000, close=Mock(side_effect=source.close))
+                        native.__iter__ = Mock(return_value=source)
+                        return native
+
+                    model = Mock(stream=Mock(side_effect=stream),
+                                 generate_streaming=Mock(side_effect=lambda **kwargs: chunks()))
+                    lock = asyncio.Lock()
+                    voice = (speech.PhononTTS(model, generation_lock=lock) if provider == 'phonon' else
+                             speech.VoxCPMTTS(model, preset, generation_lock=lock))
+                    voice.push_frame = AsyncMock()
+                    original = voice.run_tts
+
+                    async def frames(text, context_id):
+                        source = original(text, context_id)
+                        try:
+                            first = True
+                            async for frame in source:
+                                if case in ('empty', 'generation'):
+                                    yield frame
+                                    continue
+                                if not first:
+                                    continue
+                                first = False
+                                # Inject malformed provider output after the real adapter's generation boundary.
+                                yield TTSAudioRawFrame(b'', 48000, 1)
+                                frame.audio = bytes(288000 if case == 'valid' else 288002 if case == 'oversized' else
+                                                    144000 if case == 'overflow' else 1 if case == 'odd' else 16)
+                                if case == 'rate':
+                                    frame.sample_rate = 24000
+                                elif case == 'channels':
+                                    frame.num_channels = 2
+                                elif case == 'nonbytes':
+                                    frame.audio = bytearray(16)
+                                yield frame
+                                if case == 'overflow':
+                                    yield TTSAudioRawFrame(bytes(144002), 48000, 1)
+                        finally:
+                            await source.aclose()
+
+                    voice.run_tts = frames
+                    if case == 'valid':
+                        clips = await speech.prepare_acknowledgements(voice)
+                        self.assertEqual([(clip.text, len(clip.pcm)) for clip in clips], [
+                            ('One moment.', 288000), ('Just a moment.', 288000), ('Give me a moment.', 288000),
+                        ])
+                        self.assertEqual(sum(len(clip.pcm) for clip in clips), 864000)
+                        self.assertEqual(len(closed), 3)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'preparation failed:') as failed:
+                            await speech.prepare_acknowledgements(voice)
+                        self.assertIn('Check the voice log, then restart Kestrel.', str(failed.exception))
+                        self.assertIsNotNone(failed.exception.__cause__)
+                        self.assertEqual(len(closed), 1)
+                        calls = model.stream if provider == 'phonon' else model.generate_streaming
+                        self.assertEqual(calls.call_count, 1, 'Invalid preparation must not retry or continue')
+                    self.assertFalse(lock.locked())
+                    voice.push_frame.assert_not_awaited()
+
+        loop = asyncio.get_running_loop()
+        native_timeout = asyncio.timeout
+        for case in ('timeout', 'cancellation'):
+            with self.subTest(case=case):
+                entered = asyncio.Event()
+                release = threading.Event()
+                closed = threading.Event()
+                deadlines = []
+
+                def held_chunks(**kwargs):
+                    try:
+                        yield np.zeros(8, dtype=np.float32)
+                        loop.call_soon_threadsafe(entered.set)
+                        if not release.wait(5):
+                            raise AssertionError('Preparation cleanup gate was not released')
+                    finally:
+                        closed.set()
+
+                def timeout(delay):
+                    self.assertEqual(delay, 45)
+                    deadline = native_timeout(delay)
+                    deadlines.append(deadline)
+                    return deadline
+
+                model = Mock(generate_streaming=Mock(side_effect=held_chunks))
+                lock = asyncio.Lock()
+                voice = speech.VoxCPMTTS(model, preset, generation_lock=lock)
+                voice.push_frame = AsyncMock()
+                with patch.object(speech.asyncio, 'timeout', side_effect=timeout):
+                    task = asyncio.create_task(speech.prepare_acknowledgements(voice))
+                    try:
+                        await asyncio.wait_for(entered.wait(), 5)
+                        self.assertEqual(len(deadlines), 1)
+                        if case == 'timeout':
+                            deadlines[0].reschedule(loop.time())
+                        else:
+                            task.cancel()
+                        await asyncio.sleep(0)
+                        await asyncio.sleep(0)
+                        self.assertGreater(task.cancelling(), 0)
+                        self.assertFalse(task.done(), 'Native generation must finish before failure escapes')
+                        self.assertTrue(lock.locked())
+                        self.assertFalse(closed.is_set())
+                        release.set()
+                        if case == 'timeout':
+                            with self.assertRaisesRegex(RuntimeError, 'preparation failed: TimeoutError') as failed:
+                                await asyncio.wait_for(task, 5)
+                            self.assertIn('Check the voice log, then restart Kestrel.', str(failed.exception))
+                        else:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(task, 5)
+                        self.assertTrue(closed.is_set())
+                        self.assertFalse(lock.locked())
+                        self.assertEqual(model.generate_streaming.call_count, 1)
+                        voice.push_frame.assert_not_awaited()
+                    finally:
+                        release.set()
+                        if not task.done():
+                            task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
 
     async def test_model_load_failure_closes_recognition_and_audio(self):
         stt = Mock(load=AsyncMock(side_effect=RuntimeError("load failed")), close=AsyncMock())
@@ -3299,6 +3561,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.input.return_value = Forward()
                 output = Forward(output=True)
                 output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
+                output.cancel_acknowledgement = create_autospec(speech.LaptopOutput, instance=True).cancel_acknowledgement
                 self.audio.output.return_value = output
                 native_conversation = bot.run_conversation
 
@@ -3456,7 +3719,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         output = Forward()
         output.output_buffer = reply_progress.OutputBuffer(48000, 3840)
         transport = Mock(input=Mock(return_value=Forward()), output=Mock(return_value=output))
-        observer = UserBotLatencyObserver(time_source=lambda: 100.25)
+        observer = bot.AnswerLatencyObserver(time_source=lambda: 100.25)
 
         def log(message):
             messages.append(message)
@@ -3470,7 +3733,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         llm.remember_assistant_reply = Mock()
         llm._assistant_reply_token = None
         llm.current_reply = Mock(return_value=None)
-        with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
+        with (patch.object(bot, "AnswerLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,
@@ -3668,7 +3931,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(sum(len(data) for child in service.audio_children for data in child.writes), before)
             local.assert_not_awaited()
             synthesis = [item.args[0] for item in service.model.stream.call_args_list]
-            self.assertEqual(synthesis, ['Hello.', 'Answer.', 'Next.'])
+            self.assertEqual(synthesis, ['One moment.', 'Just a moment.', 'Give me a moment.', 'Answer.', 'Next.'])
             self.assertEqual(transport.llm.last_spoken_reply, 'Next.')
             for visible in (native_events, synthesis, context.get_messages(), service.manager.conversation.turns):
                 self.assertNotIn('PRIVATE', json.dumps(visible))
@@ -3831,26 +4094,33 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
-                async def stop():
+                async def start(*, hold=False):
                     interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    if hold:
+                        output.write_gate.clear()
+
+                async def stop(*, hold=False):
+                    await start(hold=hold)
                     await self.finish_user_turn(transport, 'stop')
 
                 try:
-                    output.write_gate.clear()
-                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await start(hold=True)
                     await self.finish_user_turn(transport, 'Please silence the sound.')
                     await asyncio.wait_for(output.generation_done.wait(), 5)
                     self.assertEqual(output.audio_written, 0)
                     self.assertEqual(len(transport.llm.outcomes), 1)
                     self.assertEqual(transport.llm.outcomes[0].result.confirmed, scenario != 'unconfirmed')
                     output.generation_done.clear()
-                    await stop()
+                    await stop(hold=True)
                     await asyncio.wait_for(output.generation_done.wait(), 5)
                     if scenario == 'interrupted account':
                         output.generation_done.clear()
-                        await stop()
+                        await stop(hold=True)
                         await asyncio.wait_for(output.generation_done.wait(), 5)
                     self.assertEqual(len(transport.llm.outcomes), 1)
                     self.assertTrue(spoken.empty())
@@ -3891,16 +4161,22 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
-                async def stop():
+                async def start(*, hold=False):
                     interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    if hold:
+                        output.write_gate.clear()
+
+                async def stop(*, hold=False):
+                    await start(hold=hold)
                     await self.finish_user_turn(transport, 'stop')
 
                 try:
-                    if scenario == 'undelivered':
-                        output.write_gate.clear()
-                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await start(hold=scenario == 'undelivered')
                     await self.finish_user_turn(transport, 'set volume to thirty')
                     if scenario == 'undelivered':
                         await asyncio.wait_for(output.generation_done.wait(), 5)
@@ -3908,7 +4184,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(transport.llm.outcomes), 1)
                         self.assertTrue(transport.llm.outcomes[0].result.confirmed)
                         output.generation_done.clear()
-                        await stop()
+                        await stop(hold=True)
                         await asyncio.wait_for(output.generation_done.wait(), 5)
                         self.assertTrue(spoken.empty())
                         delivered_end.clear()
@@ -4629,6 +4905,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         from types import SimpleNamespace
         started, prepared = asyncio.Queue(), asyncio.Event()
         waiting = asyncio.Queue()
+        acknowledgement_time = [100.0]
+        acknowledgement_timers = asyncio.Queue()
         wake_children = []
         native_written = asyncio.Event()
         spoken, committed, processed = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
@@ -4710,8 +4988,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         def chunks(**kwargs):
             nonlocal calls
             calls += 1
-            if calls == 1:
-                self.assertEqual(kwargs['text'], 'Hello.')
+            if calls <= 3:
+                self.assertEqual(kwargs['text'], ('One moment.', 'Just a moment.', 'Give me a moment.')[calls - 1])
                 yield np.zeros(4800, dtype=np.float32)
             elif synthesis_chunks is not None:
                 yield from synthesis_chunks(**kwargs)
@@ -4846,38 +5124,30 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await super().process_frame(frame, direction)
                         await self.push_frame(frame, direction)
 
-                class Output(BaseOutputTransport):
+                class Output(speech.LaptopOutput):
                     def __init__(self):
                         params = TransportParams(audio_out_enabled=True, audio_out_sample_rate=48000)
-                        super().__init__(params)
-                        self.output_buffer = reply_progress.OutputBuffer.for_params(params)
-                        self.write_gate = asyncio.Event()
-                        self.write_gate.set()
-                        self.reply_progress = None
+                        super().__init__(transport, params)
 
-                    async def write_transport_frame(self, frame):
-                        if isinstance(frame, TTSStartedFrame):
-                            self.reply_progress = getattr(frame, "reply_progress", None)
-                        await super().write_transport_frame(frame)
-
-                    async def start(self, frame):
-                        await super().start(frame)
-                        await self.set_transport_ready(frame)
-
-                    async def write_audio_frame(self, frame):
-                        await self.write_gate.wait()
-                        record = self.reply_progress if hasattr(self, 'reply_progress') else None
+                    async def _write_audio_locked(self, frame, record):
                         written = active() and not transport.closed and (admission is None or
                                   (record is not None and admission.may_speak(record.token)))
                         if written:
                             self.audio_written += 1
-                        else:
-                            self.output_buffer.write_failed(frame)
                         return written
 
-                transport = Mock(capture=None, failure=None, closed=False, admission=admission)
+                transport = Mock(capture=None, playback=None, failure=None, closed=False, admission=admission)
                 transport.input.return_value = Input()
                 transport.output.return_value = Output()
+
+                async def open_playback():
+                    transport.playback = object()
+
+                async def discard_playback():
+                    transport.playback = None
+
+                transport._open_playback = AsyncMock(side_effect=open_playback)
+                transport._discard_playback = AsyncMock(side_effect=discard_playback)
 
                 async def open_audio():
                     transport.llm = controller.llm
@@ -4885,6 +5155,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 async def close_audio():
                     transport.closed = True
                     transport.output().write_gate.set()
+                    await transport.output()._observe_acknowledgement_tasks()
+                    await transport._discard_playback()
 
                 transport.open = AsyncMock(side_effect=open_audio)
                 transport.close = AsyncMock(side_effect=close_audio)
@@ -4924,7 +5196,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         admitted_override = admitted
         service_handle = SimpleNamespace(sessions=sessions, audio_children=audio_children, started=started,
                                          recognizer=recognizer, model=model, channel=supplied_channel, native_written=native_written, waiting=waiting,
-                                         output_watch=output_watch, echo_generations=echo_generations)
+                                         output_watch=output_watch, echo_generations=echo_generations,
+                                         acknowledgement_time=acknowledgement_time, acknowledgement_timers=acknowledgement_timers)
 
         def conversations(**kwargs):
             nonlocal controller
@@ -5056,11 +5329,23 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.addAsyncCleanup(close)
         loop = asyncio.get_running_loop()
+        native_call_later = loop.call_later
+
+        def call_later(delay, callback, *args, **kwargs):
+            handle = native_call_later(delay, callback, *args, **kwargs)
+            if (isinstance(getattr(callback, '__self__', None), speech.LaptopOutput)
+                    and getattr(callback, '__func__', None) is speech.LaptopOutput._acknowledgement_due):
+                self.assertEqual(delay, 2.0)
+                handle.cancel()
+                acknowledgement_timers.put_nowait((callback, args, callback.__self__.acknowledgement_deadline))
+            return handle
 
         def register(sig, callback, *arguments):
             handlers[sig] = callback, arguments
 
         for binding in (
+            patch.object(speech.LaptopOutput, '_acknowledgement_now', lambda output: acknowledgement_time[0]),
+            patch.object(loop, 'call_later', side_effect=call_later),
             patch.object(bot.asyncio, 'create_subprocess_exec', spawn),
             patch('pipecat.services.openai.llm.OpenAILLMService.get_chat_completions',
                   side_effect=AssertionError('Direct provider bypass is prohibited')),
@@ -6055,6 +6340,200 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         release.set()
                     await close()
 
+    async def test_acknowledgement_output_preserves_history_repeat_and_typed_admission(self):
+        loop = asyncio.get_running_loop()
+        entered = {text: asyncio.Event() for text in ('First answer.', 'Second answer.', 'Obsolete answer.')}
+        released = {text: threading.Event() for text in entered}
+        closed = {text: asyncio.Event() for text in entered}
+        for release in released.values():
+            self.addCleanup(release.set)
+
+        def chunks(**kwargs):
+            text = kwargs['text']
+            try:
+                if text in entered:
+                    loop.call_soon_threadsafe(entered[text].set)
+                    if not released[text].wait(45):
+                        raise AssertionError('Held answer synthesis was not released')
+                yield np.ones(4800, dtype=np.float32)
+            finally:
+                if text in closed:
+                    loop.call_soon_threadsafe(closed[text].set)
+
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.', '[delivery:neutral] First answer.',
+            '[delivery:neutral] Second answer.', '[delivery:neutral] Obsolete answer.',
+            '[delivery:neutral] Quick fresh answer.',
+        ])
+        self.addCleanup(brain.close)
+        native_events = []
+        handle, spoken, committed, _, processes, close = await self.open_session(
+            brain, through_service=True, native_audio=True, activate=False,
+            synthesis_chunks=chunks, native_events=native_events,
+        )
+        service, manager = handle.service, handle.service.manager
+        timers, acknowledgement_time = service.acknowledgement_timers, service.acknowledgement_time
+        published = []
+        expected_token = None
+        thinking = asyncio.Event()
+        native_publish = manager.conversation.publish
+
+        def publish():
+            native_publish()
+            snapshot = json.loads(manager.conversation.payload)
+            published.append(snapshot)
+            if (expected_token is not None and manager.conversation.active is expected_token
+                    and snapshot['turns'] and snapshot['turns'][-1]['text']
+                    and snapshot['turns'][-1]['state'] == 'thinking'):
+                thinking.set()
+
+        manager.conversation.publish = publish
+        waiting = await asyncio.wait_for(service.waiting.get(), 5)
+        try:
+            for index, (question, answer, phrase) in enumerate((
+                ('Typed first question', 'First answer.', 'One moment.'),
+                ('Typed second question', 'Second answer.', 'Just a moment.'),
+            )):
+                thinking.clear()
+                expected_token = None
+                published_start = len(published)
+                self.assertEqual(await service.submit(question), 'accepted')
+                if index == 0:
+                    transport = await asyncio.wait_for(service.started.get(), 5)
+                    output = transport.output()
+                    self.assertEqual(len(output.prepared_acknowledgements), 3)
+                await asyncio.wait_for(entered[answer].wait(), 5)
+                callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
+                record = args[0]
+                expected_token = record.token
+                self.assertIs(manager.llm.current_reply(), record)
+                self.assertFalse(record.closed)
+                self.assertIsNone(transport.capture)
+                self.assertFalse(manager.admission.admits_microphone())
+                self.assertFalse(manager.desired_active)
+                self.assertEqual(manager.status._state, 'inactive')
+                self.assertTrue(waiting.capture.reaped.is_set())
+                self.assertIsNone(manager.waiting_transport)
+                before = sum(len(data) for child in service.audio_children for data in child.writes)
+                acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
+                callback(*args)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), phrase)
+                await asyncio.wait_for(thinking.wait(), 5)
+                self.assertEqual(manager.llm.last_spoken_reply, phrase)
+                self.assertEqual(manager.conversation.turns[-1]['text'], phrase)
+                self.assertEqual(manager.conversation.turns[-1]['state'], 'thinking')
+                pcm = b''.join(data for child in service.audio_children for data in child.writes)
+                self.assertEqual(pcm[before:], bytes(9600))
+                self.assertTrue(committed.empty())
+                self.assertIsNone(manager.waiting_transport)
+                released[answer].set()
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), answer)
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), answer)
+                self.assertEqual(manager.llm.last_spoken_reply, answer)
+                self.assertEqual(manager.conversation.turns[-1]['state'], 'complete')
+                self.assertTrue(closed[answer].is_set())
+                reply_rows = [snapshot['turns'][-1] for snapshot in published[published_start:]
+                              if snapshot['turns'] and snapshot['turns'][-1]['speaker'] == 'kestrel'
+                              and snapshot['turns'][-1]['text']]
+                self.assertEqual(reply_rows, [
+                    {'speaker': 'kestrel', 'text': phrase, 'state': 'speaking'},
+                    {'speaker': 'kestrel', 'text': phrase, 'state': 'thinking'},
+                    {'speaker': 'kestrel', 'text': phrase + ' ' + answer, 'state': 'speaking'},
+                    {'speaker': 'kestrel', 'text': phrase + ' ' + answer, 'state': 'complete'},
+                ])
+            self.assertEqual([m for m in brain.requests[2][2]['messages'] if m['role'] != 'system'], [
+                {'role': 'user', 'content': 'Typed first question'},
+                {'role': 'assistant', 'content': 'First answer.'},
+                {'role': 'user', 'content': 'Typed second question'},
+            ])
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second answer.')
+            barrier = DataFrame()
+            await output.queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+            self.assertEqual(len(brain.requests), 3)
+            self.assertTrue(timers.empty(), 'Exact repeat never arms an acknowledgement')
+            self.assertTrue(committed.empty())
+
+            self.assertEqual(await service.submit('Typed obsolete question'), 'accepted')
+            await asyncio.wait_for(entered['Obsolete answer.'].wait(), 5)
+            obsolete_callback, obsolete_args, obsolete_deadline = await asyncio.wait_for(timers.get(), 5)
+            writing = asyncio.Event()
+            release_write = asyncio.Event()
+            self.addCleanup(release_write.set)
+            playback = None
+            native_open_playback = transport._open_playback
+
+            async def hold_write():
+                writing.set()
+                await release_write.wait()
+
+            async def open_held_playback():
+                nonlocal playback
+                await native_open_playback()
+                playback = transport.playback
+                playback.stdin.drain.side_effect = hold_write
+
+            with patch.object(transport, '_open_playback', side_effect=open_held_playback):
+                acknowledgement_time[0] = max(acknowledgement_time[0], obsolete_deadline)
+                obsolete_callback(*obsolete_args)
+                await asyncio.wait_for(writing.wait(), 5)
+            held_bytes = sum(len(data) for child in service.audio_children for data in child.writes)
+            self.assertEqual(await service.submit("that's all"), 'accepted')
+            released['Obsolete answer.'].set()
+            release_write.set()
+            cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+            await asyncio.wait_for(asyncio.shield(cleanup), 5)
+            self.assertTrue(closed['Obsolete answer.'].is_set())
+            self.assertTrue(playback.reaped.is_set())
+            self.assertTrue(all(child.reaped.is_set() for child in service.audio_children if not child.wake_capture))
+            self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), held_bytes)
+            self.assertIsNone(output.acknowledgement_record)
+            self.assertFalse(output.acknowledgement_tasks)
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertIsNone(transport.llm.last_spoken_reply)
+            before = sum(len(data) for child in service.audio_children for data in child.writes)
+            acknowledgement_time[0] = max(acknowledgement_time[0], obsolete_deadline)
+            obsolete_callback(*obsolete_args)
+            self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), before)
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertTrue(spoken.empty())
+            self.assertTrue(committed.empty())
+
+            self.assertEqual(await service.toggle(), 'starting')
+            fresh = await asyncio.wait_for(service.started.get(), 5)
+            self.assertIsNotNone(fresh.capture)
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertIsNone(fresh.llm.last_spoken_reply)
+            fresh.capture.stdout.feed_data(bytes(640))
+            await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
+            await self.finish_user_turn(fresh, 'Fresh quick question')
+            quick_callback, quick_args, quick_deadline = await asyncio.wait_for(timers.get(), 5)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Quick fresh answer.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Quick fresh answer.')
+            before = sum(len(data) for child in service.audio_children for data in child.writes)
+            acknowledgement_time[0] = max(acknowledgement_time[0], quick_deadline)
+            quick_callback(*quick_args)
+            acknowledgement_time[0] = max(acknowledgement_time[0], obsolete_deadline)
+            obsolete_callback(*obsolete_args)
+            barrier = DataFrame()
+            await fresh.input().queue_frame(barrier)
+            self.assertIs(await asyncio.wait_for(fresh.processed.get(), 5), barrier)
+            self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), before)
+            self.assertTrue(spoken.empty())
+            self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                             [{'role': 'user', 'content': 'Fresh quick question'}])
+            payloads = json.dumps([brain.requests, native_events])
+            for phrase in ('One moment.', 'Just a moment.', 'Give me a moment.'):
+                self.assertNotIn(phrase, payloads)
+        finally:
+            for release in released.values():
+                release.set()
+            await close()
+        for process, home in processes:
+            self.assertIsNotNone(process.returncode)
+            self.assertFalse(home.exists())
+
     async def test_phonon_typed_reply_preserves_inactive_microphone(self):
         brain = ScriptedBrain([
             [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
@@ -6096,7 +6575,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
                          [{'role': 'user', 'content': 'Fresh voice question'}])
         self.assertEqual([item.args[0] for item in service.model.stream.call_args_list],
-                         ['Hello.', 'Typed reply.', 'Fresh reply.'])
+                         ['One moment.', 'Just a moment.', 'Give me a moment.', 'Typed reply.', 'Fresh reply.'])
         await close()
 
     async def test_typed_inactive_preserves_voice_and_context(self):
@@ -8259,10 +8738,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         @transport.llm.event_handler('on_before_push_frame')
         async def generated_text(processor, frame):
             if cancel_without_audio and isinstance(frame, InterruptionFrame) and reply_progress.token_of(frame) is not None:
-                # Revoked producers suppress their end frame; inject its delayed transport arrival explicitly.
+                # Model an already-admitted end delayed downstream of the output gate.
                 late = LLMFullResponseEndFrame()
                 late.reply_progress = frame.reply_progress
-                await output.push_frame(late)
+                await speech.BaseOutputTransport.push_frame(output, late)
                 await asyncio.wait_for(old_end_output.wait(), 5)
             if hold_text and isinstance(frame, LLMTextFrame):
                 generated.set()
@@ -8272,6 +8751,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             interrupted.clear()
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await asyncio.wait_for(interrupted.wait(), 5)
+            await barrier()
 
         async def barrier():
             frame = DataFrame()
@@ -8317,9 +8797,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     {'speaker': 'kestrel', 'text': expected, 'state': 'complete'},
                 ])
                 self.assertTrue(committed.empty(), 'Local spoken responses never enter engine history')
-            output.write_gate.clear()
             playback_started.clear()
             await start()
+            output.write_gate.clear()
             await self.finish_user_turn(transport, 'what can I say?')
             await asyncio.wait_for(playback_started.wait(), 5)
             await start()
@@ -8648,10 +9128,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(current(), expected)
 
                 async def start():
+                    interrupted.clear()
                     while not changes.empty():
                         changes.get_nowait()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await state('listening')
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await barrier()
 
                 async def barrier():
                     frame = DataFrame()
@@ -8660,8 +9143,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     await state('idle')
-                    output.write_gate.clear()
                     await start()
+                    output.write_gate.clear()
                     await self.finish_user_turn(transport, 'Say hello.')
                     await asyncio.wait_for(text_seen.wait(), 5)
                     self.assertEqual(current(), 'thinking', 'Generated text is not playback')
@@ -8676,8 +9159,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     while await asyncio.wait_for(native_events.get(), 5) is not BotStoppedSpeakingFrame:
                         pass
                     for phrase in ('repeat that', 'what can i say'):
-                        output.write_gate.clear()
                         await start()
+                        output.write_gate.clear()
                         await self.finish_user_turn(transport, phrase)
                         await state('speaking')
                         output.write_gate.set()
@@ -8751,13 +9234,22 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(current(), expected)
 
             with patch.object(status, 'set_state', observe):
-                transport, spoken, _, _, _, close = await self.open_session(brain, status=status)
+                transport, spoken, _, interrupted, _, close = await self.open_session(brain, status=status)
                 output = transport.output()
-                try:
-                    await state('idle')
-                    output.write_gate.clear()
+
+                async def start():
+                    interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await state('listening')
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+
+                try:
+                    await state('idle')
+                    await start()
+                    output.write_gate.clear()
                     await self.finish_user_turn(transport, 'PRIVATE transcript sentinel')
                     await state('speaking')
                     await asyncio.wait_for(output.generation_done.wait(), 5)
@@ -8768,9 +9260,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     for phrase in ('repeat that', 'what can i say'):
                         while not changes.empty():
                             changes.get_nowait()
+                        await start()
                         output.write_gate.clear()
-                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                        await state('listening')
                         await self.finish_user_turn(transport, phrase)
                         await state('speaking')
                         output.write_gate.set()
@@ -8778,8 +9269,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     for phrase in ('stop', 'cancel', 'mute'):
                         while not changes.empty():
                             changes.get_nowait()
-                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                        await state('listening')
+                        await start()
                         if phrase == 'mute':
                             transport.llm.local_actions.command = AsyncMock(side_effect=[
                                 'fixture-output', 'fixture-output', 'Mute: yes',

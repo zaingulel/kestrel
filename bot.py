@@ -17,6 +17,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams, VADState
+from pipecat.observers.base_observer import FramePushed
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -46,13 +47,14 @@ from admission import Admission
 from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
-from reply_progress import AnnouncementMarkFrame, ConversationSynthesisFailedFrame, ReplyProgress, SpeechAdvisoryFrame, token_of
+from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
+                            ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
 from speech import (
     ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
-    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset,
+    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset, prepare_acknowledgements,
 )
 from tool_actions import (
     TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
@@ -506,13 +508,14 @@ class BrainTurn:
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None, acknowledgement_output=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
             filter_incomplete_user_turns=False, user_turn_completion_config=None,
         ))
         self.output = None
+        self.acknowledgement_output = acknowledgement_output
         self.channel = channel
         self.local_actions = local_actions
         self.admission = admission
@@ -772,6 +775,8 @@ class HermesLLMService(LLMService):
         return brain_result(effect_observed(result), result.attempted, result.reason)
 
     def revoke(self):
+        if self.acknowledgement_output is not None:
+            self.acknowledgement_output.cancel_acknowledgement()
         self.channel.detach(self.output)
         self.output = None
         self.last_spoken_reply = None
@@ -876,6 +881,9 @@ class HermesLLMService(LLMService):
             else:
                 await self.push_reply_end(token)
             return
+        self.begin_reply(token)
+        if self.acknowledgement_output is not None:
+            self.acknowledgement_output.arm_acknowledgement(self._reply)
         output = None
         failed = False
         started = False
@@ -897,7 +905,6 @@ class HermesLLMService(LLMService):
             await self.channel.drain()
             if not self.valid_origin(frame):
                 return
-            self.begin_reply(token)
             await self.start_processing_metrics()
             if self.channel.failure:
                 raise RuntimeError(self.channel.failure)
@@ -922,6 +929,8 @@ class HermesLLMService(LLMService):
                     self.revoke()
                     return
                 if 'advisory' in event:
+                    if self.acknowledgement_output is not None:
+                        self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
                     if not started:
                         await push_reply_start('neutral')
                         started = True
@@ -938,6 +947,8 @@ class HermesLLMService(LLMService):
                 raise RuntimeError(self.channel.failure)
         except Exception as error:
             failed = True
+            if self.acknowledgement_output is not None:
+                self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.channel.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             if not started:
@@ -1052,6 +1063,7 @@ class VoiceConversations:
         self.trouble = None
         self.closed = False
         self.prepared = False
+        self.prepared_acknowledgements = ()
         self.transitioning = False
         self.lifecycle_changed = False
         self.handover = None
@@ -1208,11 +1220,7 @@ class VoiceConversations:
             self.voice_factory = partial(VoxCPMTTS, self.model, self.preset, generation_lock=self.generation_lock)
             logger.info('Kestrel speech provider: VoxCPM2 CUDA, selected local reference voice.')
         voice = self.voice_factory()
-        has_audio = False
-        async for frame in voice.run_tts('Hello.', 'warmup'):
-            has_audio |= bool(frame.audio)
-        if not has_audio:
-            raise RuntimeError(f'{self.tts_model} preparation produced no audio')
+        self.prepared_acknowledgements = await prepare_acknowledgements(voice)
         self.prepared = True
 
     async def activate(self, *, capture_enabled=True):
@@ -1224,10 +1232,11 @@ class VoiceConversations:
         self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admission.is_open))
         self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admission=admission,
                                              capture_enabled=capture_enabled)
+        self.transport.output().prepared_acknowledgements = self.prepared_acknowledgements
         # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
                                     dismiss=partial(self.request_active, False), status=self.status if capture_enabled else None,
-                                    conversation=self.conversation)
+                                    conversation=self.conversation, acknowledgement_output=self.transport.output())
         adapter = self.llm
 
         def readiness_finished(task):
@@ -1610,6 +1619,13 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
+class AnswerLatencyObserver(UserBotLatencyObserver):
+    async def on_push_frame(self, data: FramePushed):
+        if isinstance(data.frame, AcknowledgementStartedFrame) or getattr(data.frame, 'prepared_credit', None) is not None:
+            return
+        await super().on_push_frame(data)
+
+
 async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_frame_completed, typed_origin, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
@@ -1689,8 +1705,9 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
     async def on_output_frame(processor, frame):
         # The transport pushes audio only after its write succeeded.
         if isinstance(frame, OutputAudioRawFrame):
-            llm.conversation_audio(output.output_buffer.written(frame))
-        elif isinstance(frame, BotStoppedSpeakingFrame):
+            prepared = getattr(frame, 'prepared_credit', None)
+            llm.conversation_audio([prepared] if prepared is not None else output.output_buffer.written(frame))
+        elif isinstance(frame, BotStoppedSpeakingFrame) and not isinstance(frame, AcknowledgementStoppedFrame):
             output.output_buffer.stopped_speaking(frame)
         if voice.generation_cleanup_failed:
             llm.indicator_voice_failed()
@@ -1709,7 +1726,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
         transport.input(), stt, user, llm,
         voice, output, assistant,
     ])
-    latency_observer = UserBotLatencyObserver()
+    latency_observer = AnswerLatencyObserver()
 
     @latency_observer.event_handler("on_latency_measured")
     async def on_latency_measured(observer, latency_seconds):
