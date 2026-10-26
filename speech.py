@@ -762,7 +762,7 @@ class LaptopAudioTransport:
 
     def input_admitted(self):
         # Capture handed to capture_pcm never enters the conversation.
-        return self.capture_pcm is None and (self.admission is None or self.admission.admits_microphone())
+        return self.capture_pcm is None and self.admission is not None and self.admission.admits_microphone()
 
     def input(self):
         return self._input

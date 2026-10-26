@@ -4841,7 +4841,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 class Input(FrameProcessor):
                     async def process_frame(self, frame, direction):
                         if isinstance(frame, DataFrame) and not (
-                                capture_pcm is None and (admission is None or admission.admits_microphone())):
+                                capture_pcm is None and admission is not None and admission.admits_microphone()):
                             return
                         await super().process_frame(frame, direction)
                         await self.push_frame(frame, direction)

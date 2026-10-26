@@ -2348,7 +2348,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 capture.stdin = replacement.stdin = None
                 stopped = Mock()
                 echo = Mock(microphone_serial=AsyncMock(return_value=900))
-                transport = speech.LaptopAudioTransport(echo, on_stopped=stopped, admission=None)
+                transport = speech.LaptopAudioTransport(echo, on_stopped=stopped, admission=Admission(voice=True, output_switching=lambda: False))
                 self.addAsyncCleanup(transport.close)
                 native_queue = transport.input()
                 with patch.object(transport, '_spawn', return_value=capture) as spawn:
@@ -2479,6 +2479,10 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     await transport.close()
                     await worker.cancel()
 
+    async def test_missing_admission_admits_no_microphone_frame(self):
+        transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=None)
+        self.assertFalse(transport.input_admitted())
+
     async def test_output_only_and_reply_token_gate(self):
         admission = Admission(voice=False, output_switching=lambda: False)
         old, _ = admission.accept_spoken()
@@ -2555,7 +2559,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             spawned.set()
             return capture
 
-        transport = speech.LaptopAudioTransport(Mock(microphone_serial=AsyncMock(side_effect=serial)), on_stopped=Mock(), admission=None)
+        transport = speech.LaptopAudioTransport(Mock(microphone_serial=AsyncMock(side_effect=serial)), on_stopped=Mock(), admission=Admission(voice=True, output_switching=lambda: False))
         self.addAsyncCleanup(transport.close)
         with patch.object(speech.asyncio, "create_subprocess_exec", spawn):
             opening = asyncio.create_task(transport.open())
