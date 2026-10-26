@@ -1697,6 +1697,232 @@ class EchoRemovalTests(unittest.TestCase):
                        for name in ('B', 'A')]
             updates.append(dict(baseline, metadata=[]))
             tombstone = {'id': 32, 'info': None}
+            selected_node = self.node(10, 'A', 30, 910)
+            selected_node['info']['props']['media.class'] = 'Audio/Sink'
+            selection_graph = [baseline, selected_node]
+            graph_children = []
+
+            async def graph_process():
+                process = Mock(returncode=0, stdout=Mock(
+                    read=AsyncMock(side_effect=[json.dumps(selection_graph).encode(), b'']), _transport=Mock()),
+                    wait=AsyncMock(return_value=0))
+                graph_children.append(process)
+                return process
+
+            # Native source replacement, per-node targeting and deletion-shaped updates
+            # do not mean that the selected output changed.
+            churn = [dict(baseline, metadata=[{'subject': 0, 'key': 'default.audio.source',
+                                             'type': 'Spa:String:JSON', 'value': {'name': name}}])
+                     for name in ('kestrel-microphone', 'physical-source', 'kestrel-microphone')]
+            churn += [dict(baseline, metadata=[{'subject': 98, 'key': 'target.object',
+                                               'type': 'Spa:Id', 'value': 10}]),
+                      dict(baseline, metadata=[])]
+            consumed = asyncio.Event()
+            lines = [json.dumps([record]).encode() + b'\n' for record in [baseline, *churn]]
+
+            async def line():
+                if lines:
+                    return lines.pop(0)
+                consumed.set()
+                await asyncio.Event().wait()
+
+            monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=line), _transport=Mock()),
+                           wait=AsyncMock(return_value=0))
+            changes, failure = Mock(), Mock()
+
+            async def spawn_churn(*command, **kwargs):
+                if command == ('pw-dump',):
+                    return await graph_process()
+                return monitor
+
+            with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_churn):
+                watch = speech.OutputDeviceWatch()
+                try:
+                    await watch.start(changes, failure)
+                    await asyncio.wait_for(consumed.wait(), 5)
+                    changes.assert_not_called()
+                    self.assertEqual(watch.revision, 1)
+                    failure.assert_not_called()
+                finally:
+                    await watch.close()
+            failure.assert_not_called()
+            graph_a = selection_graph
+            unresolved_entry = [dict(baseline, metadata=[]), selected_node]
+            unresolved_node = [baseline]
+            node_b = self.node(11, 'B', 30, 911)
+            node_b['info']['props']['media.class'] = 'Audio/Sink'
+            graph_b = [updates[0], node_b]
+            ambiguous_node = self.node(11, 'A', 30, 911)
+            ambiguous_node['info']['props']['media.class'] = 'Audio/Sink'
+            for case in ('hidden_change', 'unresolved', 'startup_unresolved', 'explicit_unresolved',
+                         'ambiguous_selection', 'snapshot_identity', 'snapshot_identity_startup'):
+                with self.subTest(selection=case):
+                    if case == 'hidden_change':
+                        frames = [(baseline, graph_a), (updates[-1], graph_b)]
+                        expected = [2]
+                    elif case == 'unresolved':
+                        frames = [(baseline, graph_a), (churn[0], unresolved_entry),
+                                  (updates[-1], unresolved_node), (churn[1], unresolved_entry), (churn[-2], graph_a)]
+                        expected = [2, 3]
+                    elif case == 'startup_unresolved':
+                        frames = [(baseline, unresolved_entry), (churn[0], graph_a)]
+                        expected = [1, 2]
+                    elif case == 'explicit_unresolved':
+                        frames = [(baseline, graph_a), (churn[0], unresolved_entry),
+                                  (updates[0], unresolved_entry), (updates[1], unresolved_entry), (updates[-1], graph_a)]
+                        expected = [2, 3, 4, 5]
+                    elif case == 'ambiguous_selection':
+                        frames = [(baseline, graph_a), (churn[0], [baseline, selected_node, ambiguous_node]),
+                                  (churn[-2], graph_a)]
+                        expected = [2, 3]
+                    else:
+                        foreign_graph = [dict(baseline, id=33), selected_node]
+                        frames = ([(baseline, foreign_graph)] if case == 'snapshot_identity_startup'
+                                  else [(baseline, graph_a), (updates[-1], foreign_graph)])
+                        expected = []
+                    completed = asyncio.Event()
+                    seen, failed = [], Mock(side_effect=completed.set)
+
+                    async def next_record():
+                        nonlocal selection_graph
+                        if frames:
+                            record, selection_graph = frames.pop(0)
+                            return json.dumps([record]).encode() + b'\n'
+                        completed.set()
+                        await asyncio.Event().wait()
+
+                    monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=next_record),
+                                   _transport=Mock()), wait=AsyncMock(return_value=0))
+                    watch = speech.OutputDeviceWatch()
+                    with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_churn):
+                        try:
+                            if case == 'snapshot_identity_startup':
+                                with self.assertRaisesRegex(RuntimeError, speech.OUTPUT_WATCH_FAILURE):
+                                    await watch.start(lambda: seen.append(watch.revision), failed)
+                            else:
+                                await watch.start(lambda: seen.append(watch.revision), failed)
+                                await asyncio.wait_for(completed.wait(), 5)
+                            if case == 'snapshot_identity':
+                                failed.assert_called_once_with()
+                            else:
+                                failed.assert_not_called()
+                            self.assertEqual(seen, expected)
+                        finally:
+                            await watch.close()
+            selection_graph = graph_a
+
+            notice, checking, release_snapshot = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            consumed = asyncio.Event()
+            lines = [json.dumps([record]).encode() + b'\n' for record in (baseline, updates[0])]
+            monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=line), _transport=Mock()),
+                           wait=AsyncMock(return_value=0))
+            query_count = 0
+
+            async def spawn_held_snapshot(*command, **kwargs):
+                nonlocal query_count
+                if command == ('pw-dump',):
+                    query_count += 1
+                    if query_count == 2:
+                        checking.set()
+                        await release_snapshot.wait()
+                    return await graph_process()
+                return monitor
+
+            watch = speech.OutputDeviceWatch()
+            with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_held_snapshot):
+                try:
+                    await watch.start(notice.set, self.fail)
+                    await asyncio.wait_for(checking.wait(), 5)
+                    self.assertTrue(notice.is_set(), 'Explicit sink notice must close admission before awaited graph work')
+                    self.assertEqual(watch.revision, 2)
+                    release_snapshot.set()
+                    await asyncio.wait_for(consumed.wait(), 5)
+                finally:
+                    release_snapshot.set()
+                    await watch.close()
+            for startup in (False, True):
+                for entry in (None, {'subject': True, 'key': 'default.audio.source'},
+                              {'subject': -1, 'key': 'target.object'}, {'subject': 0, 'key': 5}):
+                    with self.subTest(startup_entry=startup, invalid_entry=entry):
+                        malformed = dict(baseline, metadata=[entry])
+                        consumed = asyncio.Event()
+                        lines = [json.dumps([record]).encode() + b'\n'
+                                 for record in ([malformed] if startup else [baseline, malformed])]
+                        monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=line),
+                                       _transport=Mock()), wait=AsyncMock(return_value=0))
+                        failed_event = asyncio.Event()
+                        changes, failed = Mock(), Mock(side_effect=failed_event.set)
+                        watch = speech.OutputDeviceWatch()
+                        with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_churn):
+                            try:
+                                if startup:
+                                    with self.assertRaisesRegex(RuntimeError, speech.OUTPUT_WATCH_FAILURE):
+                                        await watch.start(changes, failed)
+                                else:
+                                    await watch.start(changes, failed)
+                                    await asyncio.wait_for(failed_event.wait(), 5)
+                                    failed.assert_called_once_with()
+                                changes.assert_not_called()
+                            finally:
+                                await watch.close()
+            for owned in (False, True):
+                with self.subTest(snapshot_cleanup_owned=owned):
+                    entered, release_cleanup, failed_event = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                    consumed = asyncio.Event()
+                    lines = [json.dumps([record]).encode() + b'\n' for record in (baseline, updates[-1])]
+                    monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=line),
+                                   _transport=Mock()), wait=AsyncMock(return_value=0))
+                    failed_query = Mock(returncode=None, stdout=Mock(
+                        read=AsyncMock(side_effect=OSError('Controlled snapshot read failure')), _transport=Mock()))
+
+                    async def failed_wait():
+                        if failed_query.wait.await_count == 1:
+                            entered.set()
+                            await release_cleanup.wait()
+                        raise TimeoutError
+
+                    failed_query.wait = AsyncMock(side_effect=failed_wait)
+                    query_count = 0
+
+                    async def spawn_cleanup(*command, **kwargs):
+                        nonlocal query_count
+                        if command == ('pw-dump',):
+                            query_count += 1
+                            return await graph_process() if query_count == 1 else failed_query
+                        return monitor
+
+                    watch = speech.OutputDeviceWatch()
+                    changes, failed = Mock(), Mock(side_effect=failed_event.set)
+                    closing = None
+                    with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_cleanup):
+                        try:
+                            await watch.start(changes, failed)
+                            await asyncio.wait_for(entered.wait(), 5)
+                            if owned:
+                                closing = asyncio.create_task(watch.close())
+                                # close retains its own task, which requests cancellation of the reader.
+                                await asyncio.sleep(0)
+                                await asyncio.sleep(0)
+                                self.assertGreater(watch.reader.cancelling(), 0)
+                            release_cleanup.set()
+                            if not owned:
+                                await asyncio.wait_for(failed_event.wait(), 5)
+                            with self.assertRaisesRegex(speech.PipeWireGraphCleanupFailure, speech.OUTPUT_SWITCH_FAILURE):
+                                await closing if closing is not None else await watch.close()
+                            self.assertEqual(query_count, 2)
+                            self.assertEqual(failed.call_count, 0 if owned else 1)
+                            changes.assert_not_called()
+                            failed_query.terminate.assert_called_once_with()
+                            failed_query.kill.assert_called_once_with()
+                            self.assertEqual(failed_query.wait.await_count, 2)
+                            monitor.terminate.assert_called_once_with()
+                            monitor.wait.assert_awaited_once()
+                        finally:
+                            release_cleanup.set()
+                            if closing is not None:
+                                await asyncio.gather(closing, return_exceptions=True)
+                            elif not watch.closed:
+                                await watch.close()
             for malformed in (False, True):
                 seen, failed = asyncio.Queue(), asyncio.Event()
                 watch = speech.OutputDeviceWatch()
@@ -1704,6 +1930,8 @@ class EchoRemovalTests(unittest.TestCase):
 
                 async def spawn(*command, **kwargs):
                     self.assertEqual(kwargs['stderr'], asyncio.subprocess.DEVNULL)
+                    if command == ('pw-dump',):
+                        return await graph_process()
                     if 'pw-metadata' in command:
                         # The old native monitor cannot announce registry removal.
                         wire = 'Found "default" metadata 32\n' + ''.join(
@@ -1728,7 +1956,7 @@ class EchoRemovalTests(unittest.TestCase):
                             self.assertEqual(watch.revision, 1)
                             self.assertTrue(seen.empty())
                         else:
-                            self.assertEqual([seen.get_nowait() for _ in updates], [2, 3, 4])
+                            self.assertEqual([seen.get_nowait() for _ in updates[:2]], [2, 3])
                             self.assertTrue(seen.empty())
                     finally:
                         await watch.close()
@@ -1828,6 +2056,22 @@ class EchoRemovalTests(unittest.TestCase):
             # Before the recorder exists a passive reference need not be active.
             with self.graph_output(self.graph()[:5]):
                 self.assertEqual(await echo.microphone_serial(), 900)
+            for unresolved in ('missing_entry', 'missing_node', 'ambiguous_node'):
+                with self.subTest(unresolved_consumer=unresolved):
+                    broken = json.loads(json.dumps(graph))
+                    if unresolved == 'missing_entry':
+                        broken[5]['metadata'] = []
+                    elif unresolved == 'missing_node':
+                        broken.pop(6)
+                    else:
+                        duplicate = self.node(12, 'selected-output', 30, 911)
+                        duplicate['info']['props']['media.class'] = 'Audio/Sink'
+                        broken.append(duplicate)
+                    with self.graph_output(broken):
+                        with self.assertRaisesRegex(RuntimeError, speech.OUTPUT_SWITCH_FAILURE):
+                            await echo.output_serial()
+                        with self.assertRaisesRegex(RuntimeError, 'owned echo-removed microphone could not be verified'):
+                            await echo.microphone_serial(3200)
             playback_graph = graph + [self.client(32, 3300), self.node(1, 'owned-playback', 32, 912), self.link(1, 10, 'active')]
             with self.graph_output(playback_graph):
                 self.assertEqual(await echo.output_serial(3300), 910)
@@ -1872,6 +2116,10 @@ class EchoRemovalTests(unittest.TestCase):
                     with self.graph_output(broken):
                         with self.assertRaisesRegex(RuntimeError, 'Restart Kestrel'):
                             await echo.microphone_serial(3200, output_serial=910)
+
+            for child in graph_children:
+                child.stdout._transport.close.assert_called_once_with()
+                child.wait.assert_awaited()
 
         asyncio.run(check())
 

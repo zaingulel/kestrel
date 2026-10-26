@@ -1475,9 +1475,22 @@ class VoiceConversations:
                     ECHO_REMOVAL.start(self.echo_stopped)
                     self.echo_cleanup = None
                     self.echo_owner = self.status.remember_owner(ECHO_REMOVAL.process.pid)
-                    selected = await ECHO_REMOVAL.output_serial()
+                    while not interrupted() and self.output_watch.revision == self.echo_revision:
+                        try:
+                            selected = await ECHO_REMOVAL.output_serial()
+                            break
+                        except PipeWireGraphCleanupFailure:
+                            raise
+                        except RuntimeError:
+                            if interrupted():
+                                return
+                            if self.output_watch.revision != self.echo_revision:
+                                break
+                            await asyncio.sleep(0.5)
                     if interrupted():
                         return
+                    if self.output_watch.revision != self.echo_revision:
+                        continue
                     if transport is not None and transport.capture_enabled:
                         stable = await self.resume_output_capture(transport, selected)
                         if interrupted():

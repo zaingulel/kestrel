@@ -322,6 +322,7 @@ class OutputDeviceWatch:
         self.close_task = None
         self.revision = 0
         self.metadata_id = None
+        self.selected_serial = None
         self.closed = False
 
     async def start(self, on_change, on_failed):
@@ -333,8 +334,12 @@ class OutputDeviceWatch:
                 start_new_session=True,
             )
             async with asyncio.timeout(5):
-                self.metadata_id = await self._record()
+                record = await self._record()
+                self.metadata_id = record["id"]
                 self.revision += 1
+            self.selected_serial = await self._selection()
+            if self.selected_serial is None:
+                on_change()
             self.reader = asyncio.create_task(self._watch(on_change, on_failed))
         except asyncio.CancelledError:
             await self.close()
@@ -363,14 +368,36 @@ class OutputDeviceWatch:
                 or not isinstance(item.get('metadata'), list)
                 or self.metadata_id is not None and item['id'] != self.metadata_id):
             raise ValueError
-        return item['id']
+        if any(not isinstance(entry, dict) or type(entry.get('subject')) is not int or entry['subject'] < 0
+               or not isinstance(entry.get('key'), str) for entry in item['metadata']):
+            raise ValueError
+        return item
+
+    async def _selection(self):
+        graph = await _pipewire_graph()
+        metadata = [item for item in graph if item['type'] == 'PipeWire:Interface:Metadata'
+                    and item.get('props', {}).get('metadata.name') == 'default']
+        if len(metadata) != 1 or metadata[0]['id'] != self.metadata_id:
+            raise ValueError
+        selected = EchoRemoval._selected_output(graph)
+        return selected['info']['props']['object.serial'] if selected is not None else None
 
     async def _watch(self, on_change, on_failed):
         try:
             while True:
-                await self._record()
-                self.revision += 1
-                on_change()
+                record = await self._record()
+                explicit = any(entry['subject'] == 0 and entry['key'] == 'default.audio.sink'
+                               for entry in record['metadata'])
+                if explicit:
+                    self.revision += 1
+                    on_change()
+                selected = await self._selection()
+                if not explicit and selected != self.selected_serial:
+                    self.revision += 1
+                    on_change()
+                self.selected_serial = selected
+        except PipeWireGraphCleanupFailure:
+            raise
         except (Exception, asyncio.CancelledError):
             pass
         finally:
@@ -391,11 +418,23 @@ class OutputDeviceWatch:
             raise RuntimeError(OUTPUT_WATCH_FAILURE) from None
 
     async def _close(self):
-        if self.reader is not None:
-            self.reader.cancel()
-            await asyncio.gather(self.reader, return_exceptions=True)
-        if self.process is not None:
-            await _close_pipewire(self.process)
+        failure = None
+        try:
+            if self.reader is not None:
+                self.reader.cancel()
+                try:
+                    await self.reader
+                except asyncio.CancelledError:
+                    pass
+        except PipeWireGraphCleanupFailure as error:
+            failure = error
+        finally:
+            try:
+                if self.process is not None:
+                    await _close_pipewire(self.process)
+            finally:
+                if failure is not None:
+                    raise failure
 
 
 class EchoRemoval:
@@ -472,6 +511,8 @@ class EchoRemoval:
                     raise ValueError
             if capture_pid is not None or output_serial is not None:
                 selected = self._selected_output(graph)
+                if selected is None:
+                    raise ValueError
                 if output_serial is not None and selected["info"]["props"]["object.serial"] != output_serial:
                     raise ValueError
                 references = [item for item in nodes if item["info"]["props"].get("node.name") ==
@@ -492,10 +533,14 @@ class EchoRemoval:
                     and item.get('props', {}).get('metadata.name') == 'default']
         if len(metadata) != 1 or not isinstance(metadata[0]['metadata'], list):
             raise ValueError
+        if any(not isinstance(entry, dict) or type(entry.get('subject')) is not int or entry['subject'] < 0
+               or not isinstance(entry.get('key'), str) for entry in metadata[0]['metadata']):
+            raise ValueError
         entries = [entry for entry in metadata[0]['metadata']
                    if entry['subject'] == 0 and entry['key'] == 'default.audio.sink']
-        if (len(entries) != 1 or type(entries[0]['subject']) is not int
-                or entries[0]['type'] != 'Spa:String:JSON' or not isinstance(entries[0]['value'], dict)):
+        if not entries:
+            return None
+        if (len(entries) != 1 or entries[0]['type'] != 'Spa:String:JSON' or not isinstance(entries[0]['value'], dict)):
             raise ValueError
         name = entries[0]['value']['name']
         if not isinstance(name, str) or not name.strip() or any(ord(c) < 32 or ord(c) == 127 for c in name):
@@ -503,17 +548,20 @@ class EchoRemoval:
         outputs = [item for item in graph if item.get('type') == 'PipeWire:Interface:Node'
                    and item['info']['props'].get('node.name') == name
                    and item['info']['props'].get('media.class') == 'Audio/Sink']
+        for output in outputs:
+            serial = output['info']['props']['object.serial']
+            if type(serial) is not int or serial <= 0:
+                raise ValueError
         if len(outputs) != 1:
-            raise ValueError
-        serial = outputs[0]['info']['props']['object.serial']
-        if type(serial) is not int or serial <= 0:
-            raise ValueError
+            return None
         return outputs[0]
 
     async def output_serial(self, playback_pid=None):
         try:
             graph = await _pipewire_graph()
             selected = self._selected_output(graph)
+            if selected is None:
+                raise ValueError
             if playback_pid is not None:
                 clients = [item['id'] for item in graph if item['type'] == 'PipeWire:Interface:Client'
                            and type(item['info']['props']['pipewire.sec.pid']) is int

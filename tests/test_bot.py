@@ -5582,7 +5582,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await close()
 
     async def test_output_handover_inactive_failure_and_dismissal_stay_closed(self):
-        for case in ('inactive', 'typed_inactive', 'watcher_loss', 'verification_failure', 'dismissal', 'deferred_source', 'initial_capture_failure', 'waiting_capture_failure', 'persistent_route', 'graph_cleanup_route', 'superseded_shutdown', 'superseded_deadline', 'startup_selection_active', 'startup_selection_waiting'):
+        for case in ('inactive', 'typed_inactive', 'watcher_loss', 'verification_failure', 'dismissal', 'deferred_source', 'initial_capture_failure', 'waiting_capture_failure', 'persistent_route', 'graph_cleanup_route', 'superseded_shutdown', 'superseded_deadline', 'startup_selection_active', 'startup_selection_waiting', 'initial_selection_recovers', 'initial_selection_superseded', 'initial_selection_cleanup'):
             with self.subTest(case=case):
                 releases = []
                 brain = ScriptedBrain([
@@ -5831,6 +5831,62 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertFalse(manager.speech_admitted())
                                 fresh.capture.stdout.feed_data(b'N' * 640)
                                 self.assertEqual(await asyncio.wait_for(detector_pcm.get(), 5), b'N' * 640)
+                    elif case in ('initial_selection_recovers', 'initial_selection_superseded', 'initial_selection_cleanup'):
+                        entered, release_resolution, completed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                        releases.append(release_resolution)
+                        attempts, graph_children = [], []
+                        refresh = manager.refresh_output
+
+                        async def observed_refresh():
+                            try:
+                                await refresh()
+                            finally:
+                                completed.set()
+
+                        async def selected(playback_pid=None):
+                            attempts.append((service.output_watch.revision, manager.speech_admitted()))
+                            if case == 'initial_selection_cleanup':
+                                child = Mock(returncode=None, stdout=Mock(
+                                    read=AsyncMock(side_effect=OSError('Controlled initial graph read failure')),
+                                    _transport=Mock()), wait=AsyncMock(side_effect=TimeoutError))
+                                graph_children.append(child)
+                                with patch.object(speech.asyncio, 'create_subprocess_exec', new=AsyncMock(return_value=child)):
+                                    return await speech.EchoRemoval.output_serial(bot.ECHO_REMOVAL)
+                            if len(attempts) == 1:
+                                entered.set()
+                                if case == 'initial_selection_superseded':
+                                    await release_resolution.wait()
+                                raise RuntimeError('Selected output is not exported yet. Restart Kestrel.')
+                            return 800 + service.output_watch.revision
+
+                        with patch.object(manager, 'refresh_output', side_effect=observed_refresh), \
+                                patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=selected)):
+                            service.output_watch.emit()
+                            self.assertFalse(manager.speech_admitted())
+                            if case == 'initial_selection_superseded':
+                                await asyncio.wait_for(entered.wait(), 5)
+                                service.output_watch.emit()
+                                release_resolution.set()
+                            await asyncio.wait_for(completed.wait(), 5)
+                            if case == 'initial_selection_cleanup':
+                                await service.state('trouble')
+                                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                                self.assertFalse(manager.speech_admitted())
+                                self.assertEqual(len(attempts), 1)
+                                self.assertEqual(len(graph_children), 1)
+                                self.assertEqual(graph_children[0].wait.await_count, 2)
+                                graph_children[0].terminate.assert_called_once_with()
+                                graph_children[0].kill.assert_called_once_with()
+                                self.assertEqual(len(service.echo_generations), 2)
+                            else:
+                                self.assertIsNone(manager.failure, 'Initial unresolved output must settle without losing the service')
+                                expected_revisions = [1, 2, 2] if case == 'initial_selection_superseded' else [1, 1, 1]
+                                self.assertEqual(attempts, [(revision, False) for revision in expected_revisions])
+                                self.assertEqual(manager.echo_revision, service.output_watch.revision)
+                                self.assertTrue(manager.speech_admitted())
+                                self.assertTrue(handle.verified)
+                                self.assertEqual(len(service.sessions), 1)
+                                self.assertEqual(len(service.echo_generations), 3 if case == 'initial_selection_superseded' else 2)
                     elif case in ('superseded_shutdown', 'superseded_deadline'):
                         verifying, reaping, release_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
                         releases.append(release_cleanup)
@@ -5953,9 +6009,20 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(manager.speech_admitted())
                         self.assertEqual(await service.submit('new request'), 'unavailable')
                     elif case == 'verification_failure':
-                        with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=RuntimeError('private graph'))):
+                        failed = asyncio.Event()
+                        original_state = manager.status.set_state
+
+                        def state(value):
+                            original_state(value)
+                            if value == 'trouble':
+                                failed.set()
+
+                        with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=RuntimeError('private graph'))), \
+                                patch.object(manager.status, 'set_state', side_effect=state):
                             service.output_watch.emit()
-                            await service.state('trouble')
+                            self.assertFalse(manager.speech_admitted())
+                            # Persistent unresolved selection uses the existing 30-second total deadline.
+                            await asyncio.wait_for(failed.wait(), 35)
                         self.assertFalse(manager.speech_admitted())
                         self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
                         self.assertNotIn('private graph', manager.failure)
