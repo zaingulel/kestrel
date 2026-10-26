@@ -507,13 +507,14 @@ class BrainTurn:
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None, acknowledgement_output=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
             filter_incomplete_user_turns=False, user_turn_completion_config=None,
         ))
         self.output = None
+        self.acknowledgement_output = acknowledgement_output
         self.channel = channel
         self.local_actions = local_actions
         self.admission = admission
@@ -773,6 +774,8 @@ class HermesLLMService(LLMService):
         return brain_result(effect_observed(result), result.attempted, result.reason)
 
     def revoke(self):
+        if self.acknowledgement_output is not None:
+            self.acknowledgement_output.cancel_acknowledgement()
         self.channel.detach(self.output)
         self.output = None
         self.last_spoken_reply = None
@@ -877,6 +880,9 @@ class HermesLLMService(LLMService):
             else:
                 await self.push_reply_end(token)
             return
+        self.begin_reply(token)
+        if self.acknowledgement_output is not None:
+            self.acknowledgement_output.arm_acknowledgement(self._reply)
         output = None
         failed = False
         started = False
@@ -898,7 +904,6 @@ class HermesLLMService(LLMService):
             await self.channel.drain()
             if not self.valid_origin(frame):
                 return
-            self.begin_reply(token)
             await self.start_processing_metrics()
             if self.channel.failure:
                 raise RuntimeError(self.channel.failure)
@@ -923,6 +928,8 @@ class HermesLLMService(LLMService):
                     self.revoke()
                     return
                 if 'advisory' in event:
+                    if self.acknowledgement_output is not None:
+                        self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
                     if not started:
                         await push_reply_start('neutral')
                         started = True
@@ -939,6 +946,8 @@ class HermesLLMService(LLMService):
                 raise RuntimeError(self.channel.failure)
         except Exception as error:
             failed = True
+            if self.acknowledgement_output is not None:
+                self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.channel.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             if not started:
@@ -1222,10 +1231,11 @@ class VoiceConversations:
         self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admission.is_open))
         self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admission=admission,
                                              capture_enabled=capture_enabled)
+        self.transport.output().prepared_acknowledgements = self.prepared_acknowledgements
         # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
                                     dismiss=partial(self.request_active, False), status=self.status if capture_enabled else None,
-                                    conversation=self.conversation)
+                                    conversation=self.conversation, acknowledgement_output=self.transport.output())
         adapter = self.llm
 
         def readiness_finished(task):

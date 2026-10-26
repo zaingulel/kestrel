@@ -2069,6 +2069,99 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                 error.assert_not_called()
 
 
+
+class AcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ordinary_turn_deadline_survives_readiness_and_generation(self):
+        for outcome in ('complete', 'failure', 'revoke'):
+            with self.subTest(outcome=outcome):
+                service = hermes_service()
+                output = speech.LaptopOutput(Mock(admission=service.admission), TransportParams(
+                    audio_out_enabled=True, audio_out_sample_rate=48000,
+                ))
+                service.acknowledgement_output = output
+                armed, draining, generating = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                release_drain, release_generation = asyncio.Event(), asyncio.Event()
+                ready = service.session_ready = asyncio.get_running_loop().create_future()
+                native_arm = output.arm_acknowledgement
+                output.cancel_acknowledgement = Mock(wraps=output.cancel_acknowledgement)
+
+                def arm(record):
+                    native_arm(record)
+                    output.acknowledgement_timer.cancel()
+                    output.cancel_acknowledgement.reset_mock()
+                    armed.set()
+
+                output.arm_acknowledgement = Mock(side_effect=arm)
+
+                async def drain():
+                    draining.set()
+                    await release_drain.wait()
+
+                async def exchange(history, events, *, admitted, desktop):
+                    events.put_nowait({'delivery': 'neutral'})
+                    events.put_nowait({'text': 'An answer.'})
+                    generating.set()
+                    await release_generation.wait()
+                    if outcome == 'failure':
+                        events.put_nowait({'advisory': 'The engine failed.'})
+                    events.put_nowait(None)
+
+                service.channel.drain = drain
+                service.channel.exchange = exchange
+                service.push_frame = AsyncMock()
+                service.start_processing_metrics = AsyncMock()
+                service.stop_processing_metrics = AsyncMock()
+                task = asyncio.create_task(service.process_frame(
+                    request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'An ordinary question.'}])),
+                    FrameDirection.DOWNSTREAM,
+                ))
+                try:
+                    await asyncio.wait_for(armed.wait(), 5)
+                    record = output.arm_acknowledgement.call_args.args[0]
+                    self.assertIs(service.current_reply(), record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    ready.set_result(True)
+                    await asyncio.wait_for(draining.wait(), 5)
+                    self.assertIs(service.current_reply(), record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    release_drain.set()
+                    await asyncio.wait_for(generating.wait(), 5)
+                    self.assertIs(service.current_reply(), record)
+                    output.arm_acknowledgement.assert_called_once_with(record)
+                    output.cancel_acknowledgement.assert_not_called()
+                    if outcome == 'revoke':
+                        service.admission.close()
+                        service.revoke()
+                        self.assertTrue(output.cancel_acknowledgement.called)
+                    release_generation.set()
+                    await asyncio.wait_for(task, 5)
+                    if outcome == 'complete':
+                        output.cancel_acknowledgement.assert_not_called()
+                        record.finish()
+                        output.cancel_acknowledgement.assert_called_with(record)
+                    elif outcome == 'failure':
+                        output.cancel_acknowledgement.assert_called_with(record)
+                    else:
+                        self.assertTrue(output.cancel_acknowledgement.called)
+                finally:
+                    release_drain.set()
+                    release_generation.set()
+                    if not ready.done():
+                        ready.set_result(True)
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    await output._observe_acknowledgement_tasks()
+        service = hermes_service()
+        service.acknowledgement_output = output = Mock(spec=speech.LaptopOutput)
+        service.push_frame = AsyncMock()
+        await service.process_frame(
+            request_frame(service, bot.LLMContext([{'role': 'user', 'content': 'What can I say?'}])),
+            FrameDirection.DOWNSTREAM,
+        )
+        output.arm_acknowledgement.assert_not_called()
+
+
 class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def configured_analyzer(self):
         analyzer = None
@@ -6217,6 +6310,176 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     for release in releases:
                         release.set()
                     await close()
+
+    async def test_acknowledgement_output_preserves_history_repeat_and_typed_admission(self):
+        loop = asyncio.get_running_loop()
+        entered = {text: asyncio.Event() for text in ('First answer.', 'Second answer.', 'Obsolete answer.')}
+        released = {text: threading.Event() for text in entered}
+        closed = {text: asyncio.Event() for text in entered}
+        for release in released.values():
+            self.addCleanup(release.set)
+
+        def chunks(**kwargs):
+            text = kwargs['text']
+            try:
+                if text in entered:
+                    loop.call_soon_threadsafe(entered[text].set)
+                    if not released[text].wait(45):
+                        raise AssertionError('Held answer synthesis was not released')
+                yield np.ones(4800, dtype=np.float32)
+            finally:
+                if text in closed:
+                    loop.call_soon_threadsafe(closed[text].set)
+
+        timers = asyncio.Queue()
+        native_call_later = loop.call_later
+
+        def call_later(delay, callback, *args, **kwargs):
+            handle = native_call_later(delay, callback, *args, **kwargs)
+            if getattr(callback, '__name__', '') == '_acknowledgement_due':
+                self.assertEqual(delay, 2.0)
+                timers.put_nowait((callback, args))
+                handle.cancel()
+            return handle
+
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.', '[delivery:neutral] First answer.',
+            '[delivery:neutral] Second answer.', '[delivery:neutral] Obsolete answer.',
+            '[delivery:neutral] Quick fresh answer.',
+        ])
+        self.addCleanup(brain.close)
+        native_events = []
+        with patch.object(loop, 'call_later', side_effect=call_later):
+            handle, spoken, committed, _, processes, close = await self.open_session(
+                brain, through_service=True, native_audio=True, activate=False,
+                synthesis_chunks=chunks, native_events=native_events,
+            )
+            service, manager = handle.service, handle.service.manager
+            waiting = await asyncio.wait_for(service.waiting.get(), 5)
+            try:
+                for index, (question, answer, phrase) in enumerate((
+                    ('Typed first question', 'First answer.', 'One moment.'),
+                    ('Typed second question', 'Second answer.', 'Just a moment.'),
+                )):
+                    self.assertEqual(await service.submit(question), 'accepted')
+                    if index == 0:
+                        transport = await asyncio.wait_for(service.started.get(), 5)
+                        output = transport.output()
+                        self.assertEqual(len(output.prepared_acknowledgements), 3)
+                    await asyncio.wait_for(entered[answer].wait(), 5)
+                    callback, args = await asyncio.wait_for(timers.get(), 5)
+                    record = args[0]
+                    self.assertIs(manager.llm.current_reply(), record)
+                    self.assertFalse(record.closed)
+                    self.assertIsNone(transport.capture)
+                    self.assertFalse(manager.admission.admits_microphone())
+                    self.assertFalse(manager.desired_active)
+                    self.assertEqual(manager.status._state, 'inactive')
+                    self.assertTrue(waiting.capture.reaped.is_set())
+                    self.assertIsNone(manager.waiting_transport)
+                    before = sum(len(data) for child in service.audio_children for data in child.writes)
+                    callback(*args)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), phrase)
+                    self.assertEqual(manager.llm.last_spoken_reply, phrase)
+                    self.assertEqual(manager.conversation.turns[-1]['text'], phrase)
+                    self.assertEqual(manager.conversation.turns[-1]['state'], 'speaking')
+                    pcm = b''.join(data for child in service.audio_children for data in child.writes)
+                    self.assertEqual(pcm[before:], bytes(9600))
+                    self.assertTrue(committed.empty())
+                    self.assertIsNone(manager.waiting_transport)
+                    released[answer].set()
+                    self.assertEqual(await asyncio.wait_for(committed.get(), 5), answer)
+                    self.assertEqual(await asyncio.wait_for(spoken.get(), 5), answer)
+                    self.assertEqual(manager.llm.last_spoken_reply, answer)
+                    self.assertEqual(manager.conversation.turns[-1]['state'], 'complete')
+                    self.assertTrue(closed[answer].is_set())
+                self.assertEqual([m for m in brain.requests[2][2]['messages'] if m['role'] != 'system'], [
+                    {'role': 'user', 'content': 'Typed first question'},
+                    {'role': 'assistant', 'content': 'First answer.'},
+                    {'role': 'user', 'content': 'Typed second question'},
+                ])
+                self.assertEqual(await service.submit('repeat that'), 'accepted')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second answer.')
+                barrier = DataFrame()
+                await output.queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                self.assertEqual(len(brain.requests), 3)
+                self.assertTrue(timers.empty(), 'Exact repeat never arms an acknowledgement')
+                self.assertTrue(committed.empty())
+
+                self.assertEqual(await service.submit('Typed obsolete question'), 'accepted')
+                await asyncio.wait_for(entered['Obsolete answer.'].wait(), 5)
+                obsolete_callback, obsolete_args = await asyncio.wait_for(timers.get(), 5)
+                writing = asyncio.Event()
+                release_write = asyncio.Event()
+                self.addCleanup(release_write.set)
+                playback = None
+                native_open_playback = transport._open_playback
+
+                async def hold_write():
+                    writing.set()
+                    await release_write.wait()
+
+                async def open_held_playback():
+                    nonlocal playback
+                    await native_open_playback()
+                    playback = transport.playback
+                    playback.stdin.drain.side_effect = hold_write
+
+                with patch.object(transport, '_open_playback', side_effect=open_held_playback):
+                    obsolete_callback(*obsolete_args)
+                    await asyncio.wait_for(writing.wait(), 5)
+                held_bytes = sum(len(data) for child in service.audio_children for data in child.writes)
+                self.assertEqual(await service.submit("that's all"), 'accepted')
+                released['Obsolete answer.'].set()
+                release_write.set()
+                cleanup = await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+                await asyncio.wait_for(asyncio.shield(cleanup), 5)
+                self.assertTrue(closed['Obsolete answer.'].is_set())
+                self.assertTrue(playback.reaped.is_set())
+                self.assertTrue(all(child.reaped.is_set() for child in service.audio_children if not child.wake_capture))
+                self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), held_bytes)
+                self.assertIsNone(output.acknowledgement_record)
+                self.assertFalse(output.acknowledgement_tasks)
+                self.assertEqual(manager.conversation.turns, [])
+                self.assertIsNone(transport.llm.last_spoken_reply)
+                before = sum(len(data) for child in service.audio_children for data in child.writes)
+                obsolete_callback(*obsolete_args)
+                self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), before)
+                self.assertTrue(spoken.empty())
+                self.assertTrue(committed.empty())
+
+                self.assertEqual(await service.toggle(), 'starting')
+                fresh = await asyncio.wait_for(service.started.get(), 5)
+                self.assertIsNotNone(fresh.capture)
+                self.assertEqual(manager.conversation.turns, [])
+                self.assertIsNone(fresh.llm.last_spoken_reply)
+                fresh.capture.stdout.feed_data(bytes(640))
+                await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await self.finish_user_turn(fresh, 'Fresh quick question')
+                quick_callback, quick_args = await asyncio.wait_for(timers.get(), 5)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Quick fresh answer.')
+                self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Quick fresh answer.')
+                before = sum(len(data) for child in service.audio_children for data in child.writes)
+                quick_callback(*quick_args)
+                obsolete_callback(*obsolete_args)
+                barrier = DataFrame()
+                await fresh.input().queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(fresh.processed.get(), 5), barrier)
+                self.assertEqual(sum(len(data) for child in service.audio_children for data in child.writes), before)
+                self.assertTrue(spoken.empty())
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'],
+                                 [{'role': 'user', 'content': 'Fresh quick question'}])
+                payloads = json.dumps([brain.requests, native_events])
+                for phrase in ('One moment.', 'Just a moment.', 'Give me a moment.'):
+                    self.assertNotIn(phrase, payloads)
+            finally:
+                for release in released.values():
+                    release.set()
+                await close()
+            for process, home in processes:
+                self.assertIsNotNone(process.returncode)
+                self.assertFalse(home.exists())
 
     async def test_phonon_typed_reply_preserves_inactive_microphone(self):
         brain = ScriptedBrain([
