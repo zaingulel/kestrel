@@ -6828,6 +6828,48 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(brain.requests), 1)
         await close()
 
+    async def test_failure_publishes_accepted_typed_request(self):
+        for path, trouble in (('capture', 'trouble-microphone'), ('output switch', 'trouble')):
+            with self.subTest(path=path):
+                brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+                self.addCleanup(brain.close)
+                transport, _, _, _, _, close = await self.open_session(
+                    brain, through_service=True, native_audio=True,
+                )
+                service, manager = transport.service, transport.service.manager
+                await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                baseline = len(brain.requests)
+                held, release = asyncio.Event(), asyncio.Event()
+                self.addCleanup(release.set)
+                user = manager.ingress[1]
+                native_queue = user.queue_frame
+
+                async def queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+                    if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
+                        held.set()
+                        await release.wait()
+                    await native_queue(frame, direction, callback)
+
+                if path == 'capture':
+                    with patch.object(user, 'queue_frame', side_effect=queue):
+                        self.assertEqual(manager.submit('Typed during failure'), 'accepted')
+                        await asyncio.wait_for(held.wait(), 5)
+                        transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                        release.set()
+                        await service.state(trouble)
+                else:
+                    with patch.object(transport, 'suspend_capture', new=AsyncMock(side_effect=RuntimeError)):
+                        self.assertEqual(manager.submit('Typed during failure'), 'accepted')
+                        service.output_watch.emit()
+                        await service.state(trouble)
+                self.assertEqual(manager.conversation.turns, [
+                    {'speaker': 'you', 'text': 'Typed during failure', 'state': 'complete', 'source': 'typed'},
+                    {'speaker': 'kestrel', 'text': '', 'state': 'failed'},
+                ])
+                self.assertEqual(len(brain.requests), baseline)
+                await close()
+
     async def test_wake_waiting_audio_is_private_and_starts_fresh(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
         self.addCleanup(brain.close)

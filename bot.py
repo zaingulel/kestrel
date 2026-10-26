@@ -1274,6 +1274,7 @@ class VoiceConversations:
             LAPTOP_CAPTURE_FAILURE: 'trouble-microphone', LAPTOP_PLAYBACK_FAILURE: 'trouble-playback',
         }.get(failure, 'trouble'))
         self.desired_active = False
+        self.fail_submission()
         self.revoke()
         self.changed.set()
 
@@ -1539,6 +1540,7 @@ class VoiceConversations:
         except Exception:
             self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
             self.desired_active = False
+            self.fail_submission()
             self.revoke()
             self.changed.set()
 
