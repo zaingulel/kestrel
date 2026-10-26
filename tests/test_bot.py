@@ -2652,12 +2652,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation):
+            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation, acknowledgement_output):
                 prototype.session_ready = session_ready
                 prototype.dismiss = dismiss
                 prototype.admission = admission
                 prototype.status = status
                 prototype.conversation = conversation
+                prototype.acknowledgement_output = acknowledgement_output
                 return prototype
 
             async def activate_fixture(*, capture_enabled=True):
@@ -4093,26 +4094,33 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
-                async def stop():
+                async def start(*, hold=False):
                     interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    if hold:
+                        output.write_gate.clear()
+
+                async def stop(*, hold=False):
+                    await start(hold=hold)
                     await self.finish_user_turn(transport, 'stop')
 
                 try:
-                    output.write_gate.clear()
-                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await start(hold=True)
                     await self.finish_user_turn(transport, 'Please silence the sound.')
                     await asyncio.wait_for(output.generation_done.wait(), 5)
                     self.assertEqual(output.audio_written, 0)
                     self.assertEqual(len(transport.llm.outcomes), 1)
                     self.assertEqual(transport.llm.outcomes[0].result.confirmed, scenario != 'unconfirmed')
                     output.generation_done.clear()
-                    await stop()
+                    await stop(hold=True)
                     await asyncio.wait_for(output.generation_done.wait(), 5)
                     if scenario == 'interrupted account':
                         output.generation_done.clear()
-                        await stop()
+                        await stop(hold=True)
                         await asyncio.wait_for(output.generation_done.wait(), 5)
                     self.assertEqual(len(transport.llm.outcomes), 1)
                     self.assertTrue(spoken.empty())
@@ -4153,16 +4161,22 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
-                async def stop():
+                async def start(*, hold=False):
                     interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    if hold:
+                        output.write_gate.clear()
+
+                async def stop(*, hold=False):
+                    await start(hold=hold)
                     await self.finish_user_turn(transport, 'stop')
 
                 try:
-                    if scenario == 'undelivered':
-                        output.write_gate.clear()
-                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await start(hold=scenario == 'undelivered')
                     await self.finish_user_turn(transport, 'set volume to thirty')
                     if scenario == 'undelivered':
                         await asyncio.wait_for(output.generation_done.wait(), 5)
@@ -4170,7 +4184,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(transport.llm.outcomes), 1)
                         self.assertTrue(transport.llm.outcomes[0].result.confirmed)
                         output.generation_done.clear()
-                        await stop()
+                        await stop(hold=True)
                         await asyncio.wait_for(output.generation_done.wait(), 5)
                         self.assertTrue(spoken.empty())
                         delivered_end.clear()
@@ -8685,10 +8699,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         @transport.llm.event_handler('on_before_push_frame')
         async def generated_text(processor, frame):
             if cancel_without_audio and isinstance(frame, InterruptionFrame) and reply_progress.token_of(frame) is not None:
-                # Revoked producers suppress their end frame; inject its delayed transport arrival explicitly.
+                # Model an already-admitted end delayed downstream of the output gate.
                 late = LLMFullResponseEndFrame()
                 late.reply_progress = frame.reply_progress
-                await output.push_frame(late)
+                await speech.BaseOutputTransport.push_frame(output, late)
                 await asyncio.wait_for(old_end_output.wait(), 5)
             if hold_text and isinstance(frame, LLMTextFrame):
                 generated.set()
@@ -8698,6 +8712,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             interrupted.clear()
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await asyncio.wait_for(interrupted.wait(), 5)
+            await barrier()
 
         async def barrier():
             frame = DataFrame()
@@ -8743,9 +8758,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     {'speaker': 'kestrel', 'text': expected, 'state': 'complete'},
                 ])
                 self.assertTrue(committed.empty(), 'Local spoken responses never enter engine history')
-            output.write_gate.clear()
             playback_started.clear()
             await start()
+            output.write_gate.clear()
             await self.finish_user_turn(transport, 'what can I say?')
             await asyncio.wait_for(playback_started.wait(), 5)
             await start()
@@ -9074,10 +9089,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(current(), expected)
 
                 async def start():
+                    interrupted.clear()
                     while not changes.empty():
                         changes.get_nowait()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await state('listening')
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    await barrier()
 
                 async def barrier():
                     frame = DataFrame()
@@ -9086,8 +9104,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     await state('idle')
-                    output.write_gate.clear()
                     await start()
+                    output.write_gate.clear()
                     await self.finish_user_turn(transport, 'Say hello.')
                     await asyncio.wait_for(text_seen.wait(), 5)
                     self.assertEqual(current(), 'thinking', 'Generated text is not playback')
@@ -9102,8 +9120,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     while await asyncio.wait_for(native_events.get(), 5) is not BotStoppedSpeakingFrame:
                         pass
                     for phrase in ('repeat that', 'what can i say'):
-                        output.write_gate.clear()
                         await start()
+                        output.write_gate.clear()
                         await self.finish_user_turn(transport, phrase)
                         await state('speaking')
                         output.write_gate.set()
@@ -9177,13 +9195,22 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(current(), expected)
 
             with patch.object(status, 'set_state', observe):
-                transport, spoken, _, _, _, close = await self.open_session(brain, status=status)
+                transport, spoken, _, interrupted, _, close = await self.open_session(brain, status=status)
                 output = transport.output()
-                try:
-                    await state('idle')
-                    output.write_gate.clear()
+
+                async def start():
+                    interrupted.clear()
                     await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                     await state('listening')
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+
+                try:
+                    await state('idle')
+                    await start()
+                    output.write_gate.clear()
                     await self.finish_user_turn(transport, 'PRIVATE transcript sentinel')
                     await state('speaking')
                     await asyncio.wait_for(output.generation_done.wait(), 5)
@@ -9194,9 +9221,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     for phrase in ('repeat that', 'what can i say'):
                         while not changes.empty():
                             changes.get_nowait()
+                        await start()
                         output.write_gate.clear()
-                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                        await state('listening')
                         await self.finish_user_turn(transport, phrase)
                         await state('speaking')
                         output.write_gate.set()
@@ -9204,8 +9230,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     for phrase in ('stop', 'cancel', 'mute'):
                         while not changes.empty():
                             changes.get_nowait()
-                        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
-                        await state('listening')
+                        await start()
                         if phrase == 'mute':
                             transport.llm.local_actions.command = AsyncMock(side_effect=[
                                 'fixture-output', 'fixture-output', 'Mute: yes',
