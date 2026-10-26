@@ -16,18 +16,20 @@ from loguru import logger
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.audio.vad.vad_analyzer import VADParams, VADState
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.processors.aggregators.llm_response_universal import (
-    LLMContextAggregatorPair,
+    LLMUserAggregator, LLMAssistantAggregator,
     LLMUserAggregatorParams,
 )
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame, BotStoppedSpeakingFrame, CancelFrame, StartFrame, UserStartedSpeakingFrame,
+    Frame, InputAudioRawFrame, TranscriptionFrame, InterimTranscriptionFrame,
+    VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame, ProposedUserStartedSpeakingFrame, UserSpeakingFrame,
     UserStoppedSpeakingFrame, ProposedUserStoppedSpeakingFrame, LLMMessagesAppendFrame, LLMContextFrame, LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
     OutputAudioRawFrame, TTSSpeakFrame, TTSTextFrame, InterruptionFrame, TTSStartedFrame,
 )
@@ -47,7 +49,8 @@ from reply_progress import AnnouncementMarkFrame, ConversationSynthesisFailedFra
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
 from speech import (
-    ConversationTTS, EchoRemoval, LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
+    ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
+    LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
     NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset,
 )
 from tool_actions import (
@@ -979,6 +982,47 @@ class KnownTrouble(RuntimeError):
         self.state = state
 
 
+class ConversationUserAggregator(LLMUserAggregator):
+    def __init__(self, context, *, params, input_paused):
+        super().__init__(context, params=params)
+        self.input_paused = input_paused
+
+    async def process_frame(self, frame, direction):
+        if self.input_paused() and isinstance(frame, (
+            InputAudioRawFrame, TranscriptionFrame, InterimTranscriptionFrame,
+            VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame,
+            ProposedUserStartedSpeakingFrame, UserSpeakingFrame,
+        )):
+            return
+        await super().process_frame(frame, direction)
+
+    async def _on_user_turn_started(self, controller, strategy, params):
+        # An admitted turn start can outlive input admission while cancelling its native stop timer.
+        if not self.input_paused():
+            await super()._on_user_turn_started(controller, strategy, params)
+
+    async def _push_aggregation(self, *, run_llm=True):
+        if self.input_paused():
+            return ''
+        return await super()._push_aggregation(run_llm=run_llm)
+
+    async def reset_audio(self):
+        await self.reset()
+        controller = self._vad_controller
+        if controller is not None:
+            old = controller._vad_analyzer
+            params, sample_rate = old.params, old.sample_rate
+            await old.cleanup()
+            fresh = SileroVADAnalyzer(params=params)
+            fresh.set_sample_rate(sample_rate)
+            # Pipecat 1.12 retains the analyzer and speech state on this controller.
+            # FIFO drainage precedes replacement; keep its callbacks and idle task.
+            controller._vad_analyzer = fresh
+            controller._vad_state = VADState.QUIET
+            controller._speech_activity_time = 0
+            controller._last_audio_time = asyncio.get_running_loop().time()
+
+
 class VoiceConversations:
     def __init__(self, *, status, conversation):
         self.status = status
@@ -1020,6 +1064,11 @@ class VoiceConversations:
         self.wake_interval = None
         self.wake_disabled = False
         self.wake_reply_token = None
+        self.switching_output = False
+        self.output_watch = None
+        self.echo_revision = 0
+        self.echo_owner = None
+        self.echo_cleanup = None
 
     def invalidate_wake(self):
         self.wake_interval = None
@@ -1072,12 +1121,12 @@ class VoiceConversations:
 
     def speech_admitted(self):
         return bool(self.admission is not None and self.admission.is_set() and self.desired_active
-                    and self.pending_submit is None)
+                    and self.pending_submit is None and not self.switching_output)
 
     def submit(self, text):
         if self.closed or self.failure or not self.prepared:
             return 'unavailable'
-        if self.transitioning or self.lifecycle_changed or self.pending_submit is not None:
+        if self.transitioning or self.lifecycle_changed or self.pending_submit is not None or self.switching_output:
             return 'busy'
         if self.transport is not None and self.ingress is None:
             return 'busy'
@@ -1209,6 +1258,7 @@ class VoiceConversations:
             self.stt, self.voice, llm=self.llm,
             transport=self.transport, status=self.status, conversation=self.conversation, handle_signals=False,
             on_ingress_ready=self.ingress_ready, on_reply_finished=self.reply_finished,
+            input_paused=lambda: self.switching_output,
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
 
@@ -1317,6 +1367,181 @@ class VoiceConversations:
             self.submission_ack = None
             self.changed.set()
 
+    def output_changed(self):
+        if not self.closed and not self.failure:
+            self.switching_output = True
+            self.invalidate_wake()
+            self.changed.set()
+
+    def output_watch_failed(self):
+        if not self.closed:
+            self.switching_output = True
+            self.record_failure(OUTPUT_WATCH_FAILURE, 'trouble')
+            self.changed.set()
+
+    async def close_echo(self):
+        if self.echo_cleanup is None:
+            self.echo_cleanup = asyncio.create_task(asyncio.to_thread(ECHO_REMOVAL.close))
+        try:
+            await asyncio.shield(self.echo_cleanup)
+        except asyncio.CancelledError:
+            await self.echo_cleanup
+            raise
+
+    async def resume_output_capture(self, transport, selected):
+        resume = asyncio.create_task(transport.resume_capture(output_serial=selected))
+        notice = None
+        try:
+            while not resume.done():
+                if (self.closed or self.failure or self.lifecycle_changed
+                        or self.output_watch.revision != self.echo_revision):
+                    resume.cancel()
+                    break
+                # No await separates this clear from checking revisions above;
+                # any later notice wakes the retained waiter or is checked next.
+                self.changed.clear()
+                notice = asyncio.create_task(self.changed.wait())
+                try:
+                    await asyncio.wait((resume, notice), return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    notice.cancel()
+                    await asyncio.gather(notice, return_exceptions=True)
+                    notice = None
+        finally:
+            if notice is not None:
+                notice.cancel()
+                await asyncio.gather(notice, return_exceptions=True)
+            if not resume.done():
+                resume.cancel()
+            try:
+                await resume
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+        return not (self.closed or self.failure or self.lifecycle_changed
+                    or self.output_watch.revision != self.echo_revision)
+
+    async def refresh_output(self):
+        async def fifo(processor, frame):
+            completed = asyncio.Event()
+
+            async def observed(processor, frame, direction):
+                completed.set()
+
+            await processor.queue_frame(frame, callback=observed)
+            await completed.wait()
+
+        def interrupted():
+            return self.closed or self.failure is not None or self.lifecycle_changed
+
+        try:
+            async with asyncio.timeout(30):
+                if self.submission_task is not None:
+                    await asyncio.shield(self.submission_task)
+                if interrupted():
+                    return
+                await self.close_waiting()
+                if interrupted():
+                    return
+                transport = self.transport
+                if transport is not None:
+                    await transport.suspend_capture()
+                    if self.capture_owner is not None:
+                        self.status.retire_owner(self.capture_owner)
+                        self.capture_owner = None
+                    if interrupted():
+                        return
+                    await transport.input().drain_audio()
+                    if interrupted():
+                        return
+                    if self.stt is not None and self.ingress is not None:
+                        await self.stt.discard_pending()
+                        await fifo(self.stt, Frame())
+                        await fifo(self.ingress[1], Frame())
+                        await self.recognizer.drain()
+                        if interrupted():
+                            return
+                        await self.ingress[1].reset()
+                        await fifo(self.ingress[1], ProposedUserStoppedSpeakingFrame())
+                        await self.ingress[1].reset_audio()
+                while not interrupted():
+                    await self.close_echo()
+                    if self.echo_owner is not None:
+                        self.status.retire_owner(self.echo_owner)
+                        self.echo_owner = None
+                    if interrupted():
+                        return
+                    self.echo_revision = self.output_watch.revision
+                    ECHO_REMOVAL.start(self.echo_stopped)
+                    self.echo_cleanup = None
+                    self.echo_owner = self.status.remember_owner(ECHO_REMOVAL.process.pid)
+                    while not interrupted() and self.output_watch.revision == self.echo_revision:
+                        try:
+                            selected = await ECHO_REMOVAL.output_serial()
+                            break
+                        except PipeWireGraphCleanupFailure:
+                            raise
+                        except RuntimeError:
+                            if interrupted():
+                                return
+                            if self.output_watch.revision != self.echo_revision:
+                                break
+                            await asyncio.sleep(0.5)
+                    if interrupted():
+                        return
+                    if self.output_watch.revision != self.echo_revision:
+                        continue
+                    if transport is not None and transport.capture_enabled:
+                        stable = await self.resume_output_capture(transport, selected)
+                        if interrupted():
+                            return
+                        if not stable:
+                            # Superseded startup has reaped its input before another generation.
+                            await transport.suspend_capture()
+                            continue
+                        if transport.capture is not None:
+                            self.capture_owner = self.status.remember_owner(transport.capture.pid)
+                        if interrupted():
+                            return
+                    while not interrupted() and self.output_watch.revision == self.echo_revision:
+                        playback = transport.playback if transport is not None else None
+                        try:
+                            latest = await ECHO_REMOVAL.output_serial(
+                                playback.pid if playback is not None and playback.returncode is None else None,
+                            )
+                        except PipeWireGraphCleanupFailure:
+                            raise
+                        except RuntimeError:
+                            if interrupted():
+                                return
+                            if self.output_watch.revision != self.echo_revision:
+                                break
+                            await asyncio.sleep(0.5)
+                            if interrupted():
+                                return
+                            continue
+                        if interrupted():
+                            return
+                        if self.output_watch.revision != self.echo_revision or latest != selected:
+                            break
+                        # Playback can appear during graph I/O; verify that exact child too.
+                        if transport is not None and transport.playback is not playback:
+                            continue
+                        self.switching_output = False
+                        if self.llm is not None:
+                            self.llm.refresh_indicator()
+                        return
+                    if transport is not None:
+                        await transport.suspend_capture()
+                        if self.capture_owner is not None:
+                            self.status.retire_owner(self.capture_owner)
+                            self.capture_owner = None
+        except Exception:
+            self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
+            self.desired_active = False
+            self.revoke()
+            self.changed.set()
+
     async def run(self):
         self.status.set_state('inactive')
         self.changed.set()
@@ -1324,6 +1549,8 @@ class VoiceConversations:
             await self.changed.wait()
             self.changed.clear()
             try:
+                if self.switching_output and not self.lifecycle_changed and not self.failure:
+                    await self.refresh_output()
                 if self.wake_startup is not None and self.wake_startup.done():
                     if not self.wake_startup.cancelled() and self.wake_startup.exception() is not None:
                         self.wake_failed()
@@ -1349,6 +1576,9 @@ class VoiceConversations:
                 if self.failure:
                     raise RuntimeError(self.failure)
                 self.lifecycle_changed = False
+                if self.switching_output:
+                    self.changed.set()
+                    continue
                 if self.transport is None and (self.desired_active or self.pending_submit is not None):
                     self.transitioning = True
                     self.cleanup = None
@@ -1358,7 +1588,7 @@ class VoiceConversations:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:
                     self.status.set_state('inactive')
-                    if self.prepared and not self.wake_disabled and self.pending_submit is None and self.wake_reply_token is None and self.wake_detector is None:
+                    if self.prepared and not self.switching_output and not self.wake_disabled and self.pending_submit is None and self.wake_reply_token is None and self.wake_detector is None:
                         interval = object()
                         self.wake_interval = interval
                         self.wake_detector = WakeWordDetector(
@@ -1397,7 +1627,7 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
-async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None):
+async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -1409,8 +1639,9 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             ]),
         )
     context = LLMContext([])
-    aggregators = LLMContextAggregatorPair(context, user_params=user_params)
-    assistant = aggregators.assistant()
+    user = ConversationUserAggregator(context, params=user_params, input_paused=input_paused)
+    # Pipecat 1.12 pairs the assistant back to its exact user for native context flushing.
+    assistant = LLMAssistantAggregator(context, _paired_user_aggregator=user)
     llm.conversation = conversation
     if status is not None or conversation is not None:
         llm.status = status
@@ -1420,7 +1651,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             if isinstance(frame, StartFrame):
                 llm.indicator_input_ready()
 
-    @aggregators.user().event_handler('on_before_push_frame')
+    @user.event_handler('on_before_push_frame')
     async def indicator_user_turn(processor, frame):
         if isinstance(frame, UserStartedSpeakingFrame) and stt.admitted():
             llm.indicator_user_started()
@@ -1436,7 +1667,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
                     token, epoch = llm.spoken_origin
                     frame.request_origin = (token, 'spoken', message, message.get('content'), epoch)
 
-    @aggregators.user().event_handler('on_after_process_frame')
+    @user.event_handler('on_after_process_frame')
     async def user_frame_completed(processor, frame):
         llm.frame_completed('user', frame)
         if isinstance(frame, StartFrame) and on_ingress_ready is not None:
@@ -1494,7 +1725,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             on_reply_finished(token_of(frame))
 
     pipeline = Pipeline([
-        transport.input(), stt, aggregators.user(), llm,
+        transport.input(), stt, user, llm,
         voice, output, assistant,
     ])
     latency_observer = UserBotLatencyObserver()
@@ -1531,6 +1762,8 @@ async def run_voice_service():
     conversations = VoiceConversations(status=status, conversation=conversation)
     control = ConversationControl(conversations.toggle, submit=conversations.submit)
     heartbeat = asyncio.create_task(status.heartbeat())
+    watcher = OutputDeviceWatch()
+    conversations.output_watch = watcher
 
     def cancel():
         nonlocal stopping
@@ -1550,9 +1783,12 @@ async def run_voice_service():
         await conversation.start()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, cancel)
+        conversations.echo_stopped = echo_stopped
+        await watcher.start(conversations.output_changed, conversations.output_watch_failed)
+        conversations.echo_revision = watcher.revision
         ECHO_REMOVAL.start(echo_stopped)
         if ECHO_REMOVAL.process is not None:
-            status.remember_owner(ECHO_REMOVAL.process.pid)
+            conversations.echo_owner = status.remember_owner(ECHO_REMOVAL.process.pid)
         try:
             await conversations.prepare()
             await conversations.run()
@@ -1563,9 +1799,12 @@ async def run_voice_service():
     finally:
         try:
             try:
-                await conversations.close()
+                await watcher.close()
             finally:
-                ECHO_REMOVAL.close()
+                try:
+                    await conversations.close()
+                finally:
+                    await conversations.close_echo()
             if orderly and echo_failure is None and not conversations.failure:
                 status.mark_released()
             else:
