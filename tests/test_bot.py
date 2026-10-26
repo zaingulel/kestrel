@@ -35,6 +35,7 @@ from pipecat.turns.user_start import TranscriptionUserTurnStartStrategy, VADUser
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies, UserTurnStrategies
 
+from admission import Admission
 import bot
 import hermes_worker
 import reply_progress
@@ -177,8 +178,8 @@ def hermes_service(*, local_command=None):
     session_ready = asyncio.get_running_loop().create_future()
     session_ready.set_result(True)
     return bot.HermesLLMService(
-        bot.HermesRequestChannel(), local_actions=bot.LocalActions(command=local_command), admitted=lambda: True,
-        session_ready=session_ready,
+        bot.HermesRequestChannel(), local_actions=bot.LocalActions(command=local_command),
+        admission=Admission(voice=True, output_switching=lambda: False), session_ready=session_ready,
         dismiss=Mock(side_effect=AssertionError("Only an exact that's all turn ends the conversation")),
     )
 
@@ -188,8 +189,13 @@ def request_frame(service, context, *, speculation=None):
     messages = context.get_messages()
     if messages and messages[-1].get('role') == 'user':
         message = messages[-1]
-        frame.request_origin = (service._indicator_reply, 'spoken', message, message.get('content'), service.input_epoch())
+        ticket, mark = service.admission.accept_spoken()
+        frame.request_origin = (ticket, 'spoken', message, message.get('content'), mark)
     return frame
+
+
+def microphone_admitted(manager):
+    return manager.admission is not None and manager.admission.admits_microphone()
 
 
 class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
@@ -772,10 +778,11 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(service.local_actions.close)
 
         async def request(text):
-            service.accept_request(object())
             service.push_frame.reset_mock()
             context = bot.LLMContext([{'role': 'user', 'content': text}])
-            await service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM)
+            frame = request_frame(service, context)
+            await service.process_frame(frame, FrameDirection.DOWNSTREAM)
+            return frame
 
         await request('pause music')
         advisory = "I couldn't confirm pause. Check the media player. I won't retry."
@@ -798,11 +805,11 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 service.conversation_audio([record.source_range(audio)])
             service.conversation_output(frame)
         self.assertEqual(service.outcomes, [])
-        await request('stop')
+        stop = await request('stop')
         service.push_frame.assert_awaited_once()
         completion = service.push_frame.await_args.args[0]
         self.assertIs(type(completion), LLMFullResponseEndFrame)
-        self.assertIs(reply_progress.token_of(completion), service._indicator_reply)
+        self.assertIs(reply_progress.token_of(completion), stop.request_origin[0])
         self.assertFalse(completion.reply_progress.answer_failed)
         self.assertEqual(command.await_count, 2)
 
@@ -1510,16 +1517,17 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     first_push.set()
 
                 service.push_frame = push_frame
-                token = service._indicator_reply
                 start = TTSStartedFrame()
                 stopped = TTSStoppedFrame()
                 audio = TTSAudioRawFrame(bytes(960), 48000, 1)
                 context = bot.LLMContext([{'role': 'user', 'content': 'mute'}])
+                request = request_frame(service, context)
+                token = request.request_origin[0]
                 held = case == 'request superseded'
                 if held:
                     await service.local_actions.lock.acquire()
                 processing = asyncio.create_task(
-                    service.process_frame(request_frame(service, context), FrameDirection.DOWNSTREAM))
+                    service.process_frame(request, FrameDirection.DOWNSTREAM))
                 try:
                     with (patch.object(bot.logger, 'warning') as warning,
                           patch.object(bot, 'ANNOUNCEMENT_TIMEOUT', 0) if case == 'timed out' else nullcontext()):
@@ -1529,7 +1537,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                                     await asyncio.sleep(0)
 
                             await asyncio.wait_for(scheduled(), 10)
-                            service.accept_request(object())
+                            service.admission.accept_spoken()
                             service.local_actions.lock.release()
                             held = False
                         elif case != 'timed out':
@@ -1585,7 +1593,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                                 service.conversation_output(speech.ConversationSynthesisFailedFrame(
                                     reply_progress=record, section=audio_context))
                             else:
-                                service.admitted = lambda: False
+                                service.admission.close()
                                 service.revoke()
                         await asyncio.wait_for(processing, 10)
                     if case == 'conversation ended':
@@ -1671,7 +1679,6 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                                        max(i for i, event in enumerate(events) if isinstance(event, tuple)))
                     self.assertEqual([(item.subject, item.result) for item in service.outcomes],
                                      [('unmute', tool_actions.AudioResult(True, True, 'confirmed'))])
-                    service.accept_request(object())
                     events.clear()
                     stop = bot.LLMContext([{'role': 'user', 'content': 'stop'}])
                     await service.process_frame(request_frame(service, stop), FrameDirection.DOWNSTREAM)
@@ -2077,7 +2084,7 @@ class GreetingAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(bot, 'ConversationUserAggregator', side_effect=capture):
             with self.assertRaises(AnalyzerSelected):
-                await bot.run_conversation(None, None, llm=object(), transport=object())
+                await bot.run_conversation(None, None, llm=object(), transport=object(), on_frame_completed=None, typed_origin=None)
         return analyzer
 
     async def test_measured_first_short_greeting_is_admitted_once(self):
@@ -2166,7 +2173,7 @@ class TurnFallbackTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(UserTurnStrategies, '__post_init__', capture_selection), \
                     patch.object(bot, 'SileroVADAnalyzer', capture_vad):
                 with self.assertRaises(SelectionCaptured):
-                    await bot.run_conversation(None, None, llm=object(), transport=object())
+                    await bot.run_conversation(None, None, llm=object(), transport=object(), on_frame_completed=None, typed_origin=None)
             self.assertEqual(len(captured), 1)
             strategies = captured[0]
             self.assertEqual([type(strategy) for strategy in strategies.stop],
@@ -2285,7 +2292,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 desktop = AsyncMock(return_value=content)
                 output = asyncio.Queue()
                 await service.channel.exchange([{'role': 'user', 'content': 'Please mute.'}], output,
-                                               admitted=service.admitted, desktop=desktop)
+                                               admitted=service.admission.is_open, desktop=desktop)
                 writes = [json.loads(c.args[0]) for c in process.stdin.write.call_args_list]
                 self.assertEqual(writes[0], {'messages': [{'role': 'user', 'content': 'Please mute.'}]})
                 observed = []
@@ -2310,7 +2317,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         process.stdout.readline = AsyncMock(return_value=json.dumps(valid).encode() + b'\n')
         process.wait = AsyncMock()
         output = asyncio.Queue()
-        await service.channel._request({'prepare': True}, output, admitted=service.admitted)
+        await service.channel._request({'prepare': True}, output, admitted=service.admission.is_open)
         self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
         self.assertEqual([json.loads(c.args[0]) for c in process.stdin.write.call_args_list], [{'prepare': True}])
         self.assertIsNone(output.get_nowait())
@@ -2338,7 +2345,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 process.wait = AsyncMock()
                 output = asyncio.Queue()
                 await service.channel.exchange([{'role': 'user', 'content': 'Please save a note.'}], output,
-                                               admitted=service.admitted, desktop=AsyncMock())
+                                               admitted=service.admission.is_open, desktop=AsyncMock())
                 observed = []
                 while not output.empty():
                     observed.append(output.get_nowait())
@@ -2356,7 +2363,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         process.stdout.readline = AsyncMock(side_effect=[json.dumps(refusal).encode() + b'\n'])
         process.wait = AsyncMock()
         output = asyncio.Queue()
-        await service.channel._request({'prepare': True}, output, admitted=service.admitted)
+        await service.channel._request({'prepare': True}, output, admitted=service.admission.is_open)
         self.assertIn('Invalid or incomplete Hermes response', service.channel.failure)
         self.assertIsNone(output.get_nowait())
         self.assertTrue(output.empty())
@@ -2412,7 +2419,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 service.channel.process.wait = AsyncMock()
                 output = asyncio.Queue()
                 service.output = output
-                await service.channel.exchange([{'role': 'user', 'content': 'Hello.'}], output, admitted=service.admitted)
+                await service.channel.exchange([{'role': 'user', 'content': 'Hello.'}], output, admitted=service.admission.is_open)
                 observed = []
                 while not output.empty():
                     observed.append(output.get_nowait())
@@ -2553,20 +2560,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admitted, session_ready, dismiss, status, conversation, voice_active=None, request_admitted=None, input_epoch=None):
+            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation):
                 prototype.session_ready = session_ready
                 prototype.dismiss = dismiss
-                prototype.voice_active = voice_active or admitted
-                prototype.request_admitted = request_admitted
-                prototype.input_epoch = input_epoch
-                prototype.admitted = admitted
+                prototype.admission = admission
                 prototype.status = status
                 prototype.conversation = conversation
-                if isinstance(prototype, Mock):
-                    prototype.frame_completions = {}
-                    prototype.typed_origin = None
-                    prototype._indicator_reply = object()
-                    prototype.owns_request = lambda token: token is prototype._indicator_reply and prototype.admitted()
                 return prototype
 
             async def activate_fixture(*, capture_enabled=True):
@@ -2834,7 +2833,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         service.channel.close = AsyncMock(wraps=service.channel.close)
         stt = Mock(load=AsyncMock(side_effect=load_local), close=AsyncMock())
 
-        async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
+        async def conversation(stt, voice, *, llm, transport, handle_signals, on_frame_completed, typed_origin, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
             received_services.append(llm)
             preparation_pending.append(llm is not None and not llm.channel.preparation.done())
 
@@ -3009,7 +3008,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     os.environ['KESTREL_VOICE'] = 'unknown'
                     start = bot.LLMFullResponseStartFrame()
                     start.reply_progress = reply_progress.ReplyProgress(
-                        kwargs['llm']._indicator_reply, feed=None, feed_open=lambda: True)
+                        kwargs['llm'].admission.accept_spoken()[0], feed=None, feed_open=lambda: True)
                     await voice.process_frame(start, FrameDirection.DOWNSTREAM)
                     await voice.on_turn_context_created('reply')
                     await voice.create_audio_context('reply')
@@ -3063,7 +3062,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     os.environ['KESTREL_TTS_MODEL'] = 'unknown'
                     start = bot.LLMFullResponseStartFrame()
                     start.reply_progress = reply_progress.ReplyProgress(
-                        kwargs['llm']._indicator_reply, feed=None, feed_open=lambda: True)
+                        kwargs['llm'].admission.accept_spoken()[0], feed=None, feed_open=lambda: True)
                     await voice.process_frame(start, FrameDirection.DOWNSTREAM)
                     await voice.on_turn_context_created('reply')
                     await voice.create_audio_context('reply')
@@ -3303,12 +3302,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.audio.output.return_value = output
                 native_conversation = bot.run_conversation
 
-                async def conversation(stt, voice, *, llm, transport, handle_signals, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
+                async def conversation(stt, voice, *, llm, transport, handle_signals, on_frame_completed, typed_origin, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
                     self.assertIs(llm, service)
                     self.assertIs(transport, self.audio)
                     self.assertFalse(handle_signals)
                     await native_conversation(stt, voice, llm=llm, transport=transport,
-                        handle_signals=handle_signals, status=status, conversation=conversation,
+                        handle_signals=handle_signals, on_frame_completed=on_frame_completed, typed_origin=typed_origin, status=status, conversation=conversation,
                         on_ingress_ready=on_ingress_ready, on_reply_finished=on_reply_finished, input_paused=input_paused, user_params=bot.LLMUserAggregatorParams(
                             user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None,
                         ))
@@ -3418,16 +3417,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
         llm = Forward()
-        llm.admitted = lambda: True
         llm.conversation_output = Mock()
         llm.remember_assistant_reply = Mock()
-        llm.frame_completed = Mock()
-        llm.owns_request = lambda token: True
         llm._assistant_reply_token = None
         llm.current_reply = Mock(return_value=None)
         with patch.object(bot, "PipelineWorker", side_effect=capture_worker):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,
+                on_frame_completed=Mock(), typed_origin=Mock(return_value=None),
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -3469,17 +3466,15 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         params = bot.LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies(), empty_user_turn=None)
         voice = speech.VoxCPMTTS(self.voice, speech.load_voice_preset('irish-female', voices_dir=self.voices))
         llm = Forward()
-        llm.admitted = lambda: True
         llm.conversation_output = Mock()
         llm.remember_assistant_reply = Mock()
-        llm.frame_completed = Mock()
-        llm.owns_request = lambda token: True
         llm._assistant_reply_token = None
         llm.current_reply = Mock(return_value=None)
         with (patch.object(bot, "UserBotLatencyObserver", return_value=observer),
               patch.object(bot.logger, "info", side_effect=log)):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), voice, llm=llm, transport=transport, user_params=params,
+                on_frame_completed=Mock(), typed_origin=Mock(return_value=None),
             ))
             try:
                 await asyncio.wait_for(started.wait(), 5)
@@ -3515,8 +3510,7 @@ class TroubleCauseTests(unittest.IsolatedAsyncioTestCase):
                 manager.pipeline.set_result(None)
             else:
                 manager.pipeline.set_exception(error)
-            manager.admission = asyncio.Event()
-            manager.admission.set()
+            manager.admission = Admission(voice=True, output_switching=lambda: False)
 
         def failed_transport(manager, failure):
             manager.transport = transport(failure)
@@ -3834,7 +3828,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 @output.event_handler('on_after_push_frame')
                 async def ended(processor, frame):
                     if (isinstance(frame, LLMFullResponseEndFrame)
-                            and reply_progress.token_of(frame) is transport.llm._indicator_reply):
+                            and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
                 async def stop():
@@ -3894,7 +3888,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 @output.event_handler('on_after_push_frame')
                 async def ended(processor, frame):
                     if (isinstance(frame, LLMFullResponseEndFrame)
-                            and reply_progress.token_of(frame) is transport.llm._indicator_reply):
+                            and transport.llm.admission.may_speak(reply_progress.token_of(frame))):
                         delivered_end.set()
 
                 async def stop():
@@ -4737,8 +4731,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             model = Mock(generate_streaming=chunks)
         native_stt = speech.NemotronSTT
 
-        def new_stt(recognizer, *, admitted, input_epoch=None):
-            adapter = native_stt(recognizer, admitted=admitted, **({"input_epoch": input_epoch} if input_epoch else {}))
+        def new_stt(recognizer, *, admission):
+            adapter = native_stt(recognizer, admission=admission)
             sessions[-1].stt = adapter
             return adapter
 
@@ -4811,14 +4805,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             audio_children.append(process)
             return process
 
-        def new_transport(echo, *, on_stopped, admitted, input_admitted=None, capture_enabled=True, reply_admitted=None, capture_pcm=None):
-            active = admitted
-            if admitted_override is not None:
-                active = lambda: admitted() and admitted_override()
+        def new_transport(echo, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
+            def active():
+                return (admission is None or admission.is_open()) and (admitted_override is None or admitted_override())
+
             if native_audio or capture_pcm is not None:
-                transport = native_transport(echo, on_stopped=on_stopped, admitted=active,
-                                             **({"input_admitted": input_admitted, "capture_enabled": capture_enabled,
-                                                 "reply_admitted": reply_admitted, "capture_pcm": capture_pcm} if input_admitted else {}))
+                transport = native_transport(echo, on_stopped=on_stopped, admission=admission,
+                                             capture_enabled=capture_enabled, capture_pcm=capture_pcm)
 
                 async def spawn_audio(*argv, **kwargs):
                     process = child(capture='--record' in argv)
@@ -4847,7 +4840,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             else:
                 class Input(FrameProcessor):
                     async def process_frame(self, frame, direction):
-                        if isinstance(frame, DataFrame) and not (input_admitted or active)():
+                        if isinstance(frame, DataFrame) and not (
+                                capture_pcm is None and admission is not None and admission.admits_microphone()):
                             return
                         await super().process_frame(frame, direction)
                         await self.push_frame(frame, direction)
@@ -4873,15 +4867,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     async def write_audio_frame(self, frame):
                         await self.write_gate.wait()
                         record = self.reply_progress if hasattr(self, 'reply_progress') else None
-                        written = active() and not transport.closed and (reply_admitted is None or
-                                  (record is not None and reply_admitted(record.token)))
+                        written = active() and not transport.closed and (admission is None or
+                                  (record is not None and admission.may_speak(record.token)))
                         if written:
                             self.audio_written += 1
                         else:
                             self.output_buffer.write_failed(frame)
                         return written
 
-                transport = Mock(capture=None, failure=None, closed=False, admitted=active)
+                transport = Mock(capture=None, failure=None, closed=False, admission=admission)
                 transport.input.return_value = Input()
                 transport.output.return_value = Output()
 
@@ -5112,14 +5106,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             transport = SimpleNamespace(service=service_handle, sessions=sessions, audio_children=audio_children)
         return transport, spoken, committed, interrupted, processes, close
 
+    @staticmethod
+    def input_mark(transport):
+        admission = transport.service.manager.admission
+        return admission.input_mark() if admission is not None else None
+
     def transcription(self, transport, text, user_id='', timestamp='2026-01-01T00:00:00Z', *, finalized=True):
         frame = TranscriptionFrame(text, user_id, timestamp, finalized=finalized)
-        frame.input_epoch = transport.service.manager.input_epoch
+        frame.input_mark = self.input_mark(transport)
         return frame
 
     async def finish_user_turn(self, transport, text):
         frame = TranscriptionFrame(text, '', '2026-01-01T00:00:00Z', finalized=True)
-        frame.input_epoch = getattr(transport.service.manager, 'input_epoch', 0)
+        frame.input_mark = self.input_mark(transport)
         await transport.input().queue_frame(frame)
         await transport.input().queue_frame(ProposedUserStoppedSpeakingFrame())
 
@@ -5180,7 +5179,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First sentence.')
         interrupted.clear()
         original_reply = manager.llm.current_reply()
-        original_epoch = manager.input_epoch
+        original_mark = manager.admission.input_mark()
         original_capture = transport.capture
         original_playback = transport.playback
         self.assertIsNotNone(original_playback)
@@ -5192,12 +5191,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         def indicator():
             native_indicator()
-            if manager.speech_admitted():
+            if microphone_admitted(manager):
                 refreshed.set()
 
         async def serial(pid=None, *, output_serial=None):
             if pid is not None and output_serial is not None:
-                observations.append((service.output_watch.revision, output_serial, manager.speech_admitted()))
+                observations.append((service.output_watch.revision, output_serial, microphone_admitted(manager)))
                 if service.output_watch.revision == 1:
                     old_verification.set()
                     await asyncio.Event().wait()
@@ -5216,14 +5215,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot.ECHO_REMOVAL, 'microphone_serial', new=AsyncMock(side_effect=serial)), \
                 patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=selected)):
             service.output_watch.emit()
-            self.assertFalse(manager.speech_admitted(), 'Output notice must immediately reject stale microphone input')
+            self.assertFalse(microphone_admitted(manager), 'Output notice must immediately reject stale microphone input')
             self.assertEqual(await service.submit('During handover'), 'busy')
             await asyncio.wait_for(old_verification.wait(), 5)
             superseded_capture = transport.capture
             service.output_watch.emit()
             await asyncio.wait_for(route_seen.wait(), 5)
             self.assertIsNone(manager.failure, 'A transient route must settle while playback continues')
-            self.assertFalse(manager.speech_admitted())
+            self.assertFalse(microphone_admitted(manager))
             await asyncio.wait_for(refreshed.wait(), 5)
         self.assertTrue(superseded_capture.reaped.is_set())
         self.assertIs(transport.playback, original_playback)
@@ -5238,8 +5237,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(transport.capture, original_capture)
         self.assertIs(manager.transport, transport)
         self.assertIs(manager.llm.current_reply(), original_reply)
-        self.assertEqual(manager.input_epoch, original_epoch)
-        self.assertTrue(manager.speech_admitted())
+        self.assertTrue(manager.admission.is_current(original_mark))
+        self.assertTrue(microphone_admitted(manager))
         self.assertFalse(interrupted.is_set())
         release.set()
         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First sentence. Continuing sentence.')
@@ -5318,13 +5317,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
                     before_requests = len(brain.requests)
                     user = manager.ingress[1]
-                    original_epoch = manager.input_epoch
+                    original_mark = manager.admission.input_mark()
                     capture = transport.capture
                     native_indicator = manager.llm.refresh_indicator
 
                     def indicator():
                         native_indicator()
-                        if manager.speech_admitted():
+                        if microphone_admitted(manager):
                             refreshed.set()
 
                     async def completed(processor, frame):
@@ -5344,7 +5343,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         if frame is held_frame:
                             entered.set()
                             await release.wait()
-                            passed.append(manager.speech_admitted())
+                            passed.append(microphone_admitted(manager))
                         await original_push(frame, direction)
 
                     reset_started, handover_entered = asyncio.Event(), asyncio.Event()
@@ -5438,7 +5437,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(interrupted.wait(), 5)
                             self.assertEqual(user._vad_controller._vad_state, VADState.SPEAKING)
                             self.assertEqual(await service.submit('Accepted request'), 'accepted')
-                            original_epoch = manager.input_epoch
+                            original_mark = manager.admission.input_mark()
                             self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Accepted reply.')
                             self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Accepted reply.')
                             if manager.submission_task is not None:
@@ -5459,7 +5458,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
                             def output_notice(done):
                                 late_start_notices.append((done.cancelling(), user._user_turn_controller._user_turn,
-                                                           manager.speech_admitted()))
+                                                           microphone_admitted(manager)))
                                 service.output_watch.emit()
 
                             timer.add_done_callback(output_notice)
@@ -5467,16 +5466,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(handover_entered.wait(), 5)
                         elif case == 'accepted_action':
                             self.assertEqual(await service.submit('mute'), 'accepted')
-                            original_epoch = manager.input_epoch
+                            original_mark = manager.admission.input_mark()
                         else:
                             self.assertEqual(await service.submit('Accepted request'), 'accepted')
-                            original_epoch = manager.input_epoch
+                            original_mark = manager.admission.input_mark()
                         if case != 'native_late_start':
                             await asyncio.wait_for(entered.wait(), 5)
                             interrupted.clear()
                             refreshed.clear()
                             service.output_watch.emit()
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         old_audio_task = transport.input()._audio_task
                         old_audio_queue = transport.input()._audio_in_queue
                         if case == 'accepted_submission':
@@ -5493,7 +5492,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(refreshed.wait(), 5)
                     self.assertIs(transport.input()._audio_task, old_audio_task)
                     self.assertIs(transport.input()._audio_in_queue, old_audio_queue)
-                    self.assertEqual(manager.input_epoch, original_epoch)
+                    self.assertTrue(manager.admission.is_current(original_mark))
                     self.assertTrue(capture.reaped.is_set())
                     if case == 'native_late_start':
                         await completed(transport.output(), DataFrame())
@@ -5574,7 +5573,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await service.toggle(), 'inactive')
                     await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
                     await service.state('inactive')
-                    self.assertFalse(manager.speech_admitted())
+                    self.assertFalse(microphone_admitted(manager))
                 finally:
                     if prediction_release is not None:
                         prediction_release.set()
@@ -5604,7 +5603,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(waiting.capture.reaped.is_set())
                         manager.wake_start(interval)
                         self.assertFalse(manager.desired_active)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         self.assertIsNone(manager.transport)
                         self.assertFalse(fresh.input().ready)
                         self.assertFalse(manager.switching_output)
@@ -5629,7 +5628,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNone(typed.capture)
                         self.assertIsNone(manager.failure)
                         self.assertFalse(manager.desired_active)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                     elif case == 'deferred_source':
                         initial = await asyncio.wait_for(service.waiting.get(), 5)
                         output_end, release_output = asyncio.Event(), asyncio.Event()
@@ -5678,7 +5677,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsNone(manager.failure, 'Inactive handover must defer source proof until a consumer starts')
                             resolve.assert_not_awaited()
                             self.assertFalse(manager.desired_active)
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             self.assertIsNone(typed.capture)
                             self.assertIsNone(manager.wake_detector)
                             self.assertIsNotNone(manager.wake_reply_token)
@@ -5690,7 +5689,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(waiting.received_audio.wait(), 5)
                             self.assertFalse(waiting.verified)
                             self.assertFalse(waiting.input().ready)
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             submit_pcm.assert_not_called()
                             self.assertIsNone(service.recognizer.reader)
                             release_verification.set()
@@ -5701,7 +5700,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             fresh.capture.stdout.feed_data(b'N' * 640)
                             self.assertEqual(await asyncio.wait_for(detector_pcm.get(), 5), b'N' * 640)
                             self.assertIsNone(service.recognizer.reader)
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                     elif case in ('initial_capture_failure', 'waiting_capture_failure'):
                         switched = asyncio.Event()
                         refresh = manager.refresh_output
@@ -5758,7 +5757,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             self.assertTrue(manager.wake_disabled)
                             self.assertIsNone(manager.failure)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                     elif case in ('startup_selection_active', 'startup_selection_waiting'):
                         await asyncio.wait_for(service.waiting.get(), 5)
                         service.output_watch.emit()
@@ -5785,7 +5784,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                     captures.append(manager.transport if case == 'startup_selection_active' else manager.waiting_transport)
                                     verifying.set()
                                     await release_verification.wait()
-                                observations.append((pid, output_serial, selected[0], manager.speech_admitted()))
+                                observations.append((pid, output_serial, selected[0], microphone_admitted(manager)))
                                 if output_serial is not None and output_serial != selected[0]:
                                     raise RuntimeError('The current reference does not match the old selected output. Restart Kestrel.')
                             return 900
@@ -5807,7 +5806,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsNone(service.recognizer.reader)
                             selected[0] = 801
                             service.output_watch.emit()
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             if case == 'startup_selection_waiting':
                                 manager.wake_start(interval)
                                 self.assertFalse(manager.desired_active)
@@ -5826,9 +5825,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(detector_pcm.empty())
                             self.assertIsNone(service.recognizer.reader)
                             if case == 'startup_selection_active':
-                                self.assertTrue(manager.speech_admitted())
+                                self.assertTrue(microphone_admitted(manager))
                             else:
-                                self.assertFalse(manager.speech_admitted())
+                                self.assertFalse(microphone_admitted(manager))
                                 fresh.capture.stdout.feed_data(b'N' * 640)
                                 self.assertEqual(await asyncio.wait_for(detector_pcm.get(), 5), b'N' * 640)
                     elif case in ('initial_selection_recovers', 'initial_selection_superseded', 'initial_selection_cleanup'):
@@ -5844,7 +5843,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 completed.set()
 
                         async def selected(playback_pid=None):
-                            attempts.append((service.output_watch.revision, manager.speech_admitted()))
+                            attempts.append((service.output_watch.revision, microphone_admitted(manager)))
                             if case == 'initial_selection_cleanup':
                                 child = Mock(returncode=None, stdout=Mock(
                                     read=AsyncMock(side_effect=OSError('Controlled initial graph read failure')),
@@ -5862,7 +5861,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         with patch.object(manager, 'refresh_output', side_effect=observed_refresh), \
                                 patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=selected)):
                             service.output_watch.emit()
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             if case == 'initial_selection_superseded':
                                 await asyncio.wait_for(entered.wait(), 5)
                                 service.output_watch.emit()
@@ -5871,7 +5870,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             if case == 'initial_selection_cleanup':
                                 await service.state('trouble')
                                 self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
-                                self.assertFalse(manager.speech_admitted())
+                                self.assertFalse(microphone_admitted(manager))
                                 self.assertEqual(len(attempts), 1)
                                 self.assertEqual(len(graph_children), 1)
                                 self.assertEqual(graph_children[0].wait.await_count, 2)
@@ -5883,7 +5882,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                                 expected_revisions = [1, 2, 2] if case == 'initial_selection_superseded' else [1, 1, 1]
                                 self.assertEqual(attempts, [(revision, False) for revision in expected_revisions])
                                 self.assertEqual(manager.echo_revision, service.output_watch.revision)
-                                self.assertTrue(manager.speech_admitted())
+                                self.assertTrue(microphone_admitted(manager))
                                 self.assertTrue(handle.verified)
                                 self.assertEqual(len(service.sessions), 1)
                                 self.assertEqual(len(service.echo_generations), 3 if case == 'initial_selection_superseded' else 2)
@@ -5930,7 +5929,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             service.output_watch.emit()
                             await asyncio.wait_for(reaping.wait(), 5)
                             generations = len(service.echo_generations)
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             self.assertFalse(replacement.reaped.is_set())
                             if case == 'superseded_shutdown':
                                 service.stop()
@@ -5945,7 +5944,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             self.assertTrue(replacement.reaped.is_set())
                             self.assertEqual(len(service.echo_generations), generations,
                                              'Outer cancellation must not start another echo generation')
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             if case == 'superseded_shutdown':
                                 await close()
                                 self.assertTrue(service.task.done())
@@ -5975,7 +5974,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             if playback_pid is not None:
                                 self.assertEqual(playback_pid, playback.pid)
                                 attempts.append(playback_pid)
-                                self.assertFalse(manager.speech_admitted())
+                                self.assertFalse(microphone_admitted(manager))
                                 if case == 'graph_cleanup_route':
                                     child = Mock(stdout=Mock(read=AsyncMock(side_effect=OSError('Controlled graph read failure')),
                                                              _transport=Mock()), returncode=None,
@@ -6001,12 +6000,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             self.assertGreaterEqual(len(attempts), 2)
                         self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         self.assertTrue(typed.closed)
                     elif case == 'watcher_loss':
                         service.output_watch.on_failed()
                         await service.state('trouble')
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         self.assertEqual(await service.submit('new request'), 'unavailable')
                     elif case == 'verification_failure':
                         failed = asyncio.Event()
@@ -6020,10 +6019,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=RuntimeError('private graph'))), \
                                 patch.object(manager.status, 'set_state', side_effect=state):
                             service.output_watch.emit()
-                            self.assertFalse(manager.speech_admitted())
+                            self.assertFalse(microphone_admitted(manager))
                             # Persistent unresolved selection uses the existing 30-second total deadline.
                             await asyncio.wait_for(failed.wait(), 35)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
                         self.assertNotIn('private graph', manager.failure)
                     else:
@@ -6044,7 +6043,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                             await asyncio.wait_for(asyncio.shield(handle.cleanup_finished), 5)
                             await service.state('inactive')
                         self.assertFalse(manager.desired_active)
-                        self.assertFalse(manager.speech_admitted())
+                        self.assertFalse(microphone_admitted(manager))
                         self.assertTrue(handle.closed)
                         self.assertEqual(len(service.sessions), 1)
                     self.assertTrue(spoken.empty())
@@ -6112,16 +6111,18 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             brain, through_service=True, activate=False, native_audio=True,
         )
         service = handle.service
-        self.assertEqual(await service.submit('Typed A'), 'accepted')
-        transport = await asyncio.wait_for(service.started.get(), 5)
-        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
-        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
-        self.assertIsNone(transport.capture)
-        self.assertFalse(service.manager.desired_active)
-        self.assertEqual(service.manager.status._state, 'inactive')
-        self.assertEqual(await service.submit('Typed B'), 'accepted')
-        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
-        self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        with patch.object(service.manager.status, 'set_state', wraps=service.manager.status.set_state) as set_state:
+            self.assertEqual(await service.submit('Typed A'), 'accepted')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'First.')
+            self.assertIsNone(transport.capture)
+            self.assertFalse(service.manager.desired_active)
+            self.assertEqual(service.manager.status._state, 'inactive')
+            self.assertEqual(await service.submit('Typed B'), 'accepted')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second.')
+            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Second.')
+        self.assertEqual({item.args[0] for item in set_state.call_args_list}, {'inactive'})
         self.assertEqual(len(service.sessions), 1)
         self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'Typed A'}, {'role': 'assistant', 'content': 'First.'},
@@ -6263,7 +6264,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         async def transcript(text):
             frame = TranscriptionFrame(text, '', '', finalized=True)
-            frame.input_epoch = manager.input_epoch
+            frame.input_mark = self.input_mark(transport)
             await process(user, frame)
 
         with patch.object(analyzer, '_predict_endpoint', return_value={'prediction': 1, 'probability': 1.0}):
@@ -6283,15 +6284,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             original_discard = transport._discard_playback
             held_frame_ids, handover_order = [], []
             assistant_continuation_ready = asyncio.Event()
-            original_complete = transport.llm.frame_completed
+            original_complete = bot.TypedHandover.frame_completed
             original_stt_reset = transport.stt.discard_pending
             original_user_reset = user.reset
             original_user_queue = user.queue_frame
-            original_admitted = transport.llm.request_admitted
+            original_admitted = manager.admission.take_typed
             typed_token = None
 
-            def completed(role, frame):
-                original_complete(role, frame)
+            def completed(handover, role, frame):
+                original_complete(handover, role, frame)
                 if isinstance(frame, InterruptionFrame):
                     if role == 'assistant':
                         held_frame_ids.append(frame.id)
@@ -6327,19 +6328,19 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
             old_child = transport.playback
             with patch.object(transport, '_discard_playback', side_effect=discard), \
-                    patch.object(transport.llm, 'frame_completed', side_effect=completed), \
+                    patch.object(bot.TypedHandover, 'frame_completed', autospec=True, side_effect=completed), \
                     patch.object(transport.stt, 'discard_pending', side_effect=stt_reset), \
                     patch.object(user, 'reset', side_effect=user_reset), \
                     patch.object(user, 'queue_frame', side_effect=user_queue), \
-                    patch.object(transport.llm, 'request_admitted', side_effect=admitted):
+                    patch.object(manager.admission, 'take_typed', side_effect=admitted):
                 self.assertEqual(await service.submit('Typed C'), 'accepted')
-                typed_token = manager.pending_submit[1]
+                typed_token = manager.handover.ticket
                 release_synthesis.set()
                 await asyncio.wait_for(assistant_done.wait(), 5)
                 await asyncio.wait_for(cleanup_started.wait(), 5)
                 await asyncio.wait_for(assistant_continuation_ready.wait(), 5)
-                self.assertIsNotNone(manager.pending_submit)
-                self.assertFalse(manager.speech_admitted())
+                self.assertIsNotNone(manager.handover)
+                self.assertFalse(microphone_admitted(manager))
                 self.assertFalse(old_child.reaped.is_set())
                 self.assertFalse(any(m.get('content') == 'Typed C' for m in context.get_messages()))
                 self.assertEqual(len(brain.requests), 3)
@@ -6374,7 +6375,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         vad_held, release_vad, vad_processed = asyncio.Event(), asyncio.Event(), asyncio.Event()
         self.addCleanup(release_vad.set)
         native_user_process = user.process_frame
-        native_admitted = manager.llm.request_admitted
+        native_admitted = manager.admission.take_typed
         typed_acknowledgements = asyncio.Queue()
         admission_tokens, settled_before_admission = [], []
 
@@ -6398,11 +6399,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         spoken_origin = manager.llm.spoken_origin
         before_handover = list(manager.conversation.turns)
         with patch.object(user, 'process_frame', side_effect=hold_queued_vad), \
-                patch.object(manager.llm, 'request_admitted', side_effect=acknowledge_queued_handover):
+                patch.object(manager.admission, 'take_typed', side_effect=acknowledge_queued_handover):
             await user.queue_frame(queued_vad)
             await asyncio.wait_for(vad_held.wait(), 5)
             self.assertEqual(await service.submit('repeat that'), 'accepted')
-            accepted_token = manager.pending_submit[1]
+            accepted_token = manager.handover.ticket
             repeat_finished = asyncio.Event()
 
             @transport.output().event_handler('on_after_push_frame')
@@ -6410,18 +6411,18 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, LLMFullResponseEndFrame) and reply_progress.token_of(frame) is accepted_token:
                     repeat_finished.set()
 
-            self.assertTrue(manager.llm.owns_request(accepted_token))
-            self.assertFalse(transport.stt.admitted())
+            self.assertTrue(manager.admission.may_speak(accepted_token))
+            self.assertFalse(microphone_admitted(manager))
             release_vad.set()
             await asyncio.wait_for(vad_processed.wait(), 5)
-            self.assertTrue(manager.llm.owns_request(accepted_token),
+            self.assertTrue(manager.admission.may_speak(accepted_token),
                             'Already-queued speech cannot replace the accepted typed owner')
             self.assertIs(manager.llm.spoken_origin, spoken_origin)
             self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), accepted_token)
             if manager.submission_task is not None:
                 await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
-            self.assertIsNone(manager.pending_submit)
-            self.assertTrue(transport.stt.admitted())
+            self.assertIsNone(manager.handover)
+            self.assertTrue(microphone_admitted(manager))
             self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Reply C.')
             await asyncio.wait_for(repeat_finished.wait(), 5)
             self.assertTrue(committed.empty(), 'Typed repeat does not duplicate the native assistant history')
@@ -6432,12 +6433,12 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(admission_tokens, [accepted_token])
             self.assertTrue(typed_acknowledgements.empty())
             self.assertEqual(await service.submit('stop'), 'accepted')
-            next_token = manager.pending_submit[1]
+            next_token = manager.handover.ticket
             self.assertIsNot(next_token, accepted_token)
             self.assertIs(await asyncio.wait_for(typed_acknowledgements.get(), 5), next_token)
             if manager.submission_task is not None:
                 await asyncio.wait_for(asyncio.shield(manager.submission_task), 5)
-            self.assertIsNone(manager.pending_submit)
+            self.assertIsNone(manager.handover)
             self.assertEqual(admission_tokens, [accepted_token, next_token])
             self.assertEqual(settled_before_admission, [True, True],
                              'Native queued speech must settle before typed admission reopens input')
@@ -6475,15 +6476,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(timer.done())
             self.assertTrue(analyzer._audio_buffer)
             self.assertEqual(await service.submit('stop'), 'accepted')
-            # A barrier at the public LLM admission callback observes the forced stop/reset first.
+            # A barrier at the Admission's typed take observes the forced stop/reset first.
             admitted = asyncio.Event()
-            original_admitted = manager.llm.request_admitted
+            original_admitted = manager.admission.take_typed
 
             def acknowledge(token):
                 original_admitted(token)
                 admitted.set()
 
-            with patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+            with patch.object(manager.admission, 'take_typed', side_effect=acknowledge):
                 await asyncio.wait_for(admitted.wait(), 5)
             self.assertTrue(timer.done())
             self.assertGreater(timer.cancelling(), 0)
@@ -6593,7 +6594,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await release_interruption.wait()
             await native_queue(frame, direction, callback)
 
-        original_ack = manager.llm.request_admitted
+        original_ack = manager.admission.take_typed
 
         def acknowledge(token):
             acknowledgements.append(token)
@@ -6601,7 +6602,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(manager.llm, 'process_frame', side_effect=process), \
                 patch.object(manager.llm, 'queue_frame', side_effect=queue), \
-                patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+                patch.object(manager.admission, 'take_typed', side_effect=acknowledge):
             interrupted.clear()
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await asyncio.wait_for(interrupted.wait(), 5)
@@ -6610,7 +6611,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             before = list(manager.conversation.turns)
             hold_interruption = True
             self.assertEqual(await service.submit('repeat that'), 'accepted')
-            new_token = manager.pending_submit[1]
+            new_token = manager.handover.ticket
             self.assertIsNot(origins[0][0], new_token)
             await asyncio.wait_for(interruption_held.wait(), 5)
             release_old.set()
@@ -6690,13 +6691,13 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             transport = await asyncio.wait_for(service.started.get(), 5)
             await asyncio.wait_for(beginning.wait(), 5)
             receipts = asyncio.Queue()
-            native_ack = manager.llm.request_admitted
+            native_ack = manager.admission.take_typed
 
             def acknowledge(token):
                 native_ack(token)
                 receipts.put_nowait(token)
 
-            with patch.object(manager.llm, 'request_admitted', side_effect=acknowledge):
+            with patch.object(manager.admission, 'take_typed', side_effect=acknowledge):
                 self.assertEqual(await service.submit('Ordinary waiting for begin'), 'accepted')
                 first = await asyncio.wait_for(receipts.get(), 5)
                 if manager.submission_task is not None:
@@ -6721,7 +6722,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.shield(cleanup), 5)
         self.assertEqual(manager.conversation.turns, [])
         self.assertEqual(manager.status._state, 'inactive')
-        self.assertFalse(transport.admitted())
+        self.assertFalse(transport.admission.is_open())
         self.assertEqual(len(brain.requests), 1)
         self.assertTrue(spoken.empty())
         self.assertTrue(committed.empty())
@@ -6756,7 +6757,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager.failure)
         self.assertEqual(manager.status._state, 'inactive')
         self.assertEqual(manager.conversation.turns, [])
-        self.assertIsNone(manager.pending_submit)
+        self.assertIsNone(manager.handover)
         self.assertIsNone(manager.submission_task)
         self.assertIs(manager.model, prepared_model)
         self.assertIsNone(native_process.returncode)
@@ -6827,6 +6828,48 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             release_handover.set()
         self.assertEqual(len(brain.requests), 1)
         await close()
+
+    async def test_failure_publishes_accepted_typed_request(self):
+        for path, trouble in (('capture', 'trouble-microphone'), ('output switch', 'trouble')):
+            with self.subTest(path=path):
+                brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+                self.addCleanup(brain.close)
+                transport, _, _, _, _, close = await self.open_session(
+                    brain, through_service=True, native_audio=True,
+                )
+                service, manager = transport.service, transport.service.manager
+                await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                baseline = len(brain.requests)
+                held, release = asyncio.Event(), asyncio.Event()
+                self.addCleanup(release.set)
+                user = manager.ingress[1]
+                native_queue = user.queue_frame
+
+                async def queue(frame, direction=FrameDirection.DOWNSTREAM, callback=None):
+                    if isinstance(frame, InterruptionFrame) and direction == FrameDirection.DOWNSTREAM:
+                        held.set()
+                        await release.wait()
+                    await native_queue(frame, direction, callback)
+
+                if path == 'capture':
+                    with patch.object(user, 'queue_frame', side_effect=queue):
+                        self.assertEqual(manager.submit('Typed during failure'), 'accepted')
+                        await asyncio.wait_for(held.wait(), 5)
+                        transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                        release.set()
+                        await service.state(trouble)
+                else:
+                    with patch.object(transport, 'suspend_capture', new=AsyncMock(side_effect=RuntimeError)):
+                        self.assertEqual(manager.submit('Typed during failure'), 'accepted')
+                        service.output_watch.emit()
+                        await service.state(trouble)
+                self.assertEqual(manager.conversation.turns, [
+                    {'speaker': 'you', 'text': 'Typed during failure', 'state': 'complete', 'source': 'typed'},
+                    {'speaker': 'kestrel', 'text': '', 'state': 'failed'},
+                ])
+                self.assertEqual(len(brain.requests), baseline)
+                await close()
 
     async def test_wake_waiting_audio_is_private_and_starts_fresh(self):
         brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
@@ -6967,7 +7010,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
 
         def state(value):
             original_state(value)
-            if value == 'inactive' and manager.pending_submit is None and manager.transport is not None:
+            if value == 'inactive' and manager.handover is None and manager.transport is not None:
                 settled.set()
 
         with patch.object(manager.status, 'set_state', side_effect=state):
@@ -6987,7 +7030,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(service.waiting.empty())
             old_hit()
             self.assertFalse(manager.desired_active)
-            token = transport.llm._indicator_reply
+            token = manager.wake_reply_token
             release_end.set()
             fresh = await asyncio.wait_for(service.waiting.get(), 5)
             self.assertIsNone(transport.capture)
@@ -7056,7 +7099,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await service.toggle(), 'starting')
             transport = await asyncio.wait_for(service.started.get(), 5)
             llm = transport.llm
-            old_stt = speech.NemotronSTT(service.recognizer, admitted=transport.admitted)
+            old_stt = speech.NemotronSTT(service.recognizer, admission=transport.admission)
             await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await asyncio.wait_for(interrupted.wait(), 5)
             await transport.input().queue_frame(InputAudioRawFrame(b'private inactive audio', 16000, 1))
@@ -7169,7 +7212,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await service.toggle(), 'inactive')
                 self.assertEqual(await service.toggle(), 'starting')
                 self.assertEqual(await service.toggle(), 'inactive')
-                self.assertFalse(transport.admitted())
+                self.assertFalse(transport.admission.is_open())
                 self.assertEqual(manager.conversation.turns, [])
                 self.assertEqual(len(transport.sessions), 1)
                 process.stdout.feed_data(b'{"text":"old private transcript"}\n')
@@ -7296,17 +7339,17 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(next_entered.wait(), 5)
                         self.assertEqual(await service.toggle(), 'inactive')
                         self.assertEqual(manager.status._state, 'inactive')
-                        self.assertFalse(transport.admitted())
+                        self.assertFalse(transport.admission.is_open())
                         self.assertEqual(manager.conversation.turns, [])
                         self.assertEqual(await service.toggle(), 'starting')
                         self.assertEqual(manager.status._state, 'starting')
                         self.assertEqual(await service.toggle(), 'inactive')
                         self.assertEqual(manager.status._state, 'inactive')
-                        self.assertFalse(transport.admitted())
+                        self.assertFalse(transport.admission.is_open())
                         self.assertEqual(manager.conversation.turns, [])
                         self.assertEqual(await service.toggle(), 'starting')
                         self.assertEqual(manager.status._state, 'starting')
-                        self.assertFalse(transport.admitted())
+                        self.assertFalse(transport.admission.is_open())
                         self.assertEqual(len(transport.sessions), 1)
                         if mode == 'watchdog':
                             await asyncio.wait_for(watchdog_seen.wait(), 5)
@@ -8455,7 +8498,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         await service.state('trouble-voice')
                         self.assertEqual(manager.failure, 'Voice generation cleanup failed. Restart Kestrel.')
                         self.assertTrue(manager.cleanup.done())
-                        self.assertFalse(manager.admission.is_set())
+                        self.assertFalse(manager.admission is not None and manager.admission.is_open())
                         self.assertEqual(await service.toggle(), 'unavailable')
                         self.assertEqual(len(transport.sessions), 1)
                         self.assertEqual(len(attempts), 1)
@@ -9628,7 +9671,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.to_thread(held.wait, 5))
             self.assertEqual(await service.toggle(), 'inactive')
             self.assertEqual(await service.toggle(), 'starting')
-            self.assertFalse(old.admitted())
+            self.assertFalse(old.admission.is_open())
             self.assertEqual(manager.conversation.turns, [])
             self.assertEqual(len(handle.sessions), 1)
             self.assertFalse((notes / 'MEMORY.md').exists())
@@ -9710,7 +9753,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(old_ready.done())
                         self.assertFalse(old_ready.cancelled())
                         self.assertIs(manager.session_ready, old_ready)
-                        self.assertFalse(revoked.admitted())
+                        self.assertFalse(revoked.admission.is_open())
                         self.assertEqual(manager.conversation.turns, [])
                         self.assertEqual(sum(kind == 'write' and event == {'begin': True} for kind, event in events),
                                          writes_before + (not before_write))
@@ -11286,8 +11329,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         native_tts = bot.VoxCPMTTS
         worker_requests = []
 
-        def create_tts(voice, preset, *, generation_lock=None, admitted=lambda: True, reply_admitted=None):
-            tts = native_tts(voice, preset, generation_lock=generation_lock, admitted=admitted, reply_admitted=reply_admitted)
+        def create_tts(voice, preset, *, generation_lock=None, admission=None):
+            tts = native_tts(voice, preset, generation_lock=generation_lock, admission=admission)
             native_run_tts = tts.run_tts
             first_stream = True
 
@@ -11452,6 +11495,27 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             '(Warm, gentle and reassuring, speaking calmly) One fact.',
             'One fact.', 'Next step.', 'Fresh session.',
         ])
+
+
+class AdmissionTests(unittest.TestCase):
+    def test_dismissal_refuses_new_input_old_speech_and_earlier_input(self):
+        admission = Admission(voice=True, output_switching=lambda: False)
+        ticket, mark = admission.accept_spoken()
+        self.assertTrue(admission.is_open())
+        self.assertTrue(admission.admits_microphone())
+        self.assertTrue(admission.may_speak(ticket))
+        self.assertTrue(admission.is_current(mark))
+
+        admission.close()
+
+        self.assertFalse(admission.is_open())
+        self.assertFalse(admission.admits_microphone())
+        self.assertFalse(admission.may_speak(ticket))
+        self.assertFalse(admission.is_current(mark))
+
+        quiet = Admission(voice=False, output_switching=lambda: False)
+        self.assertTrue(quiet.is_open())
+        self.assertFalse(quiet.admits_microphone())
 
 
 class ReplyProgressTests(unittest.TestCase):

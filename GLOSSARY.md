@@ -16,6 +16,10 @@ _Avoid_: speech stack, audio pipeline
 Kestrel's record of how far a reply's speech has reached audio output, and how the reply ended.
 _Avoid_: heard, which Kestrel cannot observe.
 
+**Admission**:
+Kestrel's rule for which input enters the conversation and which request may still speak.
+_Avoid_: gate, epoch.
+
 **Brain**:
 The model that understands a request and chooses what to do. A role that different models can fill.
 _Avoid_: the model, the assistant, the name of whichever model fills the role

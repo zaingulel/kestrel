@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 import json
 import os
@@ -42,6 +42,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 from voxcpm import VoxCPM
 
+from admission import Admission
 from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
@@ -505,7 +506,7 @@ class BrainTurn:
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admitted, session_ready, dismiss, status=None, conversation=None, voice_active=None, request_admitted=None, input_epoch=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -514,15 +515,10 @@ class HermesLLMService(LLMService):
         self.output = None
         self.channel = channel
         self.local_actions = local_actions
-        self.admitted = admitted
+        self.admission = admission
         self.session_ready = session_ready
         self.dismiss = dismiss
-        self.voice_active = voice_active or admitted
-        self.request_admitted = request_admitted
-        self.typed_origin = None
         self.spoken_origin = None
-        self.input_epoch = input_epoch if input_epoch is not None else lambda: 0
-        self.frame_completions = {}
         self._assistant_reply_token = None
         self._last_spoken_token = None
         self._heard_prefix_token = None
@@ -540,38 +536,26 @@ class HermesLLMService(LLMService):
         self._indicator_user = False
         self._indicator_output = False
         self._indicator_pending = False
-        self._indicator_reply = object()
+        self._indicator_pending_reply = None
         self._indicator_output_reply = None
         self.last_spoken_reply: str | None = None
-
-    def accept_request(self, token):
-        self._indicator_reply = token
-        self._indicator_output = False
-        self._indicator_pending = False
-
-    def owns_request(self, token):
-        return token is not None and self.admitted() and token is self._indicator_reply
 
     def valid_origin(self, frame):
         origin = getattr(frame, 'request_origin', None)
         if origin is None:
             return False
-        token, source, message, text, epoch = origin
-        return (isinstance(text, str) and self.owns_request(token) and (source != 'spoken' or epoch == self.input_epoch())
+        token, source, message, text, mark = origin
+        return (isinstance(text, str) and self.admission.may_speak(token)
+                and (source != 'spoken' or self.admission.is_current(mark))
                 and any(item is message for item in frame.context.get_messages())
                 and message.get('role') == 'user' and message.get('content') == text)
 
-    def frame_completed(self, role, frame):
-        future = self.frame_completions.get((role, frame.id))
-        if future is not None and not future.done():
-            future.set_result(None)
-
     def refresh_indicator(self):
-        if self.voice_active() and self.admitted() and self.status is not None and self._indicator_ready:
+        if self.status is not None and self.admission.is_open() and self._indicator_ready:
             state = ('trouble-voice' if self._indicator_voice_failed else
                      'listening' if self._indicator_user else
-                     'speaking' if self._indicator_output else
-                     'thinking' if self._indicator_pending else
+                     'speaking' if self._indicator_output and self.admission.may_speak(self._indicator_output_reply) else
+                     'thinking' if self._indicator_pending and self.admission.may_speak(self._indicator_pending_reply) else
                      ('trouble-notes' if self.channel.failure_advisory == MEMORY_ERROR else 'trouble-engine')
                      if self.channel.failure else 'idle')
             self.status.set_state(state)
@@ -591,32 +575,32 @@ class HermesLLMService(LLMService):
 
     def indicator_output_started(self):
         if not self._indicator_user:
-            self._indicator_output_reply = self._indicator_reply
+            self._indicator_output_reply = self._reply.token if self._reply is not None else None
             self._indicator_output = True
             self.refresh_indicator()
 
     def indicator_output_stopped(self):
-        if self._indicator_output_reply is self._indicator_reply:
+        if self.admission.may_speak(self._indicator_output_reply):
             self._indicator_output = False
             self.refresh_indicator()
 
     def indicator_user_started(self):
-        self.accept_request(object())
-        self.spoken_origin = (self._indicator_reply, self.input_epoch())
+        if not self.admission.admits_microphone():
+            return
+        ticket, mark = self.admission.accept_spoken()
+        self.spoken_origin = (ticket, mark)
         self._indicator_user = True
-        self._indicator_output = False
-        self._indicator_pending = False
         self.refresh_indicator()
 
     def indicator_reply_finished(self, token):
-        if token is self._indicator_reply:
+        if self.admission.may_speak(token):
             self._indicator_pending = False
             self.refresh_indicator()
 
     def begin_reply(self, token):
         if self._reply is not None:
             self._reply.finish(interrupted=True)
-        self._reply = ReplyProgress(token, feed=self.conversation, feed_open=self.admitted, on_finish=self._reply_closed)
+        self._reply = ReplyProgress(token, feed=self.conversation, feed_open=self.admission.is_open, on_finish=self._reply_closed)
 
     def current_reply(self):
         return self._reply
@@ -637,9 +621,9 @@ class HermesLLMService(LLMService):
 
     def remember_assistant_reply(self, text):
         token = self._assistant_reply_token
-        if (self.admitted() and isinstance(text, str) and text.strip()
-                and (self.owns_request(token) or (token is not None and token is self._heard_prefix_token
-                     and self._last_spoken_token is not self._indicator_reply))):
+        if (self.admission.is_open() and isinstance(text, str) and text.strip()
+                and (self.admission.may_speak(token) or (token is not None and token is self._heard_prefix_token
+                     and not self.admission.may_speak(self._last_spoken_token)))):
             self.last_spoken_reply = text
             self._last_spoken_token = token
 
@@ -647,17 +631,17 @@ class HermesLLMService(LLMService):
         if isinstance(frame, (TTSStartedFrame, LLMFullResponseStartFrame)):
             self._assistant_reply_token = token_of(frame)
         record = getattr(frame, 'reply_progress', None)
-        if (record is not None and self.admitted()
-                and (isinstance(frame, InterruptionFrame) or self.owns_request(record.token))):
+        if (record is not None and self.admission.is_open()
+                and (isinstance(frame, InterruptionFrame) or self.admission.may_speak(record.token))):
             record.output_frame(frame)
         self.observe_announcement(frame)
-        if self.owns_request(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
+        if self.admission.may_speak(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
             self.last_spoken_reply = frame.text
             self._last_spoken_token = self._assistant_reply_token
 
     def conversation_audio(self, entries):
         for section, start, end in entries:
-            if self.admitted() and self.owns_request(section.reply.token):
+            if self.admission.may_speak(section.reply.token):
                 section.reply.credit(section, start, end)
 
     def observe_announcement(self, frame):
@@ -680,7 +664,7 @@ class HermesLLMService(LLMService):
             self._announcement[2].set_result(outcome)
 
     async def push_reply_end(self, token, *, failed=False):
-        if not self.owns_request(token):
+        if not self.admission.may_speak(token):
             return
         end = self._labelled(LLMFullResponseEndFrame(), token)
         # The output queue, not generation completion, owns the visible reply's end.
@@ -693,14 +677,14 @@ class HermesLLMService(LLMService):
         await self.push_frame(self._labelled(TTSSpeakFrame(message, append_to_context=False), token))
 
     async def speak_local_reply(self, message, token):
-        if not self.owns_request(token):
+        if not self.admission.may_speak(token):
             return
         await self.push_local_speech(message, token)
         await self.push_reply_end(token)
 
     async def announce_first(self, token, message, run, *, command):
         outcome = 'request superseded'
-        if self.owns_request(token):
+        if self.admission.may_speak(token):
             marker = AnnouncementMarkFrame()
             played = asyncio.get_running_loop().create_future()
             self._announcement = (token, marker, played)
@@ -732,12 +716,12 @@ class HermesLLMService(LLMService):
                     finished(result)
 
         return await self.local_actions.run(
-            tool, admitted=lambda: self.admitted() and epoch == self.stop_epoch, observe=observe,
+            tool, admitted=lambda: self.admission.is_open() and epoch == self.stop_epoch, observe=observe,
         )
 
     async def desktop_call(self, turn, token, output, name, arguments) -> str:
         def advise(text):
-            if self.channel.output is output and self.owns_request(token):
+            if self.channel.output is output and self.admission.may_speak(token):
                 output.put_nowait({'advisory': text})
 
         if not valid_desktop_arguments(name, arguments):
@@ -793,7 +777,7 @@ class HermesLLMService(LLMService):
         self.last_spoken_reply = None
         if self.lookup is not None:
             self.lookup.cancel()
-        if not self.admitted():
+        if not self.admission.is_open():
             self.end_announcement('conversation ended')
 
     async def process_frame(self, frame, direction):
@@ -814,6 +798,7 @@ class HermesLLMService(LLMService):
         token, source, original, text, _ = frame.request_origin
         self._indicator_user = False
         self._indicator_pending = True
+        self._indicator_pending_reply = token
         self.refresh_indicator()
         messages = frame.context.get_messages()
 
@@ -826,9 +811,7 @@ class HermesLLMService(LLMService):
         if self.conversation is not None:
             self.conversation.user(text, source=source)
         if source == 'typed':
-            self.typed_origin = None
-            if self.request_admitted is not None:
-                self.request_admitted(token)
+            self.admission.take_typed(token)
         if re.fullmatch(r"that(?:['’]?s| is) all[.!]?", text.strip().lower()):
             # Dismissal discards this context and revokes reply ownership, so no reply end or history removal follows.
             self.dismiss()
@@ -880,8 +863,8 @@ class HermesLLMService(LLMService):
             if tool.counts_toward_stop:
                 result = await self.run_shared(tool, epoch=self.stop_epoch, reporter=token)
             else:
-                result = await self.local_actions.run(tool, admitted=self.admitted)
-            if result is None or not self.owns_request(token):
+                result = await self.local_actions.run(tool, admitted=self.admission.is_open)
+            if result is None or not self.admission.may_speak(token):
                 return
             message = local_result_message(tool, result)
             if message is None:
@@ -899,7 +882,7 @@ class HermesLLMService(LLMService):
         request = None
 
         async def push_reply_start(delivery):
-            if not self.owns_request(token):
+            if not self.admission.may_speak(token):
                 return
             if self._reply is None or self._reply.token is not token:
                 self.begin_reply(token)
@@ -931,11 +914,11 @@ class HermesLLMService(LLMService):
                     if previous.user is message:
                         history.extend(deepcopy(previous.records))
             request = asyncio.create_task(self.channel.exchange(
-                history, output, admitted=lambda: self.owns_request(token),
+                history, output, admitted=lambda: self.admission.may_speak(token),
                 desktop=partial(self.desktop_call, turn, token, output),
             ))
             while event := await output.get():
-                if not self.owns_request(token):
+                if not self.admission.may_speak(token):
                     self.revoke()
                     return
                 if 'advisory' in event:
@@ -951,7 +934,7 @@ class HermesLLMService(LLMService):
                     else:
                         await self.push_frame(self._labelled(LLMTextFrame(event['text']), token))
             await request
-            if self.owns_request(token) and self.channel.failure:
+            if self.admission.may_speak(token) and self.channel.failure:
                 raise RuntimeError(self.channel.failure)
         except Exception as error:
             failed = True
@@ -960,7 +943,7 @@ class HermesLLMService(LLMService):
             if not started:
                 await push_reply_start('neutral')
                 started = True
-            if self.owns_request(token):
+            if self.admission.may_speak(token):
                 await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + advisory), token))
         finally:
             self.channel.detach(output)
@@ -1023,6 +1006,26 @@ class ConversationUserAggregator(LLMUserAggregator):
             controller._last_audio_time = asyncio.get_running_loop().time()
 
 
+@dataclass(eq=False)
+class TypedHandover:
+    """An accepted typed request the manager is handing to the engine, with the frame completions it awaits."""
+    text: str
+    ticket: object = None
+    message: dict | None = None
+    taken: asyncio.Future = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    completions: dict = field(default_factory=dict)
+
+    def frame_completed(self, role, frame) -> None:
+        future = self.completions.get((role, frame.id))
+        if future is not None and not future.done():
+            future.set_result(None)
+
+    def cancel(self) -> None:
+        for future in (self.taken, *self.completions.values()):
+            if not future.done():
+                future.cancel()
+
+
 class VoiceConversations:
     def __init__(self, *, status, conversation):
         self.status = status
@@ -1051,10 +1054,8 @@ class VoiceConversations:
         self.prepared = False
         self.transitioning = False
         self.lifecycle_changed = False
-        self.pending_submit = None
+        self.handover = None
         self.submission_task = None
-        self.submission_ack = None
-        self.input_epoch = 0
         self.ingress = None
         self.stt = None
         self.waiting_transport = None
@@ -1095,8 +1096,7 @@ class VoiceConversations:
         if self.wake_interval is not interval:
             return
         self.waiting_transport = LaptopAudioTransport(
-            ECHO_REMOVAL, on_stopped=self.wake_failed,
-            admitted=lambda: self.wake_interval is interval, input_admitted=lambda: False,
+            ECHO_REMOVAL, on_stopped=self.wake_failed, admission=None,
             capture_pcm=lambda pcm: detector.submit(pcm) if self.wake_interval is interval else None,
         )
         await self.waiting_transport.open()
@@ -1119,42 +1119,40 @@ class VoiceConversations:
             await self.wake_detector.close()
             self.wake_detector = None
 
-    def speech_admitted(self):
-        return bool(self.admission is not None and self.admission.is_set() and self.desired_active
-                    and self.pending_submit is None and not self.switching_output)
-
     def submit(self, text):
         if self.closed or self.failure or not self.prepared:
             return 'unavailable'
-        if self.transitioning or self.lifecycle_changed or self.pending_submit is not None or self.switching_output:
+        if self.transitioning or self.lifecycle_changed or self.handover is not None or self.switching_output:
             return 'busy'
         if self.transport is not None and self.ingress is None:
             return 'busy'
-        token = object()
-        self.input_epoch += 1
+        if self.admission is None:
+            self.admission = Admission(voice=self.desired_active, output_switching=lambda: self.switching_output)
+        handover = TypedHandover(text)
+        taken = handover.taken
+        handover.ticket = self.admission.accept_typed(on_taken=lambda: taken.done() or taken.set_result(None))
         self.invalidate_wake()
-        self.wake_reply_token = token
-        self.pending_submit = (text, token)
-        if self.llm is not None:
-            self.llm.accept_request(token)
+        self.wake_reply_token = handover.ticket
+        self.handover = handover
         self.changed.set()
         return 'accepted'
 
-    def typed_message_taken(self):
-        return self.submission_ack is not None and self.submission_ack.done() and not self.submission_ack.cancelled()
-
     def fail_submission(self):
-        if self.pending_submit is None:
+        if self.handover is None:
             return
-        text, token = self.pending_submit
-        if not self.typed_message_taken():
-            self.conversation.user(text, source='typed')
-        ReplyProgress.failed_before_speech(token, self.conversation)
+        if not self.admission.typed_taken(self.handover.ticket):
+            self.conversation.user(self.handover.text, source='typed')
+        ReplyProgress.failed_before_speech(self.handover.ticket, self.conversation)
 
-    def request_admitted(self, token):
-        if self.pending_submit is not None and self.pending_submit[1] is token:
-            if self.submission_ack is not None and not self.submission_ack.done():
-                self.submission_ack.set_result(None)
+    def frame_completed(self, role, frame):
+        if self.handover is not None:
+            self.handover.frame_completed(role, frame)
+
+    def typed_origin(self, message):
+        handover = self.handover
+        if handover is not None and handover.message is message and not self.admission.typed_taken(handover.ticket):
+            return handover.ticket, 'typed', message, handover.text, None
+        return None
 
     def ingress_ready(self, worker, user, context):
         self.ingress = (worker, user, context)
@@ -1178,19 +1176,15 @@ class VoiceConversations:
     def revoke(self):
         self.invalidate_wake()
         self.wake_reply_token = None
-        self.input_epoch += 1
-        self.pending_submit = None
+        if self.handover is not None:
+            self.handover.cancel()
+            self.handover = None
         if self.submission_task is not None and self.submission_task is not asyncio.current_task():
             self.submission_task.cancel()
-        if self.submission_ack is not None and not self.submission_ack.done():
-            self.submission_ack.cancel()
-        if self.llm is not None:
-            self.llm.typed_origin = None
-            for future in self.llm.frame_completions.values():
-                if not future.done():
-                    future.cancel()
         if self.admission is not None:
-            self.admission.clear()
+            self.admission.close()
+            if self.transport is None:
+                self.admission = None
         if self.llm is not None:
             self.llm.revoke()
 
@@ -1222,43 +1216,40 @@ class VoiceConversations:
         self.prepared = True
 
     async def activate(self, *, capture_enabled=True):
-        epoch = self.input_epoch
+        admission = self.admission or Admission(voice=capture_enabled, output_switching=lambda: self.switching_output)
+        self.admission = admission
         await self.conversation.begin_session()
-        if self.closed or self.lifecycle_changed or self.input_epoch != epoch or (capture_enabled and not self.desired_active):
+        if self.closed or self.lifecycle_changed or not admission.is_open() or (capture_enabled and not self.desired_active):
             return
-        self.admission = asyncio.Event()
-        self.admission.set()
-        admitted = self.admission.is_set
-        self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admitted))
-        self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admitted=admitted,
-                                             input_admitted=self.speech_admitted, capture_enabled=capture_enabled,
-                                             reply_admitted=lambda token: self.llm is not None and self.llm.owns_request(token))
-        self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admitted=admitted, session_ready=self.session_ready,
-                                    dismiss=partial(self.request_active, False), status=self.status, conversation=self.conversation, voice_active=lambda: self.desired_active,
-                                    request_admitted=self.request_admitted, input_epoch=lambda: self.input_epoch)
-        if self.pending_submit is not None:
-            self.llm.accept_request(self.pending_submit[1])
+        self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admission.is_open))
+        self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admission=admission,
+                                             capture_enabled=capture_enabled)
+        # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
+        self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
+                                    dismiss=partial(self.request_active, False), status=self.status if capture_enabled else None,
+                                    conversation=self.conversation)
         adapter = self.llm
 
         def readiness_finished(task):
             if not task.cancelled():
                 task.exception()
-            if self.llm is adapter and admitted():
+            if self.llm is adapter and admission.is_open():
                 adapter.refresh_indicator()
 
         self.session_ready.add_done_callback(readiness_finished)
-        self.voice = self.voice_factory(admitted=admitted, reply_admitted=self.llm.owns_request)
+        self.voice = self.voice_factory(admission=admission)
         await self.transport.open()
         if self.transport.capture is not None:
             self.capture_owner = self.status.remember_owner(self.transport.capture.pid)
-        if not admitted():
+        if not admission.is_open():
             return
-        self.stt = NemotronSTT(self.recognizer, admitted=self.speech_admitted, input_epoch=lambda: self.input_epoch)
+        self.stt = NemotronSTT(self.recognizer, admission=admission)
         self.pipeline = asyncio.create_task(run_conversation(
             self.stt, self.voice, llm=self.llm,
             transport=self.transport, status=self.status, conversation=self.conversation, handle_signals=False,
             on_ingress_ready=self.ingress_ready, on_reply_finished=self.reply_finished,
             input_paused=lambda: self.switching_output,
+            on_frame_completed=self.frame_completed, typed_origin=self.typed_origin,
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
 
@@ -1274,6 +1265,7 @@ class VoiceConversations:
             LAPTOP_CAPTURE_FAILURE: 'trouble-microphone', LAPTOP_PLAYBACK_FAILURE: 'trouble-playback',
         }.get(failure, 'trouble'))
         self.desired_active = False
+        self.fail_submission()
         self.revoke()
         self.changed.set()
 
@@ -1321,15 +1313,12 @@ class VoiceConversations:
         self.transport = self.pipeline = self.llm = self.voice = self.admission = self.session_ready = None
 
     async def submit_pending(self):
-        text, token = self.pending_submit
+        handover = self.handover
         worker, user, _ = self.ingress
-        llm = self.llm
-        completions = []
 
         async def completed(role, frame, queue):
             future = asyncio.get_running_loop().create_future()
-            llm.frame_completions[(role, frame.id)] = future
-            completions.append((role, frame.id))
+            handover.completions[(role, frame.id)] = future
             await queue(frame)
             await future
 
@@ -1339,19 +1328,17 @@ class VoiceConversations:
                 output_done = asyncio.get_running_loop().create_future()
                 assistant_done = asyncio.get_running_loop().create_future()
                 for role, future in (('output', output_done), ('assistant', assistant_done)):
-                    llm.frame_completions[(role, interruption.id)] = future
-                    completions.append((role, interruption.id))
+                    handover.completions[(role, interruption.id)] = future
                 await worker.queue_frame(interruption)
                 await asyncio.gather(output_done, assistant_done)
                 await self.stt.discard_pending()
                 await user.reset()
                 await completed('user', ProposedUserStoppedSpeakingFrame(), user.queue_frame)
-                message = {'role': 'user', 'content': text}
-                llm.typed_origin = (token, 'typed', message, text, self.input_epoch)
-                self.submission_ack = asyncio.get_running_loop().create_future()
+                message = {'role': 'user', 'content': handover.text}
+                handover.message = message
                 await completed('user', LLMMessagesAppendFrame(messages=[message], run_llm=True), user.queue_frame)
-                await self.submission_ack
-                self.pending_submit = None
+                await handover.taken
+                self.handover = None
         except Exception:
             self.fail_submission()
             self.record_failure('Kestrel input handover failed. Restart Kestrel.', 'trouble-handover')
@@ -1359,12 +1346,7 @@ class VoiceConversations:
             self.revoke()
             self.status.set_state(self.trouble)
         finally:
-            for key in completions:
-                future = llm.frame_completions.pop(key, None)
-                if future is not None and not future.done():
-                    future.cancel()
-            llm.typed_origin = None
-            self.submission_ack = None
+            handover.cancel()
             self.changed.set()
 
     def output_changed(self):
@@ -1539,6 +1521,7 @@ class VoiceConversations:
         except Exception:
             self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
             self.desired_active = False
+            self.fail_submission()
             self.revoke()
             self.changed.set()
 
@@ -1555,7 +1538,7 @@ class VoiceConversations:
                     if not self.wake_startup.cancelled() and self.wake_startup.exception() is not None:
                         self.wake_failed()
                 if (self.wake_detector is not None and
-                        (self.desired_active or self.pending_submit is not None or self.wake_disabled
+                        (self.desired_active or self.handover is not None or self.wake_disabled
                          or self.lifecycle_changed or self.failure or self.wake_reply_token is not None)):
                     await self.close_waiting()
                 if self.submission_task is not None and self.submission_task.done():
@@ -1565,7 +1548,7 @@ class VoiceConversations:
                 if self.failure and self.cleanup is not None:
                     self.status.set_state(self.trouble)
                     continue
-                stopped = self.pipeline is not None and self.pipeline.done() and self.admission.is_set()
+                stopped = self.pipeline is not None and self.pipeline.done() and self.admission.is_open()
                 if stopped:
                     # A stopped pipeline is a symptom: the cleanup below classifies it.
                     self.failure = 'Kestrel conversation stopped unexpectedly. Restart Kestrel.'
@@ -1579,16 +1562,16 @@ class VoiceConversations:
                 if self.switching_output:
                     self.changed.set()
                     continue
-                if self.transport is None and (self.desired_active or self.pending_submit is not None):
+                if self.transport is None and (self.desired_active or self.handover is not None):
                     self.transitioning = True
                     self.cleanup = None
                     await self.activate(capture_enabled=self.desired_active)
                 self.transitioning = False
-                if self.pending_submit is not None and self.ingress is not None and self.submission_task is None:
+                if self.handover is not None and self.ingress is not None and self.submission_task is None:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:
                     self.status.set_state('inactive')
-                    if self.prepared and not self.switching_output and not self.wake_disabled and self.pending_submit is None and self.wake_reply_token is None and self.wake_detector is None:
+                    if self.prepared and not self.switching_output and not self.wake_disabled and self.handover is None and self.wake_reply_token is None and self.wake_detector is None:
                         interval = object()
                         self.wake_interval = interval
                         self.wake_detector = WakeWordDetector(
@@ -1627,7 +1610,7 @@ class VoiceConversations:
                 await self.finish_conversation()
 
 
-async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
+async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_frame_completed, typed_origin, user_params=None, handle_signals=False, status=None, conversation=None, on_ingress_ready=None, on_reply_finished=None, input_paused=lambda: False):
     if user_params is None:
         user_params = LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams(confidence=0.5)), empty_user_turn=None,
@@ -1642,10 +1625,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
     user = ConversationUserAggregator(context, params=user_params, input_paused=input_paused)
     # Pipecat 1.12 pairs the assistant back to its exact user for native context flushing.
     assistant = LLMAssistantAggregator(context, _paired_user_aggregator=user)
-    llm.conversation = conversation
     if status is not None or conversation is not None:
-        llm.status = status
-
         @transport.input().event_handler('on_after_process_frame')
         async def indicator_input_ready(processor, frame):
             if isinstance(frame, StartFrame):
@@ -1653,7 +1633,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
 
     @user.event_handler('on_before_push_frame')
     async def indicator_user_turn(processor, frame):
-        if isinstance(frame, UserStartedSpeakingFrame) and stt.admitted():
+        if isinstance(frame, UserStartedSpeakingFrame):
             llm.indicator_user_started()
         elif isinstance(frame, UserStoppedSpeakingFrame):
             llm.indicator_user_stopped()
@@ -1661,15 +1641,16 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
             messages = frame.context.get_messages()
             if messages and messages[-1].get('role') == 'user':
                 message = messages[-1]
-                if llm.typed_origin is not None and llm.typed_origin[2] is message:
-                    frame.request_origin = llm.typed_origin
+                origin = typed_origin(message)
+                if origin is not None:
+                    frame.request_origin = origin
                 elif llm.spoken_origin is not None:
-                    token, epoch = llm.spoken_origin
-                    frame.request_origin = (token, 'spoken', message, message.get('content'), epoch)
+                    token, mark = llm.spoken_origin
+                    frame.request_origin = (token, 'spoken', message, message.get('content'), mark)
 
     @user.event_handler('on_after_process_frame')
     async def user_frame_completed(processor, frame):
-        llm.frame_completed('user', frame)
+        on_frame_completed('user', frame)
         if isinstance(frame, StartFrame) and on_ingress_ready is not None:
             on_ingress_ready(worker, processor, context)
 
@@ -1682,7 +1663,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
     async def assistant_frame_completed(processor, frame):
         if isinstance(frame, InterruptionFrame):
             llm._heard_prefix_token = None
-        llm.frame_completed('assistant', frame)
+        on_frame_completed('assistant', frame)
 
     output = transport.output()
 
@@ -1695,7 +1676,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, user_
         # The transport drops its chunk queue for these, keeping the unchunked remainder.
         if isinstance(frame, (InterruptionFrame, CancelFrame)):
             output.output_buffer.queue_dropped()
-        llm.frame_completed('output', frame)
+        on_frame_completed('output', frame)
 
     @assistant.event_handler('on_before_push_frame')
     async def remember_assistant_reply(processor, frame):

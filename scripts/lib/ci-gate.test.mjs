@@ -64,7 +64,7 @@ test('the unconditional quality lane runs the factory and speech quality checks'
   assert.match(quality, /^      - run: npm run lint$/m);
   assert.match(quality, /^      - run: npm run test:scripts$/m);
   assert.match(quality, /^      - run: npm run lint:docs$/m);
-  assert.match(quality, /^      - run: \.runtime\/voice-venv\/bin\/python -m ruff check --select F bot\.py speech\.py wakeword\.py asr_worker\.py hermes_worker\.py app_resolver\.py tool_actions\.py tool_catalogue\.py reply_progress\.py codex_status\.py desktop tests$/m);
+  assert.match(quality, /^      - run: \.runtime\/voice-venv\/bin\/python -m ruff check --select F bot\.py speech\.py wakeword\.py asr_worker\.py hermes_worker\.py app_resolver\.py tool_actions\.py tool_catalogue\.py reply_progress\.py admission\.py codex_status\.py desktop tests$/m);
   assert.match(quality, /^      - run: npm run test:speech\n        env:\n          HF_HUB_OFFLINE: '1'\n          TRANSFORMERS_OFFLINE: '1'$/m);
 });
 
