@@ -8,7 +8,7 @@
 // Exit 2 on a bad argument, before any external read. The reason is always the last line of output.
 // The watch uses the probe-free `runGh`, so a `gh` failure makes no further read.
 // Run: node scripts/merge-watch.mjs <pull-request-number>
-//      node scripts/merge-watch.mjs --draft job/<issue-number>
+//      node scripts/merge-watch.mjs --draft job/<issue>
 
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -16,8 +16,12 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runGh } from './lib/gh-exec.mjs';
 import { watchDraft, watchMerge } from './lib/merge-watch.mjs';
+import { LINEAR_IDENTIFIER } from './lib/tracker.mjs';
 
-const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue-number>';
+const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue>';
+
+// job/<N> on GitHub and markdown, job/<ID> on Linear: both accepted, since this script reads no configuration.
+const isJobBranch = (head) => head.startsWith('job/') && (/^[1-9]\d*$/.test(head.slice(4)) || LINEAR_IDENTIFIER.test(head.slice(4)));
 
 export async function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
@@ -25,7 +29,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
   let watched;
   if (args.length === 1 && /^[1-9]\d*$/.test(args[0])) {
     watched = watchMerge({ pr: args[0], ...seams });
-  } else if (args.length === 2 && args[0] === '--draft' && /^job\/[1-9]\d*$/.test(args[1])) {
+  } else if (args.length === 2 && args[0] === '--draft' && isJobBranch(args[1])) {
     watched = watchDraft({
       head: args[1],
       gitExec: dependencies.gitExec ?? ((gitArgs) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: 'pipe' })),

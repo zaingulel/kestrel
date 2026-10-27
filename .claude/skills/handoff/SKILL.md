@@ -8,6 +8,10 @@ disable-model-invocation: true
 
 Owner-invoked to park unfinished work. Completed work uses `closeout`.
 
+Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
+what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
+`docs/LINEAR-CARDS.md` says what each card step here becomes.
+
 1. **Commit what exists** on the job branch with a message that says it is work in progress. Regenerate any
    artifact the `generated artifacts` row of the Conventions table in `.agents/REPOSITORY.md` names and commit it with its
    source; the Stop and pre-commit hooks enforce it.
@@ -25,8 +29,8 @@ Owner-invoked to park unfinished work. Completed work uses `closeout`.
    newest claim names `Claude Code cloud` stays in its column under that claim instead, so that the next session's
    work-pick offers its delivery first, as the `resume` skill says under "Cloud build". In a cloud session step 4 opens
    the draft with the built-in GitHub tools, and this step is skipped: the card stays where it is for a local session.
-   A local session waiting for a cloud build's draft has no job branch of its own: it skips steps 1 to 4 and ends its
-   wait.
+   A local session watching a cloud build has no job branch of its own: it skips steps 1 to 4, ends its wait and cancels
+   any look it scheduled at the cloud session.
 6. **Leave the worktree in place.** The next session finds the branch in `resume` step 1.
 
 Report the branch, the pull request number, and the one-line next step.

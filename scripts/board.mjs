@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// board.mjs — the one board command: it lists the board and judges it from
+// board.mjs — the one board command: it lists the board (the GitHub Projects board, the
+// cards under .agents/cards where scripts/lib/board-config.mjs sets TRACKER = 'markdown', or a
+// Linear team where it sets TRACKER = 'linear') and judges it from
 // the SAME single read, so a session never pays twice for one answer and the listing
 // can never disagree with the drift verdict printed under it.
 //
@@ -19,7 +21,8 @@
 //
 // --intake reads the board once, then the details of each pickable card and each claimed
 // card with no closing pull request (body, parent, latest claim, every comment) through
-// two read-only GraphQL queries, and writes nothing and reads no checkout. Stdout is the
+// two read-only GraphQL queries, and writes nothing and reads no checkout (a markdown install
+// reads its cards, origin/main and its job branches instead, and a Linear install reads its team). Stdout is the
 // document alone and ends with a line counting itself; the scan, the details outcome and
 // the line count go to stderr. Exit 0: whole and clean. 1: a rejected argument. 2: the
 // board read failed or returned no items. 3: drift. 4: a card's details, or the board,
@@ -39,7 +42,9 @@
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { ghExec } from './lib/gh-exec.mjs';
+import { linearExec } from './lib/linear-api.mjs';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PICKABLE_STATUSES } from './lib/board-config.mjs';
+import { CARDS_DIR, configuredTracker, markdownCardDetails, readMarkdownBoard } from './lib/board-markdown.mjs';
 import {
   INTAKE_EXIT,
   fetchBoard,
@@ -51,18 +56,30 @@ import {
   parkedLine,
   pickable,
 } from './lib/board.mjs';
+import { linearCardDetails, linearTeamKey, readLinearBoard } from './lib/board-linear.mjs';
 import { intakeCards, intakeOutcome, scanBoard, scanOutcome } from './lib/board-rules.mjs';
 
-const headerLine = (label, selected, items) =>
-  `Board ${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER} — ${label}: ${selected.length} of ${items.length} item(s)`;
+const boardName = (tracker) => {
+  if (tracker === 'markdown') return `markdown ${CARDS_DIR}`;
+  if (tracker === 'linear') return `linear team ${linearTeamKey()}`;
+  return `${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER}`;
+};
+
+const headerLine = (label, selected, items, tracker) =>
+  `Board ${boardName(tracker)} — ${label}: ${selected.length} of ${items.length} item(s)`;
 
 // The pick listing and the card details as one document on stdout; the scan and the
 // details outcome on stderr, so a caller that captures stdout holds the document alone.
-function printIntake(items, args, executor, output) {
+function printIntake(items, args, { executor, linear, output, tracker, markdown }) {
   const { candidates, claims, numberless } = intakeCards(items);
-  const details = fetchCardDetails(executor, [...candidates, ...claims].map((card) => card.number));
+  const numbers = [...candidates, ...claims].map((card) => card.number);
+  const details = {
+    markdown: () => markdownCardDetails(markdown.cards, numbers, markdown.refs),
+    linear: () => linearCardDetails(linear, numbers),
+    github: () => fetchCardDetails(executor, numbers),
+  }[tracker]();
   const picks = pickable(items);
-  const listing = `${headerLine(PICKABLE_STATUSES.join('/'), picks, items)}\n\n${formatGrouped(picks)}`;
+  const listing = `${headerLine(PICKABLE_STATUSES.join('/'), picks, items, tracker)}\n\n${formatGrouped(picks)}`;
   const document = intakeDocument({ listing, candidates, claims, numberless, details });
   const { lines, exitCode } = intakeOutcome({ ...scanBoard(items), details });
   output.log(document.join('\n'));
@@ -76,6 +93,7 @@ function printIntake(items, args, executor, output) {
 export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   const executor = dependencies.ghExec ?? ghExec;
+  const linear = dependencies.linearExec ?? linearExec;
 
   let parsed;
   try {
@@ -89,19 +107,37 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
 
   // 2 under --intake, which tells a failed read from a rejected argument (1); every other mode keeps 1.
   const readFailed = parsed.intake ? INTAKE_EXIT.readFailed : 1;
-  let items;
+  let tracker;
   try {
-    items = fetchBoard(executor);
+    tracker = configuredTracker();
   } catch (err) {
-    output.error(`board: failed to read the GitHub Projects board — ${err.message}`);
+    output.error(`board: ${err.message}`);
     return readFailed;
   }
-  if (items.length === 0) {
+  // A markdown install's cards and claims, read alongside its items; null on GitHub.
+  let markdown = null;
+  let items;
+  try {
+    if (tracker === 'markdown') {
+      markdown = readMarkdownBoard(executor);
+      ({ items } = markdown);
+    } else if (tracker === 'linear') {
+      ({ items } = readLinearBoard(linear));
+    } else {
+      items = fetchBoard(executor);
+    }
+  } catch (err) {
+    const source = { markdown: 'markdown cards', linear: `Linear team ${linearTeamKey()}`, github: 'GitHub Projects board' }[tracker];
+    output.error(`board: failed to read the ${source} — ${err.message}`);
+    return readFailed;
+  }
+  // A repository with no card yet is a real, empty markdown board, and a team with no issue a real, empty Linear board; on GitHub zero items means a failed read.
+  if (items.length === 0 && tracker === 'github') {
     output.error('board: gh returned 0 items — auth/network/project problem, not an empty backlog.');
     return readFailed;
   }
 
-  if (parsed.intake) return printIntake(items, parsed, executor, output);
+  if (parsed.intake) return printIntake(items, parsed, { executor, linear, output, tracker, markdown });
 
   // Under --json stdout is a document a caller parses, so the scan goes to stderr rather
   // than corrupting it; the verdict still reaches the operator and still sets the exit code.
@@ -118,7 +154,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     if (parsed.json) {
       output.log(JSON.stringify(selected.map(normalizeItem), null, 2));
     } else {
-      output.log(`${headerLine(label, selected, items)}\n`);
+      output.log(`${headerLine(label, selected, items, tracker)}\n`);
       output.log(formatGrouped(selected));
     }
     const parkedNote = parkedLine(items, parsed);

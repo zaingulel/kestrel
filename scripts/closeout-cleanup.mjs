@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// closeout-cleanup.mjs — after a job's merge, removes the job's containers, named scratch, worktree and branch, each
-// only when every check passes; with --check, reads whether anything uses a path and removes nothing. Run the
-// verifier checkout's copy, never the job worktree's:
+// closeout-cleanup.mjs — after a job's merge, removes the job's containers, named scratch, worktree, the empty folder
+// Codex made around the worktree and the branch, each only when every check passes; with --check, reads whether
+// anything uses a path and removes nothing. Run the verifier checkout's copy, never the job worktree's:
 //   node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...
 //   node scripts/closeout-cleanup.mjs --check <absolute path> [--check <absolute path>]...
 // The worktree is the one git registers for job/<issue>. `--regenerated` names an ignored directory in it that a
@@ -57,6 +57,10 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
       platform,
       cwd: dependencies.cwd ?? process.cwd(),
       home: dependencies.home ?? homedir(),
+      codexHome: dependencies.codexHome ?? process.env.CODEX_HOME ?? '',
+      tomlParserPath:
+        dependencies.tomlParserPath ??
+        fileURLToPath(new URL('../.agents/upstream/squirrelchat-smol-toml/dist/index.cjs', import.meta.url)),
       pid,
       scriptPath: dependencies.scriptPath ?? fileURLToPath(import.meta.url),
       git,

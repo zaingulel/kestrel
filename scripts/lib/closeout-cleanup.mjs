@@ -5,10 +5,23 @@
 // retains the target it was checking. Forced deletion is limited to the exact verified merged-PR job branch.
 
 import { spawnSync } from 'node:child_process';
-import { constants, lstatSync, readlinkSync, realpathSync, rmSync, unlinkSync } from 'node:fs';
+import {
+  constants,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { isGithubRepository } from './factory-sync.mjs';
+import { LINEAR_IDENTIFIER } from './tracker.mjs';
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
 const CONTAINER_ID = /^[0-9a-f]{64}$/;
@@ -83,7 +96,9 @@ export function parseCleanupArgs(args) {
     if (badCheck !== undefined) return { error: `--check needs a normalized absolute path: ${JSON.stringify(badCheck)}` };
     return { check };
   }
-  if (positionals.length !== 1 || !POSITIVE_INTEGER.test(positionals[0])) return { error: 'expected exactly one issue number' };
+  if (positionals.length !== 1 || !(POSITIVE_INTEGER.test(positionals[0]) || LINEAR_IDENTIFIER.test(positionals[0]))) {
+    return { error: 'expected exactly one issue number or Linear issue ID' };
+  }
   const pr = values.pr?.length === 1 ? parsePr(values.pr[0]) : null;
   if (values.pr && !pr) return { error: '--pr needs exactly one canonical HTTPS GitHub pull request URL' };
   const scratch = unique(values.scratch ?? []);
@@ -183,7 +198,7 @@ function wholeRunRefusal(mainRecord, job, worktree, seams) {
   return null;
 }
 
-// Job mode: the job's containers, named scratch, worktree and branch, each removed only when every check passes.
+// Job mode: the job's containers, named scratch, worktree, Codex's empty outer folder and branch, each removed only when every check passes.
 export function cleanupJob(request, seams) {
   const job = `job/${request.issue}`;
   const git = (...args) => seams.run(seams.git.command, args, { env: seams.git.env });
@@ -250,10 +265,13 @@ export function cleanupJob(request, seams) {
     const held = useChecks(worktree.path, [worktree.path, worktree.canonical], true, true, context);
     if (held) retainWorktree(held.reason);
   }
+  const codexFolder = worktree && !worktree.retained ? codexOuterFolder(worktree, seams) : null;
   if (worktree && !worktree.retained) removeWorktree(context, request.regenerated, retainWorktree, docker.verify);
   if (!worktree) report.absent('worktree', job);
   else if (worktree.retained) report.retained('worktree', worktree.path, worktree.retained);
   else report.removed('worktree', worktree.path);
+  // Judged before the branch, so a retained outer folder stops the merged PR exception below.
+  if (codexFolder && !worktree.retained) removeCodexOuterFolder(codexFolder, context, report);
 
   if (!branchPresent) {
     report.absent('branch', job);
@@ -644,6 +662,152 @@ function canonicalPath(path) {
       missing.unshift(basename(prefix));
     }
   }
+}
+
+const CODEX_MARKER = '.codex-worktree-name';
+
+const CODEX_ROOT_KEY = 'git-worktree-root';
+// Rust's str::trim, which Codex applies to the root: Unicode White_Space at either end, so U+0085 goes and U+FEFF stays.
+const RUST_TRIM = /^\p{White_Space}+|\p{White_Space}+$/gu;
+
+// The vendored TOML parser: { parse }, or { unavailable } with why it could not be loaded.
+function loadTomlParser(path) {
+  try {
+    return { parse: createRequire(import.meta.url)(path).parse };
+  } catch (error) {
+    return { unavailable: error.code ?? error.message };
+  }
+}
+
+// Codex's worktree root setting in its user settings file: {} when nothing is at the path or the file names no root
+// or a blank one, { root } with the trimmed value, or { unusable } with why the file or its value cannot be used.
+function codexRootSetting(file, parserPath) {
+  let stat;
+  try {
+    stat = statSync(file);
+  } catch (error) {
+    if (error.code === 'ENOENT' && !lstatSync(file, { throwIfNoEntry: false })) return {};
+    return { unusable: `config.toml could not be read: ${error.code ?? error.message}` };
+  }
+  if (!stat.isFile()) return { unusable: 'config.toml is not a regular file' };
+  let bytes;
+  try {
+    bytes = readFileSync(file);
+  } catch (error) {
+    return { unusable: `config.toml could not be read: ${error.code ?? error.message}` };
+  }
+  const parser = loadTomlParser(parserPath);
+  if (parser.unavailable) return { unusable: `the TOML parser could not be loaded: ${parser.unavailable}` };
+  let config;
+  try {
+    config = parser.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return { unusable: 'config.toml is not valid TOML' };
+  }
+  if (!Object.hasOwn(config, 'desktop')) return {};
+  // A TOML table parses to an object with no prototype; an array, a date or any other value does not.
+  if (Object.getPrototypeOf(config.desktop) !== null) return { unusable: 'desktop is not a table' };
+  if (!Object.hasOwn(config.desktop, CODEX_ROOT_KEY)) return {};
+  const value = config.desktop[CODEX_ROOT_KEY];
+  if (typeof value !== 'string') return { unusable: 'its value is not a string' };
+  const root = value.replace(RUST_TRIM, '');
+  if (root === '') return {};
+  if (!isCleanAbsolute(root)) return { unusable: 'its value is not a normalized absolute path' };
+  return { root };
+}
+
+// Codex's worktree root for the session, read from its user settings file alone, never its other configuration
+// layers: the [desktop] root of $CODEX_HOME/config.toml, else $CODEX_HOME/worktrees, with ~/.codex for an empty
+// CODEX_HOME. { root } canonical; { unusable } with why the setting names no root, a CODEX_HOME (or the home folder
+// standing in for an empty one) that is not a normalized absolute path included; null only when the default root
+// cannot be resolved, which no resolved worktree can sit inside.
+function codexWorktreeRoot({ codexHome, home, tomlParserPath }) {
+  const source = codexHome === '' ? home : codexHome;
+  if (!isCleanAbsolute(source)) {
+    return { unusable: `${codexHome === '' ? 'the home folder' : 'CODEX_HOME'} is not a normalized absolute path` };
+  }
+  const base = codexHome === '' ? join(source, '.codex') : source;
+  const setting = codexRootSetting(join(base, 'config.toml'), tomlParserPath);
+  if (setting.unusable) return setting;
+  if (setting.root) {
+    const resolved = canonicalPath(setting.root);
+    return resolved.path ? { root: resolved.path } : { unusable: `its value could not be resolved: ${resolved.unresolved}` };
+  }
+  const root = canonicalPath(join(base, 'worktrees')).path;
+  return root ? { root } : null;
+}
+
+// The job worktree's parent when it sits directly inside Codex's worktree root, read before the worktree is removed
+// so its removal can tell the same folder from a replacement: { path, forms, before } or { path, forms, unreadable },
+// with `unusable` when the settings of Codex name no usable root, which makes every parent a candidate so that a marked
+// one is retained; null for any other parent.
+function codexOuterFolder(worktree, seams) {
+  const path = dirname(worktree.canonical);
+  const { root, unusable } = codexWorktreeRoot(seams) ?? {};
+  if (!unusable && (!root || dirname(path) !== root)) return null;
+  const forms = unique([dirname(worktree.path), path]);
+  try {
+    return { path, forms, before: lstatSync(path), unusable };
+  } catch (error) {
+    return { path, forms, unreadable: error.code ?? error.message, unusable };
+  }
+}
+
+// What the outer folder holds, read without following a link: { marker } with the marker's lstat when it holds only
+// Codex's empty marker, { unmarked } when the marker is not there, or { reason } to retain it.
+function outerContents(path) {
+  let entries;
+  let marker;
+  try {
+    entries = readdirSync(path);
+    if (!entries.includes(CODEX_MARKER)) return { unmarked: true };
+    marker = lstatSync(join(path, CODEX_MARKER));
+  } catch (error) {
+    return { reason: `could not be read: ${error.code ?? error.message}` };
+  }
+  const others = entries.filter((entry) => entry !== CODEX_MARKER).sort();
+  if (others.length) {
+    const more = others.length > 1 ? ` and ${others.length - 1} more` : '';
+    return { reason: `holds ${JSON.stringify(others[0])}${more}` };
+  }
+  if (!marker.isFile() || marker.size !== 0) return { reason: `its ${CODEX_MARKER} is not an empty file` };
+  return { marker };
+}
+
+// Removes the Codex folder around a removed worktree when it holds only Codex's empty marker, nothing uses it, the
+// Docker proof still holds and, read again after the checks, it is the folder read before the removal and still holds
+// only the same empty marker: the marker, then the folder, never recursively. A folder without the marker is left with
+// no line; every other outcome retains it with its reason; a marked folder is retained while the root setting of Codex
+// is unusable.
+function removeCodexOuterFolder({ path, forms, before, unreadable, unusable }, context, report) {
+  const retain = (reason) => report.retained('outer folder', path, reason);
+  if (unreadable) return retain(`could not be read: ${unreadable}`);
+  const first = outerContents(path);
+  if (first.unmarked) return;
+  if (unusable) return retain(`Codex's worktree root setting is unusable: ${unusable}`);
+  if (first.reason) return retain(first.reason);
+  const held = useChecks(path, forms, false, true, context)?.reason ?? context.docker.verify();
+  if (held) return retain(held);
+  let after;
+  try {
+    after = lstatSync(path);
+  } catch (error) {
+    return retain(`could not be read again: ${error.code ?? error.message}`);
+  }
+  if (!sameEntry(before, after)) return retain('it changed during the checks');
+  const last = outerContents(path);
+  if (!last.marker || !sameEntry(first.marker, last.marker)) return retain(last.reason ?? 'it changed during the checks');
+  try {
+    unlinkSync(join(path, CODEX_MARKER));
+  } catch (error) {
+    return retain(`removal failed: ${error.code ?? error.message}`);
+  }
+  try {
+    rmdirSync(path);
+  } catch (error) {
+    return retain(`removal failed: ${error.code ?? error.message}; its ${CODEX_MARKER} is already gone`);
+  }
+  report.removed('outer folder', path);
 }
 
 // How one normalized absolute path stands to another, compared by whole components.
@@ -1037,6 +1201,10 @@ function recordNames(value, forms) {
   return false;
 }
 
+// Whether a path still names the entry first read there: the same device, inode and file type.
+const sameEntry = (before, after) =>
+  after.dev === before.dev && after.ino === before.ino && (after.mode & constants.S_IFMT) === (before.mode & constants.S_IFMT);
+
 // Removes the target unless it changed since it was first read; a link is removed, never followed.
 function removal(path, before) {
   let after;
@@ -1045,8 +1213,7 @@ function removal(path, before) {
   } catch (error) {
     return `could not be read again: ${error.code ?? error.message}`;
   }
-  const type = (stats) => stats.mode & constants.S_IFMT;
-  if (after.dev !== before.dev || after.ino !== before.ino || type(after) !== type(before)) return 'it changed during the checks';
+  if (!sameEntry(before, after)) return 'it changed during the checks';
   try {
     if (before.isDirectory()) rmSync(path, { recursive: true });
     else unlinkSync(path);

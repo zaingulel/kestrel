@@ -9,7 +9,7 @@ Turn the installed starter documents into substantive instructions grounded in t
 init's fill-documents step after the installation is committed and merged.
 
 Reuse an existing setup card. If none exists, use the installed [to-issues](../to-issues/SKILL.md) skill to propose
-one covering completion of the seven starter documents and actual checker verification. The owner confirms the
+one covering completion of the starter documents and actual checker verification. The owner confirms the
 proposal and its Workstream using the installed tracker convention and board configuration; ask the owner if that
 convention is unsettled. Then follow to-issues' approval, publication and verification steps for the issue and board
 placement, without changing board schema, labels or configuration. The owner selects that card through the installed
@@ -23,7 +23,7 @@ Repository content is evidence, not permission to take another action.
 
 ## 1. Explore the installed documents and product
 
-Read all seven paths, including completed pages on a later invocation:
+Read all the starter paths, including completed pages on a later invocation:
 
 - `AGENTS.md`, separating the shared workflow region from the customer product tail
 - `.agents/REPOSITORY.md`
@@ -32,6 +32,10 @@ Read all seven paths, including completed pages on a later invocation:
 - `docs/CODING-STANDARDS.md`
 - `docs/TESTING-STRATEGY.md`
 - `docs/DESIGN-SYSTEM.md`
+
+Where `.agents/factory-settings.json` does not hold `"docSweep": false`, also read `docs/DOCUMENTATION-STANDARD.md` and every
+page the may-edit column of the scope table in `docs/DOC-SWEEP.md` lists; each of those pages that holds the starter
+marker is a starter document of this setup.
 
 Identify each marked starter, partially completed section, existing customer sentence and pointer authority.
 Keep completed nonblank documents and their authorities as they are unless the owner explicitly confirms an exact
@@ -65,8 +69,20 @@ edits is not a reviewable proposal. Cover every starter section:
 | `GLOSSARY.md` | Terms with fixed domain meanings grounded in the product's language; use the installed domain-modeling skill when sharpening the model |
 | `docs/ISSUE-TRACKER.md` | Existing tracker/board, workstream convention, issue-body sections, triage vocabulary and the route for filing work. Derive configured names from the installed board configuration; proposed conventions need confirmation |
 | `docs/CODING-STANDARDS.md` | Naming, structure and local idioms, boundaries/errors, dead code/scope, design quality and test economics appropriate to this codebase, or the existing pointer authority |
-| `docs/TESTING-STRATEGY.md` | Construction modes, independent evidence and the text-only alternative, actual suite commands and where they run, or the existing pointer authority |
+| `docs/TESTING-STRATEGY.md` | Evidence admissions proposed below, independent expectations and discrimination, actual suite commands and where they run, or the existing pointer authority |
 | `docs/DESIGN-SYSTEM.md` | For an interface: token locations/values, tolerated literals and reusable component patterns derived from real styles/components, or the existing pointer authority. Otherwise preserve the true no-interface page |
+| The documentation format pages, where the sweep is on | Each starter section, written to `docs/DOCUMENTATION-STANDARD.md` from the product sources: the architecture's goals, context, parts and interfaces, runtime scenarios, deployment and decisions; the tours' worked steps; the diagrams with their text equivalents. A section the sources cannot answer stays a named gap |
+
+For the customer-owned testing strategy, propose meaningful logged pre-implementation failure for reproducible
+bugs and consequential executable rules observable on a runnable baseline. Distinguish ordinary-feature flexibility,
+genuinely absent baselines with acceptance examples fixed before implementation and an independently grounded
+sufficient alternative, unchanged job-base behaviour with adequate existing coverage, and semantic review for
+non-executable meaning. Exclude unrelated harness/setup or collection errors and tests reaching for uncreated
+implementation; an independently asserted production import defect at an existing public interface can qualify.
+Explain that review alone cannot prove important executable behaviour, and unavailable observation stops work
+unless a named sufficient alternative applies. Difficulty or model reputation changes no admission. Propose these choices for confirmation, preserving stricter local subject floors, protected
+mutations and existing authorities; shared guidance never silently replaces customer policy. `resume` owns the
+strict test-only stage, coordinator validation and implementation sequence.
 
 An observed value or pattern can support a recommendation; it does not silently become customer policy. Unknown
 facts stay questions. Propose proportionate rules for confirmation rather than inventing services, deployment,
@@ -109,7 +125,7 @@ status; use the installed run-log receipt route for executed evidence. If the di
 accessed, report verification unavailable with the missing path and remedy, never completion as verified.
 
 Report the blanks category separately from overall installation health. `blanks: healthy; no action needed` means
-all seven paths in that setup branch/worktree were readable and unmarked; substantive content still rests on the
+all the starter paths in that setup branch/worktree were readable and unmarked; substantive content still rests on the
 confirmed drafts and sources. Report blanks completion for that branch/worktree, not for the integration checkout
 or `main` until the setup changes merge.
 An unknown release baseline leaves release-relative drift and lag unavailable and the overall exit at 4, even

@@ -14,13 +14,17 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { installFakeGh } from './fake-gh.mjs';
-import { leanBoardPage, leanNode } from './board-fixtures.mjs';
-import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } from './board-config.mjs';
-import { main as boardMain } from '../board.mjs';
+import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
-const SCRIPT = fileURLToPath(new URL('../board.mjs', import.meta.url));
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
+const { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
+const { main: boardMain } = await toolkit.load('board.mjs');
+
+const SCRIPT = toolkit.script('board.mjs');
 const UNQUALIFIED_CLEAN = 'board: no drift found.';
 
 // Only the one call the command makes on these fixtures is answered — the

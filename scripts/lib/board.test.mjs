@@ -7,12 +7,18 @@
 // rules judge a card on, fail-loud with a remedy on every malformed or truncated
 // response, and the routing view carrying #, status, title and labels.
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { leanBoardPage, leanNode } from './board-fixtures.mjs';
 import { installFakeGh } from './fake-gh.mjs';
-import { ghExec } from './gh-exec.mjs';
-import {
+import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
+// The copy's own gh-exec: the board reader tells an oversized read apart by the error class its own copy exports.
+const { ghExec } = await toolkit.load('lib/gh-exec.mjs');
+const {
   BOARD_OWNER,
   BOARD_OWNER_TYPE,
   BOARD_PROJECT_NUMBER,
@@ -21,8 +27,9 @@ import {
   ROUTING_FIELD,
   ROUTING_OPTIONS,
   STATUS_OPTIONS,
-} from './board-config.mjs';
-import {
+} = await toolkit.load('lib/board-config.mjs');
+const board = await toolkit.load('lib/board.mjs');
+const {
   DETAIL_BATCH_SIZE,
   cardDetailsQuery,
   fetchBoard,
@@ -40,8 +47,7 @@ import {
   formatList,
   groupByRouting,
   formatGrouped,
-} from './board.mjs';
-import * as board from './board.mjs';
+} = board;
 
 // A representative board spanning pickable + non-pickable columns.
 const BOARD = {

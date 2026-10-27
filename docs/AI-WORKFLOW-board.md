@@ -49,9 +49,8 @@ listed one, and the lagging, open-archived and confirmed-absence diagnoses stay 
 
 ### The toolkit in another repository
 
-The toolkit (`scripts/board.mjs`, `board-add.mjs`, `board-move.mjs`, `verify-issue-publish.mjs` and
-`scripts/lib/board.mjs`, `board-rules.mjs`, `board-config.mjs`, `board-add.mjs`, `board-move.mjs`, `issue-publish.mjs`,
-`gh-exec.mjs`, `cli-flags.mjs`) copies unchanged into another repository; only `scripts/lib/board-config.mjs` differs.
+The toolkit copies unchanged into another repository, exactly the files that `TOOLKIT_LIB` and `CLI_ENTRY_POINTS` name in
+[`scripts/lib/board-toolkit-copy.mjs`](../scripts/lib/board-toolkit-copy.mjs). Only `scripts/lib/board-config.mjs` differs.
 It holds the repository's own board values, and three of its settings let the copy serve a different kind of board: who
 owns the project, a user or an organisation; which field routes a card, or none on a board that tracks Status alone; and
 a lane that parks a card. A parked card keeps its column but is left out of the pick view, which lists it on its own
@@ -66,6 +65,31 @@ replace. The gh-calling tests reach their stand-in through it (`scripts/lib/fake
 because on Windows `execFile("gh")` runs only `gh.exe` and an extensionless stand-in on PATH would be skipped in favour
 of live GitHub. [`scripts/lib/gh-exec.mjs`](../scripts/lib/gh-exec.mjs) owns the variable's format, its default and what
 a malformed value does.
+
+### Cards as files
+
+A repository that works alone can keep its cards as Markdown files in the repository instead of on a GitHub Project: one
+file per card at `.agents/cards/<N>.md`, chosen at install by the `TRACKER` line in
+[`scripts/lib/board-config.mjs`](../scripts/lib/board-config.mjs). The same scripts read and move them, and the board
+shows the same six columns, but only three are stored in a file: Backlog, Ready and Done. The other three are worked
+out from the repository: an open pull request from the card's `job/<N>` branch is In review, a job branch holding the
+closing edit is Awaiting push, and any other job branch, local or on origin, is In progress. The branch is the claim,
+which is why this suits one person: two people or machines see each other's claim only after a push. A team chooses the
+GitHub board. [`docs/MARKDOWN-CARDS.md`](MARKDOWN-CARDS.md) owns the file format, the derived columns and what each card
+step becomes. A repository that outgrows markdown cards moves them onto a GitHub board with one installer command,
+which [that page](MARKDOWN-CARDS.md#moving-to-a-github-board) describes.
+
+### Cards in Linear
+
+A team that plans in Linear can keep its cards as the issues of one Linear team instead, chosen at install by the
+`TRACKER = "linear"` line and the `LINEAR_TEAM` key in [`scripts/lib/board-config.mjs`](../scripts/lib/board-config.mjs).
+The same scripts read and move them and the board shows the same six columns, each mapped to a state of the Linear team.
+A card is named by its Linear issue ID, such as `ENG-123`, which also names its `job/ENG-123` branch and the
+`Closes ENG-123` line of its pull request. Linear's own pull request automation moves a card to In Review when the draft
+is marked ready and to Done on merge, so the workflow writes only the earlier columns and checks the later two. The
+board tools reach Linear with a personal key kept in a private file on the machine, and never in a repository, a log or
+a cloud environment. [`docs/LINEAR-CARDS.md`](LINEAR-CARDS.md) owns the team and key setup and what each card step
+becomes.
 
 ### The board's own automation
 
@@ -100,6 +124,9 @@ titled.
   convention and its labels.
 - [`scripts/lib/board-config.mjs`](../scripts/lib/board-config.mjs): the repository's own board values, and the settings
   that let the scripts serve another board.
+- [`docs/MARKDOWN-CARDS.md`](MARKDOWN-CARDS.md): the card format and the card steps where cards are files.
+- [`docs/LINEAR-CARDS.md`](LINEAR-CARDS.md): the Linear team and key setup and the card steps where cards are Linear
+  issues.
 - The heads of [`scripts/board.mjs`](../scripts/board.mjs), [`scripts/board-add.mjs`](../scripts/board-add.mjs) and
   [`scripts/board-move.mjs`](../scripts/board-move.mjs): each script's modes and argument forms.
 - [`scripts/lib/gh-exec.mjs`](../scripts/lib/gh-exec.mjs): the `BOARD_TOOLKIT_GH` contract.
@@ -127,6 +154,9 @@ titled.
 - `scripts/board.mjs`, `scripts/board-add.mjs` and `scripts/board-move.mjs`: list the board, add a card, move a card.
 - `scripts/verify-issue-publish.mjs`: checks a published issue.
 - `scripts/lib/board-config.mjs`: the one file that differs between repositories.
+- `scripts/lib/board-markdown.mjs`: the reader and mover for cards kept as files.
+- `scripts/lib/board-toolkit-copy.mjs`: the test support that loads the board toolkit from a copy with a fixed
+  configuration, so no shipped board test reads an install's own `board-config.mjs`.
 - `scripts/lib/gh-exec.mjs`: the one route every `gh` call takes.
 - `scripts/lib/fake-gh.mjs`: the stand-in the tests reach through `BOARD_TOOLKIT_GH`.
 - `docs/ISSUE-TRACKER.md`: the tracker conventions.

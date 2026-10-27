@@ -83,8 +83,9 @@ allowed body differences and runtime metadata validated separately. The commit g
 matching staged validator using staged runtime settings; canonical `src/` seat checks use the matching staged source
 validator and always require both runtimes. Repair a charter mismatch by editing both canonical source charters
 together and regenerating their installed copies before staging; a consumer receives that repair through a release
-update. The runtimes are chosen at install; a release update keeps them and refuses a change, so changing one waits on
-a later release that supports it.
+update. The runtimes are chosen at install and changed later by a release update, to the installed release or a newer one,
+run with the changed value left uncommitted: it writes the files of a runtime the value adds and removes those of one it
+drops, under the same proof as any other write or removal.
 
 **How a repository turns the external review add-on on or off.** The same settings file may carry `greptile`, `true` or
 `false`; without it, as with `false`, the add-on is off. The add-on is an outside review of a `sign-off` tier change,
@@ -93,20 +94,23 @@ which the `resume` skill requests under "6. Verify and review". Its own files ar
 a release update write them only where the add-on is on and keep every entry in the manifest, and the contract test
 requires each of their paths to hold nothing where it is off and refuses anything found there. The add-on is chosen at
 install, after the owner connects the repository to the review service in that service's own dashboard, which no
-install does; a release update keeps the setting and refuses a change, so changing it waits on a later release that
-supports it.
+install does; it is changed later the same way as the runtimes: the update writes or removes the add-on's files to match, and the
+owner connects or disconnects the repository in the service's dashboard, which no update does.
 
 **How a repository turns the documentation sweep off.** The same settings file may carry `docSweep`, `true` or
-`false`; without it, as with `true`, the sweep is on. Turning it off leaves out the six files of the `sweep-scope`
-check: its workflow, its command and that command's modules and test; `scripts/lib/runtimes.mjs` names their paths. An
+`false`; without it, as with `true`, the sweep is on. Turning it off leaves out the sweep's shared files: the six of
+the `sweep-scope` check, which are its workflow, its command and that command's modules and test, and the
+documentation standard, `docs/DOCUMENTATION-STANDARD.md`; `scripts/lib/runtimes.mjs` names their paths. An
 install and a release update write them unless the sweep is off and keep every entry in the manifest, and where it is
 off the contract test requires each of their paths to hold nothing, refuses anything found there, and no longer
 requires `docs/DOC-SWEEP.md` and `docs/SWEEP-TRIAGE.md`. A repository that turns the sweep off runs neither the sweep
 nor its triage, because nothing there holds a routine's branch to the scope table, and no instruction treats either
 routine as active there, whatever its Conventions table says: each instruction that reads that table's documentation
 routines row also reads this key. The repository still keeps that row truthful, as its own record of what is
-scheduled. The sweep is chosen at install; a release update keeps the setting and refuses a change, so changing it
-waits on a later release that supports it.
+scheduled. The sweep is chosen at install, by the `docSweep` answer of
+`fabraik init`, off unless answered `true`, and changed later the same way as the runtimes; the update writes or removes
+the sweep's shared files to match, while the two manuals and the format pages are the repository's own files, which no
+update writes or removes.
 
 **What a repository needs.** The supported profiles are Claude Code alone, Codex alone, or both with cross-family
 review. It needs a private repository whose default branch is `main`, the two branch rulesets with the administrator
@@ -118,7 +122,7 @@ installed ESLint before lint or tests and names both recovery paths. A repositor
 other runtime's hook folder out of the `lint` script in its `package.json`; no release update carries those
 project-owned changes. The shared `docLintVerdict` in `scripts/lib/doc-lint-verdict.mjs`, delivered with the shared
 files, accepts a path reference, link or `CLAUDE.md` citation for whose target `needNotResolveCause` in
-`scripts/lib/runtimes.mjs` gives a cause, and reads `CLAUDE.md` only where `leftOutCause` there gives none for it. The same resolution rule covers the sweep's six files
+`scripts/lib/runtimes.mjs` gives a cause, and reads `CLAUDE.md` only where `leftOutCause` there gives none for it. The same resolution rule covers the sweep's shared files
 and its two manuals where the documentation sweep is off. Older project-owned `scripts/doc-lint.mjs` commands that
 compose the scans themselves must observe those same runtime and sweep rules; calling the shared verdict avoids
 reimplementing them. Its `scripts/lib/doc-lint.test.mjs` command fixture must copy all modules the command imports,

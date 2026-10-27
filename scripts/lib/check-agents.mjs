@@ -30,7 +30,7 @@ import { pathToFileURL } from 'node:url';
 import { presentRuntimes, SEATS } from './runtimes.mjs';
 
 const KNOWN_MODELS = ['opus', 'sonnet', 'haiku', 'fable', 'inherit'];
-const KNOWN_CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna'];
+const KNOWN_CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'];
 const KNOWN_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const KNOWN_SANDBOX_MODES = ['read-only', 'workspace-write'];
 const REQUIRED_KEYS = ['name', 'description'];

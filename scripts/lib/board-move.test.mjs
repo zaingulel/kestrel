@@ -2,19 +2,23 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import {
+import { installFakeGh } from './fake-gh.mjs';
+import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const {
   parseSingleSelectField,
   optionIdFor,
   lookupIssueBoardItem,
   parseBatchArgs,
   moveCards,
   moveLanes,
-} from './board-move.mjs';
-import { main as boardMoveMain } from '../board-move.mjs';
-import { BOARD_OWNER, BOARD_REPOSITORY, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
-import { issueItemReply } from './board-fixtures.mjs';
-import { installFakeGh } from './fake-gh.mjs';
+} = await toolkit.load('lib/board-move.mjs');
+const { main: boardMoveMain } = await toolkit.load('board-move.mjs');
+const { BOARD_OWNER, BOARD_REPOSITORY, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } = await toolkit.load('lib/board-config.mjs');
+const { issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
 
 // Shapes mirror the real `gh api graphql` payloads (verified live against the board
 // while fixing #461). Expected ids are independent literals.
@@ -143,6 +147,20 @@ test('parseBatchArgs throws on a malformed pair', () => {
   assert.throws(() => parseBatchArgs(['abc:Done'])); // non-numeric issue
   assert.throws(() => parseBatchArgs(['453:'])); // empty status
   assert.throws(() => parseBatchArgs([':Done'])); // missing issue number
+});
+
+test('parseBatchArgs under linear takes "<ID>:<Status>" pairs and refuses a numeric or lowercase issue', () => {
+  assert.deepEqual(parseBatchArgs(['ENG-12:Done', 'FAB-3:In review'], 'Status', 'linear'), [
+    { issueNumber: 'ENG-12', statusName: 'Done' },
+    { issueNumber: 'FAB-3', statusName: 'In review' },
+  ]);
+  for (const arg of ['453:Done', 'eng-12:Done', 'ENG-0:Done', 'ENG-12x:Done', 'ENG:Done']) {
+    assert.throws(() => parseBatchArgs([arg], 'Status', 'linear'), {
+      message: `malformed batch pair "${arg}" — issue must be a Linear issue ID such as ENG-123`,
+    }, arg);
+  }
+  assert.throws(() => parseBatchArgs(['ENG-12:'], 'Status', 'linear'), { message: 'malformed batch pair "ENG-12:" — status must not be empty' });
+  assert.throws(() => parseBatchArgs(['ENG-12:Done']), { message: 'malformed batch pair "ENG-12:Done" — issue number must be a positive integer' });
 });
 
 // A `--lane` typo must be described as a Lane, not sent to the reader as a Status.
@@ -306,7 +324,7 @@ after(() => fakeGh.cleanup());
 test('board-move --lane with no parked lane configured exits 1 naming board-config.mjs and never calls gh', () => {
   const callsFile = fakeGh.newCallsFile();
   writeFileSync(callsFile, '');
-  const run = spawnSync(process.execPath, [fileURLToPath(new URL('../board-move.mjs', import.meta.url)), '--lane', '12:none'], {
+  const run = spawnSync(process.execPath, [toolkit.script('board-move.mjs'), '--lane', '12:none'], {
     encoding: 'utf8',
     timeout: 30_000,
     env: fakeGh.env({ FAKE_GH_CALLS: callsFile }),
@@ -349,7 +367,8 @@ test('board-move --batch moves every pair, prints one line each on stdout and re
 // change to any usage line must fail this test.
 const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
   '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
-  '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none';
+  '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
+  '       on a Linear board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready';
 
 test('board-move rejects bad arguments before any gh call: usage problems return 2 and a malformed batch pair returns 1', () => {
   for (const args of [[], ['abc', 'Done'], ['453'], ['--batch']]) {

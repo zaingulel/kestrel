@@ -16,7 +16,7 @@ what a build must prove, and [Enforced or instructed](AI-WORKFLOW-enforcement.md
 | Review | One fresh review of the final tree, repairs, and a security review when the trust perimeter widens | Nothing: review is instructed |
 | Deliver | A draft pull request, an external review where the tier requires it and the repository has turned that add-on on, and checks on the merge result; or, for a change the repository's own gate admits whole, a push straight to `main` | A pull request that is not a draft is refused, and so is an unsafe force push; [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs) lists the exact forms |
 | Merge | On the pull request route, the platform merges once the required checks are green, squashed, with the branch deleted | A merge command other than the platform's auto-merge is refused, and the branch rules require the checks |
-| After merge | The issue is confirmed closed, the card moves to Done, servers are stopped, the job's containers, scratch, worktree and branch are removed by one command where its checks pass, and local `main` advances where that is provably safe | The cleanup command retains whatever its checks or git hold back; that it runs is instructed |
+| After merge | The issue is confirmed closed, the card moves to Done, servers are stopped, the job's containers, scratch, worktree and branch are removed by one command where its checks pass, GitHub issue trackers record remaining cleanup for later resume/closeout, and local `main` advances where that is provably safe | The cleanup command retains whatever its checks or git hold back; that it runs is instructed |
 
 ## How it works
 
@@ -37,7 +37,7 @@ flowchart TD
     DR -->|sign-off tier, add-on on: external review requested| GR[Review attempt settled, findings resolved]
     GR --> RD
     RD -->|required checks green| MG[GitHub auto-merge, squash, branch deleted]
-    MG --> CO[Closeout: issue closed, card to Done, worktree removed]
+    MG --> CO[Closeout: issue closed, card to Done, checked cleanup or retained targets]
     FF --> CO
 ```
 
@@ -51,8 +51,10 @@ bounded slices with recorded evidence, verified, and given a fresh review of the
 authorisation the card moves to Awaiting push and the owner reads the pull request body. On the owner's yes a
 draft pull request opens and the card moves to In review; a change at the sign-off tier first settles an external
 review where the repository has turned that add-on on, and every draft is then marked ready so the checks run on the merge result. Once the required checks are green
-the platform merges, and closeout confirms the issue closed, moves the card to Done and removes the worktree. A change
-whose every path qualifies skips the pull request, is pushed straight to `main`, and is closed out the same way.
+the platform merges, and closeout confirms the issue closed, moves the card to Done and removes cleanup targets
+where checks pass. GitHub issue trackers record remaining cleanup in issue comments for later resume or closeout;
+Markdown card installations keep their existing publication and Leftover inventory procedures. A change whose every
+path qualifies skips the pull request, is pushed straight to `main`, and is closed out the same way.
 
 ### Stage by stage
 
@@ -116,10 +118,14 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
   [`docs/DOC-SWEEP.md`](DOC-SWEEP.md) and
   [`docs/SWEEP-TRIAGE.md`](SWEEP-TRIAGE.md).
 - **Closeout.** The moment the merge lands, the same session confirms it, moves the card, updates local `main`, and
-  removes the branch and worktree. Local `main` advances only by a provably safe fast-forward, and a checkout that is
-  dirty, active or uncertain is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
-  its named scratch, its worktree and its branch. Failed safety checks retain targets with a reason. The only
-  exception to ordinary not-fully-merged branch refusal is the verified merged-head deletion described by the
+  removes the branch and worktree where checks pass. GitHub issue trackers record remaining cleanup separately
+  from product completion in issue comments for reconsideration on later resume or closeout under
+  [Deferred cleanup](../.agents/skills/closeout/SKILL.md#deferred-cleanup), with fresh safeguards. Markdown card
+  installations use existing card/publication and ordinary Leftover inventory procedures, with no additional
+  guaranteed persistence or discovery. Local `main` advances
+  only by a provably safe fast-forward, and a dirty, active or uncertain checkout is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
+  its named scratch, its worktree and its branch where its checks pass. Failed safety checks retain targets
+  with a reason. The only exception to ordinary not-fully-merged branch refusal is the verified merged-head deletion described by the
   [closeout skill](../.agents/skills/closeout/SKILL.md).
   Docker bind paths require the local filesystem proof the `closeout` skill describes.
   The session keeps the judgment of what is its own scratch and stops any server the
@@ -166,6 +172,13 @@ whose every path qualifies skips the pull request, is pushed straight to `main`,
 - **A required check fails, or the pull request is blocked or closed.** The waiting command ends with its reason,
   and the session reports it and repairs on the draft, as [the `resume` skill](../.agents/skills/resume/SKILL.md)
   sets out under "8. Deliver".
+- **Cleanup is retained after delivery.** Product completion does not mean every target was removed. The
+  [Deferred cleanup procedure](../.agents/skills/closeout/SKILL.md#deferred-cleanup) uses issue comments for
+  GitHub issue trackers to record pending targets and rediscover them on later resume/closeout. Markdown card
+  installations rely on existing card/publication and ordinary Leftover inventory, without an added persistence
+  or discovery guarantee. Fresh ownership and safety evidence is required; live or uncertain targets stay
+  retained. Existing authorization avoids identical permission questions but guarantees neither immediate
+  removal nor promptless runtime approval.
 - **An In progress card has no branch or pull request behind it.** It is shown to the owner with its latest claim
   and returned to Ready only on the owner's say ([the `resume` skill](../.agents/skills/resume/SKILL.md), under
   "1. Find where things stand").

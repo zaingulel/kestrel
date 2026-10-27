@@ -9,6 +9,8 @@
 // repair instruction and never lets the scan claim it covered the board.
 
 import { INTAKE_EXIT, isContentUnresolved, normalizeItem, pickable, sortForDisplay } from './board.mjs';
+import { configuredTracker } from './board-markdown.mjs';
+import { cardRef, compareCardIds } from './tracker.mjs';
 import {
   KIND_LABELS,
   PICKABLE_STATUSES,
@@ -76,16 +78,21 @@ export function openInTerminalDrift(card) {
 export function blockedClaimDrift(card) {
   if (card.state !== 'OPEN' || card.openBlockers.length === 0) return null;
   if (card.status === BACKLOG || TERMINAL_STATUSES.includes(card.status)) return null;
-  const blockers = card.openBlockers.map((number) => `#${number}`).join(', ');
+  const blockers = card.openBlockers.map(cardRef).join(', ');
   return advisory(card, `in "${column(card.status)}" but blocked by open ${blockers} — move it to ${BACKLOG} until the blockers close`);
 }
 
 // 4. An active card with no assignee names no one accountable: the board shows work in
 // progress that no session has actually taken. Advisory for the same reason as above —
-// a card is claimed at pick time, before the assignment is necessarily made.
+// a card is claimed at pick time, before the assignment is necessarily made. A markdown
+// card's claim is its job branch, which carries no assignee, so a card with one is exempt. A Linear card is
+// assigned through the card command.
 export function unassignedClaimDrift(card) {
-  if (card.state !== 'OPEN' || !isInFlight(card.status) || card.assignees.length > 0) return null;
-  return advisory(card, `claimed in "${card.status}" with no assignee — assign the session's owner (gh issue edit ${card.number} --add-assignee @me) or return it to ${PICKABLE_PHRASE}`);
+  if (card.state !== 'OPEN' || !isInFlight(card.status) || card.assignees.length > 0 || card.jobBranch) return null;
+  const remedy = configuredTracker() === 'linear'
+    ? `node scripts/linear-card.mjs assign ${card.number}`
+    : `gh issue edit ${card.number} --add-assignee @me`;
+  return advisory(card, `claimed in "${card.status}" with no assignee — assign the session's owner (${remedy}) or return it to ${PICKABLE_PHRASE}`);
 }
 
 // 5. The #654 failure mode, the reverse direction of #319: a card CLAIMED into an
@@ -153,7 +160,7 @@ export function unreadableBlock(cards) {
 
 // One drifted card → the one-line report row.
 export function formatDrift(card) {
-  return `#${card.number} [${card.status}] ${card.title} — ${card.reason}`;
+  return `${cardRef(card.number)} [${card.status}] ${card.title} — ${card.reason}`;
 }
 
 // The #600 failure mode: a card whose GraphQL content did not resolve on this read
@@ -207,15 +214,11 @@ const MASS_UNFIELDED_IDENTITY_CAP = 20;
 // ascending and numberless cards last, so the line does not inherit board order — a
 // draft card has no issue number, so it degrades to `?` rather than undefined.
 function formatIdentities(numbers) {
-  const sorted = [...numbers].sort((a, b) => {
-    if (a == null) return b == null ? 0 : 1;
-    if (b == null) return -1;
-    return a - b;
-  });
+  const sorted = [...numbers].sort(compareCardIds);
   if (sorted.every((n, i) => Number.isInteger(n) && n === sorted[0] + i)) {
     return `#${sorted[0]}-#${sorted[sorted.length - 1]}`;
   }
-  const listed = sorted.slice(0, MASS_UNFIELDED_IDENTITY_CAP).map((n) => (n == null ? '?' : `#${n}`));
+  const listed = sorted.slice(0, MASS_UNFIELDED_IDENTITY_CAP).map((n) => (n == null ? '?' : cardRef(n)));
   const omitted = sorted.length - listed.length;
   return omitted > 0 ? `${listed.join(', ')} (+${omitted} more not listed)` : listed.join(', ');
 }
@@ -311,7 +314,7 @@ export function intakeCards(items) {
     .filter((card) => isInFlight(card.status) && card.closingPullRequests.length === 0);
   const numbered = (cards) => cards.filter((card) => card.number != null);
   const candidates = numbered(picks);
-  const claims = numbered(claimed).sort((a, b) => a.number - b.number);
+  const claims = numbered(claimed).sort((a, b) => compareCardIds(a.number, b.number));
   return {
     candidates,
     claims,
@@ -377,6 +380,6 @@ export function intakeOutcome({ drifted, unreadable, details }) {
   else if (incomplete) exitCode = INTAKE_EXIT.incomplete;
   const summary = unread.length === 0
     ? `board intake: details complete for ${details.size} card(s).`
-    : `board intake: details UNAVAILABLE in whole or part for ${unread.length} of ${details.size} card(s): ${unread.map((entry) => `#${entry.number}`).join(', ')}.`;
+    : `board intake: details UNAVAILABLE in whole or part for ${unread.length} of ${details.size} card(s): ${unread.map((entry) => cardRef(entry.number)).join(', ')}.`;
   return { lines: [...scanOutcome({ drifted, unreadable, closeout: false }).lines, summary], exitCode };
 }

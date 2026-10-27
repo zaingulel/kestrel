@@ -1,0 +1,118 @@
+// Shared test support: a temporary copy of the board toolkit wired to a literal configuration.
+//
+// Another repository adopts the toolkit by copying exactly TOOLKIT_LIB and CLI_ENTRY_POINTS
+// unchanged and editing only board-config.mjs. `copyToolkit` does exactly that into a temp
+// directory, alongside the one fixture helper the tests need but no adopter ships, so a test
+// loads fresh module instances wired to the configuration it names, never to this install's own
+// board-config.mjs. An incomplete TOOLKIT_LIB fails a test at import, the same way it would fail
+// a real adopter.
+//
+// Price tag: recurring cost is about 15 ms per copy (24 small files written and one fresh
+// module load per importing test file; the portability test copies once per test).
+// Removal condition: retire it when the board toolkit is no longer copied into another
+// repository and no shipped test needs a configuration of its own.
+
+import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const LIB = fileURLToPath(new URL('.', import.meta.url));
+const SCRIPTS = fileURLToPath(new URL('..', import.meta.url));
+export const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'verify-issue-publish.mjs', 'linear-card.mjs'];
+
+// The transitive closure of relative imports from the five CLI entry points above. Copying
+// exactly this set, no more, is the adoption contract itself: a file the toolkit no longer
+// imports must fall out of here or an adopter carries dead weight neither test nor doc admits to.
+export const TOOLKIT_LIB = [
+  'board.mjs',
+  'board-rules.mjs',
+  'board-markdown.mjs',
+  'board-config.mjs',
+  'board-add.mjs',
+  'board-move.mjs',
+  'issue-publish.mjs',
+  'gh-exec.mjs',
+  'cli-flags.mjs',
+  'tracker.mjs',
+  'board-linear.mjs',
+  'linear-api.mjs',
+  'linear-card.mjs',
+  // The markdown reader's route to the repository and the cards folder.
+  'posix-shell.mjs',
+  'factory-sync.mjs',
+  'runtimes.mjs',
+  'seat-settings.mjs',
+  'check-agents.mjs',
+];
+
+// Not part of the toolkit an adopter ships: a test helper, copied only so it builds fixtures
+// against the adopted board-config.mjs rather than this repository's own.
+const TEST_SUPPORT_LIB = ['board-fixtures.mjs'];
+
+// Written out literally, as an adopter would, so an export the real config gains that
+// this copy lacks fails at import exactly as it would for them.
+export const CONFIG_TAIL = `
+export const STATUS_OPTIONS = ['Backlog', 'Ready', 'In progress', 'Awaiting push', 'In review', 'Done'];
+export const PICKABLE_STATUSES = ['Backlog', 'Ready'];
+export const WAIT_STATUSES = ['Awaiting push'];
+export const TERMINAL_STATUSES = ['Done'];
+export const ROUTING_FIELD = 'Workstream';
+export const ROUTING_OPTIONS = ['Go-to-market', 'Product', 'Platform'];
+export const KIND_LABELS = { epic: 'epic', feature: 'enhancement', task: 'task', bug: 'bug', docs: 'documentation' };
+export const PARKED_LANE = null;
+`;
+
+// The configuration every GitHub-backend test runs against: it has no TRACKER, so the GitHub
+// path runs whatever the install's own tracker, project number or vocabulary.
+export const GITHUB_TEST_CONFIG = `export const BOARD_OWNER = 'example-owner';
+export const BOARD_OWNER_TYPE = 'user';
+export const BOARD_PROJECT_NUMBER = 2;
+export const BOARD_REPOSITORY = 'example-repo';
+${CONFIG_TAIL}`;
+
+// The configuration of a markdown-tracked install: the same repository and vocabulary, no project
+// (a markdown install has none) and the tracker switch the GitHub configurations leave out.
+export const MARKDOWN_TEST_CONFIG = `export const BOARD_OWNER = 'example-owner';
+export const BOARD_OWNER_TYPE = 'user';
+export const BOARD_PROJECT_NUMBER = null;
+export const BOARD_REPOSITORY = 'example-repo';
+${CONFIG_TAIL}export const TRACKER = 'markdown';
+`;
+
+// The configuration of a Linear-tracked install: no project and no routing (a Linear install has
+// neither), the tracker switch, the team and the starter state names. Its tail repeats CONFIG_TAIL
+// with the routing lines a Linear install sets.
+export const LINEAR_TEST_CONFIG = `export const BOARD_OWNER = 'example-owner';
+export const BOARD_OWNER_TYPE = 'user';
+export const BOARD_PROJECT_NUMBER = null;
+export const BOARD_REPOSITORY = 'example-repo';
+export const STATUS_OPTIONS = ['Backlog', 'Ready', 'In progress', 'Awaiting push', 'In review', 'Done'];
+export const PICKABLE_STATUSES = ['Backlog', 'Ready'];
+export const WAIT_STATUSES = ['Awaiting push'];
+export const TERMINAL_STATUSES = ['Done'];
+export const ROUTING_FIELD = null;
+export const ROUTING_OPTIONS = [];
+export const KIND_LABELS = { epic: 'epic', feature: 'enhancement', task: 'task', bug: 'bug', docs: 'documentation' };
+export const PARKED_LANE = null;
+export const TRACKER = 'linear';
+export const LINEAR_TEAM = 'ENG';
+export const LINEAR_STATES = { 'Backlog': 'Backlog', 'Ready': 'Todo', 'In progress': 'In Progress', 'Awaiting push': 'Awaiting Push', 'In review': 'In Review', 'Done': 'Done' };
+`;
+
+// `root` is canonical: the CLI runs main() only when argv[1] resolves to its own module URL, and
+// the temp directory can sit behind a symlink (macOS /var → /private/var).
+export function copyToolkit(configSource) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'board-toolkit-')));
+  const lib = join(root, 'scripts', 'lib');
+  mkdirSync(lib, { recursive: true });
+  for (const file of [...TOOLKIT_LIB, ...TEST_SUPPORT_LIB]) copyFileSync(join(LIB, file), join(lib, file));
+  for (const file of CLI_ENTRY_POINTS) copyFileSync(join(SCRIPTS, file), join(root, 'scripts', file));
+  writeFileSync(join(lib, 'board-config.mjs'), configSource);
+  return {
+    root,
+    load: (path) => import(pathToFileURL(join(root, 'scripts', path)).href),
+    script: (name) => join(root, 'scripts', name),
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}

@@ -3,7 +3,8 @@
 //
 // Polling scenarios run `main` with an in-memory ghExec and a recording sleep that returns at once. The pull-request
 // form's argument contract and terminal success/failure cases run the real command as a subprocess with the same fake
-// replies. The draft wait also has one positive and one negative process case in fresh Git repositories.
+// replies. The draft wait also has one positive and one negative process case in fresh Git repositories, isolated from
+// the machine's and the environment's Git configuration. The cloud draft case also runs under an injected URL rewrite.
 //
 // Recurring cost: no subprocess or disk state for in-memory polling; CLI wire proofs start Node for the command and
 // each faked gh call, with no network. Only the two draft wire cases initialize Git repositories.
@@ -20,7 +21,7 @@ import { installFakeGh } from './fake-gh.mjs';
 import { main } from '../merge-watch.mjs';
 
 const CLI = fileURLToPath(new URL('../merge-watch.mjs', import.meta.url));
-const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue-number>';
+const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue>';
 
 // Each state-view call advances the scenario; checks use that step and the last step repeats. A reply is
 // [exit code, body]. Rules preserve gh's pagination/slurp behavior, and both paths refuse missing arguments.
@@ -169,9 +170,20 @@ async function watch(steps, options) {
 
 function runCli(args, steps = [MERGED], options) {
   const dir = writeScenario(steps, options);
+  // The draft wait reads origin through git, so no machine-wide config and no config injected through the
+  // environment, such as a cloud platform's url.<base>.insteadOf rewrite, may change the URL it reads.
+  const env = fakeGh.env(
+    {
+      MERGE_WATCH_SCENARIO: dir,
+      GIT_CONFIG_GLOBAL: join(dir, 'no-global-config'),
+      GIT_CONFIG_NOSYSTEM: '1',
+      ...(options?.draft ? { GH_REPO: 'foreign/elsewhere' } : {}),
+    },
+    ['GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS'],
+  );
   if (options?.draft) {
     for (const gitArgs of [['init', '--quiet'], ['remote', 'add', 'origin', options.draft.origin]]) {
-      const setup = spawnSync('git', gitArgs, { cwd: dir, encoding: 'utf8' });
+      const setup = spawnSync('git', gitArgs, { cwd: dir, encoding: 'utf8', env });
       assert.equal(setup.status, 0, setup.stderr || setup.error?.message);
     }
   }
@@ -179,7 +191,7 @@ function runCli(args, steps = [MERGED], options) {
     ...(options?.draft ? { cwd: dir } : {}),
     encoding: 'utf8',
     timeout: 30_000,
-    env: fakeGh.env({ MERGE_WATCH_SCENARIO: dir, ...(options?.draft ? { GH_REPO: 'foreign/elsewhere' } : {}) }),
+    env,
   });
   const calls = readCalls(dir);
   rmSync(dir, { recursive: true, force: true });
@@ -632,11 +644,20 @@ test('the draft wait exits 1 naming each number when more than one pull request 
   assert.equal(run.sleeps.length, 0);
 });
 
+test('the draft wait accepts a job branch named by a Linear issue ID', async () => {
+  const list = DRAFT_LIST.map((arg) => (arg === 'job/7' ? 'job/ENG-1' : arg));
+  const run = await waitDraft([[0, JSON.stringify([draftPr({ headRefName: 'job/ENG-1' })])]], ['--draft', 'job/ENG-1']);
+  assert.equal(run.status, 0);
+  assert.equal(run.last, '12');
+  assert.deepEqual(run.calls, [DRAFT_REPO, list]);
+});
+
 test('the draft wait exits 2 with its usage before any gh call unless given exactly --draft and a job branch', async () => {
   for (const args of [
     ['--draft'], ['--draft', '7'], ['--draft', 'job/0'], ['--draft', 'job/07'], ['--draft', 'job/7x'], ['--draft', 'job/'],
     ['--draft', 'main'], ['--draft', 'feature/job/7'], ['--draft', 'job/7', '8'], ['--draft=job/7'], ['job/7'],
     ['job/7', '--draft'], ['--draft', '--draft'],
+    ['--draft', 'job/eng-1'], ['--draft', 'job/ENG-0'], ['--draft', 'job/ENG-'], ['--draft', 'job/-1'], ['--draft', 'job/ENG-1/x'],
   ]) {
     const run = await waitDraft([[0, '[{"number":12}]']], args);
     assert.equal(run.status, 2, JSON.stringify(args));
@@ -699,7 +720,27 @@ test('ANTI-REGRESSION: cloud drafts require origin repository and exact job bran
   assert.deepEqual(valid.calls, [DRAFT_REPO, DRAFT_LIST]);
 });
 
-test('ANTI-REGRESSION: cloud draft CLI binds reads to origin', () => {
+test('ANTI-REGRESSION: cloud draft CLI binds reads to origin', (t) => {
+  // Contaminate the Git configuration the CLI inherits: the cloud platform's url.<base>.insteadOf rewrite through the
+  // environment, and a machine-wide rewrite in a global config file. runCli must isolate the CLI from both.
+  const configDir = mkdtempSync(join(tmpdir(), 'merge-watch-gitconfig-'));
+  const contamination = {
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'url.https://github.com/.insteadOf',
+    GIT_CONFIG_VALUE_0: 'git@github.com:',
+    GIT_CONFIG_GLOBAL: join(configDir, 'gitconfig'),
+  };
+  writeFileSync(contamination.GIT_CONFIG_GLOBAL, '[url "https://github.com/"]\n\tinsteadOf = git@github.com:\n');
+  const prior = Object.fromEntries(Object.keys(contamination).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, contamination);
+  t.after(() => {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
   for (const [label, pr, status] of [
     ['origin pull request', draftPr(), 0],
     ['fork copying content', draftPr({ headRepository: { id: 'R_fork' }, isCrossRepository: true, headRefOid: 'copied', body: 'copied' }), 1],

@@ -16,9 +16,17 @@ outside that selection follows its handed-off construction mode and owes the fin
 `docs/TESTING-STRATEGY.md` selects, with expected values from an independent oracle. Permission to group focused
 evidence does not change the strict test-first learning cycle below.
 
-- **Red before green.** Write ONE failing test, then only enough code to pass it.
-- **Vertical slices.** One seam, one test, one minimal implementation, repeat; never all the tests up front. The
-  first slice is a tracer bullet: one path end-to-end, then build outward.
+- **Meaningful red before green.** For one coherent claim, write the smallest focused set of cases needed to
+  expose it, with independently fixed expectations, and run it through `node scripts/run-log.mjs`. The local
+  testing strategy owns qualifying behavioural red, including its production-import distinction, and absent-baseline
+  alternatives. Follow `resume`'s staged dispatch under "5. Build": the test-only handoff ends at meaningful
+  expected red, and implementation starts only after coordinator validation with the test contract fixed.
+  An incorrect oracle returns for revalidation and an explicit revised contract.
+- **Green.** In the implementation stage, write only enough code to pass the validated case set.
+- **Vertical slices.** One coherent claim's focused case set, then its minimal implementation, repeat. A claim
+  may contain related material behaviours or cases; additional assertions or related cases alone do not create
+  another checkpoint. Independently distinct safeguards or claims start their own cycle. Preserve the validated
+  test contract and expectations. The first slice is a tracer bullet: one path end-to-end, then build outward.
 - **Refactor only after green**, as the separate Simplify step.
 
 ## What a good test is
@@ -40,7 +48,8 @@ evidence does not change the strict test-first learning cycle below.
   unchanged.
 - **Tautological:** the expected value is recomputed the way the code computes it. Expected values come from an
   INDEPENDENT source: a hand-computed literal, a worked example, the spec.
-- **Horizontal slicing:** all tests first, then all code.
+- **Horizontal slicing:** batching tests for unrelated claims or independently distinct safeguards before
+  implementing any of them, instead of completing one coherent claim's red-then-green cycle.
 
 ## Mocking
 
@@ -49,5 +58,6 @@ collaborators.
 
 ## Acceptance
 
-Clear the bar AGENTS.md's "Coding standards and the executed test bar" points to; `npm test` and `npm run lint` green. Then hand to
-review and Simplify.
+Report the handed-off stage honestly: expected red is the completed test-only stage, not completed implementation.
+Completed implementation clears the focused checks and lint the handoff requires; the orchestrator owns broader
+convergence and the local testing strategy's discrimination proof. Then hand to review and Simplify.

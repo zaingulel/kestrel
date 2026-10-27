@@ -25,8 +25,11 @@ Each labelled value sits on its label's line. `Construction mode:` holds exactly
 `evidence-required` or `preservation` and nothing else: the reasoning belongs in the plan, and a slice that needs
 two modes is two handoffs.
 
-`docs/TESTING-STRATEGY.md` owns focused selection and reporting, including admissible grouped evidence and
-incomplete execution. The focused verification command follows that authority.
+`docs/TESTING-STRATEGY.md` owns evidence admissions, focused selection and reporting; `resume` under "5. Build"
+owns staged dispatch. For strict work, use the existing plan, files, evidence and stop fields to declare either
+the test-only stage or the implementation stage. The former names independently grounded expectations and expected
+red; the latter carries the coordinator-validated red receipt and frozen test contract. Expected-red and stopped
+reports state their actual on-disk state; `fixed` is reserved for completed implementation. No new label is needed.
 -->
 ---8<---
 Slice: {{SLICE_TITLE}}
@@ -54,7 +57,9 @@ Standing contract:
 - Run and report the focused evidence under `docs/TESTING-STRATEGY.md`'s selection and executed-evidence rule.
 - If the runtime refuses the focused command as git it cannot verify, rerun it in the form
   `docs/TESTING-STRATEGY.md` names for a job worktree; never rename the file or leave it out of the run.
-- Follow the construction mode exactly; you cannot select, reinterpret, or downgrade it.
+- Follow the construction mode and declared stage exactly; you cannot select, reinterpret, or downgrade them.
+  Stop for coordinator classification of a newly distinct safeguard or revalidation of an incorrect oracle;
+  change a validated test contract only through an explicit revised handoff.
 - Stop and ask instead of guessing: on ambiguity about scope or acceptance, a discovery the plan did not
   anticipate, or a conflict between this handoff and the observed code, stop with the specific question, the
   evidence, and your exact on-disk state, then end with the state line below. A mechanical choice the plan
@@ -62,4 +67,6 @@ Standing contract:
 - Mutation-proofing by revert is the orchestrator's convergence step, never yours.
 - You cannot show the owner a screenshot; report what you verified and how.
 - Do not commit or push.
-- End your report with the literal line `final on-disk state = fixed` (or exactly what state you left).
+- End your report with `final on-disk state = expected red` for a completed test-only stage, `final on-disk state = fixed`
+  for completed implementation, or exactly the stopped state you left. Report required lint and focused outcomes
+  truthfully; an authorized expected-red result is not a claim of green implementation.

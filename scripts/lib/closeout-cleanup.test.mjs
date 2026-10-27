@@ -1,5 +1,5 @@
-// closeout-cleanup.test.mjs: the closeout cleanup command removes a job's containers, named scratch, worktree and
-// branch only when every check passes, and retains each target a check or a refusal holds back, with its reason.
+// closeout-cleanup.test.mjs: the closeout cleanup command removes a job's containers, named scratch, worktree, the
+// empty folder Codex made around the worktree and branch only when every check passes, and retains each target a check or a refusal holds back, with its reason.
 //
 // In-process cases run `main` with a fake `run` that answers only the command's own argument vectors over small
 // temporary trees; the runner proofs start real processes, and the CLI proofs run the command against real git.
@@ -104,15 +104,15 @@ function withoutDockerSelection(invoke) {
 // `tracked` lists each worktree's tracked paths, `lsof.open` the files processes hold and `processes` the ps rows;
 // `processStatus` is the status of this process (no no_new_privs flag unless set) and `privileged` answers both the
 // direct sudo and the user service manager route.
-function scenario(t) {
+function scenario(t, worktreeParts = ['wt']) {
   const capturedPath = { ...process.env }.PATH;
   const nativeEnv = { ...(capturedPath === undefined ? {} : { PATH: capturedPath }), LC_ALL: 'C' };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'closeout-cleanup-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const mainDir = join(root, 'main');
-  const worktree = join(root, 'wt');
+  const worktree = join(root, ...worktreeParts);
   mkdirSync(mainDir);
-  mkdirSync(worktree);
+  mkdirSync(worktree, { recursive: true });
   const state = {
     records: [{ path: mainDir, branch: 'refs/heads/main' }, { path: worktree, branch: 'refs/heads/job/23' }],
     branch: true,
@@ -264,7 +264,7 @@ function scenario(t) {
     const err = [];
     const output = { log: (line) => out.push(line), error: (line) => err.push(line) };
     const exitCode = withoutDockerSelection(() => main(args, {
-      output, run, platform: 'linux', cwd: mainDir, home: root, pid: process.pid,
+      output, run, platform: 'linux', cwd: mainDir, home: root, codexHome: '', pid: process.pid,
       scriptPath: join(mainDir, 'scripts', 'closeout-cleanup.mjs'), git: GIT, ...seams,
     }));
     return { exitCode, out, err };
@@ -339,7 +339,7 @@ test('runCommand reports a child killed by a signal as failed', { skip: process.
 test('each invalid argument exits 2 with usage and no external call', async (t) => {
   const s = scenario(t);
   const invalid = [
-    [], ['0'], ['023'], ['abc'], ['23', '24'], ['23', '--force'], ['23', '--scratch'],
+    [], ['0'], ['023'], ['abc'], ['eng-1'], ['ENG-0'], ['23', '24'], ['23', '--force'], ['23', '--scratch'],
     ['23', '--scratch', 'relative/path'], ['23', '--scratch', '/tmp/x/'], ['23', '--scratch', '/tmp/../x'],
     ['23', '--scratch', '/tmp/a\nb'], ['23', '--regenerated', '/abs'], ['23', '--regenerated', '.'],
     ['23', '--regenerated', '..'], ['23', '--regenerated', '../x'], ['23', '--regenerated', 'a/../b'],
@@ -352,6 +352,24 @@ test('each invalid argument exits 2 with usage and no external call', async (t) 
     assert.equal(err.at(-1), USAGE, JSON.stringify(args));
   }
   assert.deepEqual(s.calls, []);
+});
+
+test('a Linear issue ID is accepted as the issue and names the job/<ID> branch', async (t) => {
+  const s = scenario(t);
+  const calls = [];
+  const run = (command, args) => {
+    const key = args.join(' ');
+    calls.push(key);
+    if (key === 'worktree list --porcelain -z') return reply(0, worktreeListing([{ path: s.mainDir, branch: 'refs/heads/main' }]));
+    if (key === 'rev-parse --verify --quiet refs/heads/job/ENG-1') return reply(1);
+    return reply(99);
+  };
+  assert.deepEqual(await s.cleanup(['ENG-1'], { run }), {
+    exitCode: 3,
+    out: ['absent worktree job/ENG-1', 'absent branch job/ENG-1', 'closeout-cleanup: nothing to do'],
+    err: [],
+  });
+  assert.deepEqual(calls, ['worktree list --porcelain -z', 'rev-parse --verify --quiet refs/heads/job/ENG-1']);
 });
 
 test('an unreadable worktree list exits 1 having done nothing', async (t) => {
@@ -1544,11 +1562,11 @@ const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o args=" ] || exit 99\necho 
 // A real repository with job/23 checked out in a linked worktree that holds an ignored node_modules, an outside
 // scratch file, sh fakes for docker, lsof and ps first on PATH, and GIT_DIR naming a decoy repository the command's
 // git calls must not read.
-function cliFixture(t, docker, overrides = {}) {
+function cliFixture(t, docker, overrides = {}, worktreeParts = ['job-23']) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'closeout-cleanup-cli-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repository = join(root, 'repository');
-  const worktree = join(root, 'job-23');
+  const worktree = join(root, ...worktreeParts);
   const env = {
     ...gitEnvironment(),
     GIT_AUTHOR_NAME: 'Closeout Cleanup Test',
@@ -1570,6 +1588,7 @@ function cliFixture(t, docker, overrides = {}) {
   writeFileSync(join(repository, 'kept.txt'), 'committed\n');
   ok(git(['-C', repository, 'add', '--', 'kept.txt']), 'track kept.txt');
   ok(git(['-C', repository, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fixture baseline']), 'baseline commit');
+  mkdirSync(dirname(worktree), { recursive: true });
   ok(git(['-C', repository, 'worktree', 'add', '-q', '-b', 'job/23', worktree]), 'job worktree');
   placeFile(join(worktree, 'node_modules', 'left-pad', 'index.js'));
   writeFileSync(join(worktree, 'node_modules', '.gitignore'), '*\n');
@@ -1587,7 +1606,8 @@ function cliFixture(t, docker, overrides = {}) {
     cwd: repository,
     encoding: 'utf8',
     env: { ...env, PATH: `${bin}${delimiter}${env.PATH}`, GIT_DIR: join(root, 'decoy', '.git'),
-      FIXTURE_DOCKER_LOG: dockerLog, DOCKER_HOST: '', DOCKER_CONTEXT: '', DOCKER_CONFIG: join(root, 'docker-config'), ...overrides, ...extraEnv },
+      FIXTURE_DOCKER_LOG: dockerLog, DOCKER_HOST: '', DOCKER_CONTEXT: '', DOCKER_CONFIG: join(root, 'docker-config'),
+      CODEX_HOME: join(root, 'codex-home'), ...overrides, ...extraEnv },
   });
   const branchStatus = () => git(['-C', repository, 'rev-parse', '--verify', '--quiet', 'refs/heads/job/23']).status;
   const registered = () => git(['-C', repository, 'worktree', 'list', '--porcelain']).stdout.includes(`worktree ${worktree}\n`);
@@ -2637,4 +2657,360 @@ test('ANTI-REGRESSION: Docker socket device encodings preserve filesystem identi
       }
     });
   }
+});
+
+// Codex's desktop app puts a worktree at <root>/<name>/<repository> beside an empty marker in the outer <name> folder.
+const CODEX_MARKER = '.codex-worktree-name';
+
+function codexScenario(t, worktreeParts = ['.codex', 'worktrees', 'job-23', 'repository']) {
+  const s = scenario(t, worktreeParts);
+  const outer = dirname(s.worktree);
+  const marker = join(outer, CODEX_MARKER);
+  writeFileSync(marker, '');
+  return { ...s, outer, marker };
+}
+
+// Runs `act` once, on the first process listing after the worktree is gone: the outer folder's own process check.
+function afterWorktreeRemoved(s, act) {
+  let done = false;
+  s.state.onPs = () => {
+    if (done || existsSync(s.worktree)) return;
+    done = true;
+    act();
+  };
+}
+
+test('a removed Codex worktree takes its outer folder when only the empty marker is left', { skip: SKIP_POSIX }, async (t) => {
+  const s = codexScenario(t);
+  assert.deepEqual(await s.cleanup(), {
+    exitCode: 0,
+    out: [`removed worktree ${s.worktree}`, `removed outer folder ${s.outer}`, 'removed branch job/23', 'closeout-cleanup: 3 removed, 0 retained'],
+    err: [],
+  });
+  assert.equal(existsSync(s.outer), false);
+  assert.ok(existsSync(join(s.root, '.codex', 'worktrees')));
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('the CLI removes a real Codex worktree and its outer folder from the root CODEX_HOME names', { skip: process.platform !== 'linux' && 'Docker-present CLI proof requires native Linux' }, (t) => {
+  const f = cliFixture(t, DOCKER_EMPTY, {}, ['codex-home', 'worktrees', 'job-23', 'repository']);
+  const outer = dirname(f.worktree);
+  writeFileSync(join(outer, CODEX_MARKER), '');
+  const codexHome = join(dirname(f.repository), 'codex-home');
+  const run = f.cleanup({ CODEX_HOME: codexHome });
+  assert.equal(run.stderr, '');
+  assert.equal(run.stdout, [
+    `removed scratch ${f.scratch}`, `removed worktree ${f.worktree}`, `removed outer folder ${outer}`, 'removed branch job/23',
+    'closeout-cleanup: 4 removed, 0 retained', '',
+  ].join('\n'));
+  assert.equal(run.status, 0);
+  assert.equal(existsSync(outer), false);
+  assert.ok(existsSync(join(codexHome, 'worktrees')));
+  assert.equal(f.registered(), false);
+  assert.equal(f.branchStatus(), 1);
+});
+
+test('ANTI-REGRESSION: a Codex outer folder holding anything but its empty marker is kept and reported', { skip: SKIP_POSIX }, async (t) => {
+  const markerReason = `its ${CODEX_MARKER} is not an empty file`;
+  const changed = 'it changed during the checks';
+  const marked = (s) => assert.ok(existsSync(s.marker));
+  const cases = [
+    { name: 'a directory', reason: 'holds "other-repo"',
+      place: (s) => mkdirSync(join(s.outer, 'other-repo')),
+      check: (s) => assert.ok(lstatSync(join(s.outer, 'other-repo')).isDirectory()) },
+    { name: 'two files', reason: 'holds "alpha.txt" and 1 more',
+      place: (s) => { placeFile(join(s.outer, 'zeta.txt')); placeFile(join(s.outer, 'alpha.txt')); },
+      check: (s) => { assert.ok(existsSync(join(s.outer, 'zeta.txt'))); assert.ok(existsSync(join(s.outer, 'alpha.txt'))); } },
+    { name: 'a newline in a name', reason: 'holds "line\\nbreak"',
+      place: (s) => placeFile(join(s.outer, 'line\nbreak')),
+      check: (s) => assert.ok(existsSync(join(s.outer, 'line\nbreak'))) },
+    { name: 'a marker holding text', reason: markerReason,
+      place: (s) => writeFileSync(s.marker, 'x'),
+      check: (s) => assert.equal(readFileSync(s.marker, 'utf8'), 'x') },
+    { name: 'a marker that is a symbolic link', reason: markerReason,
+      place: (s) => {
+        const target = join(s.root, 'empty.txt');
+        writeFileSync(target, '');
+        rmSync(s.marker);
+        symlinkSync(target, s.marker);
+      },
+      check: (s) => { assert.ok(lstatSync(s.marker).isSymbolicLink()); assert.ok(existsSync(join(s.root, 'empty.txt'))); } },
+    { name: 'a marker that is an empty FIFO', reason: markerReason,
+      place: (s) => {
+        rmSync(s.marker);
+        assert.equal(spawnSync('mkfifo', [s.marker]).status, 0);
+      },
+      check: (s) => assert.ok(lstatSync(s.marker).isFIFO()) },
+    { name: 'a process using the folder', reason: 'pid 4242 (bash) uses it',
+      place: (s) => { s.state.lsof.open = [{ pid: 4242, command: 'bash', name: s.outer }]; },
+      check: marked },
+    { name: 'the folder gone after the worktree is', reason: 'could not be read: ENOENT',
+      place: (s) => { s.state.onWorktreeRemoved = () => rmSync(s.outer, { recursive: true }); },
+      check: (s) => assert.equal(existsSync(s.outer), false) },
+    { name: 'late: the folder renamed and its name linked to it', reason: changed,
+      late: (s) => { renameSync(s.outer, join(s.root, 'elsewhere')); symlinkSync(join(s.root, 'elsewhere'), s.outer); },
+      check: (s) => { assert.ok(existsSync(join(s.root, 'elsewhere', CODEX_MARKER))); assert.ok(lstatSync(s.outer).isSymbolicLink()); } },
+    { name: 'late: the folder renamed and another made at its name', reason: changed,
+      late: (s) => { renameSync(s.outer, join(s.root, 'elsewhere')); mkdirSync(s.outer); writeFileSync(s.marker, ''); },
+      check: (s) => { assert.ok(existsSync(join(s.root, 'elsewhere', CODEX_MARKER))); marked(s); } },
+    { name: 'late: text written into the marker', reason: markerReason,
+      late: (s) => writeFileSync(s.marker, 'x'),
+      check: (s) => assert.equal(readFileSync(s.marker, 'utf8'), 'x') },
+    { name: 'late: another empty file renamed over the marker', reason: changed,
+      late: (s) => { const next = join(s.outer, '.next'); writeFileSync(next, ''); renameSync(next, s.marker); },
+      check: (s) => assert.equal(readFileSync(s.marker, 'utf8'), '') },
+    { name: 'late: a file added', reason: 'holds "late.txt"',
+      late: (s) => writeFileSync(join(s.outer, 'late.txt'), 'x'),
+      check: (s) => { marked(s); assert.ok(existsSync(join(s.outer, 'late.txt'))); } },
+  ];
+  for (const { name, reason, place, late, check } of cases) {
+    await t.test(name, async (t) => {
+      const s = codexScenario(t);
+      place?.(s);
+      if (late) afterWorktreeRemoved(s, () => late(s));
+      assert.deepEqual(await s.cleanup(), {
+        exitCode: 4,
+        out: [`removed worktree ${s.worktree}`, `retained outer folder ${s.outer}: ${reason}`, 'removed branch job/23', 'closeout-cleanup: 2 removed, 1 retained'],
+        err: [],
+      });
+      check(s);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test('a retained Codex worktree leaves its outer folder untouched', { skip: SKIP_POSIX }, async (t) => {
+  const s = codexScenario(t);
+  s.state.status = '?? notes.txt\0';
+  assertWorktreeRetained(s, await s.cleanup(), 'git status lists "?? notes.txt"');
+  assert.equal(readFileSync(s.marker, 'utf8'), '');
+});
+
+test('ANTI-REGRESSION: a parent folder outside the Codex worktree root is untouched, stray marker and all', { skip: SKIP_POSIX }, async (t) => {
+  const s = scenario(t, ['.claude', 'worktrees', 'job-23']);
+  const outer = dirname(s.worktree);
+  const marker = join(outer, CODEX_MARKER);
+  writeFileSync(marker, '');
+  assert.deepEqual(await s.cleanup(['23']), {
+    exitCode: 0,
+    out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'],
+    err: [],
+  });
+  assert.ok(existsSync(outer));
+  assert.ok(existsSync(marker));
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('ANTI-REGRESSION: a failed Docker recheck keeps the Codex outer folder and the branch', { skip: SKIP_POSIX }, async (t) => {
+  const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable: daemon root differs from local root';
+  for (const boundary of ['worktree removal', 'outer folder process check']) {
+    await t.test(boundary, async (t) => {
+      const s = codexScenario(t);
+      const change = () => { s.state.native.stat = reply(0, PROOF_STAT.replace('50:2:', '50:3:')); };
+      if (boundary === 'worktree removal') s.state.onWorktreeRemoved = change;
+      else afterWorktreeRemoved(s, change);
+      assert.deepEqual(await s.cleanup(), {
+        exitCode: 4,
+        out: [`removed worktree ${s.worktree}`, `retained outer folder ${s.outer}: ${reason}`, `retained branch job/23: ${reason}`, 'closeout-cleanup: 1 removed, 2 retained'],
+        err: [],
+      });
+      assert.ok(existsSync(s.marker));
+      assert.equal(s.state.branch, true);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test('ANTI-REGRESSION: a kept Codex outer folder stops the merged PR branch exception', { skip: SKIP_POSIX }, async (t) => {
+  const s = codexScenario(t);
+  const notes = placeFile(join(s.outer, 'notes.txt'));
+  s.state.pr = reply(0, JSON.stringify(mergedPr()));
+  s.state.branchRefusal = NOT_MERGED;
+  assert.deepEqual(await s.cleanup(['23', '--pr', PR_URL]), {
+    exitCode: 4,
+    out: [`removed worktree ${s.worktree}`, `retained outer folder ${s.outer}: holds "notes.txt"`,
+      "retained branch job/23: error: the branch 'job/23' is not fully merged", 'closeout-cleanup: 1 removed, 2 retained'],
+    err: [],
+  });
+  assert.ok(!s.calls.some((call) => call.join(' ') === 'git branch -D -- job/23'));
+  assert.equal(s.state.branch, true);
+  assert.equal(readFileSync(notes, 'utf8'), 'scratch\n');
+  assert.deepEqual(s.unexpected, []);
+});
+
+// Codex's settings name the worktree root in the [desktop] table of the user-layer <CODEX_HOME>/config.toml; the scenario's
+// CODEX_HOME is empty, so the file is <root>/.codex/config.toml.
+const ROOT_KEY = 'git-worktree-root';
+
+function codexConfig(s, text) {
+  const path = join(s.root, '.codex', 'config.toml');
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+  return path;
+}
+
+const rootSetting = (value) => `[desktop]\n${ROOT_KEY} = ${value}\n`;
+const CUSTOM_PARTS = ['custom', 'job-23', 'repository'];
+
+// The cleanup output when the worktree, its outer folder and the branch are removed, and when only the worktree and the branch are.
+const outerRemoved = (s) => ({
+  exitCode: 0,
+  out: [`removed worktree ${s.worktree}`, `removed outer folder ${s.outer}`, 'removed branch job/23', 'closeout-cleanup: 3 removed, 0 retained'],
+  err: [],
+});
+const outerUntouched = (s) => ({ exitCode: 0, out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'], err: [] });
+
+test("a Codex outer folder inside the worktree root Codex's settings name is removed", { skip: SKIP_POSIX }, async (t) => {
+  const s = codexScenario(t, CUSTOM_PARTS);
+  codexConfig(s, rootSetting(JSON.stringify(`  ${join(s.root, 'custom')}  `)));
+  assert.deepEqual(await s.cleanup(), outerRemoved(s));
+  assert.equal(existsSync(s.outer), false);
+  assert.ok(existsSync(join(s.root, 'custom')));
+  assert.deepEqual(s.unexpected, []);
+});
+
+test("ANTI-REGRESSION: with a worktree root in Codex's settings the default root no longer counts", { skip: SKIP_POSIX }, async (t) => {
+  const s = codexScenario(t);
+  codexConfig(s, rootSetting(JSON.stringify(`  ${join(s.root, 'custom')}  `)));
+  assert.deepEqual(await s.cleanup(), outerUntouched(s));
+  assert.ok(existsSync(s.marker));
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('ANTI-REGRESSION: an unusable Codex worktree root setting keeps the outer folder and says why, under the default root too', { skip: SKIP_POSIX }, async (t) => {
+  const invalidToml = 'config.toml is not valid TOML';
+  const notDesktopTable = 'desktop is not a table';
+  const notAbsolute = 'its value is not a normalized absolute path';
+  const custom = (s) => JSON.stringify(join(s.root, 'custom'));
+  const cases = [
+    { name: 'a table header left open', reason: invalidToml, place: (s) => codexConfig(s, '[desktop') },
+    { name: 'a quoted value holding a raw 0xff byte', reason: invalidToml,
+      place: (s) => codexConfig(s, Buffer.concat([Buffer.from(`[desktop]\n${ROOT_KEY} = "`), Buffer.from([0xff]), Buffer.from('"\n')])) },
+    { name: 'desktop an integer', reason: notDesktopTable, place: (s) => codexConfig(s, 'desktop = 5\n') },
+    { name: 'desktop an array of tables', reason: notDesktopTable, place: (s) => codexConfig(s, '[[desktop]]\n') },
+    { name: 'desktop a date', reason: notDesktopTable, place: (s) => codexConfig(s, 'desktop = 1979-05-27\n') },
+    { name: 'a root that is an integer', reason: 'its value is not a string', place: (s) => codexConfig(s, rootSetting('5')) },
+    { name: 'a relative root', reason: notAbsolute, place: (s) => codexConfig(s, rootSetting(JSON.stringify('relative/wt'))) },
+    { name: 'a root starting with a tilde', reason: notAbsolute, place: (s) => codexConfig(s, rootSetting(JSON.stringify('~/wt'))) },
+    { name: 'a root that is not normalized', reason: notAbsolute, place: (s) => codexConfig(s, rootSetting(JSON.stringify(`${s.root}/x/../custom`))) },
+    { name: 'a root holding a byte order mark escape', reason: notAbsolute, place: (s) => codexConfig(s, rootSetting('"\\uFEFF"')) },
+    { name: 'a root that is a symbolic link to itself', reason: 'its value could not be resolved: ELOOP',
+      place: (s) => {
+        const loop = join(s.root, 'loop');
+        symlinkSync(loop, loop);
+        codexConfig(s, rootSetting(JSON.stringify(loop)));
+      } },
+    { name: 'config.toml a folder', reason: 'config.toml is not a regular file',
+      place: (s) => mkdirSync(join(s.root, '.codex', 'config.toml'), { recursive: true }) },
+    { name: 'config.toml a symbolic link to itself', reason: 'config.toml could not be read: ELOOP',
+      place: (s) => {
+        const path = join(s.root, '.codex', 'config.toml');
+        mkdirSync(dirname(path), { recursive: true });
+        symlinkSync(path, path);
+      } },
+    { name: 'config.toml a symbolic link to a missing file', reason: 'config.toml could not be read: ENOENT',
+      place: (s) => {
+        const path = join(s.root, '.codex', 'config.toml');
+        mkdirSync(dirname(path), { recursive: true });
+        symlinkSync(join(s.root, 'absent.toml'), path);
+      } },
+    { name: 'a parser path that is missing', reason: 'the TOML parser could not be loaded: MODULE_NOT_FOUND',
+      place: (s) => codexConfig(s, rootSetting(custom(s))), seams: (s) => ({ tomlParserPath: join(s.root, 'missing.cjs') }) },
+    { name: 'a parser file that throws', reason: 'the TOML parser could not be loaded: broken parser',
+      place: (s) => {
+        codexConfig(s, rootSetting(custom(s)));
+        writeFileSync(join(s.root, 'broken.cjs'), "throw new Error('broken parser');\n");
+      },
+      seams: (s) => ({ tomlParserPath: join(s.root, 'broken.cjs') }) },
+    { name: 'a CODEX_HOME that is not normalized', reason: 'CODEX_HOME is not a normalized absolute path', place: () => {},
+      seams: (s) => ({ codexHome: `${s.root}/elsewhere/../.codex` }) },
+    { name: 'a home folder that is not absolute while CODEX_HOME is empty', reason: 'the home folder is not a normalized absolute path', place: () => {},
+      seams: () => ({ home: 'relative/home' }) },
+    { name: 'a home folder that is not normalized while CODEX_HOME is empty', reason: 'the home folder is not a normalized absolute path', place: () => {},
+      seams: (s) => ({ home: `${s.root}/x/..` }) },
+    { name: 'a home folder ending in a slash while CODEX_HOME is empty', reason: 'the home folder is not a normalized absolute path', place: () => {},
+      seams: (s) => ({ home: `${s.root}/` }) },
+  ];
+  for (const { name, reason, place, seams = () => ({}) } of cases) {
+    for (const [placement, parts] of [['default placement', undefined], ['custom placement', CUSTOM_PARTS]]) {
+      await t.test(`${name}, ${placement}`, async (t) => {
+        const s = codexScenario(t, parts);
+        place(s);
+        assert.deepEqual(await s.cleanup(['23'], seams(s)), {
+          exitCode: 4,
+          out: [`removed worktree ${s.worktree}`, `retained outer folder ${s.outer}: Codex's worktree root setting is unusable: ${reason}`,
+            'removed branch job/23', 'closeout-cleanup: 2 removed, 1 retained'],
+          err: [],
+        });
+        assert.ok(existsSync(s.marker));
+        assert.deepEqual(s.unexpected, []);
+      });
+    }
+  }
+});
+
+test('ANTI-REGRESSION: a parent folder without the Codex marker is untouched with no line, even while the root setting is unusable', { skip: SKIP_POSIX }, async (t) => {
+  for (const [name, build] of [
+    ['a Claude Code worktree under an invalid config.toml', (t) => {
+      const s = scenario(t, ['.claude', 'worktrees', 'job-23']);
+      codexConfig(s, '[desktop');
+      return s;
+    }],
+    ['an unmarked folder inside the default Codex root', (t) => {
+      const s = codexScenario(t);
+      rmSync(s.marker);
+      return s;
+    }],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = build(t);
+      assert.deepEqual(await s.cleanup(), outerUntouched(s));
+      assert.ok(existsSync(dirname(s.worktree)));
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test("ANTI-REGRESSION: a worktree root in Codex's settings does not make a folder outside it removable", { skip: SKIP_POSIX }, async (t) => {
+  for (const [name, parts] of [
+    ['a folder beside the root', ['other', 'job-23', 'repository']],
+    ['a folder two levels below the root', ['custom', 'job-23', 'deeper', 'repository']],
+  ]) {
+    await t.test(name, async (t) => {
+      const s = codexScenario(t, parts);
+      codexConfig(s, rootSetting(JSON.stringify(join(s.root, 'custom'))));
+      assert.deepEqual(await s.cleanup(), outerUntouched(s));
+      assert.ok(existsSync(s.outer));
+      assert.ok(existsSync(s.marker));
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+});
+
+test("with no effective worktree root in Codex's settings the default root applies, a blank value included", { skip: SKIP_POSIX }, async (t) => {
+  const cases = [
+    { name: 'an empty file', config: '' },
+    { name: 'a desktop table alone', config: '[desktop]\n' },
+    { name: 'the key in another table', config: (s) => `[other]\n${ROOT_KEY} = ${JSON.stringify(join(s.root, 'custom'))}\n` },
+    { name: 'an empty string root', config: rootSetting('""') },
+    { name: 'a root of a space and a tab', config: rootSetting(JSON.stringify(' \t')) },
+    { name: 'a root of a next line character escape', config: rootSetting('"\\u0085"') },
+    { name: 'no file and a parser that could not load', seams: (s) => ({ tomlParserPath: join(s.root, 'missing.cjs') }) },
+  ];
+  for (const { name, config, seams = () => ({}) } of cases) {
+    await t.test(name, async (t) => {
+      const s = codexScenario(t);
+      if (config !== undefined) codexConfig(s, typeof config === 'function' ? config(s) : config);
+      assert.deepEqual(await s.cleanup(['23'], seams(s)), outerRemoved(s));
+      assert.equal(existsSync(s.outer), false);
+      assert.deepEqual(s.unexpected, []);
+    });
+  }
+  await t.test('a blank root leaves a folder under a custom folder untouched', async (t) => {
+    const s = codexScenario(t, CUSTOM_PARTS);
+    codexConfig(s, rootSetting(JSON.stringify('  ')));
+    assert.deepEqual(await s.cleanup(), outerUntouched(s));
+    assert.ok(existsSync(s.marker));
+    assert.deepEqual(s.unexpected, []);
+  });
 });

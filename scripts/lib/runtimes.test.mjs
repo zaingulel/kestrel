@@ -202,7 +202,7 @@ test('a path belongs to the Greptile add-on only under its skill folders and its
   assert.equal(treeSettings(tree(t, '{"version":1,"seats":{},"greptile":true}')).greptile, true);
 });
 
-test('a path belongs to the documentation sweep only where it is one of the six pinned, the sweep is on unless the settings file holds false, and a tree leaves out the sweep files and manuals only where it is off', (t) => {
+test('a path belongs to the documentation sweep only where it is one of the six pinned or the documentation standard, the sweep is on unless the settings file holds false, and a tree leaves out the sweep files, the standard and manuals only where it is off', (t) => {
   const sweepFiles = [
     '.github/workflows/sweep-scope.yml',
     'scripts/lib/sweep-scope-corpus.mjs',
@@ -210,6 +210,7 @@ test('a path belongs to the documentation sweep only where it is one of the six 
     'scripts/lib/sweep-scope.mjs',
     'scripts/lib/sweep-scope.test.mjs',
     'scripts/sweep-scope-check.mjs',
+    'docs/DOCUMENTATION-STANDARD.md',
   ];
   const manuals = ['docs/DOC-SWEEP.md', 'docs/SWEEP-TRIAGE.md'];
   // The comparison is exact: a look-alike is not the sweep's, and no near miss is a path this repository tracks.
@@ -295,7 +296,7 @@ test("every shared path under a runtime's folder belongs to that runtime, and th
 });
 
 // The manifest is read from disk and the six paths are written out here, so neither comes from the module under test.
-test('the shared paths of the documentation sweep are exactly the pinned six', () => {
+test('the shared paths of the documentation sweep are exactly the pinned six and the documentation standard', () => {
   const entries = JSON.parse(readFileSync(join(ROOT, '.agents/factory-manifest.json'), 'utf8')).entries;
   const pinned = [
     '.github/workflows/sweep-scope.yml',
@@ -306,7 +307,7 @@ test('the shared paths of the documentation sweep are exactly the pinned six', (
     'scripts/sweep-scope-check.mjs',
   ];
   assert.deepEqual(entries.map((entry) => entry.path).filter((path) => path.includes('sweep-scope')).sort(), pinned);
-  for (const { path } of entries) assert.equal(leftOutCause(SWEEP_ALONE_OFF, path) !== null, pinned.includes(path), path);
+  for (const { path } of entries) assert.equal(leftOutCause(SWEEP_ALONE_OFF, path) !== null, [...pinned, 'docs/DOCUMENTATION-STANDARD.md'].includes(path), path);
   for (const path of pinned) {
     assert.equal(runtimeOf(path), null, path);
     assert.equal(isGreptilePath(path), false, path);

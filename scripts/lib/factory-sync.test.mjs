@@ -582,8 +582,8 @@ test('ANTI-REGRESSION: a tree that does not turn the Greptile add-on on verifies
   }
 });
 
-// The documentation sweep's six shared paths, written out by hand; each fixture file holds hello, so no hash is
-// computed by the code under test.
+// The documentation sweep's six shared paths and the documentation standard, written out by hand; each fixture file
+// holds hello, so no hash is computed by the code under test.
 const SWEEP_PATHS = [
   '.github/workflows/sweep-scope.yml',
   'scripts/lib/sweep-scope-corpus.mjs',
@@ -591,6 +591,7 @@ const SWEEP_PATHS = [
   'scripts/lib/sweep-scope.mjs',
   'scripts/lib/sweep-scope.test.mjs',
   'scripts/sweep-scope-check.mjs',
+  'docs/DOCUMENTATION-STANDARD.md',
 ];
 const SWEEP_OFF_CAUSE = 'absent (the settings file turns the documentation sweep off)';
 const SWEEP_ON = { version: 1, seats: {}, docSweep: true };

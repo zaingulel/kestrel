@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -254,7 +254,9 @@ test('a base-tree search that fails is refused, never read as nothing found', ()
   r.write('docs/ALLOWED.md', `See ${text}.\n`);
   const head = r.commit('edit whose token needs the tree search');
   const tree = r.git('rev-parse', `${r.base}:src`);
-  rmSync(join(r.dir, '.git', 'objects', tree.slice(0, 2), tree.slice(2)));
+  const loose = join(r.dir, '.git', 'objects', tree.slice(0, 2), tree.slice(2));
+  chmodSync(loose, 0o644);
+  rmSync(loose);
   const result = r.check(head);
   assert.equal(result.status, 128, result.stdout);
   assert.match(result.stderr, /^sweep-scope: git grep failed: /);
@@ -760,7 +762,8 @@ test('content-only Markdown refuses when the pinned template parser is missing o
   cpSync(join(dirname(fileURLToPath(import.meta.url)), 'sweep-scope.mjs'), copiedModule);
   mkdirSync(join(isolated, 'node_modules'));
   for (const dependency of ['htmlparser2', 'mdast-util-from-markdown', 'mdast-util-gfm', 'micromark-extension-gfm']) {
-    symlinkSync(realpathSync(join(ROOT, 'node_modules', dependency)), join(isolated, 'node_modules', dependency), 'dir');
+    // On Windows a link to a directory is a junction, which needs no privilege and holds an absolute target.
+    symlinkSync(realpathSync(join(ROOT, 'node_modules', dependency)), join(isolated, 'node_modules', dependency), process.platform === 'win32' ? 'junction' : 'dir');
   }
   const isolatedRequire = createRequire(pathToFileURL(copiedModule));
   assert.throws(() => isolatedRequire.resolve('nunjucks/src/parser.js'), { code: 'MODULE_NOT_FOUND' },

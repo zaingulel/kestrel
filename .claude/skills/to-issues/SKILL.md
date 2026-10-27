@@ -9,6 +9,10 @@ Two shapes, one publish pipeline: **decompose** a plan/spec/Epic into ordered, b
 (tracer bullets), or **capture** a single bug, feature idea, or suggestion as one issue (slicing collapses to one;
 routing, body shape, publish, and verify are identical).
 
+Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
+what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
+`docs/LINEAR-CARDS.md` says what each card step here becomes.
+
 Claude may invoke this skill, but Step 4 (owner approval) is a HARD gate on every ordinary model-invoked
 proposal: create or update NOTHING on the board until the owner approves. Exceptions, none owned or gated by
 `/to-issues`: a follow-up card, in `Backlog`, for work an approved job surfaces and genuinely cannot finish,
