@@ -66,7 +66,8 @@ Item {
                     top=y,bottom=integer(y+height,-2147483647)}
             end
             assert(s.workArea==nil or type(s.workArea)=="function")
-            s.workArea=function(m,gaps,border)
+            s.workArea=nil
+            local function workArea(m,gaps,border)
                 local bounds=monitorBounds(m)
                 assert(type(m.reserved)=="table" and type(gaps)=="table")
                 integer(border,0)
@@ -92,7 +93,7 @@ Item {
                 local gaps,gapError=hl.get_config("general.gaps_out")
                 local border,borderError=hl.get_config("general.border_size")
                 assert(gapError==nil and borderError==nil)
-                return s.workArea(m,gaps,border)
+                return workArea(m,gaps,border)
             end
             local prior=hl.get_active_window()
             if prior then s.returnFocus=identity(prior) end
