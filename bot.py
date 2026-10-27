@@ -83,16 +83,19 @@ class LocalTool:
     failure_message: str | None = None
     lookup_failure: tuple[str, str] | None = None
     lookup_miss: tuple[str, str] | None = None
+    read_back: str | None = None
+    engine_effect: bool = False
 
 
 validate_tool_actions()
 
 LOCAL_TOOLS = {
-    name: LocalTool(spec.permission, TOOL_ACTIONS[name].run, spec.subject, spec.spoken,
+    name: LocalTool(spec.permission, None if spec.engine_effect else TOOL_ACTIONS[name].run, spec.subject, spec.spoken,
                     confirmation=spec.confirmation, announcement=spec.announcement,
-                    lookup=TOOL_ACTIONS[name].lookup, counts_toward_stop=spec.counts_toward_stop,
+                    lookup=None if spec.engine_effect else TOOL_ACTIONS[name].lookup,
+                    counts_toward_stop=spec.counts_toward_stop,
                     failure_message=spec.failure_message, lookup_failure=spec.lookup_failure,
-                    lookup_miss=spec.lookup_miss)
+                    lookup_miss=spec.lookup_miss, read_back=spec.read_back, engine_effect=spec.engine_effect)
     for name, spec in TOOL_CATALOGUE.items()
 }
 

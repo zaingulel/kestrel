@@ -1310,7 +1310,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         expected = ("I can talk with you, answer general knowledge questions and keep short notes between conversations. "
                     "You can say: mute; unmute; set the volume to thirty; pause music; next track; "
                     "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                    "None of these tools needs permission first. "
+                    "Permission required: delete one of your notes. These tools aren't available by voice yet. "
                     "You can also say repeat that, stop, that's all, or what can I say. "
                     "I have no internet or live information, and I can't see what's on your screen.")
         accepted = ('what can I say', ' WHAT CAN I SAY. ', 'What can I say!', ' What Can I Say? ')
@@ -1414,7 +1414,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -1671,7 +1671,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -2802,7 +2802,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                                     namespace = runpy.run_module('bot', run_name=module_name, alter_sys=True)
                                     self.assertEqual(set(namespace['LOCAL_TOOLS']), {
                                         'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
-                                        'focus_workspace', 'open_app', 'take_screenshot',
+                                        'focus_workspace', 'open_app', 'take_screenshot', 'delete_note',
                                     })
                                 else:
                                     with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
@@ -11335,7 +11335,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         self.assertIn(
             hermes_worker.SYSTEM_PROMPT,
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),
