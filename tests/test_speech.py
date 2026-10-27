@@ -2940,6 +2940,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                                 self.assertFalse(interruption_completed.is_set())
                             if case == 'outer_cancel':
                                 writing.cancel()
+                                await asyncio.sleep(0)
                                 self.assertFalse(writing.done())
                             cleanup_release.set()
                         if case == 'outer_cancel':
