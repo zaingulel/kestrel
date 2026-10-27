@@ -2429,6 +2429,7 @@ class NativeHermesTests(unittest.TestCase):
         long_note = 'L' * 301
         for label, arguments, reply in (
                 ('no source', {'note': target}, b'{"approved":true}\n'),
+                ('wrong source', {'note': target}, b'{"approved":true,"source":"outside"}\n'),
                 ('approved is not true', {'note': target}, b'{"approved":"yes","source":"kestrel"}\n'),
                 ('approval of invalid arguments', {'note': long_note}, APPROVAL)):
             with self.subTest(malformed=label):
