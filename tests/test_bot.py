@@ -5067,6 +5067,8 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 process.stdin.wait_closed = AsyncMock()
 
             exited = asyncio.Event()
+            if not capture:
+                process.stdin.close.side_effect = exited.set
             process.kill.side_effect = exited.set
             process.terminate.side_effect = exited.set
 
@@ -6426,9 +6428,16 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pcm[before:], bytes(9600))
                 self.assertTrue(committed.empty())
                 self.assertIsNone(manager.waiting_transport)
+                acknowledgement_child = next(child for child in reversed(service.audio_children) if child.writes)
+                self.assertTrue(acknowledgement_child.reaped.is_set(),
+                                'Acknowledgement child must exit before the answer is admitted')
+                acknowledgement_child.kill.assert_not_called()
+                children_before_answer = len(service.audio_children)
                 released[answer].set()
                 self.assertEqual(await asyncio.wait_for(committed.get(), 5), answer)
                 self.assertEqual(await asyncio.wait_for(spoken.get(), 5), answer)
+                self.assertGreater(len(service.audio_children), children_before_answer)
+                self.assertIsNot(transport.playback, acknowledgement_child)
                 self.assertEqual(manager.llm.last_spoken_reply, answer)
                 self.assertEqual(manager.conversation.turns[-1]['state'], 'complete')
                 self.assertTrue(closed[answer].is_set())
