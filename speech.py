@@ -862,8 +862,6 @@ class LaptopOutput(BaseOutputTransport):
                             return False
                         if not await self._open_playback_locked():
                             return False
-                        if not self._allowed(record):
-                            return False
                     else:
                         self.cancel_acknowledgement(record)
                 success = await self._write_audio_locked(frame, record)
