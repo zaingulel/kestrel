@@ -755,6 +755,9 @@ class LaptopOutput(BaseOutputTransport):
                 if offset == 0:
                     self.acknowledgement_index = (self.acknowledgement_index + 1) % len(self.prepared_acknowledgements)
                 await self.push_frame(frame)
+            await self.audio._finish_playback()
+            if not self._allowed(record):
+                return False
             text = TTSTextFrame(clip.text, aggregated_by='sentence')
             text.append_to_context = False
             record.stream_frame(text, section)
@@ -854,6 +857,10 @@ class LaptopOutput(BaseOutputTransport):
                 if frame.audio and record is not None and self.acknowledgement_record is record:
                     if self._acknowledgement_now() >= self.acknowledgement_deadline:
                         if not await self._play_acknowledgement_locked(record, answer_pending=True):
+                            return False
+                        if not self._allowed(record):
+                            return False
+                        if not await self._open_playback_locked():
                             return False
                     else:
                         self.cancel_acknowledgement(record)
@@ -1070,6 +1077,57 @@ class LaptopAudioTransport:
             await asyncio.gather(self.playback_watcher, return_exceptions=True)
             self.playback_watcher = None
         await self._reap_audio(process)
+
+    async def _finish_playback(self) -> None:
+        process = self.playback
+        watcher = self.playback_watcher
+        cancelled = None
+
+        async def join_watcher():
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            self.playback_watcher = None
+
+        async def drain():
+            await process.stdin.wait_closed()
+            if await process.wait() != 0:
+                raise RuntimeError(LAPTOP_PLAYBACK_FAILURE)
+
+        async def cleanup():
+            await join_watcher()
+            await self._reap_audio(process)
+            self.playback = None
+
+        try:
+            await join_watcher()
+            if process.returncode is not None or self.failure:
+                raise RuntimeError(LAPTOP_PLAYBACK_FAILURE)
+            process.stdin.close()
+            await asyncio.wait_for(drain(), 5)
+        except asyncio.CancelledError as error:
+            cancelled = error
+        except (OSError, RuntimeError, TimeoutError):
+            self.fail(LAPTOP_PLAYBACK_FAILURE)
+        else:
+            self.playback = None
+            return
+        finally:
+            self._output.playback_deadline = None
+
+        # Keep the lock and child ownership until cleanup survives every outer cancellation.
+        cleanup_task = asyncio.create_task(cleanup())
+        while True:
+            try:
+                await asyncio.shield(cleanup_task)
+                break
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except (OSError, RuntimeError, TimeoutError):
+                self.fail(LAPTOP_PLAYBACK_FAILURE)
+                break
+        if cancelled is not None:
+            raise cancelled
 
     async def close(self):
         self._output.cancel_acknowledgement()
