@@ -3,6 +3,7 @@
 import asyncio
 from asyncio import sleep
 import base64
+from collections import deque
 import io
 import hashlib
 import json
@@ -23,6 +24,7 @@ import soxr
 from loguru import logger
 from wetext import Normalizer
 from pipecat.audio.resamplers.soxr_resampler import SOXRAudioResampler
+from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     CancelFrame, DataFrame, EndFrame, Frame, InputAudioRawFrame, InterruptionFrame, LLMFullResponseEndFrame,
     LLMFullResponseStartFrame, LLMTextFrame, TranscriptionFrame, TTSAudioRawFrame,
@@ -1237,6 +1239,67 @@ class LaptopAudioTransport:
         await self._reap_audio(self.capture)
 
 
+def wav16k(pcm: bytes) -> bytes:
+    prepared = io.BytesIO()
+    with wave.open(prepared, 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(pcm)
+    return prepared.getvalue()
+
+
+ANSWER_WAIT_SECONDS = 6
+ANSWER_END_QUIET_SECONDS = 0.8
+ANSWER_LIMIT_SECONDS = 6
+# Silero confirms speech only after its 0.2 s start window, so the frames just before it are kept.
+ANSWER_PREROLL_FRAMES = 25
+ANSWER_FRAME_SECONDS = 0.02  # 640-byte frames of 16 kHz mono 16-bit audio, as LaptopAudioTransport reads them.
+
+
+async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | None:
+    """Diverts the transport's capture for one permission answer, so none of it enters the conversation.
+
+    Returns (16 kHz WAV, cut off by the limit) once the answer ends, or None when no speech starts within the wait.
+    Raises RuntimeError when capture is already diverted or the answer is no longer admitted; capture is always
+    handed back.
+    """
+    if transport.capture_pcm is not None:
+        raise RuntimeError('Capture is already diverted')
+    frames = asyncio.Queue()
+    transport.capture_pcm = frames.put_nowait
+
+    async def heard():
+        pcm = await frames.get()
+        if not admitted():
+            raise RuntimeError('The permission answer is no longer admitted')
+        return pcm, await vad.analyze_audio(pcm)
+
+    try:
+        vad.set_sample_rate(16000)
+        async with asyncio.timeout(ANSWER_WAIT_SECONDS + ANSWER_LIMIT_SECONDS + 1):
+            preroll = deque(maxlen=ANSWER_PREROLL_FRAMES)
+            for _ in range(round(ANSWER_WAIT_SECONDS / ANSWER_FRAME_SECONDS)):
+                pcm, state = await heard()
+                preroll.append(pcm)
+                if state == VADState.SPEAKING:
+                    break
+            else:
+                return None
+            answer = list(preroll)
+            quiet = 0
+            for _ in range(round(ANSWER_LIMIT_SECONDS / ANSWER_FRAME_SECONDS)):
+                pcm, state = await heard()
+                answer.append(pcm)
+                quiet = quiet + 1 if state in (VADState.QUIET, VADState.STOPPING) else 0
+                if quiet == round(ANSWER_END_QUIET_SECONDS / ANSWER_FRAME_SECONDS):
+                    return wav16k(b''.join(answer)), False
+            return wav16k(b''.join(answer)), True
+    finally:
+        transport.capture_pcm = None
+        await vad.cleanup()
+
+
 class NemotronRecognizer:
     def __init__(self):
         self.process = None
@@ -1255,13 +1318,7 @@ class NemotronRecognizer:
             if not response or json.loads(response) != {"ready": True}:
                 raise RuntimeError("Nemotron failed to load; see the service log")
             pcm = await SOXRAudioResampler().resample(reference_pcm, 48000, 16000)
-            prepared = io.BytesIO()
-            with wave.open(prepared, 'wb') as audio:
-                audio.setnchannels(1)
-                audio.setsampwidth(2)
-                audio.setframerate(16000)
-                audio.writeframes(pcm)
-            await self.transcribe(prepared.getvalue(), admitted=lambda: True)
+            await self.transcribe(wav16k(pcm), admitted=lambda: True)
         except BaseException:
             await self.close()
             raise
