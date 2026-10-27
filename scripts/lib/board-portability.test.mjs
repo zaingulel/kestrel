@@ -2,61 +2,30 @@
 // Run: node --test scripts/lib/board-portability.test.mjs
 //
 // Another repository adopts the toolkit by copying exactly the toolkit's named files
-// (TOOLKIT_LIB and CLI_ENTRY_POINTS below) unchanged and editing only board-config.mjs.
-// These tests do exactly that into a temp directory, alongside TEST_SUPPORT_LIB's one
-// fixture helper the tests need but no adopter ships, and import the copies, so each test
-// runs against fresh module instances wired to the literal config written here, never to
-// this repository's own board-config.mjs. An incomplete TOOLKIT_LIB fails these tests at
-// import, the same way it would fail a real adopter.
+// (TOOLKIT_LIB and CLI_ENTRY_POINTS in board-toolkit-copy.mjs) unchanged and editing only
+// board-config.mjs. These tests do exactly that through copyToolkit into a temp directory and
+// import the copies, so each test runs against fresh module instances wired to the literal
+// config written here, never to this repository's own board-config.mjs. An incomplete
+// TOOLKIT_LIB fails these tests at import, the same way it would fail a real adopter.
 //
-// Price tag: recurring cost is roughly 1 s per suite run (27 temp-directory copies of the
-// toolkit, one per test, 3 spawned board.mjs CLI processes and 1 spawned board-move.mjs).
+// Price tag: recurring cost is roughly 8 s per suite run, measured on Linux (one temp-directory copy
+// of the toolkit per test, the spawned board CLI processes, plus the markdown tests' temporary
+// repositories and the commands that fill them; the markdown lifecycle test alone is about 2.3 s, with
+// three clones and about 45 spawned commands, and the linear lifecycle test about 2.4 s, with 20 spawned
+// commands each answered by the fake transport).
 // Removal condition: retire it when the board toolkit is no longer copied into another
 // repository.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { installFakeGh } from './fake-gh.mjs';
-
-const LIB = fileURLToPath(new URL('.', import.meta.url));
-const SCRIPTS = fileURLToPath(new URL('..', import.meta.url));
-const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'verify-issue-publish.mjs'];
-
-// The transitive closure of relative imports from the four CLI entry points above. Copying
-// exactly this set, no more, is the adoption contract itself: a file the toolkit no longer
-// imports must fall out of here or an adopter carries dead weight neither test nor doc admits to.
-const TOOLKIT_LIB = [
-  'board.mjs',
-  'board-rules.mjs',
-  'board-config.mjs',
-  'board-add.mjs',
-  'board-move.mjs',
-  'issue-publish.mjs',
-  'gh-exec.mjs',
-  'cli-flags.mjs',
-];
-
-// Not part of the toolkit an adopter ships: a test helper, copied only so it builds fixtures
-// against the adopted board-config.mjs rather than this repository's own.
-const TEST_SUPPORT_LIB = ['board-fixtures.mjs'];
-
-// Written out literally, as an adopter would, so an export the real config gains that
-// this copy lacks fails at import exactly as it would for them.
-const CONFIG_TAIL = `
-export const STATUS_OPTIONS = ['Backlog', 'Ready', 'In progress', 'Awaiting push', 'In review', 'Done'];
-export const PICKABLE_STATUSES = ['Backlog', 'Ready'];
-export const WAIT_STATUSES = ['Awaiting push'];
-export const TERMINAL_STATUSES = ['Done'];
-export const ROUTING_FIELD = 'Workstream';
-export const ROUTING_OPTIONS = ['Go-to-market', 'Product', 'Platform'];
-export const KIND_LABELS = { epic: 'epic', feature: 'enhancement', task: 'task', bug: 'bug', docs: 'documentation' };
-export const PARKED_LANE = null;
-`;
+import { pathToFileURL } from 'node:url';
+import { installFakeGh, installFakeTransport } from './fake-gh.mjs';
+import { gitEnvironment } from './factory-sync.mjs';
+import { CONFIG_TAIL, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const ORGANISATION_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
@@ -64,21 +33,10 @@ export const BOARD_PROJECT_NUMBER = 7;
 export const BOARD_REPOSITORY = 'widgets';
 ${CONFIG_TAIL}`;
 
-const USER_CONFIG = `export const BOARD_OWNER = 'example-owner';
-export const BOARD_OWNER_TYPE = 'user';
-export const BOARD_PROJECT_NUMBER = 2;
-export const BOARD_REPOSITORY = 'example-repo';
-${CONFIG_TAIL}`;
-
 function adoptToolkit(t, configSource) {
-  const tmp = mkdtempSync(join(tmpdir(), 'board-portability-'));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-  const lib = join(tmp, 'scripts', 'lib');
-  mkdirSync(lib, { recursive: true });
-  for (const file of [...TOOLKIT_LIB, ...TEST_SUPPORT_LIB]) copyFileSync(join(LIB, file), join(lib, file));
-  for (const file of CLI_ENTRY_POINTS) copyFileSync(join(SCRIPTS, file), join(tmp, 'scripts', file));
-  writeFileSync(join(lib, 'board-config.mjs'), configSource);
-  return tmp;
+  const toolkit = copyToolkit(configSource);
+  t.after(toolkit.cleanup);
+  return toolkit.root;
 }
 
 // A board with no routing field, as AlpGuard's is.
@@ -662,5 +620,789 @@ test('the copied board-move CLI parks one card and releases another with --lane,
   assert.deepEqual(calls.filter((args) => args[0] === 'project'), [
     ['project', 'item-edit', '--id', 'PVTI_12', '--project-id', 'PVT_acme', '--field-id', 'PVTSSF_lane', '--single-select-option-id', 'PVTSSO_sebastiano'],
     ['project', 'item-edit', '--id', 'PVTI_13', '--project-id', 'PVT_acme', '--field-id', 'PVTSSF_lane', '--clear'],
+  ]);
+});
+
+// The markdown tracker, run as a spawned CLI against real temporary repositories: a bare origin
+// and a working copy that is the toolkit copy itself, whose root the reader takes from its own
+// location. The fake `gh` answers `pr list` only, from FAKE_PULLS keyed by head branch, and logs
+// every argv as a JSON line.
+const markdownGh = installFakeGh('board-portability-markdown-', `#!/usr/bin/env node
+const { appendFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_GH_CALLS, JSON.stringify(args) + '\\n');
+if (args[0] === 'pr' && args[1] === 'list') {
+  const head = args[args.indexOf('--head') + 1];
+  process.stdout.write(JSON.stringify(JSON.parse(process.env.FAKE_PULLS)[head] ?? []));
+} else {
+  process.stderr.write('unexpected gh invocation: ' + args.join(' '));
+  process.exitCode = 2;
+}
+`);
+after(() => markdownGh.cleanup());
+
+function git(cwd, ...args) {
+  const run = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: gitEnvironment(),
+  });
+  assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
+  return run.stdout;
+}
+
+const cardFile = (title, status, extra = []) =>
+  [`# ${title}`, '', `Status: ${status}`, 'Kind: task', 'Workstream: Product', ...extra, '', 'Body of the card.', ''].join('\n');
+
+// A markdown install whose `main`, with the given cards, is published on a bare origin.
+function markdownInstall(t, cards) {
+  const toolkit = copyToolkit(MARKDOWN_TEST_CONFIG);
+  t.after(toolkit.cleanup);
+  const origin = mkdtempSync(join(tmpdir(), 'board-portability-origin-'));
+  t.after(() => rmSync(origin, { recursive: true, force: true }));
+  git(origin, 'init', '--bare', '-b', 'main');
+  git(toolkit.root, 'init', '-b', 'main');
+  mkdirSync(join(toolkit.root, '.agents', 'cards'), { recursive: true });
+  for (const [number, text] of Object.entries(cards)) writeFileSync(join(toolkit.root, '.agents', 'cards', `${number}.md`), text);
+  git(toolkit.root, 'add', '.agents/cards');
+  git(toolkit.root, 'commit', '-m', 'file the cards');
+  git(toolkit.root, 'remote', 'add', 'origin', origin);
+  git(toolkit.root, 'push', 'origin', 'main');
+  return toolkit;
+}
+
+// Any copied CLI of a checkout, spawned from an unrelated folder: the reader's root is its own location,
+// never the working folder. `env` adds to the fake `gh`'s environment; `calls` is the argv log it wrote.
+function runScript(root, name, args, pulls = {}, env = {}) {
+  const callsFile = markdownGh.newCallsFile();
+  writeFileSync(callsFile, '');
+  const run = spawnSync(process.execPath, [join(root, 'scripts', name), ...args], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    cwd: tmpdir(),
+    env: markdownGh.env({ FAKE_GH_CALLS: callsFile, FAKE_PULLS: JSON.stringify(pulls), ...env }),
+  });
+  const calls = readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+  return { ...run, calls };
+}
+
+// A linked job worktree of a markdown install, carrying the toolkit, since a move is refused in the integration checkout.
+function jobWorktree(t, toolkit, number) {
+  const worktree = join(realpathSync(mkdtempSync(join(tmpdir(), 'board-portability-worktree-'))), 'job-worktree');
+  t.after(() => rmSync(join(worktree, '..'), { recursive: true, force: true }));
+  git(toolkit.root, 'add', '-A');
+  git(toolkit.root, 'commit', '-m', 'add the toolkit');
+  git(toolkit.root, 'worktree', 'add', '-b', `job/${number}`, worktree, 'main');
+  return worktree;
+}
+
+test('markdown board: intake shows the columns derived from real local, origin and origin/main refs, with only this repository\'s pull requests counted', (t) => {
+  const toolkit = markdownInstall(t, {
+    1: cardFile('Card one', 'Ready'),
+    2: cardFile('Card two', 'Backlog', ['Blocked by: 1']),
+    3: cardFile('Card three', 'Ready'),
+    4: cardFile('Card four', 'Ready'),
+    5: cardFile('Card five', 'Ready'),
+    6: cardFile('Card six', 'Done'),
+    7: cardFile('Card seven', 'Ready'),
+  });
+  const { root } = toolkit;
+  git(root, 'branch', 'job/3');
+  git(root, 'branch', 'job/4');
+  git(root, 'push', 'origin', 'job/4');
+  git(root, 'push', 'origin', 'main:refs/heads/job/7');
+  git(root, 'switch', '-c', 'job/5');
+  writeFileSync(join(root, '.agents', 'cards', '5.md'), cardFile('Card five', 'Done'));
+  git(root, 'commit', '-a', '-m', 'close card five');
+  git(root, 'switch', 'main');
+  const pulls = {
+    'job/4': [{ number: 12, headRefName: 'job/4', isCrossRepository: false }],
+    'job/7': [{ number: 99, headRefName: 'job/7', isCrossRepository: true }],
+  };
+
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake'], pulls);
+
+  assert.equal(run.status, 3, run.stderr);
+  const document = run.stdout.split('\n');
+  assert.equal(document[0], 'Board markdown .agents/cards — Backlog/Ready: 2 of 7 item(s)');
+  assert.deepEqual(document.filter((line) => line.startsWith('=== ')), [
+    '=== #1 [Ready] Card one ===',
+    '=== #2 [Backlog] Card two ===',
+    '=== #3 [In progress] Card three ===',
+    '=== #5 [Awaiting push] Card five ===',
+    '=== #7 [In progress] Card seven ===',
+  ]);
+  assert.deepEqual(document.filter((line) => line.startsWith('claim: ')), [
+    'claim: none',
+    'claim: none',
+    'claim: branch job/3 (local)',
+    'claim: branch job/5 (local)',
+    'claim: branch job/7 (origin)',
+  ]);
+  assert.ok(document.includes('open blockers: #1'), run.stdout);
+  assert.ok(document.includes('| Body of the card.'), run.stdout);
+  // The two pushed branches with no counted draft are the stalled claims; the Awaiting push card is not.
+  const stalled = (number, word) =>
+    `#${number} [In progress] Card ${word} — claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready`;
+  const stderr = run.stderr.split('\n');
+  assert.deepEqual(stderr.filter((line) => line.startsWith('#')), [stalled(3, 'three'), stalled(7, 'seven')]);
+  assert.ok(stderr.includes('⚠ BOARD DRIFT — cards out of sync with reality:'), run.stderr);
+  assert.ok(stderr.includes('board intake: details complete for 5 card(s).'), run.stderr);
+  // Only the two cards whose branch origin lists were asked, each bound to this repository.
+  assert.deepEqual(run.calls, ['job/4', 'job/7'].map((head) => [
+    'pr', 'list', '--repo', 'example-owner/example-repo', '--head', head, '--state', 'open', '--json', 'number,headRefName,isCrossRepository',
+  ]));
+
+  const all = runScript(toolkit.root, 'board.mjs', ['--all'], pulls);
+
+  assert.equal(all.status, 1, all.stderr);
+  const rows = all.stdout.split('\n');
+  assert.equal(rows[0], 'Board markdown .agents/cards — all columns: 7 of 7 item(s)');
+  // The listing puts the last pickable column first, then ascending card number; the two stalled-claim
+  // drift rows follow it on stdout in this mode.
+  assert.deepEqual(rows.filter((line) => line.startsWith('#')).slice(0, 7), [
+    '#1 [Ready] Card one',
+    '#2 [Backlog] Card two',
+    '#3 [In progress] Card three',
+    '#4 [In review] Card four',
+    '#5 [Awaiting push] Card five',
+    '#6 [Done] Card six',
+    '#7 [In progress] Card seven',
+  ]);
+});
+
+test('markdown board: a corrupt card fails the read with exit 2, naming the file and line', (t) => {
+  const toolkit = markdownInstall(t, {
+    1: cardFile('Card one', 'Ready'),
+    2: ['# Card two', '', 'Status: Ready', 'Colour: red', 'Kind: task', 'Workstream: Product', '', 'Body', ''].join('\n'),
+  });
+
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake']);
+
+  assert.equal(run.status, 2, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, 'board: failed to read the markdown cards — .agents/cards/2.md:4: unknown field "Colour"\n');
+  assert.deepEqual(run.calls, []);
+});
+
+test('markdown board: a linked .agents/cards is refused and the outside card is untouched', (t) => {
+  const toolkit = copyToolkit(MARKDOWN_TEST_CONFIG);
+  t.after(toolkit.cleanup);
+  const outside = mkdtempSync(join(tmpdir(), 'board-portability-outside-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const outsideCard = join(outside, '1.md');
+  writeFileSync(outsideCard, cardFile('Outside card', 'Ready'));
+  mkdirSync(join(toolkit.root, '.agents'));
+  // A junction needs no privilege on Windows and is a directory link everywhere else.
+  symlinkSync(outside, join(toolkit.root, '.agents', 'cards'), 'junction');
+  const before = readFileSync(outsideCard);
+
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake']);
+
+  assert.equal(run.status, 2, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^board: failed to read the markdown cards — /);
+  assert.ok(run.stderr.includes(`its parent ${join(toolkit.root, '.agents', 'cards')} is a symlink`), run.stderr);
+  assert.deepEqual(readFileSync(outsideCard), before);
+
+  const write = runScript(toolkit.root, 'board-move.mjs', ['1', 'Done']);
+
+  assert.equal(write.status, 1, write.stderr);
+  assert.equal(write.stdout, '');
+  assert.match(write.stderr, /^board-move: /);
+  assert.ok(write.stderr.includes(`its parent ${join(toolkit.root, '.agents', 'cards')} is a symlink`), write.stderr);
+  assert.deepEqual(readFileSync(outsideCard), before);
+});
+
+test('markdown board-move: a status the tracker cannot write or check, and a lane, are refused', (t) => {
+  const toolkit = markdownInstall(t, { 1: cardFile('Card one', 'Ready') });
+  const cardBefore = readFileSync(join(toolkit.root, '.agents', 'cards', '1.md'));
+
+  const unknown = runScript(toolkit.root, 'board-move.mjs', ['1', 'Parked']);
+
+  assert.equal(unknown.status, 1, unknown.stderr);
+  assert.equal(unknown.stdout, '');
+  assert.equal(
+    unknown.stderr,
+    'board-move: failed to move #1 → "Parked" (already completed: none) — unknown Status "Parked" — valid options: Backlog, Ready, Done, In progress, Awaiting push, In review\n',
+  );
+  const batch = runScript(toolkit.root, 'board-move.mjs', ['--batch', '1:Ready', '1:Parked']);
+  assert.equal(batch.status, 1, batch.stderr);
+  assert.equal(batch.stdout, '');
+  assert.ok(batch.stderr.startsWith('board-move: failed to move #1 → "Parked" (already completed: #1 → Ready) — '), batch.stderr);
+  assert.deepEqual(readFileSync(join(toolkit.root, '.agents', 'cards', '1.md')), cardBefore);
+
+  const noLane = runScript(toolkit.root, 'board-move.mjs', ['--lane', '1:Ours']);
+
+  assert.equal(noLane.status, 1, noLane.stderr);
+  assert.equal(noLane.stderr, 'board-move: --lane needs a parked lane, but scripts/lib/board-config.mjs sets PARKED_LANE = null\n');
+
+  const handLane = copyToolkit(MARKDOWN_TEST_CONFIG.replace('export const PARKED_LANE = null;', "export const PARKED_LANE = { field: 'Lane', option: 'Ours' };"));
+  t.after(handLane.cleanup);
+  const byHand = runScript(handLane.root, 'board-move.mjs', ['--lane', '1:Ours']);
+
+  assert.equal(byHand.status, 1, byHand.stderr);
+  assert.equal(byHand.stderr, 'board-move: the markdown tracker has no parked lane\n');
+});
+
+test('markdown board-move: only the real Status line is rewritten, whatever the title holds and the line endings are', (t) => {
+  const crlf = (text) => text.replaceAll('\n', '\r\n');
+  const titles = { 1: 'Card one\u2028Status: Ready', 2: 'Card two\rStatus: Ready' };
+  const toolkit = markdownInstall(t, { 1: cardFile(titles[1], 'Ready'), 2: crlf(cardFile(titles[2], 'Ready')) });
+  const worktree = jobWorktree(t, toolkit, 1);
+
+  const move = runScript(worktree, 'board-move.mjs', ['--batch', '1:Backlog', '2:Backlog']);
+
+  assert.equal(move.status, 0, move.stderr);
+  assert.equal(readFileSync(join(worktree, '.agents', 'cards', '1.md'), 'utf8'), cardFile(titles[1], 'Backlog'));
+  assert.equal(readFileSync(join(worktree, '.agents', 'cards', '2.md'), 'utf8'), crlf(cardFile(titles[2], 'Backlog')));
+});
+
+test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on read and on write and the file it points to is untouched', (t) => {
+  const toolkit = markdownInstall(t, { 2: cardFile('Card two', 'Ready') });
+  const worktree = jobWorktree(t, toolkit, 2);
+  const outside = mkdtempSync(join(tmpdir(), 'board-portability-outside-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const outsideCard = join(outside, '1.md');
+  writeFileSync(outsideCard, cardFile('Outside card', 'Ready'));
+  try {
+    symlinkSync(outsideCard, join(worktree, '.agents', 'cards', '1.md'), 'file');
+  } catch (error) {
+    if (error.code !== 'EPERM') throw error;
+    t.skip(`this account cannot create a file symlink (${error.code})`);
+    return;
+  }
+  const before = readFileSync(outsideCard);
+
+  const read = runScript(worktree, 'board.mjs', ['--intake']);
+
+  assert.equal(read.status, 2, read.stderr);
+  assert.equal(read.stdout, '');
+  assert.ok(read.stderr.includes('.agents/cards/1.md: only regular files named <N>.md'), read.stderr);
+  assert.ok(read.stderr.endsWith('found a symlink\n'), read.stderr);
+  assert.deepEqual(readFileSync(outsideCard), before);
+
+  const write = runScript(worktree, 'board-move.mjs', ['1', 'Backlog']);
+
+  assert.equal(write.status, 1, write.stderr);
+  assert.equal(write.stdout, '');
+  assert.ok(write.stderr.includes('.agents/cards/1.md: only regular files named <N>.md'), write.stderr);
+  assert.ok(write.stderr.endsWith('found a symlink\n'), write.stderr);
+  assert.deepEqual(readFileSync(outsideCard), before);
+});
+
+// The markdown lifecycle, every step through the spawned CLIs: a bare origin, an integration clone A
+// with a linked job worktree, and a second clone B. The expectations are written from the card
+// format and from the repository's own refs and files, never read back from the module.
+test('markdown lifecycle: file, claim, close, interrupted push, race, draft, integration checkout, merge', (t) => {
+  const N = 3;
+  const UNPUBLISHED = 4;
+  const NO_CARD = 9;
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'board-portability-lifecycle-')));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const origin = join(scratch, 'origin');
+  const cloneB = join(scratch, 'b');
+  const worktree = join(scratch, 'job-worktree');
+  const cardPath = (root, number) => join(root, '.agents', 'cards', `${number}.md`);
+  const view = (root, pulls) => {
+    const run = runScript(root, 'board.mjs', ['--all', '--json'], pulls);
+    assert.notEqual(run.stdout, '', run.stderr);
+    return Object.fromEntries(JSON.parse(run.stdout).map((entry) => [entry.number, [entry.status, entry.state]]));
+  };
+  const intake = (root, pulls) => {
+    const run = runScript(root, 'board.mjs', ['--intake'], pulls);
+    const out = run.stdout.split('\n');
+    return {
+      run,
+      sections: out.filter((line) => line.startsWith('=== ')),
+      claimed: out.find((line) => line.startsWith('Card details: ')),
+      claims: out.filter((line) => line.startsWith('claim: ')),
+    };
+  };
+  const claimCount = (count) => `Card details: 0 pickable card(s), then ${count} claimed card(s) with no closing pull request.`;
+  const draft = { 'job/3': [{ number: 21, headRefName: 'job/3', isCrossRepository: false }] };
+
+  // The integration clone A holds the toolkit and the filed card on main, published to the bare origin.
+  const toolkit = copyToolkit(MARKDOWN_TEST_CONFIG);
+  t.after(toolkit.cleanup);
+  const cloneA = toolkit.root;
+  mkdirSync(origin);
+  git(origin, 'init', '--bare', '-b', 'main');
+  git(cloneA, 'init', '-b', 'main');
+  git(cloneA, 'remote', 'add', 'origin', origin);
+
+  // 1. Filing is refused by the CLI; the card is a file, committed and published as Ready.
+  const filing = runScript(cloneA, 'board-add.mjs', [String(N), 'Ready']);
+  assert.equal(filing.status, 1, filing.stderr);
+  assert.equal(filing.stdout, '');
+  assert.equal(filing.stderr, 'board-add: the markdown tracker files a card by writing .agents/cards/<N>.md; see docs/MARKDOWN-CARDS.md\n');
+  mkdirSync(join(cloneA, '.agents', 'cards'), { recursive: true });
+  writeFileSync(cardPath(cloneA, N), cardFile('Card three', 'Ready'));
+  git(cloneA, 'add', '-A');
+  git(cloneA, 'commit', '-m', 'file card three');
+  git(cloneA, 'push', 'origin', 'main');
+  git(cloneA, 'worktree', 'add', '-b', `job/${N}`, worktree, 'main');
+  git(scratch, 'clone', origin, cloneB);
+
+  const verified = runScript(worktree, 'verify-issue-publish.mjs', [String(N)]);
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.equal(verified.stderr, '');
+  assert.equal(verified.stdout, [
+    'issue-publish: card files verified for #3.',
+    'issue-publish: Statuses and Workstreams verified for #3.',
+    'issue-publish: exactly one kind verified for #3.',
+    'issue-publish: #3 verified as a standalone card; it has 0 child cards (none supplied; pass them as arguments to verify an Epic).',
+    '',
+  ].join('\n'));
+  const missing = runScript(worktree, 'verify-issue-publish.mjs', [String(NO_CARD)]);
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.stderr, 'issue-publish: #9 has no card file .agents/cards/9.md in this checkout\n');
+
+  const claim = runScript(worktree, 'board-move.mjs', [String(N), 'In progress']);
+  assert.equal(claim.status, 0, claim.stderr);
+  assert.equal(claim.stdout, 'board-move: #3 at In progress — branch job/3\n');
+  const claimed = intake(worktree);
+  assert.deepEqual(claimed.sections, ['=== #3 [In progress] Card three ===']);
+  assert.equal(claimed.claimed, claimCount(1));
+
+  // 2. A card never published cannot be closed or read Done; a closing edit stays pending until the merge.
+  const unpublished = cardFile('Card four', 'Ready');
+  writeFileSync(cardPath(worktree, UNPUBLISHED), unpublished);
+  const refused = runScript(worktree, 'board-move.mjs', [String(UNPUBLISHED), 'Done']);
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.equal(refused.stdout, '');
+  assert.ok(refused.stderr.includes('#4 is not on origin/main; publish the card as Backlog or Ready through a merged change before closing it'), refused.stderr);
+  assert.equal(readFileSync(cardPath(worktree, UNPUBLISHED), 'utf8'), unpublished);
+  writeFileSync(cardPath(worktree, UNPUBLISHED), cardFile('Card four', 'Done'));
+  const handDone = runScript(worktree, 'board.mjs', ['--intake']);
+  assert.equal(handDone.status, 2, handDone.stderr);
+  assert.equal(handDone.stdout, '');
+  assert.ok(handDone.stderr.includes('.agents/cards/4.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change'), handDone.stderr);
+  rmSync(cardPath(worktree, UNPUBLISHED));
+
+  // A published card moves between Ready and Backlog by rewriting its Status line alone.
+  for (const status of ['Backlog', 'Ready']) {
+    const rewrite = runScript(worktree, 'board-move.mjs', [String(N), status]);
+    assert.equal(rewrite.status, 0, rewrite.stderr);
+    assert.equal(rewrite.stdout, `board-move: #3 → ${status}\n`);
+    assert.equal(readFileSync(cardPath(worktree, N), 'utf8'), cardFile('Card three', status));
+  }
+
+  const closing = runScript(worktree, 'board-move.mjs', [String(N), 'Done']);
+  assert.equal(closing.status, 0, closing.stderr);
+  assert.equal(closing.stdout, 'board-move: #3 → Done\n');
+  assert.equal(readFileSync(cardPath(worktree, N), 'utf8'), cardFile('Card three', 'Done'));
+  git(worktree, 'add', '-A');
+  git(worktree, 'commit', '-m', 'close card three');
+  assert.deepEqual(view(worktree), { 3: ['Awaiting push', 'OPEN'] });
+  const pending = intake(worktree);
+  assert.deepEqual(pending.sections, ['=== #3 [Awaiting push] Card three ===']);
+  assert.equal(pending.claimed, claimCount(1));
+  const waiting = runScript(worktree, 'board-move.mjs', [String(N), 'Awaiting push']);
+  assert.equal(waiting.status, 0, waiting.stderr);
+  assert.equal(waiting.stdout, 'board-move: #3 at Awaiting push — branch job/3\n');
+
+  // 3. The push is interrupted before its draft: the card stays a visible claim, and In review is refused.
+  git(worktree, 'push', 'origin', `job/${N}`);
+  const originTip = git(origin, 'rev-parse', `refs/heads/job/${N}`).trim();
+  const noDraft = runScript(worktree, 'board-move.mjs', [String(N), 'In review']);
+  assert.equal(noDraft.status, 1, noDraft.stderr);
+  assert.equal(noDraft.stdout, '');
+  assert.ok(noDraft.stderr.includes('no open pull request from job/3 in example-owner/example-repo'), noDraft.stderr);
+  const stillWaiting = intake(worktree);
+  assert.deepEqual(stillWaiting.sections, ['=== #3 [Awaiting push] Card three ===']);
+  assert.equal(stillWaiting.claimed, claimCount(1));
+  git(cloneB, 'fetch', 'origin');
+  const other = intake(cloneB);
+  assert.deepEqual(other.sections, ['=== #3 [In progress] Card three ===']);
+  assert.equal(other.claimed, claimCount(1));
+  assert.deepEqual(other.claims, ['claim: branch job/3 (origin)']);
+  assert.ok(other.run.stderr.includes('#3 [In progress] Card three — claimed in "In progress" but no closing pull request exists'), other.run.stderr);
+
+  // 4. The race: B's own job/3 does not hold origin's tip, so B's claim command refuses.
+  git(cloneB, 'switch', '-c', `job/${N}`, 'main');
+  const race = runScript(cloneB, 'board-move.mjs', [String(N), 'In progress']);
+  assert.equal(race.status, 1, race.stderr);
+  assert.equal(race.stdout, '');
+  assert.ok(race.stderr.includes(`origin's job/3 (${originTip}) is not in this branch`), race.stderr);
+  assert.equal(git(origin, 'rev-parse', `refs/heads/job/${N}`).trim(), originTip);
+
+  // 5. The draft opens: In review holds, and the card leaves the claims list on both clones.
+  const review = runScript(worktree, 'board-move.mjs', [String(N), 'In review'], draft);
+  assert.equal(review.status, 0, review.stderr);
+  assert.equal(review.stdout, 'board-move: #3 at In review — branch job/3\n');
+  for (const root of [worktree, cloneB]) {
+    assert.deepEqual(view(root, draft), { 3: ['In review', 'OPEN'] });
+    assert.equal(intake(root, draft).claimed, claimCount(0));
+  }
+
+  // 6. Nothing is written to the integration checkout, plainly or through an inherited GIT_DIR.
+  const integrationCard = readFileSync(cardPath(cloneA, N));
+  const worktreeGitDir = git(worktree, 'rev-parse', '--absolute-git-dir').trim();
+  for (const env of [{}, { GIT_DIR: worktreeGitDir }]) {
+    const integration = runScript(cloneA, 'board-move.mjs', [String(N), 'Done'], {}, env);
+    assert.equal(integration.status, 1, integration.stderr);
+    assert.equal(integration.stdout, '');
+    assert.ok(integration.stderr.includes('this is the integration checkout'), integration.stderr);
+    assert.deepEqual(readFileSync(cardPath(cloneA, N)), integrationCard);
+  }
+
+  // 7. The merge publishes the closing edit: Done and CLOSED everywhere, and closeout is clean.
+  git(cloneA, 'push', 'origin', `job/${N}:refs/heads/main`);
+  git(cloneA, 'fetch', 'origin');
+  git(cloneB, 'fetch', 'origin');
+  git(cloneA, 'merge', '--ff-only', 'origin/main');
+  for (const root of [worktree, cloneB]) assert.deepEqual(view(root, draft), { 3: ['Done', 'CLOSED'] });
+  const noop = runScript(cloneA, 'board-move.mjs', [String(N), 'Done']);
+  assert.equal(noop.status, 0, noop.stderr);
+  assert.equal(noop.stdout, 'board-move: #3 already at Done — no-op\n');
+  const closeout = runScript(cloneA, 'board.mjs', ['--closeout']);
+  assert.equal(closeout.status, 0, closeout.stdout + closeout.stderr);
+});
+
+// The Linear tracker, run as a spawned CLI: the fake transport stands in for the child that carries a
+// request to api.linear.app. It answers each query from FAKE_LINEAR, keyed by what the query asks for,
+// or fails with FAKE_LINEAR_FAIL as the real child does, on stderr with exit 1.
+const linearTransport = installFakeTransport('board-portability-linear-', `
+const { appendFileSync, readFileSync } = require('node:fs');
+const { query, variables } = JSON.parse(readFileSync(0, 'utf8'));
+if (process.env.FAKE_LINEAR_LOG) appendFileSync(process.env.FAKE_LINEAR_LOG, JSON.stringify({ query, variables }) + '\\n');
+if (process.env.FAKE_LINEAR_FAIL) {
+  process.stderr.write(process.env.FAKE_LINEAR_FAIL + '\\n');
+  process.exitCode = 1;
+} else {
+  const answers = JSON.parse(process.env.FAKE_LINEAR);
+  const answer = query.includes('teams(') ? answers.team
+    : query.includes('issueLabels(') ? answers.labels
+    : query.includes('issueCreate') ? answers.created
+    : query.includes('issueRelationCreate') ? answers.related
+    : query.includes('commentCreate') ? answers.commented
+    : query.includes('commentUpdate') ? answers.commentEdits[variables.id]
+    : query.includes('viewer') ? answers.viewer[variables.id]
+    : query.includes('comments(') ? answers.cards[variables.id]
+    : query.includes('children(') ? answers.childrenOf[variables.id]
+    : query.includes('inverseRelations(') && variables.id !== undefined ? answers.relations[variables.id]
+    : query.includes('filter: { parent:') ? answers.children
+    : query.includes('title: { eq: $title }') ? answers.sameTitle
+    : query.includes('IssueUpdateInput') ? answers.cardUpdates[variables.id]
+    : query.includes('issueUpdate') ? answers.updates[variables.id]
+    : variables.id !== undefined ? answers.moveReads[variables.id]
+    : answers.issues;
+  process.stdout.write(JSON.stringify(answer));
+}
+`, { variable: 'BOARD_TOOLKIT_LINEAR', file: 'linear.cjs' });
+after(() => linearTransport.cleanup());
+
+const linearState = (id, name, type) => ({ id, name, type });
+const linearNode = (identifier, title, state, { parent = null, relations = [], description = null } = {}) => ({
+  id: `id-${identifier}`,
+  identifier,
+  title,
+  state,
+  assignee: null,
+  parent: parent && { identifier: parent },
+  labels: { nodes: [{ name: 'task' }], pageInfo: { hasNextPage: false } },
+  inverseRelations: { nodes: relations.map((from) => ({ type: 'blocks', issue: { identifier: from, state: { type: 'unstarted' } } })), pageInfo: { hasNextPage: false } },
+  attachments: { nodes: [], pageInfo: { hasNextPage: false } },
+  description,
+});
+
+const LINEAR_BACKLOG = linearState('s-backlog', 'Backlog', 'backlog');
+const LINEAR_TODO = linearState('s-todo', 'Todo', 'unstarted');
+const LINEAR_NODES = [
+  linearNode('ENG-12', 'Card twelve', LINEAR_BACKLOG, { relations: ['ENG-2'], description: 'Do the twelve thing.' }),
+  linearNode('ENG-2', 'Card two', LINEAR_TODO),
+  linearNode('ENG-11', 'Card eleven', LINEAR_TODO, { parent: 'ENG-2' }),
+];
+const LINEAR_ANSWERS = {
+  team: {
+    teams: {
+      nodes: [{
+        id: 'team-eng',
+        key: 'ENG',
+        states: {
+          nodes: [LINEAR_BACKLOG, LINEAR_TODO, linearState('s-progress', 'In Progress', 'started'), linearState('s-awaiting', 'Awaiting Push', 'started'), linearState('s-review', 'In Review', 'started'), linearState('s-done', 'Done', 'completed')],
+          pageInfo: { hasNextPage: false },
+        },
+        gitAutomationStates: {
+          nodes: [
+            { event: 'draft', state: null, targetBranch: null },
+            { event: 'start', state: { id: 's-review' }, targetBranch: null },
+            { event: 'merge', state: { id: 's-done' }, targetBranch: null },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }],
+    },
+  },
+  issues: { issues: { nodes: LINEAR_NODES, pageInfo: { hasNextPage: false, endCursor: null } } },
+  // The single-issue read a move makes, and the answer to moving ENG-12 to Ready.
+  moveReads: Object.fromEntries(LINEAR_NODES.map((node) => [node.identifier, { issue: { id: node.id, identifier: node.identifier, team: { key: 'ENG' }, state: node.state } }])),
+  updates: { 'id-ENG-12': { issueUpdate: { issue: { id: 'id-ENG-12', state: LINEAR_TODO } } } },
+  children: { issues: { nodes: [{ identifier: 'ENG-11', parent: { identifier: 'ENG-2' }, state: { type: 'unstarted' } }], pageInfo: { hasNextPage: false, endCursor: null } } },
+  cards: Object.fromEntries(LINEAR_NODES.map((node) => [node.identifier, {
+    issue: {
+      identifier: node.identifier,
+      description: node.description,
+      parent: node.parent,
+      comments: { nodes: [{ id: `c-${node.identifier}`, createdAt: '2026-01-01T00:00:00.000Z', body: `Comment on ${node.identifier}` }], pageInfo: { hasNextPage: false, endCursor: null } },
+    },
+  }])),
+};
+
+function runLinearScript(root, script, args, env = {}) {
+  return spawnSync(process.execPath, [join(root, 'scripts', script), ...args], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    cwd: tmpdir(),
+    env: linearTransport.env({ FAKE_LINEAR: JSON.stringify(LINEAR_ANSWERS), ...env }),
+  });
+}
+
+const runLinearBoard = (root, args, env) => runLinearScript(root, 'board.mjs', args, env);
+
+test('linear board: the copied CLI prints the pick view and the intake document by identifier from the fake transport, and exits 2 naming the cause when the read fails', (t) => {
+  const root = adoptToolkit(t, LINEAR_TEST_CONFIG);
+
+  const pick = runLinearBoard(root, []);
+
+  assert.equal(pick.status, 0, pick.stderr);
+  // The Ready card nearest being worked leads, and ENG-2 sorts before ENG-11 as a number, not as text.
+  assert.deepEqual(pick.stdout.split('\n').filter((line) => line.startsWith('Board ') || line.startsWith('ENG-')), [
+    'Board linear team ENG — Backlog/Ready: 3 of 3 item(s)',
+    'ENG-2 [Ready] Card two',
+    'ENG-11 [Ready] Card eleven',
+    'ENG-12 [Backlog] Card twelve',
+  ]);
+
+  const intake = runLinearBoard(root, ['--intake']);
+
+  assert.equal(intake.status, 0, intake.stderr);
+  const document = intake.stdout.split('\n');
+  assert.equal(document[0], 'Board linear team ENG — Backlog/Ready: 3 of 3 item(s)');
+  assert.deepEqual(document.filter((line) => line.startsWith('=== ')), [
+    '=== ENG-2 [Ready] Card two ===',
+    '=== ENG-11 [Ready] Card eleven ===',
+    '=== ENG-12 [Backlog] Card twelve ===',
+  ]);
+  assert.ok(document.includes('parent: ENG-2'), intake.stdout);
+  assert.ok(document.includes('open blockers: ENG-2'), intake.stdout);
+  assert.ok(document.includes('| Do the twelve thing.'), intake.stdout);
+  assert.ok(document.includes('| Comment on ENG-12'), intake.stdout);
+  assert.ok(intake.stderr.includes('board intake: details complete for 3 card(s).'), intake.stderr);
+
+  const failed = runLinearBoard(root, ['--intake'], { FAKE_LINEAR_FAIL: 'Linear refused the API key (HTTP 401)' });
+
+  assert.equal(failed.status, 2, failed.stderr);
+  assert.equal(failed.stdout, '');
+  assert.ok(failed.stderr.includes('board: failed to read the Linear team ENG — Linear refused the API key (HTTP 401)'), failed.stderr);
+});
+
+test('linear board-move: the copied CLI moves a card by identifier, refuses a lane, and board-add refuses filing, naming linear-card.mjs', (t) => {
+  const root = adoptToolkit(t, LINEAR_TEST_CONFIG);
+  // Each request the fake transport receives, one JSON line apiece.
+  const log = join(root, 'linear-requests.log');
+  const writes = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).filter(({ query }) => query.includes('issueUpdate')) : []);
+  const move = (args) => runLinearScript(root, 'board-move.mjs', args, { FAKE_LINEAR_LOG: log });
+
+  const moved = move(['ENG-12', 'Ready']);
+
+  assert.equal(moved.status, 0, moved.stderr);
+  assert.equal(moved.stdout, 'board-move: ENG-12 → Ready\n');
+  assert.deepEqual(writes().map(({ variables }) => variables), [{ id: 'id-ENG-12', stateId: 's-todo' }]);
+
+  rmSync(log);
+  const noop = move(['ENG-2', 'Ready']);
+
+  assert.equal(noop.status, 0, noop.stderr);
+  assert.equal(noop.stdout, 'board-move: ENG-2 already at Ready — no-op\n');
+  assert.deepEqual(writes(), []);
+
+  const lane = move(['--lane', 'ENG-12:none']);
+
+  assert.equal(lane.status, 1, lane.stderr);
+  assert.equal(lane.stdout, '');
+  assert.equal(lane.stderr, 'board-move: the linear tracker has no parked lane\n');
+  assert.deepEqual(writes(), []);
+
+  const add = runLinearScript(root, 'board-add.mjs', ['ENG-12', 'Ready']);
+
+  assert.equal(add.status, 1, add.stderr);
+  assert.equal(add.stdout, '');
+  assert.equal(add.stderr, 'board-add: the linear tracker files a card with node scripts/linear-card.mjs create; see docs/LINEAR-CARDS.md\n');
+});
+
+// The rows a card command printed, one JSON array a line.
+const cardRows = (result) => result.stdout.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line));
+
+// resume's completeness rules ("3. Start the job"): the rows of a complete read, or null.
+function completeCardRead(result) {
+  if (result.status !== 0) return null;
+  const read = cardRows(result);
+  const count = (name) => read.filter(([key]) => key === name).length;
+  return count('state') === 1 && count('assignees') === 1 && read.at(-1)?.[0] === 'comments' ? read : null;
+}
+
+function completeBoardRead(result) {
+  if (result.status !== 0) return null;
+  const read = cardRows(result);
+  const boards = read.filter(([key]) => key === 'board');
+  return boards.length === 1 && !boards[0].slice(1).includes(null) && JSON.stringify(read.at(-1)) === '["boards",1]' ? read : null;
+}
+
+// resume's free check against the intake document, with the decision 6 identity on Linear: the board line's
+// tracker and team are the ones the document's `Board linear team <KEY>` header names, and its column the one
+// in the card's heading.
+function freeAgainst(document, id, cardRead, boardRead) {
+  const [, team] = /^Board linear team (\S+) — /.exec(document[0]);
+  const start = document.findIndex((line) => line.startsWith(`=== ${id} [`));
+  const section = document.slice(start, document.indexOf('', start));
+  const [, column] = /^=== \S+ \[([^\]]+)\] /.exec(section[0]);
+  const listed = section.find((line) => line.startsWith('assignees: ')).slice('assignees: '.length);
+  const documentAssignees = listed === 'none' ? [] : listed.split(', ').map((name) => name.slice(1));
+  const claimAt = section.findIndex((line) => line.startsWith('claim: '));
+  const documentClaim = section[claimAt].startsWith('claim: none')
+    ? null
+    : [Number(/^claim: comment (\d+) of /.exec(section[claimAt])[1]), section[claimAt + 1].slice('| '.length)];
+  const field = (name) => cardRead.find(([key]) => key === name)[1];
+  const claims = cardRead.filter(([key]) => key === 'claim');
+  const lastClaim = claims.length === 0 ? null : [claims.at(-1)[1], claims.at(-1)[5]];
+  const [, tracker, key, boardColumn] = boardRead.find(([name]) => name === 'board');
+  const assignees = field('assignees');
+  return field('state') === 'OPEN' && tracker === 'linear' && key === team && boardColumn === column
+    && assignees.length === documentAssignees.length && assignees.every((name) => documentAssignees.includes(name))
+    && JSON.stringify(lastClaim) === JSON.stringify(documentClaim);
+}
+
+test('linear lifecycle: file, claim through the card and board reads judged by the resume rules, In progress, Awaiting push, In review and Done by Linear, and the closeout check', (t) => {
+  const root = adoptToolkit(t, LINEAR_TEST_CONFIG);
+  const log = join(root, 'linear-requests.log');
+  const states = Object.fromEntries(LINEAR_ANSWERS.team.teams.nodes[0].states.nodes.map((state) => [state.name, state]));
+  const pageEnd = { hasNextPage: false, endCursor: null };
+  const BODY = '## Outcome\n\nThe thirteenth thing.\n';
+  const CLAIM = 'Claim: laptop, Claude Code, 2026-01-02T00:00Z';
+  const CLAIM_ID = '0000000c-0000-4000-8000-00000000000c';
+  const CLAIM_URL = 'https://linear.app/acme/issue/ENG-13#comment-0000000c';
+  const PENDING_ID = '0000000d-0000-4000-8000-00000000000d';
+  const PENDING_URL = 'https://linear.app/acme/issue/ENG-13#comment-0000000d';
+  const claimComment = { id: CLAIM_ID, body: CLAIM, createdAt: '2026-01-02T00:00:00.000Z', url: CLAIM_URL, user: { displayName: 'me' } };
+
+  // Linear's answers while ENG-13, filed as a child of ENG-2 and blocked by ENG-12, is in `state`. Its blocker is
+  // open while it is filed and done by the time it is picked. A move board-move writes is answered with `moveTo`;
+  // In review and Done are the states Linear's own rules set.
+  const answersAt = ({ state, blockerDone = true, moveTo = state, assignee = null, comments = [], attachments = [] }) => {
+    const blocker = blockerDone ? states.Done : states.Backlog;
+    const node = {
+      ...linearNode('ENG-13', 'Card thirteen', state, { parent: 'ENG-2', description: BODY }),
+      assignee: assignee && { displayName: assignee },
+      inverseRelations: { nodes: [{ type: 'blocks', issue: { identifier: 'ENG-12', state: { type: blocker.type } } }], pageInfo: { hasNextPage: false } },
+      attachments: { nodes: attachments.map((url) => ({ url, metadata: { linkKind: 'closes' } })), pageInfo: { hasNextPage: false } },
+    };
+    const nodes = LINEAR_NODES.map((other) => (other.identifier === 'ENG-12' ? { ...other, state: blocker } : other));
+    return {
+      ...LINEAR_ANSWERS,
+      issues: { issues: { nodes: [...nodes, node], pageInfo: pageEnd } },
+      moveReads: { ...LINEAR_ANSWERS.moveReads, 'ENG-13': { issue: { id: 'id-ENG-13', identifier: 'ENG-13', team: { key: 'ENG' }, state } } },
+      children: { issues: { nodes: [...LINEAR_ANSWERS.children.issues.nodes, { identifier: 'ENG-13', parent: { identifier: 'ENG-2' }, state: { type: state.type } }], pageInfo: pageEnd } },
+      cards: {
+        ...LINEAR_ANSWERS.cards,
+        'ENG-13': { issue: { identifier: 'ENG-13', description: BODY, parent: { identifier: 'ENG-2' }, state, assignee: node.assignee, comments: { nodes: comments, pageInfo: pageEnd } } },
+      },
+      relations: { 'ENG-13': { issue: { title: 'Card thirteen', description: BODY, parent: { identifier: 'ENG-2' }, inverseRelations: { nodes: [{ type: 'blocks', issue: { identifier: 'ENG-12' } }], pageInfo: pageEnd } } } },
+      childrenOf: { 'ENG-2': { issue: { children: { nodes: [{ identifier: 'ENG-11' }, { identifier: 'ENG-13' }], pageInfo: pageEnd } } } },
+      labels: { issueLabels: { nodes: [{ id: 'label-task', team: null }], pageInfo: pageEnd } },
+      sameTitle: { issues: { nodes: [], pageInfo: pageEnd } },
+      created: { issueCreate: { issue: { id: 'id-ENG-13', identifier: 'ENG-13' } } },
+      related: { issueRelationCreate: { issueRelation: { id: 'relation-ENG-12-ENG-13' } } },
+      viewer: {
+        'ENG-13': { viewer: { id: 'user-me', displayName: 'me' }, issue: { assignee: assignee && { id: 'user-me', displayName: assignee } } },
+        // edit-comment's read of the pending comment, which the viewer wrote on ENG-13.
+        [PENDING_ID]: { viewer: { id: 'user-me' }, comment: { user: { id: 'user-me' }, issue: { identifier: 'ENG-13', team: { key: 'ENG' } } } },
+      },
+      commented: { commentCreate: { comment: comments.length === 0 ? { id: CLAIM_ID, url: CLAIM_URL } : { id: PENDING_ID, url: PENDING_URL } } },
+      commentEdits: { [PENDING_ID]: { commentUpdate: { comment: { id: PENDING_ID, url: PENDING_URL } } } },
+      updates: { 'id-ENG-13': { issueUpdate: { issue: { id: 'id-ENG-13', state: moveTo } } } },
+      cardUpdates: { 'id-ENG-13': { issueUpdate: { issue: { assignee: { displayName: 'me' }, parent: { identifier: 'ENG-2' } } } } },
+    };
+  };
+  const step = (script, args, at) => runLinearScript(root, script, args, { FAKE_LINEAR: JSON.stringify(answersAt(at)), FAKE_LINEAR_LOG: log });
+  const card = (args, at) => {
+    const result = step('linear-card.mjs', args, at);
+    assert.equal(result.status, 0, result.stderr);
+    return cardRows(result);
+  };
+  const filed = { state: states.Backlog, blockerDone: false };
+  const ready = { state: states.Todo };
+  const claimed = { state: states['In Progress'], assignee: 'me', comments: [claimComment] };
+
+  // File: to-issues creates the card, checks its publication and reads its blockers back.
+  const bodyFile = join(root, 'body.md');
+  writeFileSync(bodyFile, BODY);
+  assert.deepEqual(card(['create', '--title', 'Card thirteen', '--body-file', bodyFile, '--status', 'Backlog', '--kind', 'task', '--parent', 'ENG-2', '--blocked-by', 'ENG-12'], filed), [
+    ['created', 'ENG-13'],
+    ['block', 'ENG-13', 'ENG-12'],
+  ]);
+  const published = step('verify-issue-publish.mjs', ['ENG-2', 'ENG-11', 'ENG-13'], filed);
+  assert.equal(published.status, 0, published.stderr);
+  assert.ok(published.stdout.endsWith('issue-publish: child set verified: ENG-2 has exactly the 2 supplied child issues.\n'), published.stdout);
+  assert.deepEqual(card(['text', 'ENG-13'], filed).slice(0, 4), [['title', 'Card thirteen'], ['body', BODY], ['parent', 'ENG-2'], ['blockedBy', ['ENG-12']]]);
+
+  // Claim, once the blocker is done and the card is in Ready: the intake document, then the card and board
+  // reads, complete and free against it.
+  const intake = step('board.mjs', ['--intake'], ready);
+  assert.equal(intake.status, 0, intake.stderr);
+  const document = intake.stdout.split('\n');
+  assert.equal(document[0], 'Board linear team ENG — Backlog/Ready: 3 of 4 item(s)');
+  const cardRead = completeCardRead(step('linear-card.mjs', ['view', 'ENG-13'], ready));
+  const boardRead = completeBoardRead(step('linear-card.mjs', ['view', 'ENG-13', '--board'], ready));
+  assert.deepEqual(cardRead, [['state', 'OPEN'], ['assignees', []], ['comments', 0]]);
+  assert.deepEqual(boardRead, [['board', 'linear', 'ENG', 'Ready'], ['boards', 1]]);
+  assert.equal(freeAgainst(document, 'ENG-13', cardRead, boardRead), true);
+
+  const moved = step('board-move.mjs', ['ENG-13', 'In progress'], { ...ready, moveTo: states['In Progress'] });
+  assert.equal(moved.stdout, 'board-move: ENG-13 → In progress\n', moved.stderr);
+  assert.deepEqual(card(['assign', 'ENG-13'], { state: states['In Progress'] }), [['assignees', ['me']]]);
+  assert.deepEqual(card(['comment', 'ENG-13', '--body', CLAIM], { state: states['In Progress'], assignee: 'me' }), [['comment', CLAIM_ID, CLAIM_URL]]);
+
+  // The read after the claim shows the recorded address as the first claim the read before did not show,
+  // and the same reads judged against the intake document are no longer free.
+  const heldRead = completeCardRead(step('linear-card.mjs', ['view', 'ENG-13'], claimed));
+  const heldBoard = completeBoardRead(step('linear-card.mjs', ['view', 'ENG-13', '--board'], claimed));
+  assert.deepEqual(heldRead, [['state', 'OPEN'], ['assignees', ['me']], ['claim', 1, 'me', claimComment.createdAt, CLAIM_URL, CLAIM, CLAIM_ID], ['comments', 1]]);
+  assert.deepEqual(heldBoard, [['board', 'linear', 'ENG', 'In progress'], ['boards', 1]]);
+  assert.equal(freeAgainst(document, 'ENG-13', heldRead, heldBoard), false);
+
+  const awaiting = step('board-move.mjs', ['ENG-13', 'Awaiting push'], { ...claimed, moveTo: states['Awaiting Push'] });
+  assert.equal(awaiting.stdout, 'board-move: ENG-13 → Awaiting push\n', awaiting.stderr);
+
+  // Linear's own pull request rules move the card to In review and Done; board-move only checks each.
+  const pull = ['https://github.com/example-owner/example-repo/pull/40'];
+  const review = step('board-move.mjs', ['ENG-13', 'In review'], { ...claimed, state: states['In Review'], attachments: pull });
+  assert.equal(review.stdout, 'board-move: ENG-13 at In review — moved by Linear\n', review.stderr);
+  const done = { ...claimed, state: states.Done, attachments: pull };
+  const merged = step('board-move.mjs', ['ENG-13', 'Done'], done);
+  assert.equal(merged.stdout, 'board-move: ENG-13 at Done — moved by Linear\n', merged.stderr);
+
+  // Closeout: the card's state, its pending comment and the edit that settles it, and the closeout check.
+  assert.deepEqual(card(['view', 'ENG-13'], done)[0], ['state', 'CLOSED']);
+  assert.deepEqual(card(['comment', 'ENG-13', '--body', 'Cleanup pending: job/ENG-13'], done), [['comment', PENDING_ID, PENDING_URL]]);
+  assert.deepEqual(card(['edit-comment', PENDING_ID, '--body', 'Cleanup done: job/ENG-13'], done), [['comment', PENDING_ID, PENDING_URL]]);
+  const closeout = step('board.mjs', ['--closeout'], done);
+  assert.equal(closeout.status, 0, closeout.stdout + closeout.stderr);
+
+  // Every write, in order: none for a read, a no-op or a move Linear made.
+  const writes = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    .filter(({ query }) => query.startsWith('mutation'))
+    .map(({ query, variables }) => [/^mutation\([^)]*\) \{ (\w+)\(/.exec(query)[1], variables]);
+  assert.deepEqual(writes, [
+    ['issueCreate', { input: { teamId: 'team-eng', title: 'Card thirteen', description: BODY, stateId: 's-backlog', labelIds: ['label-task'], parentId: 'id-ENG-2' } }],
+    ['issueRelationCreate', { issueId: 'id-ENG-12', relatedIssueId: 'id-ENG-13' }],
+    ['issueUpdate', { id: 'id-ENG-13', stateId: 's-progress' }],
+    ['issueUpdate', { id: 'id-ENG-13', input: { assigneeId: 'user-me' } }],
+    ['commentCreate', { issueId: 'id-ENG-13', body: CLAIM }],
+    ['issueUpdate', { id: 'id-ENG-13', stateId: 's-awaiting' }],
+    ['commentCreate', { issueId: 'id-ENG-13', body: 'Cleanup pending: job/ENG-13' }],
+    ['commentUpdate', { id: PENDING_ID, body: 'Cleanup done: job/ENG-13' }],
   ]);
 });

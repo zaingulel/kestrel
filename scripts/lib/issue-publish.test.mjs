@@ -5,15 +5,26 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
-import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, KIND_LABELS } from './board-config.mjs';
-import { fetchBoard } from './board.mjs';
-import { leanBoardPage, leanNode, issueItemReply } from './board-fixtures.mjs';
 import { installFakeGh } from './fake-gh.mjs';
-import {
+import { GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, KIND_LABELS } = await toolkit.load('lib/board-config.mjs');
+const { fetchBoard } = await toolkit.load('lib/board.mjs');
+const { leanBoardPage, leanNode, issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
+const {
   boardCardsByNumber,
+  parseIssuePublishArgs,
   verifyIssuePublication,
-} from './issue-publish.mjs';
-import { main } from '../verify-issue-publish.mjs';
+} = await toolkit.load('lib/issue-publish.mjs');
+const { main } = await toolkit.load('verify-issue-publish.mjs');
+
+const linearToolkit = copyToolkit(LINEAR_TEST_CONFIG);
+after(() => linearToolkit.cleanup());
+const { main: linearMain } = await linearToolkit.load('verify-issue-publish.mjs');
+const { verifyLinearPublication } = await linearToolkit.load('lib/issue-publish.mjs');
 
 const BOARD = [
   { content: { number: 475 }, status: 'Ready', routing: 'Platform', labels: [KIND_LABELS.epic, 'area:board'] },
@@ -57,6 +68,126 @@ function verify(args, { board = BOARD, graph = graphChildren([476, 477]) } = {})
   });
   return { report, calls, ghExec };
 }
+
+test('parseIssuePublishArgs under linear takes Linear issue IDs and refuses numbers and duplicates', () => {
+  assert.deepEqual(parseIssuePublishArgs(['ENG-1', 'ENG-10', 'FAB-2'], 'linear'), { subjectNumber: 'ENG-1', childNumbers: ['ENG-10', 'FAB-2'] });
+  assert.deepEqual(parseIssuePublishArgs(['ENG-7'], 'linear'), { subjectNumber: 'ENG-7', childNumbers: [] });
+  for (const args of [['7'], ['ENG-1', '8'], ['eng-1'], ['ENG-0'], ['ENG-1x']]) {
+    assert.throws(() => parseIssuePublishArgs(args, 'linear'), { message: /^expected a Linear issue ID such as ENG-123, received "/ }, JSON.stringify(args));
+  }
+  assert.throws(() => parseIssuePublishArgs(['ENG-1', 'ENG-2', 'ENG-1'], 'linear'), { message: 'duplicate issue ID ENG-1' });
+  assert.throws(() => parseIssuePublishArgs(['ENG-1']), { message: 'expected a positive issue number, received "ENG-1"' });
+});
+
+// The Linear-tracked copy runs the check through its CLI with a fake executor that answers as Linear would:
+// `issues` leaves archived issues out unless `includeArchived: true`, so the board read never holds an archived
+// card, and `Issue.archivedAt` is null for an issue that is not archived.
+const linearState = (id, name, type) => ({ id, name, type });
+const LINEAR_TODO = linearState('s-todo', 'Todo', 'unstarted');
+const LINEAR_TEAM = {
+  teams: {
+    nodes: [{
+      id: 'team-eng',
+      key: 'ENG',
+      states: {
+        nodes: [
+          linearState('s-backlog', 'Backlog', 'backlog'), LINEAR_TODO, linearState('s-progress', 'In Progress', 'started'),
+          linearState('s-awaiting', 'Awaiting Push', 'started'), linearState('s-review', 'In Review', 'started'),
+          linearState('s-done', 'Done', 'completed'), linearState('s-triage', 'Triage', 'triage'),
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+      gitAutomationStates: {
+        nodes: [
+          { event: 'draft', state: null, targetBranch: null },
+          { event: 'start', state: { id: 's-review' }, targetBranch: null },
+          { event: 'merge', state: { id: 's-done' }, targetBranch: null },
+        ],
+        pageInfo: { hasNextPage: false },
+      },
+    }],
+  },
+};
+const linearList = (nodes, pageInfo = { hasNextPage: false }) => ({ nodes, pageInfo });
+const linearIssue = (identifier, issueState, labels) => ({
+  id: `id-${identifier}`, identifier, title: identifier, state: issueState, assignee: null,
+  labels: linearList(labels.map((name) => ({ name }))), inverseRelations: linearList([]), attachments: linearList([]),
+});
+
+// The epic ENG-1 with the active child ENG-3 and the child ENG-2, closed and archived, which the board read lacks.
+function linearPublication({ active = [linearIssue('ENG-1', LINEAR_TODO, [KIND_LABELS.epic]), linearIssue('ENG-3', LINEAR_TODO, [KIND_LABELS.task, 'area:board'])], direct = {} } = {}) {
+  const children = [{ identifier: 'ENG-3', archived: false }, { identifier: 'ENG-2', archived: true }];
+  const directReads = {
+    'ENG-2': { identifier: 'ENG-2', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'completed' }, labels: linearList([{ name: KIND_LABELS.bug }]) },
+    ...direct,
+  };
+  const calls = [];
+  const exec = (query, variables) => {
+    calls.push({ query, variables });
+    if (query.includes('teams(')) return LINEAR_TEAM;
+    if (query.includes('filter: { parent:')) return { issues: linearList([]) };
+    if (query.includes('issues(')) return { issues: linearList(active) };
+    if (query.includes('children(')) {
+      assert.equal(variables.id, 'ENG-1');
+      const archivedIncluded = query.includes('includeArchived: true');
+      return { issue: { children: linearList(children.filter((child) => archivedIncluded || !child.archived).map(({ identifier }) => ({ identifier }))) } };
+    }
+    if (query.includes('archivedAt')) return { issue: directReads[variables.id] };
+    throw new Error(`unanticipated Linear request: ${query}`);
+  };
+  return { exec, calls };
+}
+
+function runLinearCheck(args, fixture) {
+  const stdout = [];
+  const stderr = [];
+  const status = linearMain(args, { linearExec: fixture.exec, output: { log: (line) => stdout.push(line), error: (line) => stderr.push(line) } });
+  return { status, stdout, stderr };
+}
+
+test('issue-publish under linear verifies board presence, Status, one kind label and the exact child set by identifier, archived children included, and verifies an archived closed card by a direct read that refuses a label list with another page', () => {
+  const epic = linearPublication();
+  const verified = runLinearCheck(['ENG-1', 'ENG-2', 'ENG-3'], epic);
+  assert.equal(verified.status, 0, verified.stderr.join('\n'));
+  assert.deepEqual(verified.stdout, [
+    'issue-publish: board presence verified for ENG-1, ENG-2, ENG-3.',
+    'issue-publish: Statuses verified for ENG-1, ENG-2, ENG-3.',
+    'issue-publish: exactly one kind label verified for ENG-1, ENG-2, ENG-3.',
+    'issue-publish: closed cards archived in Linear, verified by a direct read: ENG-2.',
+    'issue-publish: child set verified: ENG-1 has exactly the 2 supplied child issues.',
+  ]);
+  assert.deepEqual(epic.calls.filter(({ query }) => query.includes('archivedAt')).map(({ variables }) => variables), [{ id: 'ENG-2' }]);
+
+  const standalone = runLinearCheck(['ENG-1'], linearPublication());
+  assert.equal(standalone.status, 0, standalone.stderr.join('\n'));
+  assert.equal(standalone.stdout.at(-1), 'issue-publish: ENG-1 verified as a standalone issue; it has 2 child issues (none supplied; pass them as arguments to verify an Epic).');
+
+  const refusals = [
+    [['ENG-1', 'ENG-3'], {}, 'Epic ENG-1 child mismatch: supplied but not native children: none; native children but not supplied: ENG-2'],
+    [['ENG-1', 'ENG-2', 'ENG-3', 'ENG-4'], { active: [linearIssue('ENG-1', LINEAR_TODO, [KIND_LABELS.epic]), linearIssue('ENG-3', LINEAR_TODO, [KIND_LABELS.task]), linearIssue('ENG-4', LINEAR_TODO, [KIND_LABELS.task])] }, 'Epic ENG-1 child mismatch: supplied but not native children: ENG-4; native children but not supplied: none'],
+    [['ENG-1'], { active: [linearIssue('ENG-1', linearState('s-triage', 'Triage', 'triage'), [KIND_LABELS.epic])] }, 'requested issue ENG-1 has no non-empty Status'],
+    [['ENG-1'], { active: [linearIssue('ENG-1', LINEAR_TODO, [KIND_LABELS.epic, KIND_LABELS.task])] }, `requested issue ENG-1 needs exactly one kind label (${Object.values(KIND_LABELS).join(', ')}) but has 2 (labels found: ${KIND_LABELS.epic}, ${KIND_LABELS.task})`],
+    [['ENG-1'], { active: [], direct: { 'ENG-1': { identifier: 'ENG-1', team: { key: 'ENG' }, archivedAt: null, state: LINEAR_TODO, labels: linearList([{ name: KIND_LABELS.epic }]) } } }, 'requested issue ENG-1 is not in this board read, which lagged the card; re-run this check rather than adding the card again.'],
+    [['ENG-1', 'ENG-2', 'ENG-3'], { direct: { 'ENG-2': { identifier: 'ENG-2', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'started' }, labels: linearList([{ name: KIND_LABELS.bug }]) } } }, 'requested issue ENG-2 is archived while still open; unarchive it, never add a second.'],
+    [['ENG-1', 'ENG-2', 'ENG-3'], { direct: { 'ENG-2': { identifier: 'ENG-2', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'completed' }, labels: linearList([{ name: 'area:board' }], { hasNextPage: true }) } } }, 'ENG-2\'s labels run past one page, so its kind label cannot be checked'],
+  ];
+  for (const [args, fixture, message] of refusals) {
+    const refused = runLinearCheck(args, linearPublication(fixture));
+    assert.equal(refused.status, 1, message);
+    assert.deepEqual(refused.stdout, []);
+    assert.deepEqual(refused.stderr, [`issue-publish: ${message}`]);
+  }
+});
+
+test('issue-publish under linear refuses an archived card that Linear answers under another identifier', () => {
+  // Linear resolves a former identifier of an issue that moved team, so the direct read answers as ENG-30.
+  const moved = { identifier: 'ENG-30', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'completed' }, labels: linearList([{ name: KIND_LABELS.bug }]) };
+
+  assert.throws(
+    () => verifyLinearPublication(['ENG-1', 'ENG-2', 'ENG-3'], linearPublication({ direct: { 'ENG-2': moved } }).exec),
+    { message: 'requested issue ENG-2 is ENG-30 in Linear now, so this read is not the requested card; check the identifier rather than adding the card again.' },
+  );
+});
 
 test('issue-publish: reports exact board presence, Statuses, Workstreams, and the native child set on a valid publication', () => {
   const { report, calls, ghExec } = verify(['475', '476', '477']);
@@ -698,7 +829,7 @@ after(() => fakeGh.cleanup());
 test('issue-publish: CLI exits non-zero for invalid arguments without invoking GitHub', () => {
   const callsFile = fakeGh.newCallsFile();
   writeFileSync(callsFile, '');
-  const result = spawnSync(process.execPath, ['scripts/verify-issue-publish.mjs', '475', '0'], {
+  const result = spawnSync(process.execPath, [toolkit.script('verify-issue-publish.mjs'), '475', '0'], {
     cwd: process.cwd(),
     encoding: 'utf8',
     env: fakeGh.env({ FAKE_GH_CALLS: callsFile }),

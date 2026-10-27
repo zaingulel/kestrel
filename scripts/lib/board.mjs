@@ -26,6 +26,7 @@ import {
 } from './board-config.mjs';
 import { rejectUnknownArgs } from './cli-flags.mjs';
 import { GhOutputTooLargeError } from './gh-exec.mjs';
+import { cardRef, compareCardIds } from './tracker.mjs';
 
 // The one command's arguments, parsed before any gh call. A typo'd flag would otherwise
 // be discarded into the DEFAULT read — a metered board read answering a question the
@@ -745,18 +746,18 @@ function bodyLines(body) {
 // reason and nothing else, so a missing detail never reads as present or empty.
 function cardSection(card, detail) {
   const heading = [
-    oneLine(`=== #${card.number} [${card.status}] ${card.title} ===`),
+    oneLine(`=== ${cardRef(card.number)} [${card.status}] ${card.title} ===`),
     ...(ROUTING_FIELD ? [oneLine(`${ROUTING_FIELD}: ${card.routing || 'none'}`)] : []),
   ];
-  const blockers = `open blockers: ${card.openBlockers.length > 0 ? card.openBlockers.map((n) => `#${n}`).join(', ') : 'none'}`;
+  const blockers = `open blockers: ${card.openBlockers.length > 0 ? card.openBlockers.map(cardRef).join(', ') : 'none'}`;
   const assignees = oneLine(`assignees: ${card.assignees.length > 0 ? card.assignees.map((login) => `@${login}`).join(', ') : 'none'}`);
   if (detail.unavailable !== undefined) return [...heading, blockers, assignees, `details: UNAVAILABLE — ${detail.unavailable}`];
   return [
     ...heading,
-    `parent: ${detail.parent === null ? 'none' : `#${detail.parent}`}`,
+    `parent: ${detail.parent === null ? 'none' : cardRef(detail.parent)}`,
     blockers,
     assignees,
-    ...claimLines(detail),
+    ...(detail.claim === undefined ? claimLines(detail) : [`claim: ${detail.claim}`]),
     ...bodyLines(detail.body),
     ...commentLines(detail),
   ];
@@ -797,8 +798,8 @@ export function parkedLine(items, args) {
   const held = args.all || args.status ? [] : parked(items);
   if (held.length === 0) return null;
   const numbers = held.map((i) => i.content?.number ?? null)
-    .sort((a, b) => (a ?? Infinity) - (b ?? Infinity))
-    .map((n) => (n == null ? '#?' : `#${n}`));
+    .sort(compareCardIds)
+    .map((n) => (n == null ? '#?' : cardRef(n)));
   return `Parked (${PARKED_LANE.field}: ${PARKED_LANE.option}), not pickable: ${numbers.join(', ')}`;
 }
 
@@ -831,6 +832,8 @@ export function normalizeItem(i) {
     openBlockers: list(i.blockers).filter((b) => b.state === 'OPEN').map((b) => b.number),
     closingPullRequests: list(i.closingPullRequests),
     subIssues: i.content?.subIssuesSummary ?? null,
+    // A markdown card's claim is a job branch, not an assignee; only that tracker's items carry it.
+    ...(i.jobBranch ? { jobBranch: i.jobBranch } : {}),
   };
 }
 
@@ -841,14 +844,14 @@ const NEXT_UP_STATUS = PICKABLE_STATUSES[PICKABLE_STATUSES.length - 1];
 
 export function sortForDisplay(items) {
   const rank = (s) => (s === NEXT_UP_STATUS ? 0 : 1);
-  const num = (i) => (i.content?.number ?? Number.MAX_SAFE_INTEGER);
-  return [...items].sort((a, b) => rank(a.status) - rank(b.status) || num(a) - num(b));
+  const num = (i) => (i.content?.number ?? null);
+  return [...items].sort((a, b) => rank(a.status) - rank(b.status) || compareCardIds(num(a), num(b)));
 }
 
 // One item → the two-line routing view (`#N [Status] Title` + its labels).
 export function formatRow(i) {
   const n = normalizeItem(i);
-  const num = n.number == null ? '#?' : `#${n.number}`;
+  const num = n.number == null ? '#?' : cardRef(n.number);
   const labels = n.labels.length ? n.labels.join(', ') : '—';
   return `${oneLine(`${num} [${n.status}] ${n.title}`)}\n    ${oneLine(labels)}`;
 }

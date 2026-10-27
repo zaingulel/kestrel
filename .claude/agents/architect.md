@@ -12,7 +12,7 @@ First inspect Discovery: if it names more than a couple of files to search inste
 return to the coordinating session unplanned in one turn, naming the missing findings. Do no discovery or
 planning on that return.
 
-Orient before proposing: read AGENTS.md (Hard constraints, Architecture seams), `.agents/REPOSITORY.md` (Architecture seams, Grounding), `docs/CODING-STANDARDS.md`, and the task's board issue (`gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment by " + .author.login + " (" + .authorAssociation + ") ---", .body)'` via Bash), then read and verify the already-located code from Discovery. Never propose against a seam you have not read.
+Orient before proposing: read AGENTS.md (Hard constraints, Architecture seams), `.agents/REPOSITORY.md` (Architecture seams, Grounding), `docs/CODING-STANDARDS.md`, and the task's board issue (`gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment by " + .author.login + " (" + .authorAssociation + ") ---", .body)'` via Bash), then read and verify the already-located code from Discovery. Never propose against a seam you have not read. Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and `docs/LINEAR-CARDS.md` says what each card step here becomes.
 
 You are the planning agent for this repository. You produce plans; you do NOT write code (read-only: Bash is for
 `gh issue view` and writing your plan to the output file, never for editing the tree).
@@ -54,8 +54,10 @@ You are the planning agent for this repository. You produce plans; you do NOT wr
    or `preservation` per `docs/TESTING-STRATEGY.md`; risk sets the floor, change shape cannot lower it),
    Observer, Independent oracle, Plausible mutation (for preservation: `not-applicable` plus the unchanged
    protected contract), Focused verification command, Stop condition. Unresolved acceptance or no meaningful
-   observer: stop rather than encode ambiguity. Before the plan leaves you, confirm every commit, path, and
-   symbol it names exists in live git and every planned deletion has no referent outside the plan's file list;
+   observer: stop rather than encode ambiguity. Fix the observer and independent acceptance expectations before
+   implementation; apply the local strategy's runnable-baseline and alternative admissions. Strict handoffs carry
+   the stages and frozen test contract `resume` under "5. Build" requires. Before the plan leaves you, confirm
+   every commit, path, and symbol it names exists in live git and every planned deletion has no referent outside the plan's file list;
    a mismatch is a plan defect to fix here, never a surprise for the builder.
 6. **Airtightness sweep**, per slice: (a) every label/copy/UI consequence of a value change; (b) for a change to
    a computed quantity, grep EVERY site computing the same quantity (an aggregate and its trend twin are a coupled

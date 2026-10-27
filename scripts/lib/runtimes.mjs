@@ -10,10 +10,10 @@
 // The two answers are separate questions, and neither stands in for the other:
 // leftOutCause: why a tree with these settings must hold nothing at a path, or null where the tree installs it. The
 // path's runtime is not named or, failing that, it is the Greptile add-on's and the add-on is off or, failing that, it
-// is one of the documentation sweep's six files and the sweep is off.
+// is one of the documentation sweep's six files or the documentation standard and the sweep is off.
 // needNotResolveCause: why a reference to a path need not resolve in a tree with these settings, or null where it
-// must. The path's runtime is not named or, failing that, it is one of the sweep's six files or two manuals and the
-// sweep is off. Never the add-on.
+// must. The path's runtime is not named or, failing that, it is one of the sweep's six files, the documentation
+// standard or the two manuals and the sweep is off. Never the add-on.
 // Both take the settings readSettingsHeader returns, which reach it only as settings-file text; a tree with no file is
 // judged as the text NO_SETTINGS_FILE, so what an absent key means is written once (treeSettings).
 //
@@ -25,8 +25,9 @@
 // isGreptilePath: the Greptile add-on's files are everything under .agents/skills/greptile/, .claude/skills/greptile/
 // and .greptile/. A tree installs them only where its settings file holds `"greptile": true`.
 // The settings file's `docSweep` key turns the documentation sweep's files off with `false`; with no key it is on. The
-// sweep's shared files are the six the sweep-scope check owns (SWEEP_PATHS). A tree whose sweep is off leaves them out;
-// a reference to one of them, or to one of the two manuals the sweep runs by, need not resolve there (sweepOmits).
+// sweep's shared files are the six the sweep-scope check owns (SWEEP_PATHS) and the documentation standard
+// (SWEEP_STANDARD). A tree whose sweep is off leaves them out; a reference to one of them, or to one of the two manuals
+// the sweep runs by, need not resolve there (sweepOmits).
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -70,9 +71,11 @@ const SWEEP_PATHS = new Set([
   'scripts/sweep-scope-check.mjs',
 ]);
 const SWEEP_MANUALS = ['docs/DOC-SWEEP.md', 'docs/SWEEP-TRIAGE.md'];
+const SWEEP_STANDARD = 'docs/DOCUMENTATION-STANDARD.md';
+const SWEEP_SHARED = new Set([...SWEEP_PATHS, SWEEP_STANDARD]);
 
-/** Whether a tree whose sweep is `docSweep` leaves the path out: the sweep's six files and its two manuals, only where it is off. Exact string comparison. */
-export const sweepOmits = (docSweep, path) => !docSweep && (SWEEP_PATHS.has(path) || SWEEP_MANUALS.includes(path));
+/** Whether a tree whose sweep is `docSweep` leaves the path out: the sweep's six files, the documentation standard and its two manuals, only where it is off. Exact string comparison. */
+export const sweepOmits = (docSweep, path) => !docSweep && (SWEEP_SHARED.has(path) || SWEEP_MANUALS.includes(path));
 
 const runtimeCause = (path) => `the settings file names no ${runtimeOf(path)} runtime`;
 const SWEEP_OFF_CAUSE = 'the settings file turns the documentation sweep off';
@@ -81,7 +84,7 @@ const SWEEP_OFF_CAUSE = 'the settings file turns the documentation sweep off';
 export function leftOutCause({ runtimes, greptile, docSweep }, path) {
   if (!installs(runtimes, path)) return runtimeCause(path);
   if (!greptile && isGreptilePath(path)) return 'the settings file does not turn the Greptile add-on on';
-  return !docSweep && SWEEP_PATHS.has(path) ? SWEEP_OFF_CAUSE : null;
+  return !docSweep && SWEEP_SHARED.has(path) ? SWEEP_OFF_CAUSE : null;
 }
 
 /** Why a reference to the path need not resolve in a tree with these settings, or null where it must. */

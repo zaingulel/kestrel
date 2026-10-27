@@ -1,9 +1,14 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } from './board-config.mjs';
-import { addIssueToBoard } from './board-add.mjs';
-import { issueItemReply } from './board-fixtures.mjs';
-import { main as boardAddMain } from '../board-add.mjs';
+import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } = await toolkit.load('lib/board-config.mjs');
+const { addIssueToBoard } = await toolkit.load('lib/board-add.mjs');
+const { issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
+const { main: boardAddMain } = await toolkit.load('board-add.mjs');
 
 // Shapes mirror the real `gh api graphql` payloads for project 2. Expected ids are
 // independent literals, never re-derived from the production code.

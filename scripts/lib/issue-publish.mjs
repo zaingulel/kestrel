@@ -12,20 +12,34 @@
 // when a forgotten child is offset by a stray one. Given a single number, the count is reported
 // rather than asserted, because a lone number cannot distinguish a standalone issue from an Epic
 // whose children were forgotten: showing the count resolves that ambiguity visibly.
+// verifyMarkdownPublication applies the same checks to a markdown-tracked board's card files, and
+// verifyLinearPublication to a Linear team's issues.
 
-import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD } from './board-config.mjs';
+import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD, TERMINAL_STATUSES } from './board-config.mjs';
+import { allNodes, linearTeamKey, readLinearBoard } from './board-linear.mjs';
+import { CARDS_DIR } from './board-markdown.mjs';
 import { lookupIssueBoardItem } from './board-move.mjs';
 import { isContentUnresolved, normalizeItem, parseNode } from './board.mjs';
+import { isClosedState } from './linear-card.mjs';
+import { LINEAR_IDENTIFIER, cardRef, compareCardIds } from './tracker.mjs';
 
 const FIELDS_VERIFIED = ROUTING_FIELD ? `Statuses and ${ROUTING_FIELD}s` : 'Statuses';
 const KIND_LABEL_NAMES = Object.values(KIND_LABELS);
 
-export function parseIssuePublishArgs(args) {
+// On a Linear board an issue is its identifier, such as ENG-123, and "number" below carries that string.
+export function parseIssuePublishArgs(args, tracker = 'github') {
   if (!Array.isArray(args) || args.length < 1) {
     throw new Error('expected an issue number, optionally followed by child numbers');
   }
 
+  const linear = tracker === 'linear';
   const numbers = args.map((arg) => {
+    if (linear) {
+      if (typeof arg !== 'string' || !LINEAR_IDENTIFIER.test(arg)) {
+        throw new Error(`expected a Linear issue ID such as ENG-123, received ${JSON.stringify(arg)}`);
+      }
+      return arg;
+    }
     if (typeof arg !== 'string' || !/^[1-9]\d*$/.test(arg)) {
       throw new Error(`expected a positive issue number, received ${JSON.stringify(arg)}`);
     }
@@ -38,7 +52,7 @@ export function parseIssuePublishArgs(args) {
 
   const seen = new Set();
   for (const number of numbers) {
-    if (seen.has(number)) throw new Error(`duplicate issue number #${number}`);
+    if (seen.has(number)) throw new Error(`duplicate issue ${linear ? `ID ${number}` : `number #${number}`}`);
     seen.add(number);
   }
 
@@ -141,6 +155,26 @@ function archivedClosedCard(number, item) {
   return card;
 }
 
+// A requested card's fields: a routing value where the board has a routing field, a Status, and exactly one
+// kind label. Shared by every tracker's path; cardRef prints a GitHub number as #<number>.
+function checkCardFields(number, card) {
+  if (ROUTING_FIELD && (typeof card.routing !== 'string' || card.routing.trim() === '')) {
+    throw new Error(`requested issue ${cardRef(number)} has no non-empty ${ROUTING_FIELD}`);
+  }
+  if (typeof card.status !== 'string' || card.status.trim() === '') {
+    throw new Error(`requested issue ${cardRef(number)} has no non-empty Status`);
+  }
+  if (card.labels.some((label) => typeof label !== 'string')) {
+    throw new Error(`requested issue ${cardRef(number)} has a label whose name is not text`);
+  }
+  const kindLabelCount = card.labels.filter((label) => KIND_LABEL_NAMES.includes(label)).length;
+  if (kindLabelCount !== 1) {
+    throw new Error(
+      `requested issue ${cardRef(number)} needs exactly one kind label (${KIND_LABEL_NAMES.join(', ')}) but has ${kindLabelCount} (labels found: ${card.labels.length === 0 ? 'none' : card.labels.join(', ')})`,
+    );
+  }
+}
+
 // Returns the requested numbers that were verified from an archived board item.
 function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
   const archivedNumbers = [];
@@ -179,27 +213,35 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
           : `requested issue #${number} is absent from the board`);
       }
     }
-    if (ROUTING_FIELD && (typeof card.routing !== 'string' || card.routing.trim() === '')) {
-      throw new Error(`requested issue #${number} has no non-empty ${ROUTING_FIELD}`);
-    }
-    if (typeof card.status !== 'string' || card.status.trim() === '') {
-      throw new Error(`requested issue #${number} has no non-empty Status`);
-    }
-    if (card.labels.some((label) => typeof label !== 'string')) {
-      throw new Error(`requested issue #${number} has a label whose name is not text`);
-    }
-    const kindLabelCount = card.labels.filter((label) => KIND_LABEL_NAMES.includes(label)).length;
-    if (kindLabelCount !== 1) {
-      throw new Error(
-        `requested issue #${number} needs exactly one kind label (${KIND_LABEL_NAMES.join(', ')}) but has ${kindLabelCount} (labels found: ${card.labels.length === 0 ? 'none' : card.labels.join(', ')})`,
-      );
-    }
+    checkCardFields(number, card);
   }
   return archivedNumbers;
 }
 
 function formatNumbers(numbers) {
-  return numbers.length === 0 ? 'none' : numbers.map((number) => `#${number}`).join(', ');
+  return numbers.length === 0 ? 'none' : numbers.map(cardRef).join(', ');
+}
+
+// An Epic's children must be exactly the supplied set; either difference fails, each named.
+function assertChildSet(subjectNumber, childNumbers, nativeChildNumbers) {
+  const nativeSet = new Set(nativeChildNumbers);
+  const suppliedSet = new Set(childNumbers);
+  const notNative = childNumbers.filter((number) => !nativeSet.has(number)).sort(compareCardIds);
+  const notSupplied = nativeChildNumbers.filter((number) => !suppliedSet.has(number)).sort(compareCardIds);
+  if (notNative.length > 0 || notSupplied.length > 0) {
+    throw new Error(
+      `Epic ${cardRef(subjectNumber)} child mismatch: supplied but not native children: ${formatNumbers(notNative)}; native children but not supplied: ${formatNumbers(notSupplied)}`,
+    );
+  }
+}
+
+function boardVerifiedLines(requestedNumbers) {
+  const requested = formatNumbers(requestedNumbers);
+  return [
+    `issue-publish: board presence verified for ${requested}.`,
+    `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
+    `issue-publish: exactly one kind label verified for ${requested}.`,
+  ];
 }
 
 // The transport functions are injected so the verifier is deterministic in
@@ -218,11 +260,8 @@ export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
     'api', 'graphql', '-f', `query=${nativeChildrenQuery(subjectNumber)}`,
   ]);
   const { totalCount, numbers: nativeChildNumbers } = parseNativeChildren(response);
-  const requested = formatNumbers(requestedNumbers);
   const verified = [
-    `issue-publish: board presence verified for ${requested}.`,
-    `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
-    `issue-publish: exactly one kind label verified for ${requested}.`,
+    ...boardVerifiedLines(requestedNumbers),
     ...(archivedNumbers.length === 0 ? [] : [
       `issue-publish: closed cards archived on the board, verified from their own board items: ${formatNumbers(archivedNumbers)}.`,
     ]),
@@ -245,19 +284,100 @@ export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
     );
   }
 
-  const nativeSet = new Set(nativeChildNumbers);
-  const suppliedSet = new Set(childNumbers);
-  const ascending = (a, b) => a - b;
-  const notNative = childNumbers.filter((number) => !nativeSet.has(number)).sort(ascending);
-  const notSupplied = nativeChildNumbers.filter((number) => !suppliedSet.has(number)).sort(ascending);
-  if (notNative.length > 0 || notSupplied.length > 0) {
-    throw new Error(
-      `Epic #${subjectNumber} child mismatch: supplied but not native children: ${formatNumbers(notNative)}; native children but not supplied: ${formatNumbers(notSupplied)}`,
-    );
-  }
+  assertChildSet(subjectNumber, childNumbers, nativeChildNumbers);
 
   return [
     ...verified,
     `issue-publish: native child set verified: #${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`,
+  ];
+}
+
+// The pure card-file counterpart of verifyIssuePublication: the requested cards must each have a card file
+// in the checkout (the reader already refused any file that lacks a real Status, kind or routing value),
+// and an Epic's children, read from the Parent lines, must be exactly the supplied set.
+export function verifyMarkdownPublication(args, cards) {
+  const { subjectNumber, childNumbers } = parseIssuePublishArgs(args);
+  const requestedNumbers = [subjectNumber, ...childNumbers];
+  for (const number of requestedNumbers) {
+    if (!cards.has(number)) throw new Error(`#${number} has no card file ${CARDS_DIR}/${number}.md in this checkout`);
+  }
+  const requested = formatNumbers(requestedNumbers);
+  const verified = [
+    `issue-publish: card files verified for ${requested}.`,
+    `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
+    `issue-publish: exactly one kind verified for ${requested}.`,
+  ];
+  const children = [...cards.values()].filter((card) => card.parent === subjectNumber).map((card) => card.number);
+
+  if (childNumbers.length === 0) {
+    return [
+      ...verified,
+      `issue-publish: #${subjectNumber} verified as a standalone card; it has ${children.length} child cards (none supplied; pass them as arguments to verify an Epic).`,
+    ];
+  }
+
+  assertChildSet(subjectNumber, childNumbers, children);
+  return [
+    ...verified,
+    `issue-publish: child card set verified: #${subjectNumber} has exactly the ${childNumbers.length} supplied child cards.`,
+  ];
+}
+
+const LINEAR_CHILDREN_QUERY =
+  'query($id: String!, $after: String) { issue(id: $id) { children(first: 50, after: $after, includeArchived: true) { nodes { identifier } pageInfo { hasNextPage endCursor } } } }';
+
+const LINEAR_DIRECT_QUERY =
+  'query($id: String!) { issue(id: $id) { identifier team { key } archivedAt state { type } labels(first: 20) { nodes { name } pageInfo { hasNextPage } } } }';
+
+// A requested card the Linear board read lacks, read directly. The board read leaves archived issues out, so a
+// closed archived card of the team is judged as a Done card, an open archived one is the operator's to unarchive,
+// and an issue that is not archived is one the read lagged.
+function directLinearCard(id, exec) {
+  const { issue } = exec(LINEAR_DIRECT_QUERY, { id });
+  if (issue.identifier !== id) {
+    throw new Error(`requested issue ${id} is ${issue.identifier} in Linear now, so this read is not the requested card; check the identifier rather than adding the card again.`);
+  }
+  if (issue.labels.pageInfo.hasNextPage) throw new Error(`${id}'s labels run past one page, so its kind label cannot be checked`);
+  if (issue.team.key !== linearTeamKey()) {
+    throw new Error(`requested issue ${id} belongs to team ${issue.team.key}, not the configured team ${linearTeamKey()}, so it is not on this board`);
+  }
+  if (issue.archivedAt === null) throw new Error(`requested issue ${id} is not in this board read, which lagged the card; re-run this check rather than adding the card again.`);
+  if (!isClosedState(issue.state)) throw new Error(`requested issue ${id} is archived while still open; unarchive it, never add a second.`);
+  return { status: TERMINAL_STATUSES[0], routing: null, labels: issue.labels.nodes.map((label) => label.name) };
+}
+
+// The Linear counterpart of verifyIssuePublication over the executor `exec(query, variables) -> data`: every
+// requested card on the team's board with a Status and one kind label, and an Epic's children, archived ones
+// included, exactly the supplied set by identifier.
+export function verifyLinearPublication(args, exec) {
+  const { subjectNumber, childNumbers } = parseIssuePublishArgs(args, 'linear');
+  const requestedNumbers = [subjectNumber, ...childNumbers];
+  const cards = new Map(readLinearBoard(exec).items.map(normalizeItem).map((card) => [card.number, card]));
+  const archivedNumbers = [];
+  for (const id of requestedNumbers) {
+    let card = cards.get(id);
+    if (!card) {
+      card = directLinearCard(id, exec);
+      archivedNumbers.push(id);
+    }
+    checkCardFields(id, card);
+  }
+  const children = allNodes(exec, LINEAR_CHILDREN_QUERY, { id: subjectNumber }, (data) => data.issue.children).map((child) => child.identifier);
+  const verified = [
+    ...boardVerifiedLines(requestedNumbers),
+    ...(archivedNumbers.length === 0 ? [] : [
+      `issue-publish: closed cards archived in Linear, verified by a direct read: ${formatNumbers(archivedNumbers)}.`,
+    ]),
+  ];
+  if (childNumbers.length === 0) {
+    return [
+      ...verified,
+      `issue-publish: ${subjectNumber} verified as a standalone issue; it has ${children.length} child issues (none supplied; pass them as arguments to verify an Epic).`,
+    ];
+  }
+  assertChildSet(subjectNumber, childNumbers, children);
+  return [
+    ...verified,
+    `issue-publish: child set verified: ${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`,
   ];
 }

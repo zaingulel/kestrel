@@ -55,8 +55,8 @@ costliest Codex model, Astra, only through the
 builder at the model its seat file sets. Every subagent is one of the named seats above, dispatched by its seat
 name; a generic, default or unnamed role is never dispatched.
 
-A session waiting on a helper, or on a command that runs for minutes, uses its runtime's one long wait and never sleeps
-and checks in a loop; the `resume` skill gives each runtime's exact form under "5. Build".
+A session waiting on a helper or a command uses its runtime's native awaited operation as the `resume` Waiting rule
+under "5. Build" says and never substitutes manual sleep-and-status-check loops.
 
 ## Codex model routing
 
@@ -93,7 +93,7 @@ Every rule this file does not hold in full has one home:
 | What is true of this repository alone: its product, where its own facts live, its grounding authorities and its Conventions table | `.agents/REPOSITORY.md` |
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
 | Which builder seat a slice goes to; the machinery admissions, the friction route and how machinery leaves; what a plan carries for a change to how the interface looks, and who decides where the `frontend-design` skill and the design system disagree; and the steps of plan approval where a repository has turned it on: how the setting is read, how the plan is presented and revised, and what a resumed session does | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
-| Each runtime's exact form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
+| Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
 | The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, its same-family form in a cloud build, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
 | Every other rule of the external review, in a repository that has turned that add-on on: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
 | How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; how a repository turns the external review add-on on or off; how a repository turns the documentation sweep off and what that leaves out; and what a repository needs before it runs the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
@@ -101,6 +101,7 @@ Every rule this file does not hold in full has one home:
 | What to ask the owner and what agents decide when `to-spec` or an interview for it shapes a specification: read before asking anything | [`to-issues`](.agents/skills/to-issues/SKILL.md), "Specification entry" |
 | How many skills are vendored, from which upstream repositories and at which commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
 | The documentation sweep and its day-after triage, when the Conventions table marks them active and the settings file does not hold `"docSweep": false` | [docs/DOC-SWEEP.md](docs/DOC-SWEEP.md) and [docs/SWEEP-TRIAGE.md](docs/SWEEP-TRIAGE.md) |
+| Writing or reviewing new human-facing documentation, unless the settings file holds `"docSweep": false` | [docs/DOCUMENTATION-STANDARD.md](docs/DOCUMENTATION-STANDARD.md) |
 | The weekly retro, in a repository whose `docs/ISSUE-TRACKER.md` records it | [docs/WEEKLY-RETRO.md](docs/WEEKLY-RETRO.md) |
 
 ## Owner gates
@@ -214,7 +215,7 @@ effort or turn-limit line that the adopter's own committed seat settings file na
 repository overrides a seat and what an override may not do. An adopter that runs one runtime carries no file of the
 other, and a file found at one of the other's shared paths is refused like a changed byte. An adopter whose settings file does not turn the external review add-on on carries none of
 that add-on's files, on the same terms. An adopter whose settings file turns the documentation sweep off carries none of
-the `sweep-scope` check's files, on the same terms. A shared change reaches adopters when the owner publishes a release
+the sweep's shared files, on the same terms. A shared change reaches adopters when the owner publishes a release
 and each adopter applies it on an update card. An urgent fix is authored in the canonical repository, released, and
 applied on the owner's decision.
 

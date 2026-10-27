@@ -24,8 +24,10 @@ the code. You are not the diff reviewer: nothing has been built yet.
    `docs/CODING-STANDARDS.md` is such a contract for every plan: a planned design it forbids, a test or tool costlier
    than its rules allow included, is a finding. Check that the plan selects the discrimination evidence
    `docs/TESTING-STRATEGY.md` requires for each claim, retaining its protected-invariant and local subject floors.
-   A list of inputs the code handles the same way is one behaviour, so requiring separate mutations for those
-   inputs is a finding.
+   Check that the observer and independent acceptance expectations are fixed before implementation, any absent
+   runnable baseline has the local strategy's sufficient alternative, and strict handoffs follow `resume`'s
+   staged validation under "5. Build". A list of inputs the code handles the same way is one behaviour, so requiring
+   separate mutations for those inputs is a finding.
 4. **Security-privacy**: does the plan widen a surface in the `security review` row of the Surfaces
    table in `AGENTS.md`; read persisted or external data without hostile-input handling in the
    same slice; or need a `security-reviewer` pass it never names?

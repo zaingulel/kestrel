@@ -8,19 +8,24 @@
 // twin card that must NOT produce the row, so a rule widened into a false alarm fails
 // here too.
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import { GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+
+const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
+after(() => toolkit.cleanup());
+
+const {
   BOARD_OWNER,
   KIND_LABELS,
   PICKABLE_STATUSES,
   ROUTING_FIELD,
   TERMINAL_STATUSES,
   WAIT_STATUSES,
-} from './board-config.mjs';
-import { leanBoardPage, leanNode } from './board-fixtures.mjs';
-import { normalizeItem, parseBoardPage } from './board.mjs';
-import {
+} = await toolkit.load('lib/board-config.mjs');
+const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
+const { formatList, intakeDocument, normalizeItem, parseBoardPage } = await toolkit.load('lib/board.mjs');
+const {
   blockedClaimDrift,
   formatDrift,
   formatUnreadable,
@@ -35,7 +40,7 @@ import {
   unfieldedDrift,
   unreadableBlock,
   unreadableCards,
-} from './board-rules.mjs';
+} = await toolkit.load('lib/board-rules.mjs');
 
 function parsedLeanItems(nodes) {
   return parseBoardPage(leanBoardPage(nodes)).items;
@@ -164,6 +169,34 @@ test('rule 4 — active work with no assignee is an advisory; an assigned card a
   assert.equal(closeoutExit(drifted), 0);
 });
 
+// A Linear card as the Linear board read hands it to the rules: its identifier is its number.
+test('an unassigned Linear claim names linear-card.mjs assign as the remedy', async (t) => {
+  const linearToolkit = copyToolkit(LINEAR_TEST_CONFIG);
+  t.after(linearToolkit.cleanup);
+  const { scanBoard: scanLinearBoard } = await linearToolkit.load('lib/board-rules.mjs');
+  const linearItem = (identifier, assignees) => ({
+    id: `id-${identifier}`,
+    status: 'In progress',
+    title: `card ${identifier}`,
+    routing: null,
+    labels: [KIND_LABELS.task],
+    assignees,
+    blockers: [],
+    closingPullRequests: [{ number: 9 }],
+    content: { __typename: 'Issue', number: identifier, state: 'OPEN', subIssuesSummary: { total: 0, completed: 0 } },
+  });
+
+  const { drifted } = scanLinearBoard([linearItem('ENG-12', []), linearItem('ENG-13', ['alice'])]);
+
+  assert.deepEqual(drifted, [{
+    number: 'ENG-12',
+    status: 'In progress',
+    title: 'card ENG-12',
+    reason: 'claimed in "In progress" with no assignee — assign the session\'s owner (node scripts/linear-card.mjs assign ENG-12) or return it to Backlog or Ready',
+    advisory: true,
+  }]);
+});
+
 // GitHub closes an issue when its closing pull request merges into the default branch,
 // and every merge here goes to main, so an OPEN issue with a merged closing pull
 // request was reopened on purpose. Its live state decides: no column reports it as
@@ -223,6 +256,15 @@ test('rule 5 — a parked claim with no closing pull request is not stalled; the
     reason: 'claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready',
     advisory: true,
   });
+});
+
+test('unassignedClaimDrift skips a card whose claim is a branch', () => {
+  // A markdown card is claimed by its job branch and never has an assignee; the same item without a branch is reported.
+  const [raw] = parsedLeanItems([issueNode({ number: 1, status: 'In progress', assignees: [], closingPullRequests: [{ number: 9 }] })]);
+  const claimedByBranch = scanBoard([{ ...raw, jobBranch: { local: true, remote: false } }]);
+  assert.deepEqual(claimedByBranch.drifted, []);
+  assert.equal(normalizeItem({ ...raw, jobBranch: { local: false, remote: true } }).jobBranch.remote, true);
+  assert.deepEqual(scanBoard([raw]).drifted.map((d) => d.number), [1]);
 });
 
 test('a parked claim is still reported by rule 4 when unassigned and by rule 3 when an open blocker holds it', () => {
@@ -652,6 +694,56 @@ test('ANTI-REGRESSION: intakeCards keeps every numbered pickable card and every 
   assert.deepEqual(candidates.map((c) => c.number), [30, 10, 20]);
   assert.deepEqual(claims.map((c) => c.number), [40, 42, 44]);
   assert.equal(numberless, 1);
+});
+
+// A Linear card's number is its identifier string. The board read of the GitHub fixtures cannot carry one,
+// so these are raw items as the Linear reader will hand them over. Every expected line is written by hand
+// from the identifier forms and the team-then-number order.
+test('a Linear card prints by its identifier in rows, drift lines, blockers and the intake section, ordered by team then number', () => {
+  const raw = (number, status, extra = {}) => ({
+    content: { number, state: 'OPEN' }, status, title: `t ${number}`, routing: null, labels: [], assignees: [], blockers: [], closingPullRequests: [], ...extra,
+  });
+  const open = (number) => ({ number, state: 'OPEN' });
+  const items = [
+    raw('ENG-10', 'Ready'),
+    raw('ENG-9', 'Ready', { blockers: [open('FAB-3'), open('ENG-12'), { number: 'ENG-2', state: 'CLOSED' }] }),
+    raw('FAB-1', 'Ready'),
+    raw('ENG-2', 'Backlog'),
+    raw('ENG-30', 'In progress'),
+    raw('ENG-4', 'In progress', { blockers: [open('ENG-11'), open('ENG-5')] }),
+  ];
+
+  const row = (id, status) => `${id} [${status}] t ${id}\n    —`;
+  assert.equal(formatList(items.slice(0, 4)), [row('ENG-9', 'Ready'), row('ENG-10', 'Ready'), row('FAB-1', 'Ready'), row('ENG-2', 'Backlog')].join('\n'));
+
+  const blocked = blockedClaimDrift(normalizeItem(items[5]));
+  assert.equal(formatDrift(blocked), 'ENG-4 [In progress] t ENG-4 — in "In progress" but blocked by open ENG-11, ENG-5 — move it to Backlog until the blockers close');
+
+  const many = Array.from({ length: 26 }, (_, i) => ({ number: `ENG-${26 - i}`, status: 'Ready', routing: null, title: `t ${i}` }));
+  const [summary] = unfieldedDrift(many);
+  const listed = Array.from({ length: 20 }, (_, i) => `ENG-${i + 1}`).join(', ');
+  assert.ok(summary.reason.endsWith(`Affected cards: ${listed} (+6 more not listed)`), summary.reason);
+
+  const { candidates, claims, numberless } = intakeCards(items);
+  assert.deepEqual(candidates.map((c) => c.number), ['ENG-9', 'ENG-10', 'FAB-1', 'ENG-2']);
+  assert.deepEqual(claims.map((c) => c.number), ['ENG-4', 'ENG-30']);
+  assert.equal(numberless, 0);
+
+  const read = { body: 'b', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  const details = new Map([...candidates, ...claims].map(({ number }) => [number, { ...read, number, ...(number === 'ENG-9' ? { parent: 'ENG-1' } : {}) }]));
+  const document = intakeDocument({ listing: 'listing', candidates, claims, numberless, details });
+  assert.deepEqual(document.filter((line) => line.startsWith('===')), [
+    '=== ENG-9 [Ready] t ENG-9 ===', '=== ENG-10 [Ready] t ENG-10 ===', '=== FAB-1 [Ready] t FAB-1 ===',
+    '=== ENG-2 [Backlog] t ENG-2 ===', '=== ENG-4 [In progress] t ENG-4 ===', '=== ENG-30 [In progress] t ENG-30 ===',
+  ]);
+  assert.ok(document.includes('open blockers: FAB-3, ENG-12'));
+  assert.ok(document.includes('parent: ENG-1'));
+
+  details.set('ENG-10', { number: 'ENG-10', unavailable: 'gh: timed out' });
+  assert.equal(
+    intakeOutcome({ drifted: [], unreadable: [], details }).lines.at(-1),
+    'board intake: details UNAVAILABLE in whole or part for 1 of 6 card(s): ENG-10.',
+  );
 });
 
 // The exit codes are read off the intake exit table: 0 whole and clean, 3 drift with every

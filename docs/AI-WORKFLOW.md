@@ -206,7 +206,7 @@ fills that table with its own highest-consequence invariants and with its own an
 
 The workflow itself travels as the files `.agents/factory-manifest.json` lists. A repository carries every one of them
 except those its settings file leaves out: the files of a runtime it does not name, the external review add-on unless it
-turns that on, and the `sweep-scope` check where it turns the documentation sweep off. [`AGENTS.md`](../AGENTS.md) owns
+turns that on, and the sweep's shared files, the `sweep-scope` check and the documentation standard, where it turns the documentation sweep off. [`AGENTS.md`](../AGENTS.md) owns
 where they are authored and how they reach another repository, under "Shared workflow adoption";
 [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) owns how they are fingerprinted, pinned and kept, how
 a repository overrides a seat's settings, how its settings file leaves files out and what a repository needs before it
@@ -288,8 +288,9 @@ requests no external review and waits for none: its `sign-off` tier is the cross
 line is the six fields above.
 
 The add-on is chosen at install, after the owner connects the repository to Greptile in Greptile's own dashboard,
-which no install does; a release update keeps the setting and refuses a change, so changing it waits on a later release
-that supports it, as [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) says. Where it is on, the
+which no install does; a release update run with the changed setting uncommitted writes or removes the add-on's files
+later, and the owner connects or disconnects the repository in that dashboard by hand, as
+[the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) says. Where it is on, the
 install writes the add-on's files: the `greptile` skill, which owns how a review is requested and settled, and the
 reviewer's configuration, which keeps Greptile to the reviews a session requests. [The `resume` skill](../.agents/skills/resume/SKILL.md) owns when the review runs and how a
 session reads the setting, under "6. Verify and review".

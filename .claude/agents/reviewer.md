@@ -54,12 +54,18 @@ Lenses:
 6. **Evidence**: independently derive every coherent claim and its construction mode from the issue and final
    diff before reading the recorded selection. Check the delivered observer, independent oracle, discrimination
    proof, and focused evidence against `docs/TESTING-STRATEGY.md`, including its protected-invariant and local
-   subject floors and the branch work log's executed results. A test that accepts the claimed wrong behaviour,
+   subject floors and the branch work log's executed results. Audit meaningful pre-implementation failure and
+   staged coordinator validation under `resume`'s "5. Build", including honest chronology-gap recovery under
+   "6. Verify and review"; later mutations cannot repair history. Derive base behaviour from the job base, not
+   implementation earlier in the same job. A test that accepts the claimed wrong behaviour,
    or asserts wall-clock timing instead of the behaviour, is a finding.
 7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Read the
    issue (`gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment by " +
    .author.login + " (" + .authorAssociation + ") ---", .body)'`), then flag missing or partial acceptance
-   criteria, scope creep, and requirements implemented wrong. No issue: say so and skip this lens.
+   criteria, scope creep, and requirements implemented wrong. No issue: say so and skip this lens. Where
+   `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
+   what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear
+   team, and `docs/LINEAR-CARDS.md` says what each card step here becomes.
 
 **Output contract:** one parseable JSON object with `findings` ranked most-severe first (`file`, `line`,
 `verdict` `CONFIRMED`|`PLAUSIBLE`, `lens` `correctness`|`honesty`|`quality`|`canon`|`constraint`|`evidence`|`spec`,

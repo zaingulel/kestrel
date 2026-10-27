@@ -20,6 +20,7 @@ import {
   BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PARKED_LANE, ROUTING_FIELD,
 } from './board-config.mjs';
 import { BOARD_CARD_FIELDS } from './board.mjs';
+import { LINEAR_IDENTIFIER } from './tracker.mjs';
 
 // The value that clears a non-Status field (`--lane 12:none` releases a parked card).
 // Status is never cleared: an unfielded card is drift the board scan reports.
@@ -145,15 +146,18 @@ export function lookupIssueBoardItem(number, exec, { fieldName = null, card = fa
 // Parse `--batch <issue#>:<Status> [...]` (or `--lane <issue#>:<Lane>`) CLI args into
 // { issueNumber, statusName } pairs. Splits on the FIRST colon so a value is never
 // truncated. Fail-loud on a malformed pair — missing colon, non-numeric issue, or empty
-// value. `valueLabel` only names the value in those messages.
-export function parseBatchArgs(args, valueLabel = 'Status') {
+// value. `valueLabel` only names the value in those messages. On a Linear board the issue is its
+// identifier, such as ENG-123, and `issueNumber` carries that string.
+export function parseBatchArgs(args, valueLabel = 'Status', tracker = 'github') {
   return args.map((arg) => {
     const idx = arg.indexOf(':');
     if (idx <= 0) throw new Error(`malformed batch pair "${arg}" — expected "<issue#>:<${valueLabel}>"`);
-    const issueNumber = Number(arg.slice(0, idx));
+    const issue = arg.slice(0, idx);
     const statusName = arg.slice(idx + 1).trim();
-    if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
-      throw new Error(`malformed batch pair "${arg}" — issue number must be a positive integer`);
+    const linear = tracker === 'linear';
+    const issueNumber = linear ? issue : Number(issue);
+    if (!(linear ? LINEAR_IDENTIFIER.test(issue) : Number.isInteger(issueNumber) && issueNumber > 0)) {
+      throw new Error(`malformed batch pair "${arg}" — issue ${linear ? 'must be a Linear issue ID such as ENG-123' : 'number must be a positive integer'}`);
     }
     if (!statusName) throw new Error(`malformed batch pair "${arg}" — ${valueLabel.toLowerCase()} must not be empty`);
     return { issueNumber, statusName };

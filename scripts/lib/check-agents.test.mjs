@@ -73,6 +73,12 @@ test('a well-formed Codex agent is clean', () => {
   assert.deepEqual(checkCodexAgentSource('reviewer.toml', GOOD_TOML), []);
 });
 
+test('Codex Terra high is accepted and unknown models remain rejected', () => {
+  const terra = GOOD_TOML.replace('model = "gpt-6.1-sol"', 'model = "gpt-6.1-terra"').replace('model_reasoning_effort = "xhigh"', 'model_reasoning_effort = "high"');
+  assert.match(checkCodexAgentSource('reviewer.toml', terra.replace('gpt-6.1-terra', 'gpt-9')).join('\n'), /unknown model `gpt-9`/);
+  assert.deepEqual(checkCodexAgentSource('reviewer.toml', terra), []);
+});
+
 test('Codex format failures are named: unclosed block, missing field, bad name, sandbox, unrecognized line', () => {
   assert.match(checkCodexAgentSource('reviewer.toml', GOOD_TOML.replace(/\n"""\n$/, '\n')).join('\n'), /never closes/);
   assert.match(checkCodexAgentSource('reviewer.toml', GOOD_TOML.replace('model = "gpt-6.1-sol"\n', '')).join('\n'), /missing required TOML field `model`/);

@@ -38,7 +38,7 @@ MIT `LICENSE` are kept in `.agents/upstream/supabase-agent-skills/`. The accessi
 which upstream keeps at `design/CONNECTORS.md` to explain the plugin's placeholders for connected tools; it is an
 optional reference that is not carried, so the link resolves to nothing by intent: from each of the skill's three copies
 it would point outside the vendored folder, at a different place each time, and the accessibility audit follows no
-connector note. [`AGENTS.md`](../AGENTS.md) owns how each copy is refreshed, under "Runtime notes". The agent seats
+connector note. One library is vendored the same way, in `.agents/upstream/squirrelchat-smol-toml/`: the CommonJS build `dist/index.cjs` of the TOML parser smol-toml 1.9.1, taken from its npm package with its BSD-3-Clause `LICENSE`, which the closeout cleanup helper loads to read Codex's settings; it is replaced whole on an upgrade and never edited. [`AGENTS.md`](../AGENTS.md) owns how each copy is refreshed, under "Runtime notes". The agent seats
 under `.claude/agents/` and `.codex/agents/` are maintained counterparts, with shared charters kept aligned across the
 two runtime formats. The safety hooks exist as twins: `.claude/settings.json` wires the Claude set, `.codex/hooks.json`
 the Codex set.
@@ -78,28 +78,44 @@ A Claude Code cloud session runs on a machine the platform provides, from a fres
 the credential and attaches no network secret to a GitHub request, so the board scripts cannot run there and no token
 given to the environment changes that. The session runs in auto mode, never Accept edits, in an environment that holds
 no environment variables, no network secrets and no credential in its setup script. It acts on GitHub as the owner,
-through tools no hook observes, so the skill's list of permitted writes is the only bound on what it publishes. The board is kept in step from the owner's machine: a local session claims the
-card, waits for its draft with `node scripts/merge-watch.mjs --draft job/<issue>` and delivers it in the same session,
-and the cloud session plans, builds, reviews and opens the draft pull request under that claim. Every review runs in
-the cloud on Claude seats and the pull request body declares it, so no Codex review follows at delivery. A fix made
-after the review of the final tree gets a review scoped to it before the draft opens, and the body names the commit the
-last review covered. Discovery scopes its reads to origin and accepts only one open pull request owned by origin on
-that exact job branch. Local takeover resolves origin's identity anew and checks provenance in the same unscoped
-GitHub CLI context used by readiness and merge, then checks the reviewed commit against the fetched branch. This
-refuses a conflicting `GH_REPO` or default repository even when commit and body were copied from the intended draft.
-The admitted repository identifier and job branch stay fixed. Entering the worktree or later changing working
-directory, GitHub CLI environment, authentication, configuration or default repository requires validation again
-before the next readiness or merge action. A card whose local session parks or ends before the draft opens keeps its
-claim, and the next session offers its delivery first. Only a card that takes the pull request route is built this way:
-a change the direct route to `main` admits is built locally. Codex has no cloud build.
+through tools no hook observes, so the skill's list of permitted writes is the only bound on what it publishes. The
+board is kept in step from the owner's machine: a local session claims the card, starts the cloud session, watches it,
+waits for its draft with `node scripts/merge-watch.mjs --draft job/<issue>` and delivers it in the same session, and the
+cloud session plans, builds, reviews and opens the draft pull request under that claim. In the Claude desktop app the
+local session works the cloud session from the app's built-in browser on claude.ai/code, the one place a cloud session
+shows, since the app's own session tools do not list cloud sessions. It acts on claude.ai as the owner, through tools no
+hook observes, so the skill's Cloud build is the only bound on what it does there. Before each start a script the
+session runs in the page, rather than a browser click, opens the chosen environment's settings, takes only whether its
+environment variables and setup script are empty and whether its summaries read as an empty environment's do, never what
+they hold, and presses Cancel; nothing else acts on or reads the page while that dialog is open, and where it stays open
+the session asks the owner to close it. The session goes on without asking where the script shows the environment empty
+and the dialog closed, starts nothing where it finds environment variables, and otherwise asks the owner to confirm the
+environment, naming what it could not confirm, as for network secrets, a setup script that holds anything or an
+organization's environment; that answer covers a later start of its own only where the check reads the same. It starts
+the cloud session on `main` in that environment and in auto mode and reads all of them back before it sends the start
+message, looks at the session's page about every ten minutes and tells the owner what it shows, starts a fresh session
+when its own fetch shows `main` moved since it sent the start message, and archives each session once it has verified
+that the session stopped, then checks that the branch head is still the reviewed commit it verified. A session without
+that browser gives the owner the start message to send and has the owner confirm the stop. Every review runs in the
+cloud on Claude seats and the pull request body declares it, so no Codex review follows at delivery. A fix made after
+the review of the final tree gets a review scoped to it before the draft opens, and the body names the commit the last
+review covered. Discovery scopes its reads to origin and accepts only one open pull request owned by origin on that
+exact job branch. Local takeover resolves origin's identity anew and checks provenance in the same unscoped GitHub CLI
+context used by the pull request body edit, readiness and merge, then checks the reviewed commit against the fetched
+branch. This refuses a conflicting `GH_REPO` or default repository even when commit and body were copied from the
+intended draft. The admitted repository identifier and job branch stay fixed. Entering the worktree or later changing
+working directory, GitHub CLI environment, authentication, configuration or default repository requires validation again
+before the next body edit, readiness or merge action. A card whose local session parks or ends before the draft opens
+keeps its claim, and the next session offers its delivery first. Only a card that takes the pull request route is built
+this way: a change the direct route to `main` admits is built locally. Codex has no cloud build.
 
 | Step | Where it runs | The card's column after it |
 |---|---|---|
-| Pick, claim with the runtime `Claude Code cloud`, move, start message carrying the claim's address | A local session | In progress |
+| Pick, claim with the runtime `Claude Code cloud`, move, the environment's settings checked, the cloud session started on `main` in auto mode with a start message carrying the claim's address | A local session | In progress |
 | Plan, build, review, and a review scoped to any fix made after the review of the final tree | The cloud session | In progress |
 | Draft pull request whose body names the commit the last review covered | The cloud session | In progress |
-| Wait for the draft, then the owner's confirmation that the cloud session has stopped | The local session that gave the start message, or the next session, whose work-pick offers the card first | In progress |
-| Origin and provenance in the delivery context verified, reviewed commit checked against the branch, convergence checks again, visual work, push authorisation | The same local session | Awaiting push |
+| Watch the cloud session and wait for the draft, starting a fresh session where its own fetch shows `main` moved since the start message | The local session that started the cloud build, or the next session, whose work-pick offers the card first | In progress |
+| Origin and provenance in the delivery context verified, reviewed commit checked against the branch, each cloud session archived once verified stopped or its stop confirmed by the owner, convergence checks again, visual work, push authorisation | The same local session | Awaiting push |
 | Push, ready, auto-merge | The same local session | In review |
 | Merge | The board's own Item closed workflow | Done |
 
@@ -194,8 +210,9 @@ in the settings file stands apart from push authorisation too.
 - **A runtime has not trusted the hooks.** A hook file a runtime has not trusted does not run. A session checks
   for this when it starts and tells the owner; [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the
   check and the remedy under "Before intake".
-- **A file of a runtime the repository does not run is in the tree.** The contract test refuses it by path. Remove it;
-  the runtimes are chosen at install, and a release update refuses a change to them.
+- **A file of a runtime the repository does not run is in the tree.** The contract test refuses it by path. Remove it; to run that
+  runtime instead, then name it in the settings file and apply the change with a release update, as
+  [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md) says.
 - **A session asks about cross-family review though the owner already said yes.** The yes counts only as
   `"crossFamilyReview": true` in `.agents/factory-settings.json` on `main`. A yes given in an earlier job's conversation, a
   home setting or a settings file naming both runtimes without the key records nothing, so the session asks once per
@@ -214,15 +231,41 @@ in the settings file stands apart from push authorisation too.
   session moves the card.
 - **A cloud session cannot confirm its claim.** It builds nothing: the claim its start message names was released,
   withdrawn or followed by a later claim, the issue is closed, or the job branch already exists.
+- **The cloud session's clone is not the current `main`.** `main` moved between the clone and the session's own fetch,
+  so the cloud session stops before its admission and says so. Once its own fetch shows `main` moved since it sent the
+  start message, the local session archives it and starts a fresh one from the new `main`, unasked; the same stop
+  again goes to the owner.
+- **The new-session form shows an earlier branch, environment or mode.** The form can keep an earlier session's choices,
+  so the local session chooses `main`, the checked environment and auto mode wherever the form shows something else,
+  leaves a choice the form already shows, since clicking the repository it shows selected turns it off, turns off any
+  other repository the form keeps, and sends the start message only once the page shows all of them, with that
+  repository the only one selected.
+- **An action on claude.ai is refused or asks for permission.** Claude Code's safety checks review each click and typed
+  entry on an outside page. The session never works around a refusal: it asks the owner, and the owner's answer covers
+  that action. Claude Code reads a lasting allowance for its auto mode classifier only from a person's own user
+  settings or an organisation's managed settings, never from a repository.
+- **The owner's claude.ai sign-in stays in the built-in browser.** The browser keeps sign-ins between sessions, so a
+  later session there could read other cloud sessions without a prompt. Each look reads only the cloud session's status
+  and last message, and the owner can sign out there whenever no cloud build is running. Before an archive without
+  asking, the session also reads the list of active sessions on the account, taking only each row's repository and time
+  from the page as shown.
+- **The local session cannot read the cloud session's page or verify its stop.** It says so, the owner reports a stop,
+  and the owner confirms that every cloud session under the claim has stopped and is archived before delivery or
+  release, as with a session that has no built-in browser.
+- **The platform subscribes the cloud session to its pull request's activity.** The cloud session turns that off once
+  its finished draft is open, and the local session archives it before delivery only once its page shows Auto-fix off
+  for the draft; otherwise it asks the owner, since archiving alone is not documented to stop those events.
 - **A card goes back to `Ready` during a cloud build.** A released claim stops no cloud session that is already
-  building, so the session that moves the card first has the owner confirm the cloud session has stopped and is
-  archived. Only then does it release the claim, which keeps any later start message from building.
+  building, so the session that moves the card first has every cloud session under the claim stopped and archived: it
+  archives those it started once it has verified them, and has the owner confirm any other. Only then does it release
+  the claim, which keeps any later start message from building.
 - **A cloud build turns out to be a direct-route change.** It opens no draft and the owner is told, because the route
   carries only pull request changes; such a card is built locally.
 - **A cloud machine is reclaimed.** Only pushed work survives; the cloud session pushes its branch before it waits on
   the owner.
 - **The local session ends before the draft opens.** The card keeps its `Claude Code cloud` claim in its column, and the
-  next session's work-pick offers its delivery first: waiting for the draft, or delivering it once it is open.
+  next session's work-pick offers its delivery first: waiting for the draft, or delivering it once it is open. The next
+  session did not start the cloud session, so the owner confirms its stop.
 - **The wait for the draft stops without one.** Foreign or unknown provenance, multiple pull requests, unreadable
   replies or failed reads exit non-zero with the reason last; the session tells the owner and waits again on the
   owner's say.
@@ -239,7 +282,7 @@ in the settings file stands apart from push authorisation too.
 
 - `AGENTS.md` and `CLAUDE.md`: the contract, and the Claude Code import of it.
 - `.agents/skills/` and `.claude/skills/`: the skills and their copies.
-- `.agents/upstream/`: the vendored skills, one folder for each upstream repository.
+- `.agents/upstream/`: the vendored skills and TOML parser, one folder for each upstream repository.
 - `.claude/agents/` and `.codex/agents/`: the seat files.
 - `.claude/settings.json` and `.codex/hooks.json`: the hook registrations.
 - `.codex/hooks/verify-green.mjs` and `scripts/lib/posix-shell.mjs`: the Windows route to the shell hooks.

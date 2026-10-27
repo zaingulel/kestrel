@@ -12,6 +12,10 @@ one and how to call it. Plain single commands from the job worktree, read-only, 
 Section 4 carries the other review this skill reaches: the plan review the `resume` skill's Plan step names, run
 on the Codex `plan-reviewer` seat before any build.
 
+Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
+what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
+`docs/LINEAR-CARDS.md` says what each card step here becomes.
+
 ## 1. Dispatch the other family's seat as configured
 
 Dispatch the other family only where the `resume` skill, under "6. Verify and review", finds cross-family review
