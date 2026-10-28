@@ -13,7 +13,8 @@
 // is one of the documentation sweep's six files or the documentation standard and the sweep is off.
 // needNotResolveCause: why a reference to a path need not resolve in a tree with these settings, or null where it
 // must. The path's runtime is not named or, failing that, it is one of the sweep's six files, the documentation
-// standard or the two manuals and the sweep is off. Never the add-on.
+// standard or the two manuals and the sweep is off or, failing that, it is the direction page, whatever the settings.
+// Never the add-on.
 // Both take the settings readSettingsHeader returns, which reach it only as settings-file text; a tree with no file is
 // judged as the text NO_SETTINGS_FILE, so what an absent key means is written once (treeSettings).
 //
@@ -79,6 +80,8 @@ export const sweepOmits = (docSweep, path) => !docSweep && (SWEEP_SHARED.has(pat
 
 const runtimeCause = (path) => `the settings file names no ${runtimeOf(path)} runtime`;
 const SWEEP_OFF_CAUSE = 'the settings file turns the documentation sweep off';
+const DIRECTION_PAGE = 'docs/PRODUCT-DIRECTION.md';
+const DIRECTION_PAGE_CAUSE = "the direction page is the owner's own and a repository may hold none";
 
 /** Why a tree with these settings must hold nothing at the path, or null where it installs the path. */
 export function leftOutCause({ runtimes, greptile, docSweep }, path) {
@@ -90,7 +93,8 @@ export function leftOutCause({ runtimes, greptile, docSweep }, path) {
 /** Why a reference to the path need not resolve in a tree with these settings, or null where it must. */
 export function needNotResolveCause({ runtimes, docSweep }, path) {
   if (!installs(runtimes, path)) return runtimeCause(path);
-  return sweepOmits(docSweep, path) ? SWEEP_OFF_CAUSE : null;
+  if (sweepOmits(docSweep, path)) return SWEEP_OFF_CAUSE;
+  return path === DIRECTION_PAGE ? DIRECTION_PAGE_CAUSE : null;
 }
 
 const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
@@ -145,7 +149,7 @@ export function checkContained(root, path) {
 // What a tree with no settings file is judged as.
 const NO_SETTINGS_FILE = '{"version":1,"seats":{}}';
 
-/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview, a valid `runtimes` value, a `planApproval`, a `greptile` and a `docSweep` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
+/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager, a valid `runtimes` value, a `planApproval`, a `greptile`, a `docSweep` and a `productManager` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
 export function readSettingsHeader(text, label) {
   let settings;
   try {
@@ -156,11 +160,12 @@ export function readSettingsHeader(text, label) {
   if (!isRecord(settings)) throw refusal(label, 'file', 'must hold one JSON object', settings);
   if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the shared workflow (only 1)', settings.version, true);
   for (const key of Object.keys(settings)) {
-    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview', key, true);
+    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview' && key !== 'productManager') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager', key, true);
   }
   if (settings.planApproval !== undefined && typeof settings.planApproval !== 'boolean') throw refusal(label, 'planApproval', 'must be true or false', settings.planApproval);
   if (settings.greptile !== undefined && typeof settings.greptile !== 'boolean') throw refusal(label, 'greptile', 'must be true or false', settings.greptile);
   if (settings.docSweep !== undefined && typeof settings.docSweep !== 'boolean') throw refusal(label, 'docSweep', 'must be true or false', settings.docSweep);
+  if (settings.productManager !== undefined && typeof settings.productManager !== 'boolean') throw refusal(label, 'productManager', 'must be true or false', settings.productManager);
   if (settings.crossFamilyReview !== undefined && settings.crossFamilyReview !== true) throw refusal(label, 'crossFamilyReview', 'must be true, or left out to record no authorization', settings.crossFamilyReview);
   const runtimes = readRuntimes(settings.runtimes, label);
   if (settings.crossFamilyReview === true && runtimes.length < RUNTIMES.length) throw refusal(label, 'crossFamilyReview', 'is refused where runtimes names one runtime', settings.crossFamilyReview);

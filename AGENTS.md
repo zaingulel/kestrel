@@ -10,10 +10,9 @@ state. This file holds in full only the rules every session needs; every other r
 
 ## Runtime notes
 
-A repository runs Claude Code, Codex or both. Its settings file names which under `runtimes`, as the `shared-files` skill
-says, and a repository that names none runs both. Only the named runtimes' seats, hooks, skill copies and contract file
-are installed, so a sentence here, in a skill or in a charter about a runtime the repository does not run applies to
-nothing in it.
+A repository runs Claude Code, Codex or both. Its settings file names which under `runtimes`, and a repository that
+names none runs both. Only the named runtimes' seats, hooks, skill copies and contract file are installed, so a
+sentence here, in a skill or in a charter about a runtime the repository does not run applies to nothing in it.
 
 Claude Code reads this file through `CLAUDE.md`, which adds its own notes; Codex reads it directly and prompts before a
 browser run where the repository supplies `.codex/rules/playwright.rules`. Skills are shared in `.agents/skills/`, and
@@ -29,21 +28,7 @@ local `main` as [Update local main](.agents/skills/closeout/SKILL.md#update-loca
 Each job gets one worktree and all of the job's work happens inside it, never a worktree inside another job worktree;
 the `resume` skill says where it lives and how the session enters it on each runtime.
 
-When using the bundled PostgreSQL examples, apply these caveats. In `security-rls-performance`, the policy's calling role
-needs `EXECUTE` on `private.is_team_member(bigint)` after the revocations: grant it only to intended policy callers,
-such as `authenticated` when that is the policy's intended role. Keep the non-exposed schema, identity check and
-restricted search path; retain revocations for `PUBLIC` and roles that do not need the helper, including unrelated
-anonymous or service roles. [`SECURITY DEFINER`](https://www.postgresql.org/docs/16/sql-createfunction.html) changes
-execution privileges, not permission to call. In `schema-constraints`, scope both the check-constraint and foreign-key
-existence queries by `conname` and `conrelid`: schema-qualify the target table in `ALTER TABLE` and resolve that same
-name through `regclass`. [Constraint names alone are not unique](https://www.postgresql.org/docs/17/catalog-pg-constraint.html).
-
-In `conn-prepared-statements`, `DEALLOCATE` does not keep separately executed statements on one server connection.
-Use session pooling or a direct connection for the SQL `PREPARE`/`EXECUTE`/`DEALLOCATE` sequence; do not treat it as a
-transaction-pooling fix. [PgBouncer does not support this SQL sequence in transaction pooling](https://www.pgbouncer.org/features.html).
-In `lock-deadlock-prevention`, retain ordered `SELECT ... ORDER BY id FOR UPDATE` inside the transaction before the
-single `UPDATE`; one statement does not atomically acquire every row lock. All competing transactions must follow the
-[same lock order](https://www.postgresql.org/docs/17/explicit-locking.html#LOCKING-DEADLOCKS).
+Before applying any bundled PostgreSQL example, read [docs/POSTGRES-EXAMPLES.md](docs/POSTGRES-EXAMPLES.md) whole and apply its caveats.
 
 The session that talks to the owner coordinates: it plans the cards that need no architect, hands every edit to a
 builder seat, settles reviews, and delivers; it never builds. Residual judgment that would make a handoff
@@ -109,19 +94,20 @@ Every rule this file does not hold in full has one home:
 1. **Work-pick** is the owner's pick of one row of the `resume` candidate table, which approves that card's
    outcome and acceptance criteria as written and starts the job, unless the `resume` skill's checks under
    "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked.
-   Owner-directed surfaces are the Surfaces table's `owner-directed` row and need owner direction plus
-   canon or domain validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named
-   anti-regression test.
+   With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume`
+   says under "2. Work-pick"; no run picks a card needing owner direction or sign-off. Owner-directed
+   surfaces are the Surfaces table's `owner-directed` row and need owner direction plus canon or domain
+   validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named anti-regression
+   test.
 2. **Push authorisation** is one yes to the filled pull request body and its screenshot, and any owner
    instruction to push is that yes. It covers the whole deliver sequence in the `resume` skill, push to
    auto-squash merge, with no fresh yes inside it. `closeout` follows the merge unasked.
-3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`; a
-   repository with no settings file, no such key or `false` goes from plan to build with no owner step. Where it
-   is on, it is one yes to the completed plan as presented, given before anything is built, and any owner
-   instruction to build that plan is that yes; silence and elapsed time never are. A change the owner asks for
-   is made and the plan presented again before that yes. The plan is presented after any plan review the card
-   requires, which stays the agents' own review and no part of this gate, and both gates above keep their
-   meaning. The `resume` skill owns the steps under "4. Plan".
+3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`; no file,
+   no key or `false` sends a plan to build with no owner step. Where it is on, it is one yes to the completed plan as
+   presented, given before anything is built, and any owner instruction to build that plan is that yes; silence and
+   elapsed time never are. A change the owner asks for is made and the plan presented again before that yes. The plan is
+   presented after any plan review the card requires, which stays the agents' own review and no part of this gate, and
+   both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
 
 **Routine board updates.** For an owner-approved job, the coordinating session has the owner's standing
 authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
@@ -212,12 +198,11 @@ and leaves an identical one as it is, or by an update to a named release of the 
 verified manifest; the `shared-files` skill says how shared files are fingerprinted, pinned at a release and kept as real
 files. An adopter's copy of a shared file differs from the canonical bytes in one way only: the value of a seat's model,
 effort or turn-limit line that the adopter's own committed seat settings file names; the `shared-files` skill says how a
-repository overrides a seat and what an override may not do. An adopter that runs one runtime carries no file of the
-other, and a file found at one of the other's shared paths is refused like a changed byte. An adopter whose settings file does not turn the external review add-on on carries none of
-that add-on's files, on the same terms. An adopter whose settings file turns the documentation sweep off carries none of
-the sweep's shared files, on the same terms. A shared change reaches adopters when the owner publishes a release
-and each adopter applies it on an update card. An urgent fix is authored in the canonical repository, released, and
-applied on the owner's decision.
+repository overrides a seat and what an override may not do. An adopter carries no file of a runtime its settings file
+does not name, of the external review add-on unless that file turns it on, or of the documentation sweep's shared files
+where that file turns it off, and a file at one of those paths is refused like a changed byte. A shared change reaches
+adopters when the owner publishes a release and each adopter applies it on an update card. An urgent fix is authored
+in the canonical repository, released, and applied on the owner's decision.
 
 Whoever can use the administrator bypass of the required check on `main` can put any commit on `main` when the local
 hook is skipped: the holders of that role and every write deploy key, which GitHub admits by the same bypass, so the

@@ -25,8 +25,6 @@ export function docLintVerdict({ files, read, settings, resolutionFiles = files,
   const commandFiles = files.filter((rel) => classifyDocLintPath(rel, vendoredNames).illegalInvocations);
   const skillMetaFiles = files.filter((rel) => classifyDocLintPath(rel, vendoredNames).skillMeta);
 
-  // A missing target is accepted only when it belongs to a runtime the settings file leaves out,
-  // or to the sweep when it leaves the sweep out.
   const exists = (p) => pathExists(trackedSet, p) || needNotResolveCause(settings, p) !== null;
 
   // Refuse a repo-wide scan that would pass over no content.

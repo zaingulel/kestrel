@@ -7,8 +7,8 @@
 // repository from that branch. Every read is whole or fails with its cause: a corrupt card, an
 // unreadable origin, an origin/main copy, a pull-request list or a linked cards folder stops the
 // read, so a hostile or broken input never reads as a quiet board. docs/MARKDOWN-CARDS.md owns the
-// card format and what each card step becomes. A move rewrites only a card's Status line, and only in
-// a job worktree: the integration checkout is never written to.
+// card format and what each card step becomes. A move rewrites only a card's Status line, and never in
+// the integration checkout.
 //
 // Git is reached through an injected runner `run(args, input) -> stdout`, which throws an Error
 // carrying git's complaint, and `gh` through the executor the caller hands in, so the whole file

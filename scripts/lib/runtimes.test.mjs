@@ -108,7 +108,7 @@ test('the settings file names the runtimes present: no file means both, and an u
     ['[]', 'file: must hold one JSON object; found []'],
     ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "extra"; ${RECOVERY}`],
   ];
   for (const [text, message] of refused) {
     assert.throws(() => presentRuntimes(tree(t, text)), { message: `.agents/factory-settings.json: ${message}` }, text);
@@ -124,7 +124,7 @@ test('planApproval: true or false is admitted, no key is valid, and any other va
     assert.throws(() => header({ planApproval: value }), { message: `settings.json: planApproval: must be true or false; found ${found}` });
   }
   for (const key of ['PlanApproval', 'plan_approval', 'planApprovals']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -137,7 +137,7 @@ test('greptile: true or false is admitted, no key is valid, and any other value 
     assert.throws(() => header({ greptile: value }), { message: `settings.json: greptile: must be true or false; found ${found}` });
   }
   for (const key of ['Greptile', 'greptile_review', 'greptiles']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -150,12 +150,12 @@ test('docSweep: true or false is admitted, no key means on, and any other value 
     assert.throws(() => header({ docSweep: value }), { message: `settings.json: docSweep: must be true or false; found ${found}` });
   }
   for (const key of ['DocSweep', 'doc_sweep', 'docsweep', 'sweep']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
   }
 });
 
 test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both runtimes run, and any other value, a file naming one runtime and a near spelling are still refused by name', () => {
-  const keyList = 'version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview';
+  const keyList = 'version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager';
   assert.equal(header({}).crossFamilyReview, false);
   assert.equal(header({ crossFamilyReview: true }).crossFamilyReview, true);
   assert.equal(header({ crossFamilyReview: true, runtimes: ['claude', 'codex'] }).crossFamilyReview, true);
@@ -167,6 +167,20 @@ test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both run
   }
   for (const key of ['CrossFamilyReview', 'cross_family_review', 'crossFamilyReviews']) {
     assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides ${keyList}; found "${key}"; ${RECOVERY}` });
+  }
+});
+
+test('ANTI-REGRESSION: productManager is admitted as true or false whichever runtimes run, no key means off, and any other value or a near spelling is still refused by name', () => {
+  for (const extra of [{ productManager: true }, { productManager: false }, {}]) {
+    assert.deepEqual(header(extra).runtimes, ['claude', 'codex'], JSON.stringify(extra));
+  }
+  assert.deepEqual(header({ productManager: true, runtimes: ['claude'] }).runtimes, ['claude']);
+  assert.deepEqual(header({ productManager: true, runtimes: ['codex'] }).runtimes, ['codex']);
+  for (const [value, found] of [['true', '"true"'], [1, '1'], [0, '0'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
+    assert.throws(() => header({ productManager: value }), { message: `settings.json: productManager: must be true or false; found ${found}` });
+  }
+  for (const key of ['ProductManager', 'product_manager', 'productManagers', 'productmanager']) {
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -243,8 +257,11 @@ test('ANTI-REGRESSION: a path a tree must hold nothing at and a path a reference
   const addOnOff = 'the settings file does not turn the Greptile add-on on';
   const sweepOff = 'the settings file turns the documentation sweep off';
   const everythingOn = { greptile: true, docSweep: true };
+  const pageCause = "the direction page is the owner's own and a repository may hold none";
+  const page = 'docs/PRODUCT-DIRECTION.md';
   // [settings, path, why the tree must hold nothing there, why a reference to it need not resolve]
   const table = [
+    [{}, page, null, pageCause],
     [{ greptile: false }, '.greptile/config.json', addOnOff, null],
     [{}, '.agents/skills/greptile/SKILL.md', addOnOff, null],
     [{ docSweep: false }, 'docs/DOC-SWEEP.md', null, sweepOff],
@@ -254,6 +271,9 @@ test('ANTI-REGRESSION: a path a tree must hold nothing at and a path a reference
     [{ runtimes: ['codex'] }, 'CLAUDE.md', noClaude, noClaude],
     [{}, 'AGENTS.md', null, null],
     [{ runtimes: ['codex'], docSweep: false }, 'docs/README.md', null, null],
+    [{ productManager: true }, page, null, pageCause],
+    [{ runtimes: ['codex'], docSweep: false }, page, null, pageCause],
+    [{}, 'docs/PRODUCT-DIRECTION.md.bak', null, null],
     [everythingOn, '.greptile/config.json', null, null],
     [everythingOn, 'docs/DOC-SWEEP.md', null, null],
     [everythingOn, 'scripts/sweep-scope-check.mjs', null, null],

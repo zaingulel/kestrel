@@ -74,8 +74,9 @@ back to the owner in two cases only: where the repository has turned plan approv
 plan and build nothing until the owner says yes; and where the approved outcome or a trade-off changes during the build. A change the
 repository's own gate admits whole goes straight to `main` on the same yes, with no pull request.
 
-The two decisions are named work-pick and push authorisation, and the optional third plan approval.
-[`AGENTS.md`](../AGENTS.md) owns what each approves, what turns the third on, what goes back to the owner in between, and the approval a destructive action still needs, under "Owner gates". Underneath
+The two decisions are named work-pick and push authorisation, and the optional third plan approval. Where the repository
+turns product manager mode on, the owner may hand work-pick to a product manager run, which
+[The life of one change](AI-WORKFLOW-job.md) describes. [`AGENTS.md`](../AGENTS.md) owns what each approves, what turns the third on, what goes back to the owner in between, and the approval a destructive action still needs, under "Owner gates". Underneath
 this path every job runs in its own worktree, every check logs its exit code, and a short list of machine guards holds
 what a sentence could not; [The life of one change](AI-WORKFLOW-job.md) follows it stage by stage.
 

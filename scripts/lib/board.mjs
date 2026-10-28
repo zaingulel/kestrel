@@ -123,15 +123,6 @@ const RERUN = 'rerun the board read, and if it repeats inspect the GitHub Projec
 // The one repository this board's cards may belong to, spelled the way GitHub does.
 const BOARD_NAME_WITH_OWNER = `${BOARD_OWNER}/${BOARD_REPOSITORY}`;
 
-// The single-select fields the reader has a vocabulary for (Status, and the routing
-// field when one is configured), and the option list board-config.mjs configures for each. A live board that no longer matches is judged
-// against names it does not have, so the read stops instead (the 2026-07-28 incident:
-// one field mutation replaced a whole option list and cleared 218 cards).
-const CONFIGURED_OPTIONS = new Map([
-  [STATUS_FIELD, STATUS_OPTIONS],
-  ...(ROUTING_FIELD ? [[ROUTING_FIELD, ROUTING_OPTIONS]] : []),
-]);
-
 // Every connection in the response either came back whole or the read stops here:
 // `totalCount` is the ONLY evidence of that, so a missing or non-integer one is a
 // broken read rather than a quiet pass, and a card narrowed to its `first:` cap
@@ -297,9 +288,10 @@ export function assertProject(data, boardOwner = BOARD_OWNER, projectNumber = BO
 // order, not the board's own. A configured parked lane's field must be a single-select
 // offering its option, among any others. Returns the schema signature fetchBoard
 // compares the next page against.
-export function assertFieldSchema(fields) {
+export function assertFieldSchema(fields, { routingField = ROUTING_FIELD, routingOptions = ROUTING_OPTIONS, parkedLane = PARKED_LANE } = {}) {
   assertWholeConnection(fields, 'project fields', 'board page');
-  for (const [name, configured] of CONFIGURED_OPTIONS) {
+  const configuredOptions = [[STATUS_FIELD, STATUS_OPTIONS], ...(routingField ? [[routingField, routingOptions]] : [])];
+  for (const [name, configured] of configuredOptions) {
     const field = fields.nodes.find((f) => f?.name === name);
     if (!field) {
       throw new Error(`the board has no "${name}" field — add it to the project, or correct the name in scripts/lib/board-config.mjs`);
@@ -318,8 +310,8 @@ export function assertFieldSchema(fields) {
       );
     }
   }
-  if (PARKED_LANE) {
-    const { field: name, option } = PARKED_LANE;
+  if (parkedLane) {
+    const { field: name, option } = parkedLane;
     const field = fields.nodes.find((f) => f?.name === name);
     if (!field) {
       throw new Error(`the board has no "${name}" field for PARKED_LANE — add it to the project, or correct PARKED_LANE in scripts/lib/board-config.mjs`);

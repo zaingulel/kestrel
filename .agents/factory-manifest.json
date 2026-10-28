@@ -1,10 +1,10 @@
 {
   "canonical": "zaingulel/fabraik",
   "release": {
-    "tag": "v0.4.0",
-    "id": 425493420,
-    "assetId": 681668923,
-    "digest": "sha256:7b70659d19b41c849e8b47d407a25405c0707e53d56bb0e3722de98e00123933"
+    "tag": "v0.5.1",
+    "id": 427045411,
+    "assetId": 685955133,
+    "digest": "sha256:eaba13c6278b8260913b7745c89dcf4caeba016b99ed4e565dca84f1760e581f"
   },
   "entries": [
     {
@@ -145,7 +145,35 @@
     },
     {
       "path": ".agents/skills/resume/SKILL.md",
-      "sha256": "932ce212a00cb309eeacc731e8fa2e82c87af7e11f9ec034da4f651fc017b305"
+      "sha256": "7fcfe636f8c70121bc063dab7075a0ffe290b6f548b2bbafab2d5e048471e4c5"
+    },
+    {
+      "path": ".agents/skills/resume/references/cloud-build.md",
+      "sha256": "fa62a94cbe0b6a16d981dddfb20d0b64787649d53210d07b756e2cecf6535fdf"
+    },
+    {
+      "path": ".agents/skills/resume/references/deliver.md",
+      "sha256": "b8570c7efd469d82ae16965d947ed37dae6f45ffb0ab57405ae8514078c23e77"
+    },
+    {
+      "path": ".agents/skills/resume/references/plan-approval.md",
+      "sha256": "efa8f0b7a162c3f483e5348fbe89585eaf59e66323867b1260262db404166799"
+    },
+    {
+      "path": ".agents/skills/resume/references/review-routes.md",
+      "sha256": "32c2a3bc298435ee15fee46e14ed98fffcd3827d497f6728133c59cdcd027373"
+    },
+    {
+      "path": ".agents/skills/resume/references/strict-construction.md",
+      "sha256": "d4fe7d3ae537463c6a974a8cde3f97dedf5f292cdf5f086b3b851daf4960be20"
+    },
+    {
+      "path": ".agents/skills/resume/references/sweep-intake.md",
+      "sha256": "1636cbe436b32fd64d39188845736c50b52084e82d7af8ecac1944d9042ace98"
+    },
+    {
+      "path": ".agents/skills/resume/references/visual.md",
+      "sha256": "b0befc605dfff9a9f2ed42ef50d1a45e82e86a09f9f1b179b6b0f32f27fa4788"
     },
     {
       "path": ".agents/skills/retro/SKILL.md",
@@ -565,7 +593,35 @@
     },
     {
       "path": ".claude/skills/resume/SKILL.md",
-      "sha256": "932ce212a00cb309eeacc731e8fa2e82c87af7e11f9ec034da4f651fc017b305"
+      "sha256": "7fcfe636f8c70121bc063dab7075a0ffe290b6f548b2bbafab2d5e048471e4c5"
+    },
+    {
+      "path": ".claude/skills/resume/references/cloud-build.md",
+      "sha256": "fa62a94cbe0b6a16d981dddfb20d0b64787649d53210d07b756e2cecf6535fdf"
+    },
+    {
+      "path": ".claude/skills/resume/references/deliver.md",
+      "sha256": "b8570c7efd469d82ae16965d947ed37dae6f45ffb0ab57405ae8514078c23e77"
+    },
+    {
+      "path": ".claude/skills/resume/references/plan-approval.md",
+      "sha256": "efa8f0b7a162c3f483e5348fbe89585eaf59e66323867b1260262db404166799"
+    },
+    {
+      "path": ".claude/skills/resume/references/review-routes.md",
+      "sha256": "32c2a3bc298435ee15fee46e14ed98fffcd3827d497f6728133c59cdcd027373"
+    },
+    {
+      "path": ".claude/skills/resume/references/strict-construction.md",
+      "sha256": "d4fe7d3ae537463c6a974a8cde3f97dedf5f292cdf5f086b3b851daf4960be20"
+    },
+    {
+      "path": ".claude/skills/resume/references/sweep-intake.md",
+      "sha256": "1636cbe436b32fd64d39188845736c50b52084e82d7af8ecac1944d9042ace98"
+    },
+    {
+      "path": ".claude/skills/resume/references/visual.md",
+      "sha256": "b0befc605dfff9a9f2ed42ef50d1a45e82e86a09f9f1b179b6b0f32f27fa4788"
     },
     {
       "path": ".claude/skills/retro/SKILL.md",
@@ -700,7 +756,7 @@
     },
     {
       "path": ".github/pull_request_template.md",
-      "sha256": "0c875ae43804d781f3f050736b4d85c4162a3ebf4f385483ec91f9543365191d"
+      "sha256": "4292f536367f7909593daeea37ab491e6c781da1b92060ec08ded1161dc2d754"
     },
     {
       "path": ".github/workflows/sweep-scope.yml",
@@ -713,7 +769,7 @@
     {
       "path": "AGENTS.md",
       "region": "factory-shared",
-      "sha256": "c88976692c0e3efec2d5878d988761827fec8423070d62f0e6f86ff8c0db4f30"
+      "sha256": "a05b2fc1c95405ad9f094d43600ff7fec1f81c91b2ab11b608c519b39bf632b3"
     },
     {
       "path": "CLAUDE.md",
@@ -733,7 +789,7 @@
     },
     {
       "path": "docs/AI-WORKFLOW-job.md",
-      "sha256": "dcf6ca45a62dc9912355819334be25660b6fb56425e6381ad97132793b1082ad"
+      "sha256": "9217b4db4b36ca9100a614de6fb713e73795e472ac225ce2c877028e102170ab"
     },
     {
       "path": "docs/AI-WORKFLOW-runtimes.md",
@@ -745,7 +801,7 @@
     },
     {
       "path": "docs/AI-WORKFLOW.md",
-      "sha256": "bb8c3af1cffacd7fb07aebe3ee794a0391fe2b109a34a06a307af3f70d30f350"
+      "sha256": "74ac29beed329024d5967c8ae33c0ff7dd3d815d31088bb2f682a60dcfc1aea2"
     },
     {
       "path": "docs/DOCUMENTATION-STANDARD.md",
@@ -753,11 +809,15 @@
     },
     {
       "path": "docs/LINEAR-CARDS.md",
-      "sha256": "adeb26b67ec4ff43d6edc06e4619f9d6ce623d524c7710e070e12477d69a725d"
+      "sha256": "e8cef3ecefa033321e905223af36faf4b2e56b381e8ba39a94da00e91425ce7c"
     },
     {
       "path": "docs/MARKDOWN-CARDS.md",
-      "sha256": "901c1f0fd5dd6bb29fb664bff00960736592bef22b4b48b09620cc693666682d"
+      "sha256": "748c362bb6ec4e74cb095467854b884493a0d49982d4342595c97ff26391f0c2"
+    },
+    {
+      "path": "docs/POSTGRES-EXAMPLES.md",
+      "sha256": "20e2573604f642b349c5897bb4f33b09d32fcc1dcac71b3dc2d4a3cf193733d3"
     },
     {
       "path": "docs/WEEKLY-RETRO.md",
@@ -810,11 +870,11 @@
     },
     {
       "path": "scripts/lib/board-markdown.mjs",
-      "sha256": "ac9a7840e1d3f18ceab15fae77ab835e09c1d908157bf44c9d2d469d16260003"
+      "sha256": "d7d9a3bd639436d0595df64c4480b91f627c2c42d46b65dd627185d39e3c9b3f"
     },
     {
       "path": "scripts/lib/board-markdown.test.mjs",
-      "sha256": "6f7ce092f3aa84ddf9d6bf348bce04c22f0b8ab54a87083d3c3d6b48d9f0321c"
+      "sha256": "74f1fff2771e622f5cf001465e6f93469e128bdfbc29eee3adad03319e684027"
     },
     {
       "path": "scripts/lib/board-move.mjs",
@@ -822,11 +882,11 @@
     },
     {
       "path": "scripts/lib/board-move.test.mjs",
-      "sha256": "39c748d5bacf753f902b07af55e063a64e10ffab1812714ecb2d5b2b9b7ee318"
+      "sha256": "0d282e3e3f835f49d65ca45763508ff83f856d54b3adb6d37820c3fb2742ce43"
     },
     {
       "path": "scripts/lib/board-portability.test.mjs",
-      "sha256": "b9be30e1ddbb6b93699356eff77fd2fe04fd2167b9b37c9978351de87b253c63"
+      "sha256": "759659f394adbf211706b209998f555226fe2d0b2feb0e641ca946810ae81063"
     },
     {
       "path": "scripts/lib/board-rules.mjs",
@@ -842,7 +902,7 @@
     },
     {
       "path": "scripts/lib/board.mjs",
-      "sha256": "04cef2720abb4abd410ba42ab4b700ad29e79baf98c77b45a4172fc623025f76"
+      "sha256": "dbde9075dd2350e64c0a632e06c2b6b6c87e197c7c3c3c51a8fcddcf8b8f848d"
     },
     {
       "path": "scripts/lib/board.test.mjs",
@@ -910,7 +970,7 @@
     },
     {
       "path": "scripts/lib/doc-lint-verdict.mjs",
-      "sha256": "372bec0aecfcd737d764e6950e8cd377ac525baee5d78d9cde66de680b612a5d"
+      "sha256": "21da703e2039c74af0330a2c211d246706544e53a7e6528f77b810961e2fa99f"
     },
     {
       "path": "scripts/lib/factory-sync.mjs",
@@ -994,19 +1054,19 @@
     },
     {
       "path": "scripts/lib/runtimes.mjs",
-      "sha256": "f47bd48a497a4d78cef3aff954b0006c085c139250b5052c3691bace6dd18617"
+      "sha256": "b41f43c42237b295f9a0eaea91ff15886b6337b6b26066543212a3717e5ea23c"
     },
     {
       "path": "scripts/lib/runtimes.test.mjs",
-      "sha256": "c7c2324db8f817a2196f46292768a30a7548fffe5c74afa8a1d2714f4ba945cf"
+      "sha256": "9807dabf02daa999897ea816715eea6f28115fdebcdd86ef870f6bf82ca585a8"
     },
     {
       "path": "scripts/lib/seat-settings.mjs",
-      "sha256": "8f793199e367a6ca3569cfd98fd660ebff64f71164ee7899ac56b84c18c58bf2"
+      "sha256": "daac573be28748893eac9b39451b3e82fb15795c7e5928d2c8778e2250144fcf"
     },
     {
       "path": "scripts/lib/seat-settings.test.mjs",
-      "sha256": "495ca3ce906deeac6641e1d8b8183c42abc574a5c56502b2aa331fe7c94db7c4"
+      "sha256": "c19cfa2af9ee7a88b06053ef3a0e5575665abadf31f57910ab314e56104ed4c3"
     },
     {
       "path": "scripts/lib/settings-policy.test.mjs",
@@ -1058,7 +1118,7 @@
     },
     {
       "path": "scripts/lib/workflow-contract.test.mjs",
-      "sha256": "f927eae9cbdde769110781076272a33f7d4ff017a9ead66ddc31a4657524bbd4"
+      "sha256": "6653410e018eba2ab15d950151c8ebc72e1135a22ba3017e8448735ee5863a66"
     },
     {
       "path": "scripts/linear-card.mjs",

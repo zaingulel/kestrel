@@ -43,7 +43,7 @@ const VOCABULARY = {
   statuses: ['Backlog', 'Ready', 'Done'],
 };
 const NO_ROUTING_VOCABULARY = { ...VOCABULARY, routingField: null, routingOptions: [] };
-const FILE = '.agents/cards/7.md';
+const FILE = `${CARDS_DIR}/7.md`;
 const lines = (...parts) => `${parts.join('\n')}\n`;
 
 const WELL_FORMED = lines(
@@ -228,7 +228,7 @@ test('markdownBoardItems derives every item field from the cards, the published 
   const items = markdownBoardItems(cards, published, refs, pulls);
 
   assert.deepEqual(items[1], {
-    id: '.agents/cards/2.md',
+    id: `${CARDS_DIR}/2.md`,
     status: 'In review',
     title: 'Second',
     routing: 'Product',
@@ -314,14 +314,14 @@ test('publishedStatuses refuses an origin/main copy that does not parse, naming 
   const broken = lines('# T', '', 'Status: Ready', 'Kind: task', 'Workstream: Product', 'Colour: red');
   assert.throws(
     () => publishedStatuses(fakeGit({ blobs: { [ON_MAIN(1)]: broken } }).run, new Map([[1, card(1)]])),
-    { message: 'origin/main:.agents/cards/1.md:6: unknown field "Colour"' },
+    { message: `origin/main:${CARDS_DIR}/1.md:6: unknown field "Colour"` },
   );
 });
 
 test('publishedStatuses refuses a card absent from origin/main whose checkout copy says Done, naming the initial publication', () => {
   assert.throws(
     () => publishedStatuses(fakeGit().run, new Map([[3, card(3, { status: 'Done' })]])),
-    { message: '.agents/cards/3.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change' },
+    { message: `${CARDS_DIR}/3.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change` },
   );
 });
 
@@ -384,7 +384,7 @@ test('jobRefs refuses a local branch tip whose card copy does not parse, naming 
   const broken = lines('# T', '', 'Status: Ready', 'Colour: red');
   assert.throws(
     () => jobRefs(fakeGit({ locals: 'refs/heads/job/12\n', blobs: { [AT_TIP(12)]: broken } }).run),
-    { message: 'job/12:.agents/cards/12.md:4: unknown field "Colour"' },
+    { message: `job/12:${CARDS_DIR}/12.md:4: unknown field "Colour"` },
   );
 });
 
@@ -481,11 +481,11 @@ test('readCards refuses a Parent or a blocker that names no card, naming the lin
   const withField = (field) => `${plain}${field}\n`;
   assert.throws(
     () => readCards(cardsRoot(t, { '2.md': withField('Parent: 9') })),
-    { message: '.agents/cards/2.md:6: Parent names card 9, which has no file in .agents/cards' },
+    { message: `${CARDS_DIR}/2.md:6: Parent names card 9, which has no file in .agents/cards` },
   );
   assert.throws(
     () => readCards(cardsRoot(t, { '1.md': plain, '2.md': withField('Blocked by: 1, 9') })),
-    { message: '.agents/cards/2.md:6: Blocked by names card 9, which has no file in .agents/cards' },
+    { message: `${CARDS_DIR}/2.md:6: Blocked by names card 9, which has no file in .agents/cards` },
   );
 });
 
