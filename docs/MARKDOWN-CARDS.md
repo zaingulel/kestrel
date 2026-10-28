@@ -83,12 +83,14 @@ wins, and rules 1 to 3 apply only to a card whose published status is Backlog or
   and which is not from a fork counts.
 - A card shows its kind as its one label, no assignee, each blocker's own state, and its children from the `Parent`
   lines. A closing pull request is only ever a counted open one, never inferred from a branch.
-- A pushed branch with no draft reads Awaiting push in the checkout that pushed it and In progress elsewhere, with no
-  closing pull request. Intake lists it under claims, and the stalled-claim advisory reports it, as for a GitHub card
-  between push and draft.
+- A pushed branch with no draft reads Awaiting push in every worktree of a clone whose local `job/<N>` branch tip's
+  copy of the card says `Done`, and In progress otherwise, including in a clone that lacks that local branch (such as
+  another machine's); it has no closing pull request. Intake lists it under claims, and the stalled-claim advisory
+  reports it where it reads In progress, as for a GitHub card between push and draft, because Awaiting push is a
+  waiting column that advisory exempts.
 - The read uses the card files of the checkout the script sits in, never the current directory. If origin's branches,
   `origin/main`'s copies or a pull-request list cannot be read, or a reply is malformed, the whole read fails with exit
-  2; it never reads as "nothing in flight".
+  2 under `--intake` and exit 1 in every other mode; it never reads as "nothing in flight".
 
 ## The claim
 
@@ -207,7 +209,8 @@ node <distribution>/scripts/fabraik.mjs move-cards --answers <file> --target <wo
 - One person. Two machines on one install see each other's claim only after a push and a fetch, and a stale
   `origin/main` shows a merged card still in flight until the next fetch.
 - GitHub is still required for pull requests, checks and merges; a repository with no remote is out of scope.
-- A read needs origin and `gh` reachable. Offline it fails loudly with exit 2 and never reads as a free board.
+- A read needs origin and `gh` reachable. Offline it fails loudly with exit 2 under `--intake` and 1 otherwise, and
+  never reads as a free board.
 - Card edits outside a job travel as their own pull request. The direct route never admits a card file.
 - No documentation sweep and no cloud build, since both act on GitHub issues. A markdown install that later sets
   `docSweep` to true by hand gets a sweep that files GitHub issues: the settings check does not read the tracker.

@@ -108,7 +108,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     ['[]', `${label}: file: must hold one JSON object; found []`],
     ['{"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep and crossFamilyReview; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],
     [withRuntimes(['gemini']), `${label}: ${runtimesRule}; found ["gemini"]`],

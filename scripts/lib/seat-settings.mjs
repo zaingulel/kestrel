@@ -14,7 +14,7 @@
 //   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
-//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep` and `crossFamilyReview`.
+//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep`, `crossFamilyReview` and `productManager`.
 //     `version` is exactly 1; any other version is refused as unsupported by this copy, with the recovery. Another
 //     key is refused with the recovery.
 //  2. `seats` is an object whose only keys are `claude` and `codex`, each an object from seat name to an object of
@@ -50,8 +50,11 @@
 //     cross-family review is authorized. Anything else is refused. No update or check acts on the value. `fabraik init`
 //     writes it only on a yes to its disclosure, and the session reads it, as the `resume` skill says under
 //     "6. Verify and review".
+// 14. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
+//     Anything else is refused. No update or check acts on the value; the session reads it on the fetched `main`, as
+//     the `resume` skill says under "2. Work-pick".
 //
-// The JSON half of rule 1, the list half of rule 9 and rules 10, 11, 12 and 13 are readSettingsHeader (runtimes.mjs), which
+// The JSON half of rule 1, the list half of rule 9 and rules 10 to 14 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is
 // substituteSeatSettings; 7 is overrideProblems. The file half of rule 1 belongs to readSettingsFile (runtimes.mjs); rules 3 and 8 belong to factory-sync.mjs.
 

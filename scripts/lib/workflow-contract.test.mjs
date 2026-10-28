@@ -321,7 +321,7 @@ const SKILL_READING_SEATS = {
 };
 
 for (const [skill, readingSeats] of Object.entries(SKILL_READING_SEATS)) {
-  test(`exactly the seats that read the ${skill} skill name it, and the resume skill names it`, () => {
+  test(`exactly the seats that read the ${skill} skill name it, and the resume skill's visual reference names it`, () => {
     const SKILL_PATH = `.agents/skills/${skill}/SKILL.md`;
     const SKILL_TOKEN = `\`${SKILL_PATH}\``;
     for (const { directory: dir, extension } of PRESENT.map((runtime) => SEATS[runtime])) {
@@ -331,12 +331,13 @@ for (const [skill, readingSeats] of Object.entries(SKILL_READING_SEATS)) {
         .sort();
       assert.deepEqual(naming, readingSeats, `${dir}: the seats whose charter names ${SKILL_PATH}`);
     }
-    assert.ok(RESUME.includes(SKILL_TOKEN), `the resume skill must name ${SKILL_PATH}`);
+    const visual = readFileSync(resolve(ROOT, '.agents/skills/resume/references/visual.md'), 'utf8');
+    assert.ok(visual.includes(SKILL_TOKEN), `the resume skill's visual reference must name ${SKILL_PATH}`);
   });
 }
 
 test('the resume deliver step carries exactly the merge-watch command', () => {
-  const rawStep = RESUME.match(/^4\. Watch it land[\s\S]*?(?=^## )/m);
+  const rawStep = readFileSync(resolve(ROOT, '.agents/skills/resume/references/deliver.md'), 'utf8').match(/^4\. Watch it land[\s\S]*?(?=^## |(?![\s\S]))/m);
   assert.deepEqual(
     shellBlocks(rawStep[0]).map((block) => block.body),
     ['node scripts/merge-watch.mjs <pr>'],
@@ -346,7 +347,7 @@ test('the resume deliver step carries exactly the merge-watch command', () => {
 
 // Pins native command facts only; fresh semantic review assesses the takeover policy.
 test('cloud takeover carries the origin provenance commands', () => {
-  const cloud = RESUME.slice(RESUME.indexOf('## Cloud build\n'), RESUME.indexOf('## Parking\n'));
+  const cloud = readFileSync(resolve(ROOT, '.agents/skills/resume/references/cloud-build.md'), 'utf8');
   const commands = shellBlocks(cloud).map((block) => block.body);
   assert.ok(commands.includes('git remote get-url origin'));
   assert.ok(commands.includes('gh repo view --json id -- "<origin-url>"'));
@@ -466,20 +467,41 @@ function refusedShapes(block) {
   return [...shapes];
 }
 
-test('the resume, cross-review and to-issues skills give only command shapes an isolated worktree session accepts', () => {
+// Recurring cost: one read of each resume reference.
+test('the resume skill with its references, and the cross-review and to-issues skills, give only command shapes an isolated worktree session accepts', () => {
+  const refuse = (path, markdown) => {
+    for (const { where, body, shapes } of skillShapeFindings(markdown)) {
+      assert.fail(`${path}, ${where}, must be one plain command, but has ${shapes.join(', ')}:\n${body}`);
+    }
+  };
   for (const name of ['resume', 'cross-review', 'to-issues']) {
     const path = `.agents/skills/${name}/SKILL.md`;
     const markdown = readFileSync(resolve(ROOT, path), 'utf8');
     assert.ok(shellBlocks(markdown).length > 0, `${path} must carry fenced shell blocks to inspect`);
-    for (const { where, body, shapes } of skillShapeFindings(markdown)) {
-      assert.fail(`${path}, ${where}, must be one plain command, but has ${shapes.join(', ')}:\n${body}`);
-    }
+    refuse(path, markdown);
+  }
+  const references = '.agents/skills/resume/references';
+  for (const name of readdirSync(resolve(ROOT, references))) {
+    const path = `${references}/${name}`;
+    refuse(path, readFileSync(resolve(ROOT, path), 'utf8'));
   }
 });
 
 test('ANTI-REGRESSION: the resume skill reads the plan approval setting with a command whose answer does not depend on the current folder', () => {
   const reads = RESUME.match(/git ls-tree[^`\n]*/g) ?? [];
   assert.deepEqual(reads, ['git ls-tree --full-tree --name-only origin/main -- .agents/factory-settings.json']);
+});
+
+test('ANTI-REGRESSION: the resume skill reads the direction page only from the fetched main', () => {
+  assert.deepEqual(RESUME.match(/git show\s+[^\s`]*PRODUCT-DIRECTION\.md[^\s`]*/g), [
+    'git show origin/main:docs/PRODUCT-DIRECTION.md',
+  ]);
+});
+
+test('ANTI-REGRESSION: the resume skill reads the settings file only from the fetched main', () => {
+  const reads = RESUME.match(/git show\s+[^\s`]*factory-settings\.json[^\s`]*/g) ?? [];
+  assert.ok(reads.length > 0, 'the resume skill reads the settings file with git show');
+  for (const read of reads) assert.equal(read, 'git show origin/main:.agents/factory-settings.json');
 });
 
 test('the refused-shape check catches each refused shape and passes quoted jq text', () => {
@@ -764,18 +786,18 @@ test('the review line has two specified forms, and the template and skills point
   }
 });
 
-// The carried-receipt record: the resume skill's Receipt reuse rule must name each slot the pull request template
-// carries, which the template's skeleton test below pins there, and the two commands that settle a commit added on
-// top. Hand-written from the approved record, never extracted from either file. Recurring cost: one scan of the
-// skill text already read.
+// The carried-receipt record: the Receipt reuse rule in the resume skill's deliver reference must name each slot the
+// pull request template carries, which the template's skeleton test below pins there, and the two commands that settle
+// a commit added on top. Hand-written from the approved record, never extracted from either file. Recurring cost: one
+// read and scan of the deliver reference.
 const CARRIED_SLOTS = ['Carried from:', 'Changed paths:', 'Carried receipts:'];
 
-test('the Receipt reuse rule in the resume skill names each carried-receipt slot and both commands', () => {
+test("the Receipt reuse rule in the resume skill's deliver reference names each carried-receipt slot and both commands", () => {
   const COMMANDS = [
     'git merge-base --is-ancestor <earlier-commit> HEAD',
     'git -c core.quotePath=false diff --name-only --no-renames --ignore-submodules=none <earlier-commit> HEAD',
   ];
-  const spans = new Set(inlineSpans(splitMarkdown(RESUME).prose).map((span) => span.body.replace(/\s+/g, ' ')));
+  const spans = new Set(inlineSpans(splitMarkdown(readFileSync(resolve(ROOT, '.agents/skills/resume/references/deliver.md'), 'utf8')).prose).map((span) => span.body.replace(/\s+/g, ' ')));
   for (const literal of [...CARRIED_SLOTS, ...COMMANDS]) {
     assert.ok(spans.has(literal), `the resume skill's Receipt reuse rule must name \`${literal}\` as one code span`);
   }
@@ -989,6 +1011,8 @@ const ADOPTER_PATHS = {
   'scripts/gates/stop': 'optional product hook point, checked for presence',
   'scripts/gates/pre-commit': 'optional product hook point, checked for presence',
   'scripts/gates/pre-push-main': 'optional product hook point, checked for presence',
+  'docs/PRODUCT-DIRECTION.md': 'the owner\'s direction page, which a repository that turns product manager mode on keeps',
+  '.agents/cards/': 'the markdown cards folder, which a repository whose board uses markdown cards keeps',
 };
 const PATH_TOKEN = /[A-Za-z0-9_.@/*<>{}|$-]+/g;
 const PLACEHOLDER = /[*<>{}|$]/;

@@ -387,6 +387,29 @@ test('board-move rejects bad arguments before any gh call: usage problems return
   assert.deepEqual(calls, []);
 });
 
+test('board-move selects only the configured Project among historical memberships', () => {
+  const statusField = structuredClone(STATUS_FIELD_JSON);
+  statusField.data[BOARD_OWNER_TYPE].projectV2.id = 'PVT_configured_project';
+  const calls = [];
+  const exec = (args) => {
+    calls.push(args);
+    if (args[0] !== 'api') return '';
+    if (args[3].includes('projectV2(number:')) return JSON.stringify(statusField);
+    return JSON.stringify(issueItemReply([
+      { id: 'historical-item', isArchived: true, project: { number: BOARD_PROJECT_NUMBER, owner: { login: 'someone-else' } }, value: { name: 'Done' } },
+      { id: 'configured-item', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: { name: 'Ready' } },
+    ]));
+  };
+  const sink = outputSink();
+  assert.equal(boardMoveMain(['999', 'Done'], { ghExec: exec, output: sink }), 0);
+  assert.equal(sink.stdout, 'board-move: #999 → Done\n');
+  assert.equal(sink.stderr, '');
+  assert.deepEqual(calls.filter((args) => args[0] === 'project'), [[
+    'project', 'item-edit', '--id', 'configured-item', '--project-id', 'PVT_configured_project',
+    '--field-id', 'PVTSSF_status', '--single-select-option-id', 'opt-done',
+  ]]);
+});
+
 test('board-move refuses incomplete issue-item replies with their cause and no write', () => {
   const missingNodes = issueItemReply();
   delete missingNodes.data.repository.issue.projectItems.nodes;
@@ -401,6 +424,14 @@ test('board-move refuses incomplete issue-item replies with their cause and no w
     ['not json at all', /not valid JSON/],
     [issueItemReply([{ id: 'bad', isArchived: false, project: null }]), /non-integer project number/],
     [issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } }]), /non-boolean isArchived/],
+    [issueItemReply([
+      { id: 'one', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } },
+      { id: 'two', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } },
+    ]), /has 2 items on project .*; expected at most one/],
+    [issueItemReply([
+      { id: 'configured', isArchived: false, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } } },
+      { id: 'ownerless', isArchived: false, project: { number: BOARD_PROJECT_NUMBER } },
+    ]), /no owner login/],
     [missingNodes, /no projectItems\.nodes\[\] array/],
   ];
   for (const [reply, expected] of cases) {

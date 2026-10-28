@@ -87,6 +87,21 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   the plan presented again. The gate is off unless the repository's settings file turns it on, and no guard holds
   it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
   [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "4. Plan".
+- **Product manager run, where the repository turns it on.** The owner can hand the work-pick to the session instead of
+  choosing a row. The owner launches a session at the repository root on either runtime and says `Start a product
+  manager run.`; a run starts only where the git guard is shown running. On Claude Code the owner first turns on
+  "Require trusted devices" in their Claude account and the "Push when Claude decides" and "Push when actions required"
+  notifications; where "Require trusted devices" cannot be on, no Claude Code run starts, and the owner can run it on
+  Codex. On Codex the owner launches in the workspace-write sandbox, and Codex's Auto-review may answer the run's
+  approval requests. The session cannot check these settings. It reads the owner's direction page from the fetched
+  `main`, picks one card the page ranks highest among those it may take, names the pick and the reason in the table's
+  closing line, and takes that one card through the usual stages to `Awaiting push`. A card needing owner direction or
+  sign-off is never picked, and a card found not free stops the run. Push authorisation stays the owner's yes. At every
+  stop the session says why it stopped and what the owner does next, then ends its turn: on Claude Code that arrives as
+  a push to the owner's phone, and on Codex it is said in the session only, because Codex sends no push. A prompt or
+  approval from the runtime waits for the owner's own answer. The mode is off unless the settings file on `main` turns
+  it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
+  [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2. Work-pick".
 - **Evidence during the build.** Every executed check runs through a logger that writes its real outcome, so the
   pull request body quotes what a script wrote, not what an agent remembers;
   [The evidence bar](AI-WORKFLOW-evidence.md) explains the log. Every green slice is committed on the job branch,

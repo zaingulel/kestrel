@@ -2,7 +2,7 @@
 
 ## Summary
 
-<!-- The outcome in a few plain sentences: the problem, the cause and the fix. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. -->
+<!-- The outcome in a few plain sentences: the problem, the cause and the fix. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. When a product manager run picked the card, the Summary ends with one line beginning `Picked:` that gives the run's reason, as the resume skill says under "2. Work-pick". -->
 
 Closes #
 

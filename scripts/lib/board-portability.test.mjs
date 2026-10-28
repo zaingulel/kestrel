@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { installFakeGh, installFakeTransport } from './fake-gh.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
+import { CARDS_DIR } from './board-markdown.mjs';
 import { CONFIG_TAIL, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const ORGANISATION_CONFIG = `export const BOARD_OWNER = 'acme-org';
@@ -662,8 +663,8 @@ function markdownInstall(t, cards) {
   t.after(() => rmSync(origin, { recursive: true, force: true }));
   git(origin, 'init', '--bare', '-b', 'main');
   git(toolkit.root, 'init', '-b', 'main');
-  mkdirSync(join(toolkit.root, '.agents', 'cards'), { recursive: true });
-  for (const [number, text] of Object.entries(cards)) writeFileSync(join(toolkit.root, '.agents', 'cards', `${number}.md`), text);
+  mkdirSync(join(toolkit.root, CARDS_DIR), { recursive: true });
+  for (const [number, text] of Object.entries(cards)) writeFileSync(join(toolkit.root, CARDS_DIR, `${number}.md`), text);
   git(toolkit.root, 'add', '.agents/cards');
   git(toolkit.root, 'commit', '-m', 'file the cards');
   git(toolkit.root, 'remote', 'add', 'origin', origin);
@@ -712,7 +713,7 @@ test('markdown board: intake shows the columns derived from real local, origin a
   git(root, 'push', 'origin', 'job/4');
   git(root, 'push', 'origin', 'main:refs/heads/job/7');
   git(root, 'switch', '-c', 'job/5');
-  writeFileSync(join(root, '.agents', 'cards', '5.md'), cardFile('Card five', 'Done'));
+  writeFileSync(join(root, CARDS_DIR, '5.md'), cardFile('Card five', 'Done'));
   git(root, 'commit', '-a', '-m', 'close card five');
   git(root, 'switch', 'main');
   const pulls = {
@@ -781,7 +782,7 @@ test('markdown board: a corrupt card fails the read with exit 2, naming the file
 
   assert.equal(run.status, 2, run.stderr);
   assert.equal(run.stdout, '');
-  assert.equal(run.stderr, 'board: failed to read the markdown cards — .agents/cards/2.md:4: unknown field "Colour"\n');
+  assert.equal(run.stderr, `board: failed to read the markdown cards — ${CARDS_DIR}/2.md:4: unknown field "Colour"\n`);
   assert.deepEqual(run.calls, []);
 });
 
@@ -794,7 +795,7 @@ test('markdown board: a linked .agents/cards is refused and the outside card is 
   writeFileSync(outsideCard, cardFile('Outside card', 'Ready'));
   mkdirSync(join(toolkit.root, '.agents'));
   // A junction needs no privilege on Windows and is a directory link everywhere else.
-  symlinkSync(outside, join(toolkit.root, '.agents', 'cards'), 'junction');
+  symlinkSync(outside, join(toolkit.root, CARDS_DIR), 'junction');
   const before = readFileSync(outsideCard);
 
   const run = runScript(toolkit.root, 'board.mjs', ['--intake']);
@@ -802,7 +803,7 @@ test('markdown board: a linked .agents/cards is refused and the outside card is 
   assert.equal(run.status, 2, run.stderr);
   assert.equal(run.stdout, '');
   assert.match(run.stderr, /^board: failed to read the markdown cards — /);
-  assert.ok(run.stderr.includes(`its parent ${join(toolkit.root, '.agents', 'cards')} is a symlink`), run.stderr);
+  assert.ok(run.stderr.includes(`its parent ${join(toolkit.root, CARDS_DIR)} is a symlink`), run.stderr);
   assert.deepEqual(readFileSync(outsideCard), before);
 
   const write = runScript(toolkit.root, 'board-move.mjs', ['1', 'Done']);
@@ -810,13 +811,13 @@ test('markdown board: a linked .agents/cards is refused and the outside card is 
   assert.equal(write.status, 1, write.stderr);
   assert.equal(write.stdout, '');
   assert.match(write.stderr, /^board-move: /);
-  assert.ok(write.stderr.includes(`its parent ${join(toolkit.root, '.agents', 'cards')} is a symlink`), write.stderr);
+  assert.ok(write.stderr.includes(`its parent ${join(toolkit.root, CARDS_DIR)} is a symlink`), write.stderr);
   assert.deepEqual(readFileSync(outsideCard), before);
 });
 
 test('markdown board-move: a status the tracker cannot write or check, and a lane, are refused', (t) => {
   const toolkit = markdownInstall(t, { 1: cardFile('Card one', 'Ready') });
-  const cardBefore = readFileSync(join(toolkit.root, '.agents', 'cards', '1.md'));
+  const cardBefore = readFileSync(join(toolkit.root, CARDS_DIR, '1.md'));
 
   const unknown = runScript(toolkit.root, 'board-move.mjs', ['1', 'Parked']);
 
@@ -830,7 +831,7 @@ test('markdown board-move: a status the tracker cannot write or check, and a lan
   assert.equal(batch.status, 1, batch.stderr);
   assert.equal(batch.stdout, '');
   assert.ok(batch.stderr.startsWith('board-move: failed to move #1 → "Parked" (already completed: #1 → Ready) — '), batch.stderr);
-  assert.deepEqual(readFileSync(join(toolkit.root, '.agents', 'cards', '1.md')), cardBefore);
+  assert.deepEqual(readFileSync(join(toolkit.root, CARDS_DIR, '1.md')), cardBefore);
 
   const noLane = runScript(toolkit.root, 'board-move.mjs', ['--lane', '1:Ours']);
 
@@ -854,8 +855,8 @@ test('markdown board-move: only the real Status line is rewritten, whatever the 
   const move = runScript(worktree, 'board-move.mjs', ['--batch', '1:Backlog', '2:Backlog']);
 
   assert.equal(move.status, 0, move.stderr);
-  assert.equal(readFileSync(join(worktree, '.agents', 'cards', '1.md'), 'utf8'), cardFile(titles[1], 'Backlog'));
-  assert.equal(readFileSync(join(worktree, '.agents', 'cards', '2.md'), 'utf8'), crlf(cardFile(titles[2], 'Backlog')));
+  assert.equal(readFileSync(join(worktree, CARDS_DIR, '1.md'), 'utf8'), cardFile(titles[1], 'Backlog'));
+  assert.equal(readFileSync(join(worktree, CARDS_DIR, '2.md'), 'utf8'), crlf(cardFile(titles[2], 'Backlog')));
 });
 
 test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on read and on write and the file it points to is untouched', (t) => {
@@ -866,7 +867,7 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
   const outsideCard = join(outside, '1.md');
   writeFileSync(outsideCard, cardFile('Outside card', 'Ready'));
   try {
-    symlinkSync(outsideCard, join(worktree, '.agents', 'cards', '1.md'), 'file');
+    symlinkSync(outsideCard, join(worktree, CARDS_DIR, '1.md'), 'file');
   } catch (error) {
     if (error.code !== 'EPERM') throw error;
     t.skip(`this account cannot create a file symlink (${error.code})`);
@@ -878,7 +879,7 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
 
   assert.equal(read.status, 2, read.stderr);
   assert.equal(read.stdout, '');
-  assert.ok(read.stderr.includes('.agents/cards/1.md: only regular files named <N>.md'), read.stderr);
+  assert.ok(read.stderr.includes(`${CARDS_DIR}/1.md: only regular files named <N>.md`), read.stderr);
   assert.ok(read.stderr.endsWith('found a symlink\n'), read.stderr);
   assert.deepEqual(readFileSync(outsideCard), before);
 
@@ -886,7 +887,7 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
 
   assert.equal(write.status, 1, write.stderr);
   assert.equal(write.stdout, '');
-  assert.ok(write.stderr.includes('.agents/cards/1.md: only regular files named <N>.md'), write.stderr);
+  assert.ok(write.stderr.includes(`${CARDS_DIR}/1.md: only regular files named <N>.md`), write.stderr);
   assert.ok(write.stderr.endsWith('found a symlink\n'), write.stderr);
   assert.deepEqual(readFileSync(outsideCard), before);
 });
@@ -903,7 +904,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   const origin = join(scratch, 'origin');
   const cloneB = join(scratch, 'b');
   const worktree = join(scratch, 'job-worktree');
-  const cardPath = (root, number) => join(root, '.agents', 'cards', `${number}.md`);
+  const cardPath = (root, number) => join(root, CARDS_DIR, `${number}.md`);
   const view = (root, pulls) => {
     const run = runScript(root, 'board.mjs', ['--all', '--json'], pulls);
     assert.notEqual(run.stdout, '', run.stderr);
@@ -936,7 +937,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   assert.equal(filing.status, 1, filing.stderr);
   assert.equal(filing.stdout, '');
   assert.equal(filing.stderr, 'board-add: the markdown tracker files a card by writing .agents/cards/<N>.md; see docs/MARKDOWN-CARDS.md\n');
-  mkdirSync(join(cloneA, '.agents', 'cards'), { recursive: true });
+  mkdirSync(join(cloneA, CARDS_DIR), { recursive: true });
   writeFileSync(cardPath(cloneA, N), cardFile('Card three', 'Ready'));
   git(cloneA, 'add', '-A');
   git(cloneA, 'commit', '-m', 'file card three');
@@ -957,7 +958,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   const missing = runScript(worktree, 'verify-issue-publish.mjs', [String(NO_CARD)]);
   assert.equal(missing.status, 1);
   assert.equal(missing.stdout, '');
-  assert.equal(missing.stderr, 'issue-publish: #9 has no card file .agents/cards/9.md in this checkout\n');
+  assert.equal(missing.stderr, `issue-publish: #9 has no card file ${CARDS_DIR}/9.md in this checkout\n`);
 
   const claim = runScript(worktree, 'board-move.mjs', [String(N), 'In progress']);
   assert.equal(claim.status, 0, claim.stderr);
@@ -978,7 +979,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   const handDone = runScript(worktree, 'board.mjs', ['--intake']);
   assert.equal(handDone.status, 2, handDone.stderr);
   assert.equal(handDone.stdout, '');
-  assert.ok(handDone.stderr.includes('.agents/cards/4.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change'), handDone.stderr);
+  assert.ok(handDone.stderr.includes(`${CARDS_DIR}/4.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change`), handDone.stderr);
   rmSync(cardPath(worktree, UNPUBLISHED));
 
   // A published card moves between Ready and Backlog by rewriting its Status line alone.
