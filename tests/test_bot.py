@@ -4050,6 +4050,32 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(manager.typed_answer)
                 vad.cleanup.assert_awaited_once()
 
+    async def test_answer_window_time_limit_covers_its_frame_bounds(self):
+        from types import SimpleNamespace
+        real_timeout, limits = asyncio.timeout, []
+
+        def recording_timeout(seconds):
+            limits.append(seconds)
+            return real_timeout(seconds)
+
+        transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
+        # Only the window's own time limit is recorded: the patch ends once the window is open, before wait_until sets its own.
+        with patch.object(speech.asyncio, 'timeout', recording_timeout):
+            window = asyncio.create_task(speech.capture_answer(transport, vad, admitted=lambda: True))
+            await asyncio.sleep(0)
+        self.assertEqual(len(limits), 1, 'The answer window must set exactly one time limit')
+        # The longest run: speech on the last waiting frame, then speech through the limit and the whole discard bound.
+        wait, limit = (round(seconds / speech.ANSWER_FRAME_SECONDS)
+                       for seconds in (speech.ANSWER_WAIT_SECONDS, speech.ANSWER_LIMIT_SECONDS))
+        worst_case = (wait + limit + limit) * speech.ANSWER_FRAME_SECONDS
+        self.assertGreaterEqual(limits[0], worst_case, 'The time limit would end a worst-case answer before its frame bounds')
+        for pcm in [ANSWER_QUIET] * (wait - 1) + [ANSWER_SPEECH] * (1 + limit + limit):
+            transport.capture_pcm(pcm)
+        wav, cut_off = await asyncio.wait_for(window, 5)
+        self.assertTrue(cut_off)
+        self.assertEqual(len(vad.analysed), wait + limit + limit)
+        self.assertIsNone(transport.capture_pcm)
+
 
 class WholeConversationFixtureTests(unittest.TestCase):
     def test_startup_failure_restores_runtime(self):
