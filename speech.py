@@ -1261,8 +1261,8 @@ async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, b
     """Diverts the transport's capture for one permission answer, so none of it enters the conversation.
 
     Returns (16 kHz WAV, cut off by the limit) once the answer ends, or None when no speech starts within the wait.
-    Calls decided() once, the moment that outcome is known: before anything else is awaited and before the thrown-away
-    tail of a cut-off answer is read.
+    Calls decided() once, the moment that outcome is known or the window fails: before anything else is awaited and
+    before the thrown-away tail of a cut-off answer is read. A cancelled window decides nothing.
     Raises RuntimeError when capture is already diverted or the answer is no longer admitted; capture is always
     handed back.
     """
@@ -1277,6 +1277,13 @@ async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, b
             raise RuntimeError('The permission answer is no longer admitted')
         return pcm, await vad.analyze_audio(pcm)
 
+    ended = False
+
+    def decide():
+        nonlocal ended
+        ended = True
+        decided()
+
     try:
         vad.set_sample_rate(16000)
         async with asyncio.timeout(ANSWER_WAIT_SECONDS + 2 * ANSWER_LIMIT_SECONDS + 1):
@@ -1287,7 +1294,7 @@ async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, b
                 if state == VADState.SPEAKING:
                     break
             else:
-                decided()
+                decide()
                 return None
             answer = list(preroll)
             limit = round(ANSWER_LIMIT_SECONDS / ANSWER_FRAME_SECONDS)
@@ -1298,9 +1305,9 @@ async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, b
                 answer.append(pcm)
                 quiet = quiet + 1 if state in (VADState.QUIET, VADState.STOPPING) else 0
                 if quiet == end_quiet:
-                    decided()
+                    decide()
                     return wav16k(b''.join(answer)), False
-            decided()
+            decide()
             # Speech still going at the cut-off is read and thrown away until it ends, so none of it reaches the
             # conversation once capture is handed back.
             for _ in range(limit):
@@ -1309,6 +1316,10 @@ async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, b
                 if quiet == end_quiet:
                     break
             return wav16k(b''.join(answer)), True
+    except Exception:
+        if not ended:
+            decided()
+        raise
     finally:
         transport.capture_pcm = None
         await vad.cleanup()

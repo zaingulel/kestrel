@@ -4034,6 +4034,19 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(transport.capture_pcm)
             vad.cleanup.assert_awaited_once()
             self.assertEqual(decisions, [], 'A cancelled answer window decides nothing')
+        with self.subTest('a detector failure on the first frame decides once and hands capture back'):
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            vad.analyze_audio = AsyncMock(side_effect=RuntimeError('Answer detector failed: fixture'))
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+            transport.capture_pcm(ANSWER_SPEECH)
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(window, 5)
+            vad.analyze_audio.assert_awaited_once_with(ANSWER_SPEECH)
+            self.assertIsNone(transport.capture_pcm)
+            vad.cleanup.assert_awaited_once()
+            self.assertEqual(len(decisions), 1, 'A failed answer window ends the answer exactly once')
         for label, failure in (('raises', AsyncMock(side_effect=RuntimeError('Nemotron recognition failed: fixture'))),
                                ('returns no text', AsyncMock(return_value=None))):
             with self.subTest(f'a recognizer that {label} breaks the asking step and hands capture back'):
@@ -5719,6 +5732,61 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'],
                                  'Text typed after the spoken answer was decided must not approve')
                 self.assertEqual(read_notes(notes), seeded)
+                await self.hear_exactly(spoken, 'Yes to what?')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 4)
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'][-1],
+                                 {'role': 'user', 'content': 'yes'}, 'The typed yes is an ordinary request')
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+
+        with self.subTest('text typed once the answer window has failed is a new request'):
+            notes = self.private_notes(memory=[kept, first])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('asked', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_say('Yes to what?'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            self.fake_answer_recognizer(service, 'No.')
+            failed_answer = bot.capture_answer
+            typed = []
+
+            async def fail_then_type(transport, vad, **kwargs):
+                async def analyse(audio):
+                    # Queued as the window fails, so the typed yes lands ahead of the capture task's done callbacks.
+                    asyncio.get_running_loop().call_soon(lambda: typed.append(manager.submit('yes')))
+                    raise RuntimeError('Answer detector failed: fixture')
+
+                vad.analyze_audio = analyse
+                return await failed_answer(transport, vad, **kwargs)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                mark = len(events)
+                with patch.object(bot, 'capture_answer', fail_then_type):
+                    await self.speak_request(transport, requests[0])
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await wait_until(lambda: len(brain.requests) >= 3, 'The asking turn never settled')
+                self.assertEqual(typed, ['accepted'])
+                writes = [event for kind, event in events[mark:] if kind == 'write']
+                self.assertNotIn(APPROVAL, writes, 'Text typed after the answer window failed must not approve')
+                self.assertIn({'tool_result': brain_result(False, False, 'permission step failed'), 'source': 'kestrel'},
+                              writes, 'A failed answer window is a broken asking step')
+                self.assertEqual(read_notes(notes), seeded)
+                # The typed request already holds the speaker, so the broken step's advisory is never heard.
                 await self.hear_exactly(spoken, 'Yes to what?')
                 await self.reply_finished(transport, spoken)
                 self.assertEqual(len(brain.requests), 4)
