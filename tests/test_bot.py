@@ -4021,6 +4021,27 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
                 # The quiet ends the tail at the last frame fed; the six second bound ends it with frames still queued.
                 handed_back = len(answer_frames(wav)) // 640 + 300 if bounded else len(fed) + len(ending)
                 self.assertEqual(len(vad.analysed), handed_back)
+        with self.subTest('a detector failure in the thrown-away tail still decides only once'):
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            analyse, broken = vad.analyze_audio, b'T' * 640
+
+            async def fail_in_tail(audio):
+                if audio == broken:
+                    raise RuntimeError('Answer detector failed: fixture')
+                return await analyse(audio)
+
+            vad.analyze_audio = fail_in_tail
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+            # One opening frame and the six second limit reach the cut-off; the next frame is the thrown-away tail.
+            for pcm in [ANSWER_SPEECH] * 301 + [broken]:
+                transport.capture_pcm(pcm)
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(window, 5)
+            self.assertIsNone(transport.capture_pcm, 'The answer window must hand capture back')
+            vad.cleanup.assert_awaited_once()
+            self.assertEqual(decisions, [301], 'A failure after the cut-off was decided must not decide again')
         with self.subTest('cancellation hands capture back'):
             transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
             window = asyncio.create_task(speech.capture_answer(
