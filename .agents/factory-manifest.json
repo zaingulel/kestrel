@@ -1,10 +1,10 @@
 {
   "canonical": "zaingulel/fabraik",
   "release": {
-    "tag": "v0.5.0",
-    "id": 426803540,
-    "assetId": 685319928,
-    "digest": "sha256:56fa32797181235978a417864ea9319e1c529af3f7cb1e64a78a5e026e77c381"
+    "tag": "v0.5.1",
+    "id": 427045411,
+    "assetId": 685955133,
+    "digest": "sha256:eaba13c6278b8260913b7745c89dcf4caeba016b99ed4e565dca84f1760e581f"
   },
   "entries": [
     {
@@ -902,7 +902,7 @@
     },
     {
       "path": "scripts/lib/board.mjs",
-      "sha256": "04cef2720abb4abd410ba42ab4b700ad29e79baf98c77b45a4172fc623025f76"
+      "sha256": "dbde9075dd2350e64c0a632e06c2b6b6c87e197c7c3c3c51a8fcddcf8b8f848d"
     },
     {
       "path": "scripts/lib/board.test.mjs",
