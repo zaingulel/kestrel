@@ -882,6 +882,7 @@ class HermesLLMService(LLMService):
                 if json.loads(result)['confirmed']:
                     speak('final', tool.confirmation)
                 else:
+                    turn.closed = True
                     advise(tool.failure_message)
 
             return EngineApproval(admitted=lambda: self.admission.may_speak(token) and turn.epoch == self.stop_epoch,
@@ -1036,6 +1037,8 @@ class HermesLLMService(LLMService):
         delivery = None
         # Kestrel's own last line has been spoken; later brain text is dropped without failing the reply.
         ended = False
+        # Kestrel's question opened the reply, so it has no brain reply start for an advisory to join.
+        question_opened = False
         request = None
 
         async def push_reply_start(label):
@@ -1080,17 +1083,21 @@ class HermesLLMService(LLMService):
                 if 'advisory' in event:
                     if self.acknowledgement_output is not None:
                         self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
-                    if not started:
-                        await push_reply_start(delivery or 'neutral')
-                        started = True
-                    await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + event['advisory']), token))
+                    if question_opened:
+                        await self.push_local_speech(event['advisory'], token)
+                    else:
+                        if not started:
+                            await push_reply_start(delivery or 'neutral')
+                            started = True
+                        await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + event['advisory']), token))
                     failed = True
                 elif 'question' in event:
                     if self.acknowledgement_output is not None:
                         self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
                     # Kestrel's own speech opens the reply, as a local reply does: a reply start with no brain text
                     # would end in the no-speakable-text notice.
-                    started = True
+                    if not started:
+                        question_opened = started = True
                     await self.push_local_speech(event['question'], token)
                     # Labelled after the question, so the marker carries the live record it was spoken in.
                     await self.push_frame(self._labelled(event['marker'], token))
@@ -1449,6 +1456,9 @@ class VoiceConversations:
                     self.transport, SileroVADAnalyzer(params=VADParams(confidence=0.5)),
                     admitted=lambda: admitted() and self.admission.admits_microphone(),
                 ))
+                # Registered before anything else can be, so text typed once the spoken answer has ended, even from
+                # another of its done callbacks, is an ordinary new request.
+                capture.add_done_callback(lambda task: setattr(self, 'typed_answer', None))
                 await asyncio.wait({typed, capture}, return_when=asyncio.FIRST_COMPLETED)
             else:
                 await asyncio.wait({typed}, timeout=ANSWER_TYPED_SECONDS)

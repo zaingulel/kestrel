@@ -1277,7 +1277,7 @@ async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | No
 
     try:
         vad.set_sample_rate(16000)
-        async with asyncio.timeout(ANSWER_WAIT_SECONDS + ANSWER_LIMIT_SECONDS + 1):
+        async with asyncio.timeout(ANSWER_WAIT_SECONDS + 2 * ANSWER_LIMIT_SECONDS + 1):
             preroll = deque(maxlen=ANSWER_PREROLL_FRAMES)
             for _ in range(round(ANSWER_WAIT_SECONDS / ANSWER_FRAME_SECONDS)):
                 pcm, state = await heard()
@@ -1287,13 +1287,22 @@ async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | No
             else:
                 return None
             answer = list(preroll)
+            limit = round(ANSWER_LIMIT_SECONDS / ANSWER_FRAME_SECONDS)
+            end_quiet = round(ANSWER_END_QUIET_SECONDS / ANSWER_FRAME_SECONDS)
             quiet = 0
-            for _ in range(round(ANSWER_LIMIT_SECONDS / ANSWER_FRAME_SECONDS)):
+            for _ in range(limit):
                 pcm, state = await heard()
                 answer.append(pcm)
                 quiet = quiet + 1 if state in (VADState.QUIET, VADState.STOPPING) else 0
-                if quiet == round(ANSWER_END_QUIET_SECONDS / ANSWER_FRAME_SECONDS):
+                if quiet == end_quiet:
                     return wav16k(b''.join(answer)), False
+            # Speech still going at the cut-off is read and thrown away until it ends, so none of it reaches the
+            # conversation once capture is handed back.
+            for _ in range(limit):
+                _, state = await heard()
+                quiet = quiet + 1 if state in (VADState.QUIET, VADState.STOPPING) else 0
+                if quiet == end_quiet:
+                    break
             return wav16k(b''.join(answer)), True
     finally:
         transport.capture_pcm = None
