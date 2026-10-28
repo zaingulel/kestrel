@@ -3965,8 +3965,9 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
 
     async def open_window(self, frames):
         from types import SimpleNamespace
-        transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
-        window = asyncio.create_task(speech.capture_answer(transport, vad, admitted=lambda: True))
+        transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+        window = asyncio.create_task(speech.capture_answer(
+            transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
         await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
         for pcm in frames:
             transport.capture_pcm(pcm)
@@ -3974,6 +3975,7 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(transport.capture_pcm, 'The answer window must hand capture back')
         vad.set_sample_rate.assert_called_once_with(16000)
         vad.cleanup.assert_awaited_once()
+        self.assertEqual(len(decisions), 1, 'Each answer window decides exactly once')
         return result
 
     async def test_answer_window_endpoints_and_always_restores_capture(self):
@@ -3995,8 +3997,9 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
                 ('speech going on past the cut-off is thrown away for at most six more seconds',
                  [ANSWER_SPEECH] * 299, [ANSWER_SPEECH] * 10, True)):
             with self.subTest(label):
-                transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
-                window = asyncio.create_task(speech.capture_answer(transport, vad, admitted=lambda: True))
+                transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+                window = asyncio.create_task(speech.capture_answer(
+                    transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
                 await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
                 fed = [ANSWER_SPEECH] * 301 + tail
                 for pcm in fed:
@@ -4013,12 +4016,15 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
                 # One opening frame, then the six second limit counted by frames; 422eeac's float sum reaches it one frame later.
                 self.assertIn(len(answer_frames(wav)), (301 * 640, 302 * 640))
                 self.assertEqual(set(answer_frames(wav)), {ord('Y')}, 'The thrown-away tail is not part of the answer')
+                self.assertEqual(decisions, [len(answer_frames(wav)) // 640],
+                                 'The cut-off is decided before any of the thrown-away tail is read')
                 # The quiet ends the tail at the last frame fed; the six second bound ends it with frames still queued.
                 handed_back = len(answer_frames(wav)) // 640 + 300 if bounded else len(fed) + len(ending)
                 self.assertEqual(len(vad.analysed), handed_back)
         with self.subTest('cancellation hands capture back'):
-            transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
-            window = asyncio.create_task(speech.capture_answer(transport, vad, admitted=lambda: True))
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
             await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
             transport.capture_pcm(ANSWER_SPEECH)
             await wait_until(lambda: vad.analysed == [ANSWER_SPEECH], 'The answer window never heard the speech')
@@ -4027,6 +4033,7 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
                 await window
             self.assertIsNone(transport.capture_pcm)
             vad.cleanup.assert_awaited_once()
+            self.assertEqual(decisions, [], 'A cancelled answer window decides nothing')
         for label, failure in (('raises', AsyncMock(side_effect=RuntimeError('Nemotron recognition failed: fixture'))),
                                ('returns no text', AsyncMock(return_value=None))):
             with self.subTest(f'a recognizer that {label} breaks the asking step and hands capture back'):
@@ -4058,10 +4065,11 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
             limits.append(seconds)
             return real_timeout(seconds)
 
-        transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
+        transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
         # Only the window's own time limit is recorded: the patch ends once the window is open, before wait_until sets its own.
         with patch.object(speech.asyncio, 'timeout', recording_timeout):
-            window = asyncio.create_task(speech.capture_answer(transport, vad, admitted=lambda: True))
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
             await asyncio.sleep(0)
         self.assertEqual(len(limits), 1, 'The answer window must set exactly one time limit')
         # The longest run: speech on the last waiting frame, then speech through the limit and the whole discard bound.
@@ -4073,6 +4081,7 @@ class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
             transport.capture_pcm(pcm)
         wav, cut_off = await asyncio.wait_for(window, 5)
         self.assertTrue(cut_off)
+        self.assertEqual(decisions, [wait + limit], 'The cut-off is decided before any of the thrown-away tail is read')
         self.assertEqual(len(vad.analysed), wait + limit + limit)
         self.assertIsNone(transport.capture_pcm)
 
@@ -5654,6 +5663,61 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(typed, ['accepted'])
                 self.assertNotIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'],
                                  'Text typed after the spoken answer ended must not approve')
+                self.assertEqual(read_notes(notes), seeded)
+                await self.hear_exactly(spoken, 'Yes to what?')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 4)
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'][-1],
+                                 {'role': 'user', 'content': 'yes'}, 'The typed yes is an ordinary request')
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+
+        with self.subTest('text typed once the spoken answer is decided is a new request'):
+            notes = self.private_notes(memory=[kept, first])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('asked', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_say('Yes to what?'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            self.fake_answer_recognizer(service, 'No.')
+            decided_answer = bot.capture_answer
+            typed = []
+
+            async def decide_then_type(transport, vad, **kwargs):
+                detector_cleanup = vad.cleanup
+
+                async def cleanup():
+                    # Capture awaits cleanup only once the answer is decided, so the typed yes is queued ahead of the
+                    # capture task's done callbacks.
+                    asyncio.get_running_loop().call_soon(lambda: typed.append(manager.submit('yes')))
+                    await detector_cleanup()
+
+                vad.cleanup = cleanup
+                return await decided_answer(transport, vad, **kwargs)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                mark = len(events)
+                with patch.object(bot, 'capture_answer', decide_then_type):
+                    await self.speak_request(transport, requests[0])
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await wait_until(lambda: len(brain.requests) >= 3, 'The asking turn never settled')
+                self.assertEqual(typed, ['accepted'])
+                self.assertNotIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'],
+                                 'Text typed after the spoken answer was decided must not approve')
                 self.assertEqual(read_notes(notes), seeded)
                 await self.hear_exactly(spoken, 'Yes to what?')
                 await self.reply_finished(transport, spoken)

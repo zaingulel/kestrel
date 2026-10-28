@@ -1257,10 +1257,12 @@ ANSWER_PREROLL_FRAMES = 25
 ANSWER_FRAME_SECONDS = 0.02  # 640-byte frames of 16 kHz mono 16-bit audio, as LaptopAudioTransport reads them.
 
 
-async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | None:
+async def capture_answer(transport, vad, *, admitted, decided) -> tuple[bytes, bool] | None:
     """Diverts the transport's capture for one permission answer, so none of it enters the conversation.
 
     Returns (16 kHz WAV, cut off by the limit) once the answer ends, or None when no speech starts within the wait.
+    Calls decided() once, the moment that outcome is known: before anything else is awaited and before the thrown-away
+    tail of a cut-off answer is read.
     Raises RuntimeError when capture is already diverted or the answer is no longer admitted; capture is always
     handed back.
     """
@@ -1285,6 +1287,7 @@ async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | No
                 if state == VADState.SPEAKING:
                     break
             else:
+                decided()
                 return None
             answer = list(preroll)
             limit = round(ANSWER_LIMIT_SECONDS / ANSWER_FRAME_SECONDS)
@@ -1295,7 +1298,9 @@ async def capture_answer(transport, vad, *, admitted) -> tuple[bytes, bool] | No
                 answer.append(pcm)
                 quiet = quiet + 1 if state in (VADState.QUIET, VADState.STOPPING) else 0
                 if quiet == end_quiet:
+                    decided()
                     return wav16k(b''.join(answer)), False
+            decided()
             # Speech still going at the cut-off is read and thrown away until it ends, so none of it reaches the
             # conversation once capture is handed back.
             for _ in range(limit):

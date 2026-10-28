@@ -1455,10 +1455,10 @@ class VoiceConversations:
                 capture = asyncio.create_task(capture_answer(
                     self.transport, SileroVADAnalyzer(params=VADParams(confidence=0.5)),
                     admitted=lambda: admitted() and self.admission.admits_microphone(),
+                    # Text typed once the spoken answer is decided, even before capture has finished, is an ordinary
+                    # new request.
+                    decided=lambda: setattr(self, 'typed_answer', None),
                 ))
-                # Registered before anything else can be, so text typed once the spoken answer has ended, even from
-                # another of its done callbacks, is an ordinary new request.
-                capture.add_done_callback(lambda task: setattr(self, 'typed_answer', None))
                 await asyncio.wait({typed, capture}, return_when=asyncio.FIRST_COMPLETED)
             else:
                 await asyncio.wait({typed}, timeout=ANSWER_TYPED_SECONDS)
