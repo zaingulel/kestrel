@@ -34,6 +34,10 @@ TRACE_FAILURE_ERROR = ('Local conversation tracing failed. Check free space and 
 RUNTIME_HOME_ERROR = ('Hermes runtime home is not a private directory owned by this user. '
                       'Check runtime ownership and permissions, then restart Kestrel.')
 ENGINE_CLOSE_ERROR = 'Hermes engine could not close cleanly. Restart Kestrel.'
+SOURCE_IDENTITY_ERROR = ('Hermes source identity could not be verified. '
+                         'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
+ENGINE_LOAD_ERROR = ('Hermes engine files could not be loaded. '
+                     'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
 TOOL_SURFACE_ERROR = ("Hermes offered tools other than memory and Kestrel's desktop tools. "
                       'Check the pinned Hermes configuration, then restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
@@ -251,15 +255,13 @@ MEMORY_REPLY_REMINDER = (
 
 
 def validate_hermes_source() -> None:
-    refusal = ('Hermes source identity could not be verified. '
-               'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
     try:
         head = subprocess.run(
             ['git', '-C', str(HERMES_SOURCE), 'rev-parse', 'HEAD'],
             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5,
         ).stdout.strip()
         if head != HERMES_COMMIT:
-            raise RuntimeError(refusal)
+            raise RuntimeError(SOURCE_IDENTITY_ERROR)
         subprocess.run(
             ['git', '-C', str(HERMES_SOURCE), 'diff', '--quiet', '--no-ext-diff',
              '--no-textconv', 'HEAD', '--'],
@@ -268,9 +270,9 @@ def validate_hermes_source() -> None:
         spec = importlib.util.find_spec('run_agent')
         if (spec is None or spec.origin is None
                 or Path(spec.origin).resolve() != (HERMES_SOURCE / 'run_agent.py').resolve()):
-            raise RuntimeError(refusal)
+            raise RuntimeError(SOURCE_IDENTITY_ERROR)
     except (OSError, subprocess.SubprocessError, ImportError, ValueError):
-        raise RuntimeError(refusal) from None
+        raise RuntimeError(SOURCE_IDENTITY_ERROR) from None
 
 
 def validate_local_configuration() -> None:
@@ -523,13 +525,16 @@ def main(*, base_url=BONSAI_URL):
                 os.environ['HERMES_NEMO_RELAY_PLUGINS_TOML'] = str(plugins)
             except Exception as error:
                 raise RuntimeError(TRACE_STARTUP_ERROR) from (error.__cause__ or error)
-            from run_agent import AIAgent
-            from tools.registry import registry
-            from agent.relay_runtime import get_runtime
-            from agent.turn_failure_copy import is_max_iteration_handoff
-            from agent.reasoning_promotion import answer_in_reasoning_capability
-            from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
-            import nemo_relay
+            try:
+                from run_agent import AIAgent
+                from tools.registry import registry
+                from agent.relay_runtime import get_runtime
+                from agent.turn_failure_copy import is_max_iteration_handoff
+                from agent.reasoning_promotion import answer_in_reasoning_capability
+                from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
+                import nemo_relay
+            except ImportError as error:
+                raise RuntimeError(ENGINE_LOAD_ERROR) from error
 
             bridge_failed = False
             outside = False

@@ -184,6 +184,7 @@ In trouble, the status snapshot carries one of these wire letters, and the panel
 | R | `trouble-recognition` | `Speech recognition failed. Restart Kestrel.` |
 | V | `trouble-voice` | `Voice generation failed. Restart Kestrel.` |
 | E | `trouble-engine` | `Kestrel's engine is unavailable. Restart Kestrel.` |
+| G | `trouble-engine-missing` | `Kestrel's engine is missing, has changed or couldn't be checked. Reinstall it as the manual describes, then restart Kestrel.` |
 | O | `trouble-notes` | `Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.` |
 | H | `trouble-handover` | `A typed message could not reach the conversation. Restart Kestrel.` |
 

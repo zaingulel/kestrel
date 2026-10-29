@@ -962,7 +962,7 @@ TestCase {
             ["D", resting, false, false], ["N", resting, false, false],
             ["I", active, true, false], ["L", active, true, false], ["T", active, true, false], ["S", active, true, false],
             ["A", unconfirmed, false, true], ["U", unconfirmed, false, true],
-            ["B", unconfirmed, false, true], ["E", unconfirmed, false, true]
+            ["B", unconfirmed, false, true], ["E", unconfirmed, false, true], ["G", unconfirmed, false, true]
         ]) {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
@@ -1112,6 +1112,8 @@ TestCase {
                 "Voice generation failed. Restart Kestrel."],
             ["E", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Kestrel's engine is unavailable. Restart Kestrel.", "trouble",
                 "Kestrel's engine is unavailable. Restart Kestrel."],
+            ["G", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Kestrel's engine is missing, has changed or couldn't be checked. Reinstall it as the manual describes, then restart Kestrel.", "trouble",
+                "Kestrel's engine is missing, has changed or couldn't be checked. Reinstall it as the manual describes, then restart Kestrel."],
             ["O", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.", "trouble",
                 "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel."],
             ["H", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "A typed message could not reach the conversation. Restart Kestrel.", "trouble",
