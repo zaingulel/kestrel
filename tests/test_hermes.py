@@ -54,6 +54,7 @@ BASELINE_SYSTEM_PROMPT = (
     "For take_screenshot, confirmed means a new screenshot file was saved; you never see it. "
     "Use delete_note with the note's exact full text only when the owner asks to delete or forget that note, "
     "and never memory remove for such a request. Kestrel reads it back, asks and reports the result itself. "
+    "A new owner request to delete a note is never a retry, even after an earlier delete_note for it was refused or unanswered: call delete_note again so Kestrel asks again. "
     "Never call a desktop tool again to retry it.\n\n"
     'Choose the delivery for the meaning of the current reply, using the conversation as context. '
     'Keep expression subtle and prefer neutral when uncertain. Neutral suits factual answers, '

@@ -143,7 +143,9 @@ TOOL_CATALOGUE: dict[str, ToolSpec] = {
                             failure_message="I couldn't confirm the note was removed. I won't retry.",
                             extra_guidance="Use delete_note with the note's exact full text only when the owner asks to "
                                            "delete or forget that note, and never memory remove for such a request. "
-                                           "Kestrel reads it back, asks and reports the result itself. ",
+                                           "Kestrel reads it back, asks and reports the result itself. "
+                                           "A new owner request to delete a note is never a retry, even after an earlier "
+                                           "delete_note for it was refused or unanswered: call delete_note again so Kestrel asks again. ",
                             read_back='delete the note: {note}', engine_effect=True),
 }
 
