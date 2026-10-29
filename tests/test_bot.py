@@ -1432,6 +1432,60 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(replay[0].append_to_context)
                 command.assert_not_awaited()
 
+    async def test_local_repeat_requires_credited_speech(self):
+        def local_sentence(service, text, size, sample_rate=48000):
+            token, _ = service.admission.accept_spoken()
+            service.begin_reply(token)
+            record = service.current_reply()
+            section = record.open_section('neutral')
+            start = TTSStartedFrame()
+            audio = TTSAudioRawFrame(bytes(size), sample_rate, 1)
+            spoken = TTSTextFrame(text, aggregated_by='sentence')
+            spoken.append_to_context = False
+            record.starts_text(audio, text)
+            for frame in (start, audio, spoken):
+                record.stream_frame(frame, section)
+            service.conversation_output(start)
+            return record, section, spoken
+
+        for case in ('partial before text', 'credit after text', 'empty source',
+                     'invalid metadata', 'skipped text start', 'superseded ticket'):
+            with self.subTest(case=case):
+                service = hermes_service()
+                self.addAsyncCleanup(service.local_actions.close)
+                service.last_spoken_reply = 'Previously heard reply.'
+                sentence = 'This local sentence reached output.'
+                size = 0 if case == 'empty source' else 960 if case in (
+                    'credit after text', 'superseded ticket') else 9600
+                record, section, spoken = local_sentence(
+                    service, sentence, size, 24000 if case == 'invalid metadata' else 48000)
+
+                if case == 'partial before text':
+                    service.conversation_audio([(section, 0, 7680)])
+                    service.conversation_output(spoken)
+                    self.assertEqual(service.last_spoken_reply, sentence)
+                elif case == 'credit after text':
+                    service.conversation_output(spoken)
+                    self.assertEqual(service.last_spoken_reply, 'Previously heard reply.')
+                    service.conversation_audio([(section, 0, 960)])
+                    self.assertEqual(service.last_spoken_reply, sentence)
+                elif case == 'superseded ticket':
+                    service.conversation_output(spoken)
+                    self.assertEqual(service.last_spoken_reply, 'Previously heard reply.')
+                    newer, newer_section, newer_spoken = local_sentence(
+                        service, 'Newer heard reply.', 960)
+                    self.assertIsNot(record.token, newer.token)
+                    service.conversation_audio([(newer_section, 0, 960)])
+                    service.conversation_output(newer_spoken)
+                    self.assertEqual(service.last_spoken_reply, 'Newer heard reply.')
+                    service.conversation_audio([(section, 0, 960)])
+                    self.assertEqual(service.last_spoken_reply, 'Newer heard reply.')
+                else:
+                    credit = (section, 7680, 9600) if case == 'skipped text start' else (section, 0, size)
+                    service.conversation_audio([credit])
+                    service.conversation_output(spoken)
+                    self.assertEqual(service.last_spoken_reply, 'Previously heard reply.')
+
     async def test_processor_excludes_speculative_nonuser_and_upstream_mute(self):
         cases = [
             ([{'role': 'user', 'content': 'mute'}], True, FrameDirection.DOWNSTREAM),

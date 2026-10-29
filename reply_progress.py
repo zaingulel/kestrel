@@ -70,6 +70,7 @@ class ReplySection:
     source_bytes: int = 0
     previous_text_end: int = 0
     pending_text_starts: list[tuple[int, str]] = field(default_factory=list)
+    heard_text_starts: set[int] = field(default_factory=set)
     source_valid: bool = True
     output_bytes: int = 0
     output_stopped: bool = False
@@ -93,6 +94,8 @@ class ReplyProgress:
         self.interrupting = False
         self.sections: list[ReplySection] = []
         self.spans: list[TextSpan] = []
+        self._local_text_candidates: list[tuple[TextSpan, str]] = []
+        self.local_repeat_text: str | None = None
         self.incomplete = False
         self.synthesis_failed = False
         self.write_failed = False
@@ -165,6 +168,21 @@ class ReplyProgress:
     def span_of(self, text_frame) -> TextSpan | None:
         return self._text_spans.get(text_frame.id)
 
+    def remember_local_text(self, frame: TTSTextFrame) -> None:
+        if self.closed or not self.feed_open():
+            return
+        span = self.span_of(frame)
+        if (frame.text.strip() and span is not None and span.valid and span.audible
+                and span.start < span.end):
+            self._local_text_candidates.append((span, frame.text))
+            self._refresh_local_repeat()
+
+    def _refresh_local_repeat(self) -> None:
+        for span, text in reversed(self._local_text_candidates):
+            if any(span.start <= byte < span.end for byte in span.section.heard_text_starts):
+                self.local_repeat_text = text
+                return
+
     def source_range(self, frame) -> tuple[ReplySection, int, int] | None:
         return self._sources.get(frame.id)
 
@@ -214,8 +232,10 @@ class ReplyProgress:
                 continue
             if text.strip():
                 self.delivered = True
+                section.heard_text_starts.add(byte)
             if self.feed is not None:
                 self.feed.spoken(self.token, text)
+        self._refresh_local_repeat()
 
     def output_lost(self) -> None:
         if not self.closed:

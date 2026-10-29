@@ -638,17 +638,20 @@ class HermesLLMService(LLMService):
                 and (isinstance(frame, InterruptionFrame) or self.admission.may_speak(record.token))):
             record.output_frame(frame)
         self.observe_announcement(frame)
-        span = record.span_of(frame) if record is not None and isinstance(frame, TTSTextFrame) else None
-        if (self.admission.may_speak(self._assistant_reply_token) and isinstance(frame, TTSTextFrame)
-                and not frame.append_to_context and frame.text.strip() and span is not None
-                and span.valid and span.audible and span.start < span.end <= span.section.output_bytes):
-            self.last_spoken_reply = frame.text
-            self._last_spoken_token = self._assistant_reply_token
+        if record is not None and isinstance(frame, TTSTextFrame) and not frame.append_to_context:
+            record.remember_local_text(frame)
+            self._remember_local_reply(record)
+
+    def _remember_local_reply(self, record):
+        if self.admission.may_speak(record.token) and record.local_repeat_text is not None:
+            self.last_spoken_reply = record.local_repeat_text
+            self._last_spoken_token = record.token
 
     def conversation_audio(self, entries):
         for section, start, end in entries:
             if self.admission.may_speak(section.reply.token):
                 section.reply.credit(section, start, end)
+                self._remember_local_reply(section.reply)
 
     def observe_announcement(self, frame):
         if self._announcement is None:
