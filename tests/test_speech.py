@@ -2361,6 +2361,119 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(frame, kind):
                     return frame
 
+    async def test_sound_cue_playback_failure_is_terminal(self):
+        for case in ('drained', 'broken_pipe', 'nonzero', 'cancelled', 'revoked'):
+            with self.subTest(case=case):
+                admission = Admission(voice=False, output_switching=lambda: False)
+                token = admission.accept_typed(on_taken=lambda: None)
+                stopped = Mock()
+                transport = speech.LaptopAudioTransport(Mock(), on_stopped=stopped, admission=admission,
+                                                       capture_enabled=False)
+                self.addAsyncCleanup(transport.close)
+                output = transport.output()
+                playback = self.child(3600, normal_eof=True, hold_exit=True,
+                                      exit_code=7 if case == 'nonzero' else 0)
+                children = []
+                cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
+                first_drain, release_drain = asyncio.Event(), asyncio.Event()
+                native_wait = playback.wait.side_effect
+
+                async def wait_child():
+                    if case == 'cancelled' and playback.kill.called:
+                        cleanup_started.set()
+                        await release_cleanup.wait()
+                    return await native_wait()
+
+                playback.wait.side_effect = wait_child
+                if case == 'broken_pipe':
+                    playback.stdin.drain = AsyncMock(side_effect=BrokenPipeError('Private playback detail'))
+                elif case == 'revoked':
+                    async def drain():
+                        first_drain.set()
+                        await release_drain.wait()
+
+                    playback.stdin.drain = AsyncMock(side_effect=drain)
+
+                async def spawn(*args, **kwargs):
+                    children.append(playback)
+                    self.assertEqual(len(children), 1, 'Cue failure must never spawn a failure-cue retry')
+                    return playback
+
+                async def paced(duration):
+                    return None
+
+                self.addCleanup(playback.release_exit)
+                self.addCleanup(release_cleanup.set)
+                self.addCleanup(release_drain.set)
+                task = None
+                with patch.object(transport, '_spawn', spawn), patch.object(speech, 'sleep', paced):
+                    _, observed = await self.pipeline(output)
+                    try:
+                        task = asyncio.create_task(output.play_cue('heard', token=token))
+                        if case == 'broken_pipe':
+                            self.assertFalse(await asyncio.wait_for(task, 5))
+                        elif case == 'revoked':
+                            await asyncio.wait_for(first_drain.wait(), 5)
+                            first_writes = list(playback.stdin.write.call_args_list)
+                            self.assertEqual(len(first_writes), 1)
+                            self.assertTrue(first_writes[0].args[0])
+                            self.assertLess(len(first_writes[0].args[0]), 6720)
+                            self.assertTrue(admission.may_speak(token))
+                            admission.accept_typed(on_taken=lambda: None)
+                            self.assertFalse(admission.may_speak(token))
+                            release_drain.set()
+                            await asyncio.wait_for(playback.eof.wait(), 5)
+                            playback.release_exit()
+                            self.assertFalse(await asyncio.wait_for(task, 5))
+                            self.assertEqual(playback.stdin.write.call_args_list, first_writes,
+                                             'Revoked cue authority must not write additional stale bytes')
+                        else:
+                            await asyncio.wait_for(playback.eof.wait(), 5)
+                            pcm = b''.join(call.args[0] for call in playback.stdin.write.call_args_list)
+                            self.assertEqual(len(pcm), 6720, '70-ms mono 48-kHz signed-16-bit heard cue')
+                            self.assertTrue(any(pcm))
+                            self.assertLessEqual(np.max(np.abs(np.frombuffer(pcm, dtype='<i2').astype(np.int32))), 3277)
+                            self.assertFalse(task.done(), 'EOF does not establish drained successful playback')
+                            if case == 'cancelled':
+                                task.cancel()
+                                await asyncio.wait_for(cleanup_started.wait(), 5)
+                                self.assertFalse(task.done(), 'Cancellation must await owned-child cleanup')
+                                self.assertFalse(playback.reaped.is_set())
+                                release_cleanup.set()
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await asyncio.wait_for(task, 5)
+                            else:
+                                playback.release_exit()
+                                self.assertEqual(await asyncio.wait_for(task, 5), case == 'drained')
+                        self.assertTrue(playback.reaped.is_set())
+                        self.assertIsNone(transport.playback)
+                        self.assertIsNone(transport.playback_watcher)
+                        self.assertIsNone(output.playback_deadline)
+                        self.assertTrue(observed.empty(), 'Cues emit no text, reply or audio-credit frames')
+                        if case in ('broken_pipe', 'nonzero'):
+                            self.assertEqual(transport.failure, speech.LAPTOP_PLAYBACK_FAILURE)
+                            stopped.assert_called_once_with()
+                            self.assertFalse(await output.play_cue('failed', token=token))
+                            self.assertEqual(children, [playback])
+                            stopped.assert_called_once()
+                        elif case == 'drained':
+                            self.assertIsNone(transport.failure)
+                            playback.kill.assert_not_called()
+                            self.assertEqual(playback.returncode, 0)
+                        elif case == 'revoked':
+                            self.assertIsNone(transport.failure)
+                            stopped.assert_not_called()
+                        else:
+                            playback.kill.assert_called_once()
+                    finally:
+                        release_cleanup.set()
+                        release_drain.set()
+                        playback.release_exit()
+                        if task is not None and not task.done():
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                        await transport.close()
+
     async def test_acknowledgement_deadline_orders_native_bytes(self):
         now = 100.0
         acknowledgement_now = 100.0
@@ -2634,7 +2747,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=admission)
         self.addAsyncCleanup(transport.close)
         transport.playback = playback
-        answer_playback = self.child(3301)
+        answer_playback = self.child(3301, normal_eof=True)
+        cue_playback = self.child(3302, normal_eof=True)
         output = transport.output()
         output.prepared_acknowledgements = (speech.PreparedAcknowledgement('One moment.', b'K' * 3840),)
         llm = bot.HermesLLMService(Mock(), local_actions=Mock(), admission=admission,
@@ -2689,7 +2803,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced),
               patch.object(bot.UserBotLatencyObserver, '__init__', timed_observer),
               patch.object(bot.logger, 'info', side_effect=logged),
-              patch.object(transport, '_spawn', return_value=answer_playback)):
+              patch.object(transport, '_spawn', side_effect=[answer_playback, cue_playback])):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), Forward(), llm=llm, transport=transport, user_params=params,
                 on_frame_completed=completed, typed_origin=Mock(return_value=None),
@@ -2737,7 +2851,11 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(playback.reaped.is_set())
             self.assertEqual(playback.returncode, 0)
             playback.kill.assert_not_called()
-            self.assertIs(transport.playback, answer_playback)
+            self.assertIsNone(transport.playback)
+            for child in (answer_playback, cue_playback):
+                self.assertTrue(child.reaped.is_set())
+                self.assertEqual(child.returncode, 0)
+                child.kill.assert_not_called()
             self.assertEqual([call.args[0] for call in answer_playback.stdin.write.call_args_list],
                              [b'A' * 960 + bytes(2880)])
             self.assertEqual(answer_section.output_bytes, 960)

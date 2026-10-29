@@ -638,14 +638,20 @@ class HermesLLMService(LLMService):
                 and (isinstance(frame, InterruptionFrame) or self.admission.may_speak(record.token))):
             record.output_frame(frame)
         self.observe_announcement(frame)
-        if self.admission.may_speak(self._assistant_reply_token) and isinstance(frame, TTSTextFrame) and not frame.append_to_context and frame.text.strip():
-            self.last_spoken_reply = frame.text
-            self._last_spoken_token = self._assistant_reply_token
+        if record is not None and isinstance(frame, TTSTextFrame) and not frame.append_to_context:
+            record.remember_local_text(frame)
+            self._remember_local_reply(record)
+
+    def _remember_local_reply(self, record):
+        if self.admission.may_speak(record.token) and record.local_repeat_text is not None:
+            self.last_spoken_reply = record.local_repeat_text
+            self._last_spoken_token = record.token
 
     def conversation_audio(self, entries):
         for section, start, end in entries:
             if self.admission.may_speak(section.reply.token):
                 section.reply.credit(section, start, end)
+                self._remember_local_reply(section.reply)
 
     def observe_announcement(self, frame):
         if self._announcement is None:
@@ -666,12 +672,16 @@ class HermesLLMService(LLMService):
         if self._announcement is not None and not self._announcement[2].done():
             self._announcement[2].set_result(outcome)
 
-    async def push_reply_end(self, token, *, failed=False):
+    async def push_reply_end(self, token, *, failed=False, cue_failed=False, cue=True):
         if not self.admission.may_speak(token):
             return
         end = self._labelled(LLMFullResponseEndFrame(), token)
         # The output queue, not generation completion, owns the visible reply's end.
         end.reply_progress.answer_failed |= failed
+        end.reply_progress.cue_failed |= cue_failed
+        end.reply_progress.terminal_cue = cue
+        if end.reply_progress.closed and failed:
+            end.reply_progress.terminal_outcome = 'failed'
         await self.push_frame(end)
 
     async def push_local_speech(self, message, token):
@@ -679,11 +689,11 @@ class HermesLLMService(LLMService):
             self.begin_reply(token)
         await self.push_frame(self._labelled(TTSSpeakFrame(message, append_to_context=False), token))
 
-    async def speak_local_reply(self, message, token):
+    async def speak_local_reply(self, message, token, *, cue_failed=False):
         if not self.admission.may_speak(token):
             return
         await self.push_local_speech(message, token)
-        await self.push_reply_end(token)
+        await self.push_reply_end(token, cue_failed=cue_failed)
 
     async def announce_first(self, token, message, run, *, command):
         outcome = 'request superseded'
@@ -830,12 +840,19 @@ class HermesLLMService(LLMService):
                              if item.result is None or effect_observed(item.result) or item.result.attempted]
             account = stop_account(self.outcomes)
             if account is None:
-                await self.push_reply_end(token)
+                await self.push_reply_end(token, cue=False)
             else:
                 for item in self.outcomes:
                     if item.result is not None:
                         item.reporter = token
-                await self.speak_local_reply(account, token)
+                await self.push_local_speech(account, token)
+                await self.push_reply_end(token, cue=False)
+            return
+        tool = match_instant_tool(text)
+        mute = tool is not None and tool.announcement is not None
+        if not mute and self.acknowledgement_output is not None:
+            await self.acknowledgement_output.play_cue('heard', token=token)
+        if not self.valid_origin(frame):
             return
         if re.fullmatch(r'repeat that[.!?]?', text.strip().lower()):
             remove_original()
@@ -845,7 +862,6 @@ class HermesLLMService(LLMService):
             remove_original()
             await self.speak_local_reply(capability_help(), token)
             return
-        tool = match_instant_tool(text)
         if tool is not None and tool.lookup is not None:
             lookup = asyncio.create_task(resolve_local_tool(tool, command=self.local_actions.command))
             self.lookup = self.local_actions.retain(lookup)
@@ -856,7 +872,7 @@ class HermesLLMService(LLMService):
                 raise
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 remove_original()
-                await self.speak_local_reply(tool.lookup_failure[1], token)
+                await self.speak_local_reply(tool.lookup_failure[1], token, cue_failed=True)
                 return
         if tool is not None:
             if not self.valid_origin(frame):
@@ -877,9 +893,9 @@ class HermesLLMService(LLMService):
                 if message is None:
                     self.retire_outcomes(token)
             if message is not None:
-                await self.speak_local_reply(message, token)
+                await self.speak_local_reply(message, token, cue_failed=not effect_observed(result))
             else:
-                await self.push_reply_end(token)
+                await self.push_reply_end(token, cue=not mute, cue_failed=not effect_observed(result))
             return
         self.begin_reply(token)
         if self.acknowledgement_output is not None:
@@ -1641,11 +1657,11 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
     user = ConversationUserAggregator(context, params=user_params, input_paused=input_paused)
     # Pipecat 1.12 pairs the assistant back to its exact user for native context flushing.
     assistant = LLMAssistantAggregator(context, _paired_user_aggregator=user)
-    if status is not None or conversation is not None:
-        @transport.input().event_handler('on_after_process_frame')
-        async def indicator_input_ready(processor, frame):
-            if isinstance(frame, StartFrame):
-                llm.indicator_input_ready()
+    @transport.input().event_handler('on_after_process_frame')
+    async def indicator_input_ready(processor, frame):
+        if isinstance(frame, StartFrame):
+            llm.indicator_input_ready()
+            await transport.output().play_cue('listening')
 
     @user.event_handler('on_before_push_frame')
     async def indicator_user_turn(processor, frame):
@@ -1682,6 +1698,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
         on_frame_completed('assistant', frame)
 
     output = transport.output()
+    last_terminal_token = None
 
     @output.event_handler('on_before_process_frame')
     async def output_frame_entering(processor, frame):
@@ -1703,6 +1720,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
 
     @output.event_handler('on_after_push_frame')
     async def on_output_frame(processor, frame):
+        nonlocal last_terminal_token
         # The transport pushes audio only after its write succeeded.
         if isinstance(frame, OutputAudioRawFrame):
             prepared = getattr(frame, 'prepared_credit', None)
@@ -1718,9 +1736,16 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
                 llm.indicator_output_stopped()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 llm.indicator_reply_finished(token_of(frame))
+        record = getattr(frame, 'reply_progress', None)
         llm.conversation_output(frame)
-        if isinstance(frame, LLMFullResponseEndFrame) and on_reply_finished is not None:
-            on_reply_finished(token_of(frame))
+        if (record is not None and record.closed and not record.terminal_notified
+                and llm.admission.may_speak(record.token) and record.token is not last_terminal_token):
+            last_terminal_token = record.token
+            record.terminal_notified = True
+            if record.terminal_cue and record.terminal_outcome != 'interrupted':
+                await output.play_cue('failed' if record.cue_failed or record.terminal_outcome == 'failed' else 'finished', token=record.token)
+            if on_reply_finished is not None:
+                on_reply_finished(record.token)
 
     pipeline = Pipeline([
         transport.input(), stt, user, llm,
