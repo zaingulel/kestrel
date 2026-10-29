@@ -4467,6 +4467,36 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             answer_release.set()
             await close()
 
+    async def test_slow_start_shows_when_voice_started_during_preparation(self):
+        preparation_release = threading.Event()
+        self.addCleanup(preparation_release.set)
+
+        def held():
+            if not preparation_release.wait(45):
+                raise AssertionError('Held preparation was not released')
+            yield {'content': '[delivery:neutral] Prepared.'}, None
+            yield {}, 'stop'
+
+        brain = ScriptedBrain([held()])
+        self.addCleanup(brain.close)
+        channel = self.slow_start_channel()
+        handle, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, activate=False, channel=channel,
+        )
+        service, manager = handle.service, handle.service.manager
+        try:
+            self.assertEqual(await service.toggle(), 'starting')
+            await asyncio.wait_for(service.started.get(), 5)
+            await wait_until(lambda: manager.status._state == 'idle', 'Voice never became idle during preparation')
+            self.assertFalse(service.channel.preparation.done(), 'Preparation must still be running')
+            preparation_release.set()
+            await wait_until(lambda: manager.status._state == 'idle-slow',
+                             'The slow start never showed after preparation ended')
+            self.assertTrue(spoken.empty(), 'A slow start is shown silently')
+        finally:
+            preparation_release.set()
+            await close()
+
     async def test_typed_request_tells_slow_start_while_voice_is_off(self):
         brain = ScriptedBrain(['[delivery:neutral] Prepared.', '[delivery:neutral] Typed answer.'])
         self.addCleanup(brain.close)
