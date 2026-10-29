@@ -478,10 +478,11 @@ TOOL_ACTIONS: dict[str, ToolAction] = {
 
 
 def validate_tool_actions() -> None:
-    shared = TOOL_CATALOGUE.keys() & TOOL_ACTIONS.keys()
+    local = {name for name, spec in TOOL_CATALOGUE.items() if not spec.engine_effect}
+    shared = local & TOOL_ACTIONS.keys()
     problems = {
-        'missing': TOOL_CATALOGUE.keys() - TOOL_ACTIONS.keys(),
-        'extra': TOOL_ACTIONS.keys() - TOOL_CATALOGUE.keys(),
+        'missing': local - TOOL_ACTIONS.keys(),
+        'extra': TOOL_ACTIONS.keys() - local,
         'invalid run': {name for name in shared if not callable(TOOL_ACTIONS[name].run)},
         'invalid lookup': {name for name in shared
                            if (not callable(TOOL_ACTIONS[name].lookup) if TOOL_CATALOGUE[name].needs_lookup

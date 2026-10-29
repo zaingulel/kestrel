@@ -39,7 +39,11 @@ import hermes_worker
 import reply_progress
 import speech
 import tool_actions
-from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, require_native_hermes
+from test_hermes import (
+    NATIVE_PYTHON, ROOT, ScriptedBrain, WorkerProcess, note_bytes, read_notes, require_native_hermes, scripted_call,
+    scripted_say, tool_contents,
+)
+from tool_catalogue import brain_result
 
 
 # Owner-reported missed first Hi: 120 native 16 kHz confidence/volume pairs.
@@ -194,6 +198,42 @@ def request_frame(service, context, *, speculation=None):
 
 def microphone_admitted(manager):
     return manager.admission is not None and manager.admission.admits_microphone()
+
+
+ANSWER_SPEECH, ANSWER_QUIET = b'Y' * 640, b'q' * 640
+APPROVAL = {'approved': True, 'source': 'kestrel'}
+
+
+def answer_vad(*, params=None):
+    """A VAD double that hears speech only in ANSWER_SPEECH frames and records every frame it analyses."""
+    vad = Mock(params=params, sample_rate=16000, cleanup=AsyncMock(), analysed=[])
+
+    async def analyse(audio):
+        vad.analysed.append(audio)
+        return VADState.SPEAKING if audio == ANSWER_SPEECH else VADState.QUIET
+
+    vad.analyze_audio = analyse
+    return vad
+
+
+def deletion_question(note):
+    return f"I'm about to delete the note: {note}. Shall I?"
+
+
+def answer_frames(wav):
+    with wave.open(io.BytesIO(wav)) as audio:
+        if (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) != (1, 2, 16000):
+            raise AssertionError('Answer audio must be 16 kHz mono 16-bit')
+        return audio.readframes(audio.getnframes())
+
+
+async def wait_until(predicate, message):
+    try:
+        async with asyncio.timeout(5):
+            while not predicate():
+                await asyncio.sleep(0.005)
+    except TimeoutError:
+        raise AssertionError(message) from None
 
 
 class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
@@ -1310,7 +1350,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
         expected = ("I can talk with you, answer general knowledge questions and keep short notes between conversations. "
                     "You can say: mute; unmute; set the volume to thirty; pause music; next track; "
                     "workspace three; open followed by an installed app's exact name; take a screenshot. "
-                    "None of these tools needs permission first. "
+                    "Permission required: delete one of your notes. I'll read the request back and ask you before doing it. "
                     "You can also say repeat that, stop, that's all, or what can I say. "
                     "I have no internet or live information, and I can't see what's on your screen.")
         accepted = ('what can I say', ' WHAT CAN I SAY. ', 'What can I say!', ' What Can I Say? ')
@@ -1380,12 +1420,12 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
             bot.LOCAL_TOOLS['beta'] = bot.LocalTool(ask, action, 'beta', 'beta example')
             self.assertEqual(bot.capability_help(),
                              f'{intro} No local tools are available without permission. Permission required: beta example. '
-                             f"These tools aren't available by voice yet. {phrases} {limits}")
+                             f"I'll read the request back and ask you before doing it. {phrases} {limits}")
             bot.LOCAL_TOOLS['alpha'] = bot.LocalTool(free, action, 'alpha', 'alpha example')
             bot.LOCAL_TOOLS['gamma'] = bot.LocalTool(ask, action, 'gamma', 'gamma example')
             self.assertEqual(bot.capability_help(),
                              f'{intro} You can say: alpha example. Permission required: beta example; gamma example. '
-                             f"These tools aren't available by voice yet. {phrases} {limits}")
+                             f"I'll read the request back and ask you before doing it. {phrases} {limits}")
             bot.LOCAL_TOOLS['beta'] = bot.LocalTool(forbidden, action, 'beta', 'beta example')
             del bot.LOCAL_TOOLS['gamma']
             self.assertEqual(bot.capability_help(),
@@ -1414,7 +1454,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
              False, FrameDirection.DOWNSTREAM, False),
             ([], False, FrameDirection.DOWNSTREAM, False),
         ])
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         for messages, speculative, direction, consumes in cases:
             with self.subTest(messages=messages, speculative=speculative, direction=direction):
                 command = AsyncMock(side_effect=AssertionError('Repeat must not invoke a desktop command'))
@@ -1671,7 +1711,7 @@ class LocalMuteTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(processing, return_exceptions=True)
 
     def test_only_exact_mute_selects_a_free_tool(self):
-        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual(set(bot.LOCAL_TOOLS), {'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         tool = bot.LOCAL_TOOLS['mute']
         self.assertEqual(tool.permission, bot.PermissionTier.FREE)
         self.assertTrue(callable(tool.run))
@@ -2705,13 +2745,15 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 manager.recognizer.failure = None
             activate = manager.activate
 
-            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation, acknowledgement_output):
+            def adapter(channel, *, local_actions, admission, session_ready, dismiss, status, conversation, acknowledgement_output,
+                        hear_answer):
                 prototype.session_ready = session_ready
                 prototype.dismiss = dismiss
                 prototype.admission = admission
                 prototype.status = status
                 prototype.conversation = conversation
                 prototype.acknowledgement_output = acknowledgement_output
+                prototype.hear_answer = hear_answer
                 return prototype
 
             async def activate_fixture(*, capture_enabled=True):
@@ -2802,7 +2844,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                                     namespace = runpy.run_module('bot', run_name=module_name, alter_sys=True)
                                     self.assertEqual(set(namespace['LOCAL_TOOLS']), {
                                         'mute', 'unmute', 'set_volume', 'pause_media', 'next_track',
-                                        'focus_workspace', 'open_app', 'take_screenshot',
+                                        'focus_workspace', 'open_app', 'take_screenshot', 'delete_note',
                                     })
                                 else:
                                     with self.assertRaisesRegex(RuntimeError, '^Kestrel tool catalogue mismatch') as refused:
@@ -3896,6 +3938,188 @@ class TroubleCauseTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(task, 5)
 
 
+class PermissionAnswerTests(unittest.IsolatedAsyncioTestCase):
+    def test_answers_count_only_as_exact_whole_yes_or_no(self):
+        # The prototype's sets at 422eeac are the oracle.
+        yes = ('yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'go ahead', 'do it', 'yes please', 'please do',
+               'yes go ahead')
+        no = ('no', 'nope', 'no thanks', "don't", 'do not', 'stop', 'cancel', 'not now', 'never mind')
+        for text in (*yes, 'Yes.', '  OK!  '):
+            with self.subTest(text=text):
+                self.assertEqual(bot.classify_answer(text), 'yes')
+        for text in (*no, 'don’t'):
+            with self.subTest(text=text):
+                self.assertEqual(bot.classify_answer(text), 'no')
+        for text in ('yes, but not that one', 'no, wait, yes', 'maybe', ''):
+            with self.subTest(text=text):
+                self.assertEqual(bot.classify_answer(text), 'unclear')
+
+    def test_question_endings_never_classify_as_an_answer(self):
+        # A recognizer that catches the tail of Kestrel's own question must not hear it as an answer.
+        for note in ('yes', 'do it', 'go ahead', 'no', 'Caller keeps the red notebook in the study'):
+            words = deletion_question(note).split()
+            for start in range(len(words)):
+                ending = ' '.join(words[start:])
+                with self.subTest(ending=ending):
+                    self.assertEqual(bot.classify_answer(ending), 'unclear')
+
+    async def open_window(self, frames):
+        from types import SimpleNamespace
+        transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+        window = asyncio.create_task(speech.capture_answer(
+            transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+        await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+        for pcm in frames:
+            transport.capture_pcm(pcm)
+        result = await asyncio.wait_for(window, 5)
+        self.assertIsNone(transport.capture_pcm, 'The answer window must hand capture back')
+        vad.set_sample_rate.assert_called_once_with(16000)
+        vad.cleanup.assert_awaited_once()
+        self.assertEqual(len(decisions), 1, 'Each answer window decides exactly once')
+        return result
+
+    async def test_answer_window_endpoints_and_always_restores_capture(self):
+        from types import SimpleNamespace
+        with self.subTest('no speech within the six second wait is silence'):
+            self.assertIsNone(await self.open_window([ANSWER_QUIET] * 300 + [ANSWER_SPEECH] * 5))
+        with self.subTest('speech on the last waiting frame keeps the frames just before it'):
+            wav, cut_off = await self.open_window([ANSWER_QUIET] * 299 + [ANSWER_SPEECH] + [ANSWER_QUIET] * 41)
+            self.assertEqual(answer_frames(wav), ANSWER_QUIET * 24 + ANSWER_SPEECH + ANSWER_QUIET * 40)
+            self.assertFalse(cut_off)
+        with self.subTest('0.8 seconds of quiet ends the answer and speech restarts the count'):
+            wav, cut_off = await self.open_window(
+                [ANSWER_SPEECH] + [ANSWER_QUIET] * 39 + [ANSWER_SPEECH] + [ANSWER_QUIET] * 40 + [ANSWER_SPEECH] * 3)
+            self.assertEqual(answer_frames(wav), ANSWER_SPEECH + ANSWER_QUIET * 39 + ANSWER_SPEECH + ANSWER_QUIET * 40)
+            self.assertFalse(cut_off)
+        for label, tail, ending, bounded in (
+                ('six seconds of speech is cut off and its tail is thrown away until 0.8 seconds of quiet',
+                 [ANSWER_SPEECH] * 19 + [ANSWER_QUIET] * 39, [ANSWER_QUIET], False),
+                ('speech going on past the cut-off is thrown away for at most six more seconds',
+                 [ANSWER_SPEECH] * 299, [ANSWER_SPEECH] * 10, True)):
+            with self.subTest(label):
+                transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+                window = asyncio.create_task(speech.capture_answer(
+                    transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+                await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+                fed = [ANSWER_SPEECH] * 301 + tail
+                for pcm in fed:
+                    transport.capture_pcm(pcm)
+                await wait_until(lambda: len(vad.analysed) == len(fed) or window.done(), 'The answer window stalled')
+                self.assertFalse(window.done(), f'Capture was handed back after {len(vad.analysed)} frames, inside the tail')
+                self.assertIsNotNone(transport.capture_pcm)
+                for pcm in ending:
+                    transport.capture_pcm(pcm)
+                wav, cut_off = await asyncio.wait_for(window, 5)
+                self.assertIsNone(transport.capture_pcm, 'The answer window must hand capture back')
+                vad.cleanup.assert_awaited_once()
+                self.assertTrue(cut_off)
+                # One opening frame, then the six second limit counted by frames; 422eeac's float sum reaches it one frame later.
+                self.assertIn(len(answer_frames(wav)), (301 * 640, 302 * 640))
+                self.assertEqual(set(answer_frames(wav)), {ord('Y')}, 'The thrown-away tail is not part of the answer')
+                self.assertEqual(decisions, [len(answer_frames(wav)) // 640],
+                                 'The cut-off is decided before any of the thrown-away tail is read')
+                # The quiet ends the tail at the last frame fed; the six second bound ends it with frames still queued.
+                handed_back = len(answer_frames(wav)) // 640 + 300 if bounded else len(fed) + len(ending)
+                self.assertEqual(len(vad.analysed), handed_back)
+        with self.subTest('a detector failure in the thrown-away tail still decides only once'):
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            analyse, broken = vad.analyze_audio, b'T' * 640
+
+            async def fail_in_tail(audio):
+                if audio == broken:
+                    raise RuntimeError('Answer detector failed: fixture')
+                return await analyse(audio)
+
+            vad.analyze_audio = fail_in_tail
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+            # One opening frame and the six second limit reach the cut-off; the next frame is the thrown-away tail.
+            for pcm in [ANSWER_SPEECH] * 301 + [broken]:
+                transport.capture_pcm(pcm)
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(window, 5)
+            self.assertIsNone(transport.capture_pcm, 'The answer window must hand capture back')
+            vad.cleanup.assert_awaited_once()
+            self.assertEqual(decisions, [301], 'A failure after the cut-off was decided must not decide again')
+        with self.subTest('cancellation hands capture back'):
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+            transport.capture_pcm(ANSWER_SPEECH)
+            await wait_until(lambda: vad.analysed == [ANSWER_SPEECH], 'The answer window never heard the speech')
+            window.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await window
+            self.assertIsNone(transport.capture_pcm)
+            vad.cleanup.assert_awaited_once()
+            self.assertEqual(decisions, [], 'A cancelled answer window decides nothing')
+        with self.subTest('a detector failure on the first frame decides once and hands capture back'):
+            transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+            vad.analyze_audio = AsyncMock(side_effect=RuntimeError('Answer detector failed: fixture'))
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await wait_until(lambda: transport.capture_pcm is not None or window.done(), 'The answer window never opened')
+            transport.capture_pcm(ANSWER_SPEECH)
+            with self.assertRaises(RuntimeError):
+                await asyncio.wait_for(window, 5)
+            vad.analyze_audio.assert_awaited_once_with(ANSWER_SPEECH)
+            self.assertIsNone(transport.capture_pcm)
+            vad.cleanup.assert_awaited_once()
+            self.assertEqual(len(decisions), 1, 'A failed answer window ends the answer exactly once')
+        for label, failure in (('raises', AsyncMock(side_effect=RuntimeError('Nemotron recognition failed: fixture'))),
+                               ('returns no text', AsyncMock(return_value=None))):
+            with self.subTest(f'a recognizer that {label} breaks the asking step and hands capture back'):
+                manager = bot.VoiceConversations(status=Mock(), conversation=Mock())
+                transport, vad = SimpleNamespace(capture_pcm=None), answer_vad()
+                manager.transport = transport
+                manager.admission = Mock(**{'admits_microphone.return_value': True})
+                with patch.object(bot, 'SileroVADAnalyzer', return_value=vad) as analyser, \
+                        patch.object(manager.recognizer, 'transcribe', new=failure):
+                    hearing = asyncio.create_task(manager.hear_answer(admitted=lambda: True, spoken=True))
+                    await wait_until(lambda: transport.capture_pcm is not None or hearing.done(),
+                                     'The answer window never opened')
+                    for pcm in [ANSWER_SPEECH] * 3 + [ANSWER_QUIET] * 40:
+                        transport.capture_pcm(pcm)
+                    with self.assertRaises(RuntimeError):
+                        await asyncio.wait_for(hearing, 5)
+                self.assertEqual(analyser.call_args.kwargs['params'].confidence, 0.5)
+                failure.assert_awaited_once()
+                self.assertEqual(answer_frames(failure.await_args.args[0]), ANSWER_SPEECH * 3 + ANSWER_QUIET * 40)
+                self.assertIsNone(transport.capture_pcm)
+                self.assertIsNone(manager.typed_answer)
+                vad.cleanup.assert_awaited_once()
+
+    async def test_answer_window_time_limit_covers_its_frame_bounds(self):
+        from types import SimpleNamespace
+        real_timeout, limits = asyncio.timeout, []
+
+        def recording_timeout(seconds):
+            limits.append(seconds)
+            return real_timeout(seconds)
+
+        transport, vad, decisions = SimpleNamespace(capture_pcm=None), answer_vad(), []
+        # Only the window's own time limit is recorded: the patch ends once the window is open, before wait_until sets its own.
+        with patch.object(speech.asyncio, 'timeout', recording_timeout):
+            window = asyncio.create_task(speech.capture_answer(
+                transport, vad, admitted=lambda: True, decided=lambda: decisions.append(len(vad.analysed))))
+            await asyncio.sleep(0)
+        self.assertEqual(len(limits), 1, 'The answer window must set exactly one time limit')
+        # The longest run: speech on the last waiting frame, then speech through the limit and the whole discard bound.
+        wait, limit = (round(seconds / speech.ANSWER_FRAME_SECONDS)
+                       for seconds in (speech.ANSWER_WAIT_SECONDS, speech.ANSWER_LIMIT_SECONDS))
+        worst_case = (wait + limit + limit) * speech.ANSWER_FRAME_SECONDS
+        self.assertGreaterEqual(limits[0], worst_case, 'The time limit would end a worst-case answer before its frame bounds')
+        for pcm in [ANSWER_QUIET] * (wait - 1) + [ANSWER_SPEECH] * (1 + limit + limit):
+            transport.capture_pcm(pcm)
+        wav, cut_off = await asyncio.wait_for(window, 5)
+        self.assertTrue(cut_off)
+        self.assertEqual(decisions, [wait + limit], 'The cut-off is decided before any of the thrown-away tail is read')
+        self.assertEqual(len(vad.analysed), wait + limit + limit)
+        self.assertIsNone(transport.capture_pcm)
+
+
 class WholeConversationFixtureTests(unittest.TestCase):
     def test_startup_failure_restores_runtime(self):
         for method in (
@@ -4916,10 +5140,10 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await close()
 
     async def test_invalid_or_permissioned_brain_desktop_calls_execute_nothing(self):
-        permission = "That needs permission, which isn't available by voice yet, so I didn't do it."
+        forbidden = "That isn't allowed by voice, so I didn't do it."
         invalid = "I couldn't use that request, so I didn't do it."
         cases = [
-            ('mute', {}, 'permission required', permission),
+            ('mute', {}, 'not allowed by voice', forbidden),
             ('set_volume', {'percent': 30.5}, 'invalid arguments', invalid),
             ('set_volume', {'percent': True}, 'invalid arguments', invalid),
             ('set_volume', {'percent': 101}, 'invalid arguments', invalid),
@@ -4943,7 +5167,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             for index, (name, arguments, reason, advisory) in enumerate(cases):
                 with self.subTest(name=name, arguments=arguments):
                     tool = bot.LOCAL_TOOLS['mute']
-                    entry = bot.replace(tool, permission=bot.PermissionTier.ASK) if index == 0 else tool
+                    entry = bot.replace(tool, permission=bot.PermissionTier.FORBIDDEN) if index == 0 else tool
                     with patch.dict(bot.LOCAL_TOOLS, mute=entry):
                         await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                         await self.finish_user_turn(transport, 'Please handle this desktop request.')
@@ -4964,7 +5188,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_refusal_after_confirmed_brain_effect_disclaims_only_that_call(self):
         # Refusing a later call must not deny an earlier confirmed effect.
         invalid = "I couldn't use that request, so I didn't do it."
-        permission = "That needs permission, which isn't available by voice yet, so I didn't do it."
+        forbidden = "That isn't allowed by voice, so I didn't do it."
         brain = ScriptedBrain([
             [({'tool_calls': [{'index': 0, 'id': 'mute-first', 'type': 'function', 'function': {
                 'name': 'mute', 'arguments': '{}',
@@ -5007,20 +5231,20 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             ])
             self.assertEqual([c for c in command.await_args_list if 'set-sink-mute' in c.args[0]],
                              [call(('/usr/bin/pactl', 'set-sink-mute', 'physical', '1'))])
-            with patch.dict(bot.LOCAL_TOOLS, mute=bot.replace(bot.LOCAL_TOOLS['mute'], permission=bot.PermissionTier.ASK)):
+            with patch.dict(bot.LOCAL_TOOLS, mute=bot.replace(bot.LOCAL_TOOLS['mute'], permission=bot.PermissionTier.FORBIDDEN)):
                 await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
                 await self.finish_user_turn(transport, 'Please make it a little quieter.')
-                self.assertEqual(await asyncio.wait_for(committed.get(), 5), permission)
+                self.assertEqual(await asyncio.wait_for(committed.get(), 5), forbidden)
             heard = []
             while not spoken.empty():
                 heard.append(spoken.get_nowait())
-            self.assertEqual(' '.join(heard), permission)
+            self.assertEqual(' '.join(heard), forbidden)
             self.assertEqual(len(brain.requests), 6)
             results = [m for m in brain.requests[-1][2]['messages']
                        if m['role'] == 'tool' and m['tool_call_id'] in ('volume-first', 'mute-refused')]
             self.assertEqual([(m['tool_call_id'], json.loads(m['content'])) for m in results], [
                 ('volume-first', {'confirmed': True, 'attempted': True, 'reason': 'confirmed'}),
-                ('mute-refused', {'confirmed': False, 'attempted': False, 'reason': 'permission required'}),
+                ('mute-refused', {'confirmed': False, 'attempted': False, 'reason': 'not allowed by voice'}),
             ])
             self.assertEqual([c for c in command.await_args_list if 'set-sink-volume' in c.args[0]],
                              [call(('/usr/bin/pactl', 'set-sink-volume', 'physical', '30%'))])
@@ -5029,6 +5253,1082 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(command.await_count, 17)
         finally:
             await close()
+
+    def private_notes(self, *, memory=(), user=()):
+        """An isolated private note store holding exactly these entries, never the owner's notes."""
+        home = tempfile.TemporaryDirectory(prefix='kestrel-notes-test-', dir=ROOT / '.runtime')
+        self.addCleanup(home.cleanup)
+        notes = Path(home.name) / 'notes'
+        notes.mkdir(mode=0o700)
+        for name, entries in (('MEMORY.md', memory), ('USER.md', user)):
+            for path, content in ((notes / name, note_bytes(*entries)), (notes / (name + '.lock'), b'')):
+                path.write_bytes(content)
+                path.chmod(0o600)
+        return notes
+
+    def watch_answer_windows(self):
+        """Queues (transport, value) for every capture_pcm change after construction on each laptop transport opened later."""
+        changes = asyncio.Queue()
+
+        class ObservedTransport(speech.LaptopAudioTransport):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.observed = True
+
+            @property
+            def capture_pcm(self):
+                return self.__dict__.get('_capture_pcm')
+
+            @capture_pcm.setter
+            def capture_pcm(self, value):
+                if self.__dict__.get('observed'):
+                    changes.put_nowait((self, value))
+                self.__dict__['_capture_pcm'] = value
+
+        binding = patch.object(speech, 'LaptopAudioTransport', ObservedTransport)
+        binding.start()
+        self.addCleanup(binding.stop)
+        return changes
+
+    async def window_change(self, windows, transport):
+        changed, value = await asyncio.wait_for(windows.get(), 5)
+        self.assertIs(changed, transport, 'Only the conversation capture may open an answer window')
+        return value
+
+    def fake_answer_recognizer(self, service, text, *, entered=None, release=None):
+        """Replaces recognition with a fixed transcript, recording the audio and whether the turn was admitted."""
+        heard = []
+
+        async def transcribe(audio, *, admitted):
+            heard.append((audio, admitted()))
+            if entered is not None:
+                entered.set()
+                await release.wait()
+            return text
+
+        binding = patch.object(service.recognizer, 'transcribe', new=AsyncMock(side_effect=transcribe))
+        binding.start()
+        self.addCleanup(binding.stop)
+        return heard
+
+    async def hear_exactly(self, spoken, expected):
+        """Collects spoken text until it reads exactly `expected`; any other text fails at once."""
+        heard = ''
+        while heard != expected:
+            part = await asyncio.wait_for(spoken.get(), 5)
+            heard = f'{heard} {part}' if heard else part
+            self.assertTrue(expected.startswith(heard), f'Heard {heard!r} where {expected!r} was due')
+
+    async def speak_request(self, transport, text):
+        if transport.capture is not None:
+            # Fresh capture audio keeps the five second capture stall bound away from the turn.
+            transport.capture.stdout.feed_data(bytes(640))
+        transport.output().generation_done.clear()
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, text)
+
+    async def reply_finished(self, transport, spoken):
+        await asyncio.wait_for(transport.output().generation_done.wait(), 5)
+        barrier = DataFrame()
+        await transport.service.manager.voice.queue_frame(barrier)
+        self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+        self.assertTrue(spoken.empty(), 'Nothing more is spoken for this request')
+
+    def assert_refused_once(self, events, mark):
+        writes = [event for kind, event in events[mark:] if kind == 'write']
+        self.assertNotIn(APPROVAL, writes)
+        results = [json.loads(event['tool_result']) for event in writes if 'tool_result' in event]
+        self.assertEqual([(result['confirmed'], result['attempted']) for result in results], [(False, False)])
+
+    def assert_approved_once(self, events, mark):
+        self.assertEqual([event for kind, event in events[mark:] if kind == 'write' and set(event) != {'messages'}],
+                         [APPROVAL])
+        self.assertEqual([event for kind, event in events[mark:] if kind == 'read' and 'tool_observed' in event],
+                         [{'tool_observed': brain_result(True, True, 'confirmed')}])
+
+    async def test_note_that_ends_a_sentence_gets_no_second_full_stop(self):
+        # Each pair is the exact wording Kestrel must speak: the question, then the removal confirmation.
+        cases = (
+            ('The library books are due back on Friday.',
+             "I'm about to delete the note: The library books are due back on Friday. Shall I?",
+             'I removed the note: The library books are due back on Friday.'),
+            ('Watch the step!',
+             "I'm about to delete the note: Watch the step! Shall I?",
+             'I removed the note: Watch the step!'),
+            ('Is the gate locked?',
+             "I'm about to delete the note: Is the gate locked? Shall I?",
+             'I removed the note: Is the gate locked?'),
+            ('Call the dentist',
+             "I'm about to delete the note: Call the dentist. Shall I?",
+             'I removed the note: Call the dentist.'),
+        )
+        notes = self.private_notes(memory=[case[0] for case in cases])
+        windows = self.watch_answer_windows()
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.',
+            *(reply for index, (note, _, _) in enumerate(cases)
+              for reply in (scripted_call(f'note-{index}', 'delete_note', {'note': note}), scripted_say('Unspoken remark.'))),
+        ])
+        self.addCleanup(brain.close)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+        )
+        service = transport.service
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+            for note, question, removal in cases:
+                with self.subTest(note=note):
+                    self.fake_answer_recognizer(service, 'Yes.')
+                    await self.speak_request(transport, 'Please delete that note.')
+                    await self.hear_exactly(spoken, question)
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await self.hear_exactly(spoken, removal)
+                    await self.reply_finished(transport, spoken)
+        finally:
+            await close()
+
+    def test_removal_confirmation_adds_no_second_full_stop_after_a_sentence_ending(self):
+        for note, confirmation in (
+                ('The spare bike key is in the blue drawer.', 'I removed the note: The spare bike key is in the blue drawer.'),
+                ('Watch the step!', 'I removed the note: Watch the step!'),
+                ('Is the gate locked?', 'I removed the note: Is the gate locked?'),
+                ('Call the dentist', 'I removed the note: Call the dentist.')):
+            with self.subTest(note=note):
+                self.assertEqual(bot.local_tool('delete_note', note).confirmation, confirmation)
+
+    async def test_note_deletion_runs_only_after_a_clear_spoken_yes(self):
+        target = 'Caller keeps the red notebook in the study'
+        kept = 'Caller prefers cedar tea'
+        long_note = 'Long note ' + 'x' * 290
+        self.assertEqual(len(long_note), 300)
+        notes = self.private_notes(memory=[kept, target], user=[long_note])
+        seeded = read_notes(notes)
+        windows = self.watch_answer_windows()
+        events = []
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.',
+            scripted_call('first', 'delete_note', {'note': target}), scripted_say('Unspoken remark.'),
+            scripted_call('long', 'delete_note', {'note': long_note}), scripted_say('Unspoken remark.'),
+        ])
+        self.addCleanup(brain.close)
+        transport, spoken, _, interrupted, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+            native_events=events,
+        )
+        service = transport.service
+        recognised = self.fake_answer_recognizer(service, 'Yes.')
+        output = transport.output()
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+            mark = len(events)
+            await self.speak_request(transport, 'Please delete my red notebook note.')
+            await self.hear_exactly(spoken, deletion_question(target))
+            self.assertIsNotNone(await self.window_change(windows, transport), 'The answer window opens after the question')
+            self.assertEqual(read_notes(notes), seeded, 'Nothing is deleted before the answer')
+            self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
+            transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+            self.assertIsNone(await self.window_change(windows, transport), 'The endpointed answer hands capture back')
+            await self.hear_exactly(spoken, f'I removed the note: {target}.')
+            await self.reply_finished(transport, spoken)
+            self.assertEqual([(answer_frames(audio), admitted) for audio, admitted in recognised],
+                             [(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40, True)])
+            self.assert_approved_once(events, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': seeded['USER.md']})
+            self.assertEqual(len(brain.requests), 3)
+            self.assertEqual(tool_contents(brain.requests[-1]), [brain_result(True, True, 'confirmed')])
+
+            # A long readback still waits for the question to play, well past the announcement bound.
+            mark = len(events)
+            asked = ('read', {'tool_call': {'name': 'delete_note', 'arguments': {'note': long_note}}})
+            with patch.object(bot, 'ANNOUNCEMENT_TIMEOUT', 0.05):
+                transport.capture.stdout.feed_data(bytes(640))
+                output.generation_done.clear()
+                interrupted.clear()
+                await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                await asyncio.wait_for(interrupted.wait(), 5)
+                barrier = DataFrame()
+                await output.queue_frame(barrier)
+                self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                output.write_gate.clear()
+                await self.finish_user_turn(transport, 'Please forget my long note.')
+                await wait_until(lambda: asked in events[mark:], 'The engine never asked about the long note')
+                await asyncio.sleep(0.3)
+                self.assertTrue(windows.empty(), 'No answer window opens while the question is still unplayed')
+                self.assertTrue(spoken.empty())
+                output.write_gate.set()
+                await self.hear_exactly(spoken, deletion_question(long_note))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, f'I removed the note: {long_note}.')
+                await self.reply_finished(transport, spoken)
+            self.assert_approved_once(events, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': note_bytes()})
+            self.assertEqual(len(brain.requests), 5)
+            self.assertEqual(len(recognised), 2)
+        finally:
+            output.write_gate.set()
+            await close()
+
+        with self.subTest('a delivery label before the call'):
+            # Real replies open with a delivery label, so the question can follow a reply start that carries no text.
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            labelled = [({'content': '[delivery:neutral] '}, None)]
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                [*labelled, *scripted_call('labelled-yes', 'delete_note', {'note': target})], scripted_say('Unspoken remark.'),
+                [*labelled, *scripted_call('labelled-no', 'delete_note', {'note': kept})], scripted_say('Unspoken remark.'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            try:
+                await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+                for note, answer, line, settled in (
+                        (target, 'Yes.', f'I removed the note: {target}.', self.assert_approved_once),
+                        (kept, 'No.', "Okay, I won't.", self.assert_refused_once)):
+                    recognised = self.fake_answer_recognizer(service, answer)
+                    mark = len(events)
+                    await self.speak_request(transport, 'Please delete that note.')
+                    await self.hear_exactly(spoken, deletion_question(note))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await self.hear_exactly(spoken, line)
+                    await self.reply_finished(transport, spoken)
+                    self.assertEqual(len(recognised), 1)
+                    settled(events, mark)
+                self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': seeded['USER.md']})
+                self.assertEqual(len(brain.requests), 5)
+            finally:
+                await close()
+
+        with self.subTest('a yes whose deletion is not confirmed closes the turn'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('changed', 'delete_note', {'note': target}), scripted_call('after', 'mute', {}),
+                scripted_say('Unspoken remark.'),
+            ])
+            self.addCleanup(brain.close)
+            command = AsyncMock(return_value='')
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events, local_command=command,
+            )
+            service = transport.service
+            self.fake_answer_recognizer(service, 'Yes.')
+            try:
+                await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+                mark = len(events)
+                await self.speak_request(transport, 'Please delete my red notebook note.')
+                await self.hear_exactly(spoken, deletion_question(target))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                # The note changes on disk after the question, so the approved removal is not confirmed.
+                changed = note_bytes(kept, 'Caller keeps the blue notebook in the study')
+                (notes / 'MEMORY.md').write_bytes(changed)
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, "I couldn't confirm the note was removed. I won't retry.")
+                await wait_until(lambda: len(brain.requests) == 4, 'The turn never finished')
+                self.assertEqual(tool_contents(brain.requests[-1]), [brain_result(False, True, 'note removal failed'),
+                                                                     brain_result(False, False, 'turn closed')])
+                command.assert_not_awaited()
+                self.assertIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'])
+                self.assertEqual(read_notes(notes), {'MEMORY.md': changed, 'USER.md': seeded['USER.md']})
+                await self.reply_finished(transport, spoken)
+            finally:
+                await close()
+
+    async def test_question_after_the_waiting_acknowledgement_is_confirmed_as_played(self):
+        bike = 'Caller keeps the bike key under the blue pot'
+        garden = 'Caller plans tomatoes along the south fence'
+        notes = self.private_notes(memory=[bike, garden])
+        windows = self.watch_answer_windows()
+        events, logs = [], []
+        sink = logger.add(lambda message: logs.append(str(message).strip()), format='{message}')
+        self.addCleanup(logger.remove, sink)
+        calls = {'bike': threading.Event(), 'garden': threading.Event()}
+
+        def replies():
+            yield '[delivery:neutral] Prepared.'
+            for (call_id, call_due), note in zip(calls.items(), (bike, garden)):
+                # Holding the call keeps the turn waiting long enough for its acknowledgement to fall due.
+                if not call_due.wait(45):
+                    raise AssertionError('The held delete_note call was not released')
+                yield scripted_call(call_id, 'delete_note', {'note': note})
+                yield scripted_say('Unspoken remark.')
+
+        brain = ScriptedBrain(replies())
+        self.addCleanup(brain.close)
+        for call_due in calls.values():
+            self.addCleanup(call_due.set)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+            native_events=events,
+        )
+        service = transport.service
+        timers, acknowledgement_time = service.acknowledgement_timers, service.acknowledgement_time
+        output = transport.output()
+        self.fake_answer_recognizer(service, 'Yes.')
+        native_write = output._write_audio_locked
+        playing, release_acknowledgement = asyncio.Event(), asyncio.Event()
+
+        async def hold_after_first_acknowledgement_chunk(frame, record):
+            written = await native_write(frame, record)
+            if getattr(frame, 'prepared_credit', None) is not None and not playing.is_set():
+                playing.set()
+                await release_acknowledgement.wait()
+            return written
+
+        def verdicts():
+            return [line for line in logs if line.startswith('The permission question')]
+
+        async def answer_yes_and_hear_removal(note, mark):
+            await wait_until(verdicts, 'The question was never judged')
+            self.assertRegex(verdicts()[-1], r'^The permission question played in \d+\.\d s$')
+            self.assertIsNotNone(await self.window_change(windows, transport), 'The answer window opens after the question')
+            transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+            self.assertIsNone(await self.window_change(windows, transport))
+            await self.hear_exactly(spoken, f'I removed the note: {note}.')
+            await self.reply_finished(transport, spoken)
+            self.assert_approved_once(events, mark)
+
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+
+            # The acknowledgement plays whole before the question.
+            mark = len(events)
+            await self.speak_request(transport, 'Please delete my bike key note.')
+            callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
+            acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
+            callback(*args)
+            await self.hear_exactly(spoken, 'One moment.')
+            calls['bike'].set()
+            await self.hear_exactly(spoken, deletion_question(bike))
+            await answer_yes_and_hear_removal(bike, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(garden), 'USER.md': note_bytes()})
+
+            # The question arrives while the acknowledgement is mid-play and cuts it off.
+            logs.clear()
+            mark = len(events)
+            with patch.object(output, '_write_audio_locked', new=hold_after_first_acknowledgement_chunk):
+                await self.speak_request(transport, 'Please delete my garden plan note.')
+                callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
+                acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
+                callback(*args)
+                await asyncio.wait_for(playing.wait(), 5)
+                calls['garden'].set()
+                await wait_until(lambda: output.acknowledgement_record is None,
+                                 'The question never cut off the acknowledgement')
+                release_acknowledgement.set()
+                await self.hear_exactly(spoken, deletion_question(garden))
+                await answer_yes_and_hear_removal(garden, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(), 'USER.md': note_bytes()})
+        finally:
+            release_acknowledgement.set()
+            await close()
+
+    async def test_reply_speech_behind_a_cut_acknowledgement_still_plays(self):
+        bike, garden = 'Caller keeps the bike key under the blue pot', 'Caller plans tomatoes along the south fence'
+        notes = self.private_notes(memory=[bike, garden])
+        windows = self.watch_answer_windows()
+        events, logs = [], []
+        sink = logger.add(lambda message: logs.append(str(message).strip()), format='{message}')
+        self.addCleanup(logger.remove, sink)
+        speech_due, call_due = threading.Event(), threading.Event()
+        self.addCleanup(speech_due.set)
+        self.addCleanup(call_due.set)
+
+        def look_then_call():
+            # Holding the speech until the acknowledgement is due makes the speech play it first; holding the call
+            # keeps the question behind that speech. 'Checking.' is the lookahead that releases 'Let me look.'
+            # to synthesis before the call; it is itself held until the reply ends.
+            for due, delta in ((speech_due, [({'content': '[delivery:neutral] Let me look. Checking.'}, None)]),
+                               (call_due, scripted_call('bike', 'delete_note', {'note': bike}))):
+                if not due.wait(45):
+                    raise AssertionError('The held reply was not released')
+                yield from delta
+
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', look_then_call(), scripted_say('Unspoken remark.')])
+        self.addCleanup(brain.close)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+            native_events=events,
+        )
+        service = transport.service
+        output = transport.output()
+        self.fake_answer_recognizer(service, 'Yes.')
+        native_write = output._write_audio_locked
+        playing, release_acknowledgement = asyncio.Event(), asyncio.Event()
+
+        async def hold_after_first_acknowledgement_chunk(frame, record):
+            written = await native_write(frame, record)
+            if getattr(frame, 'prepared_credit', None) is not None and not playing.is_set():
+                playing.set()
+                await release_acknowledgement.wait()
+            return written
+
+        def verdicts():
+            return [line for line in logs if line.startswith('The permission question')]
+
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+            mark = len(events)
+            with patch.object(output, '_write_audio_locked', new=hold_after_first_acknowledgement_chunk):
+                await self.speak_request(transport, 'Please delete my bike key note.')
+                # The acknowledgement falls due without its own frame, so the reply speech plays it first.
+                _, _, deadline = await asyncio.wait_for(service.acknowledgement_timers.get(), 5)
+                service.acknowledgement_time[0] = max(service.acknowledgement_time[0], deadline)
+                speech_due.set()
+                await asyncio.wait_for(playing.wait(), 5)
+                call_due.set()
+                await wait_until(lambda: output.acknowledgement_record is None,
+                                 'The question never cut off the acknowledgement')
+                release_acknowledgement.set()
+                await self.hear_exactly(spoken, f'Let me look. {deletion_question(bike)}')
+                await wait_until(verdicts, 'The question was never judged')
+                self.assertRegex(verdicts()[-1], r'^The permission question played in \d+\.\d s$')
+                # The panel shows only speech whose audio reached the output.
+                self.assertEqual(service.manager.conversation.turns[-1]['text'],
+                                 f'One moment. Let me look. {deletion_question(bike)}')
+                self.assertIsNotNone(await self.window_change(windows, transport), 'The answer window opens after the question')
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, f'I removed the note: {bike}.')
+            self.assert_approved_once(events, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(garden), 'USER.md': note_bytes()})
+        finally:
+            release_acknowledgement.set()
+            await close()
+
+    async def test_typed_answers_settle_a_pending_question(self):
+        first, second, third = ('Caller keeps the red notebook in the study', 'Caller walks at dawn',
+                                'Caller works late on Thursdays')
+        kept = 'Caller prefers cedar tea'
+        requests = ['Please delete my notebook note.', 'Delete the notebook note after all.',
+                    'Delete the notebook note, really.', 'Delete the notebook note now.',
+                    'Please delete my dawn note.', 'Please delete my Thursday note.', 'Replacement request']
+        refusal_lines = {'no': "Okay, I won't.", 'unclear': "I didn't catch a clear yes, so I won't."}
+        windows = self.watch_answer_windows()
+
+        with self.subTest('voice on'):
+            notes = self.private_notes(memory=[kept, first, second], user=[third])
+            seeded = read_notes(notes)
+            events, analysers = [], []
+
+            def vad_factory(*, params):
+                analysers.append(answer_vad(params=params))
+                return analysers[-1]
+
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                *[reply for note in (first, first, first, first, second)
+                  for reply in (scripted_call('asked', 'delete_note', {'note': note}), scripted_say('Unspoken remark.'))],
+                scripted_call('stale', 'delete_note', {'note': third}), scripted_say('Unspoken remark.'),
+                scripted_say('Replacement answer.'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=vad_factory, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            entered, release = asyncio.Event(), asyncio.Event()
+            self.addCleanup(release.set)
+            recognised = self.fake_answer_recognizer(service, 'yes', entered=entered, release=release)
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                for request, answer, outcome in ((requests[0], 'No thanks.', 'no'), (requests[1], 'maybe later', 'unclear'),
+                                                 (requests[2], '   ', 'unclear')):
+                    mark = len(events)
+                    await self.speak_request(transport, request)
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    if answer.strip():
+                        self.assertEqual(await service.submit(answer), 'accepted')
+                    else:
+                        self.assertEqual(manager.submit(answer), 'accepted', 'The panel cannot send blank text')
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await self.hear_exactly(spoken, refusal_lines[outcome])
+                    await self.reply_finished(transport, spoken)
+                    self.assert_refused_once(events, mark)
+                    self.assertEqual(read_notes(notes), seeded)
+
+                mark = len(events)
+                await self.speak_request(transport, requests[3])
+                await self.hear_exactly(spoken, deletion_question(first))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                self.assertEqual(await service.submit('Yes'), 'accepted')
+                self.assertIsNone(await self.window_change(windows, transport), 'A typed answer hands capture back')
+                await self.hear_exactly(spoken, f'I removed the note: {first}.')
+                await self.reply_finished(transport, spoken)
+                self.assert_approved_once(events, mark)
+                self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept, second), 'USER.md': seeded['USER.md']})
+                self.assertEqual(len(brain.requests), 9, 'A typed answer is not a brain request')
+
+                # A typed answer during spoken capture wins before the speech endpoints.
+                mark = len(events)
+                await self.speak_request(transport, requests[4])
+                await self.hear_exactly(spoken, deletion_question(second))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 5)
+                await wait_until(lambda: sum(vad.analysed.count(ANSWER_SPEECH) for vad in analysers) == 5,
+                                 'Spoken capture never heard the answer begin')
+                self.assertEqual(await service.submit('yes'), 'accepted')
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, f'I removed the note: {second}.')
+                await self.reply_finished(transport, spoken)
+                self.assert_approved_once(events, mark)
+                self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': seeded['USER.md']})
+                self.assertEqual(recognised, [], 'A typed answer never reaches recognition')
+
+                # A spoken yes recognised only after a replacement request superseded its turn approves nothing.
+                mark = len(events)
+                settled = read_notes(notes)
+                await self.speak_request(transport, requests[5])
+                await self.hear_exactly(spoken, deletion_question(third))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await asyncio.wait_for(entered.wait(), 5)
+                self.assertEqual(manager.submit(requests[6]), 'accepted')
+                release.set()
+                await self.hear_exactly(spoken, 'Replacement answer.')
+                self.assertEqual([admitted for _, admitted in recognised], [True])
+                writes = [event for kind, event in events[mark:] if kind == 'write']
+                self.assertNotIn(APPROVAL, writes)
+                self.assertIn({'tool_result': brain_result(False, False, 'request superseded'), 'source': 'kestrel'}, writes)
+                self.assertEqual(read_notes(notes), settled)
+                self.assertEqual(len(brain.requests), 14)
+                you = [turn['text'] for turn in manager.conversation.turns if turn['speaker'] == 'you']
+                self.assertEqual([text for text in you if text not in requests], [], 'Typed answers are not panel turns')
+                for request in brain.requests:
+                    self.assertEqual([m['content'] for m in request[2]['messages']
+                                      if m['role'] == 'user' and m['content'] not in requests and m['content'] != 'Hello.'], [])
+                context = manager.ingress[2].get_messages()
+                self.assertEqual([m['content'] for m in context if m['role'] == 'user' and m['content'] not in requests], [])
+            finally:
+                release.set()
+                await close()
+
+        with self.subTest('voice off'):
+            notes = self.private_notes(memory=[kept, first], user=[third])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('typed', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_call('unanswered', 'delete_note', {'note': third}), scripted_say('Unspoken remark.'),
+            ])
+            self.addCleanup(brain.close)
+            handle, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, activate=False, memory_root=notes, native_events=events,
+            )
+            service = handle.service
+            manager = service.manager
+            try:
+                startup = await asyncio.wait_for(service.waiting.get(), 5)
+                self.assertEqual(await service.submit(requests[0]), 'accepted')
+                transport = await asyncio.wait_for(service.started.get(), 5)
+                # The typed request itself begins the conversation, so only writes after that begin are counted.
+                await wait_until(lambda: ('write', {'begin': True}) in events, 'The typed request began no conversation')
+                mark = len(events)
+                await self.hear_exactly(spoken, deletion_question(first))
+                await wait_until(lambda: manager.typed_answer is not None, 'The question opened no typed answer')
+                self.assertEqual(manager.submit('yes'), 'accepted')
+                await self.hear_exactly(spoken, f'I removed the note: {first}.')
+                await self.reply_finished(transport, spoken)
+                self.assert_approved_once(events, mark)
+                self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': seeded['USER.md']})
+                fresh = await asyncio.wait_for(service.waiting.get(), 5)
+                self.assertIsNot(fresh, startup)
+                self.assertIsNotNone(fresh.capture_pcm, 'Wake capture returns intact after the answer')
+
+                mark = len(events)
+                settled = read_notes(notes)
+                with patch.object(bot, 'ANSWER_TYPED_SECONDS', 0.05):
+                    self.assertEqual(await service.submit(requests[4]), 'accepted')
+                    await self.hear_exactly(spoken, deletion_question(third))
+                    await self.hear_exactly(spoken, "I didn't get an answer, so I won't.")
+                    await self.reply_finished(transport, spoken)
+                self.assert_refused_once(events, mark)
+                self.assertEqual(read_notes(notes), settled)
+                self.assertIsNotNone((await asyncio.wait_for(service.waiting.get(), 5)).capture_pcm)
+                self.assertTrue(windows.empty(), 'A typed-only question never touches capture')
+                self.assertNotIn('capture_pcm', vars(transport))
+                self.assertEqual(len(brain.requests), 5)
+                self.assertEqual([turn['text'] for turn in manager.conversation.turns if turn['speaker'] == 'you'],
+                                 [requests[0], requests[4]])
+            finally:
+                await close()
+
+        with self.subTest('text typed once the spoken answer has ended is a new request'):
+            notes = self.private_notes(memory=[kept, first])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('asked', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_say('Yes to what?'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            self.fake_answer_recognizer(service, 'No.')
+            ended_answer = bot.capture_answer
+            typed = []
+
+            async def answer_then_type(*args, **kwargs):
+                # Queued after the spoken answer completes, so the typed yes lands before the asking step resumes.
+                asyncio.current_task().add_done_callback(lambda capture: typed.append(manager.submit('yes')))
+                return await ended_answer(*args, **kwargs)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                mark = len(events)
+                with patch.object(bot, 'capture_answer', answer_then_type):
+                    await self.speak_request(transport, requests[0])
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await wait_until(lambda: len(brain.requests) >= 3, 'The asking turn never settled')
+                self.assertEqual(typed, ['accepted'])
+                self.assertNotIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'],
+                                 'Text typed after the spoken answer ended must not approve')
+                self.assertEqual(read_notes(notes), seeded)
+                await self.hear_exactly(spoken, 'Yes to what?')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 4)
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'][-1],
+                                 {'role': 'user', 'content': 'yes'}, 'The typed yes is an ordinary request')
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+
+        with self.subTest('text typed once the spoken answer is decided is a new request'):
+            notes = self.private_notes(memory=[kept, first])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('asked', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_say('Yes to what?'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            self.fake_answer_recognizer(service, 'No.')
+            decided_answer = bot.capture_answer
+            typed = []
+
+            async def decide_then_type(transport, vad, **kwargs):
+                detector_cleanup = vad.cleanup
+
+                async def cleanup():
+                    # Capture awaits cleanup only once the answer is decided, so the typed yes is queued ahead of the
+                    # capture task's done callbacks.
+                    asyncio.get_running_loop().call_soon(lambda: typed.append(manager.submit('yes')))
+                    await detector_cleanup()
+
+                vad.cleanup = cleanup
+                return await decided_answer(transport, vad, **kwargs)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                mark = len(events)
+                with patch.object(bot, 'capture_answer', decide_then_type):
+                    await self.speak_request(transport, requests[0])
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await wait_until(lambda: len(brain.requests) >= 3, 'The asking turn never settled')
+                self.assertEqual(typed, ['accepted'])
+                self.assertNotIn(APPROVAL, [event for kind, event in events[mark:] if kind == 'write'],
+                                 'Text typed after the spoken answer was decided must not approve')
+                self.assertEqual(read_notes(notes), seeded)
+                await self.hear_exactly(spoken, 'Yes to what?')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 4)
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'][-1],
+                                 {'role': 'user', 'content': 'yes'}, 'The typed yes is an ordinary request')
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+
+        with self.subTest('text typed once the answer window has failed is a new request'):
+            notes = self.private_notes(memory=[kept, first])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('asked', 'delete_note', {'note': first}), scripted_say('Unspoken remark.'),
+                scripted_say('Yes to what?'),
+            ])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            self.fake_answer_recognizer(service, 'No.')
+            failed_answer = bot.capture_answer
+            typed = []
+
+            async def fail_then_type(transport, vad, **kwargs):
+                async def analyse(audio):
+                    # Queued as the window fails, so the typed yes lands ahead of the capture task's done callbacks.
+                    asyncio.get_running_loop().call_soon(lambda: typed.append(manager.submit('yes')))
+                    raise RuntimeError('Answer detector failed: fixture')
+
+                vad.analyze_audio = analyse
+                return await failed_answer(transport, vad, **kwargs)
+
+            try:
+                await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                mark = len(events)
+                with patch.object(bot, 'capture_answer', fail_then_type):
+                    await self.speak_request(transport, requests[0])
+                    await self.hear_exactly(spoken, deletion_question(first))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await wait_until(lambda: len(brain.requests) >= 3, 'The asking turn never settled')
+                self.assertEqual(typed, ['accepted'])
+                writes = [event for kind, event in events[mark:] if kind == 'write']
+                self.assertNotIn(APPROVAL, writes, 'Text typed after the answer window failed must not approve')
+                self.assertIn({'tool_result': brain_result(False, False, 'permission step failed'), 'source': 'kestrel'},
+                              writes, 'A failed answer window is a broken asking step')
+                self.assertEqual(read_notes(notes), seeded)
+                # The typed request already holds the speaker, so the broken step's advisory is never heard.
+                await self.hear_exactly(spoken, 'Yes to what?')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 4)
+                self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'][-1],
+                                 {'role': 'user', 'content': 'yes'}, 'The typed yes is an ordinary request')
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+
+    async def test_permission_step_refuses_when_asking_cannot_complete(self):
+        target = 'Caller keeps the red notebook in the study'
+        kept = 'Caller prefers cedar tea'
+        request = 'Please delete my notebook note.'
+        broken = "I couldn't ask for permission, so I didn't do it."
+        windows = self.watch_answer_windows()
+
+        with self.subTest('capture failure'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            recognised = self.fake_answer_recognizer(service, 'yes')
+            try:
+                await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+                await self.speak_request(transport, request)
+                await self.hear_exactly(spoken, deletion_question(target))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                await service.state('trouble-microphone')
+                self.assertIsNone(await self.window_change(windows, transport))
+                self.assertEqual(recognised, [])
+            finally:
+                await close()
+            self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
+            self.assertEqual(read_notes(notes), seeded)
+
+        with self.subTest('a tool that cannot be read back, a local tool, or a question that never plays'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain([
+                '[delivery:neutral] Prepared.',
+                scripted_call('unread', 'mute', {}), scripted_say('Untrue success claim.'),
+                scripted_call('local', 'mute', {}), scripted_say('Untrue success claim.'),
+                scripted_call('unplayed', 'delete_note', {'note': target}), scripted_say('Unspoken remark.'),
+            ])
+            self.addCleanup(brain.close)
+            command = AsyncMock(side_effect=AssertionError('A broken asking step must not run the tool'))
+            transport, spoken, committed, interrupted, _, close = await self.open_session(
+                brain, through_service=True, local_command=command, memory_root=notes, native_events=events,
+            )
+            output = transport.output()
+            try:
+                await asyncio.wait_for(asyncio.shield(transport.service.manager.session_ready), 5)
+                mute = bot.LOCAL_TOOLS['mute']
+                for index, entry in enumerate((bot.replace(mute, permission=bot.PermissionTier.ASK),
+                                               bot.replace(mute, permission=bot.PermissionTier.ASK,
+                                                           read_back='mute the sound'))):
+                    mark = len(events)
+                    with patch.dict(bot.LOCAL_TOOLS, mute=entry):
+                        await self.speak_request(transport, 'Please silence the sound.')
+                        await self.hear_exactly(spoken, broken)
+                        self.assertEqual(await asyncio.wait_for(committed.get(), 5), broken)
+                        await self.reply_finished(transport, spoken)
+                    self.assert_refused_once(events, mark)
+                    self.assertEqual(len(brain.requests), 2 * index + 3)
+                    command.assert_not_awaited()
+
+                mark = len(events)
+                with patch.object(bot, 'QUESTION_TIMEOUT', 0.05):
+                    output.generation_done.clear()
+                    interrupted.clear()
+                    await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+                    await asyncio.wait_for(interrupted.wait(), 5)
+                    barrier = DataFrame()
+                    await output.queue_frame(barrier)
+                    self.assertIs(await asyncio.wait_for(transport.processed.get(), 5), barrier)
+                    output.write_gate.clear()
+                    await self.finish_user_turn(transport, request)
+                    await wait_until(lambda: any(kind == 'write' and 'tool_result' in event for kind, event in events[mark:]),
+                                     'The unplayed question was never refused')
+                    self.assertEqual(read_notes(notes), seeded)
+                    output.write_gate.set()
+                    heard = ''
+                    while not heard.endswith(broken):
+                        part = await asyncio.wait_for(spoken.get(), 5)
+                        heard = f'{heard} {part}' if heard else part
+                    self.assertIn(heard, (broken, f'{deletion_question(target)} {broken}'))
+                    await self.reply_finished(transport, spoken)
+                self.assert_refused_once(events, mark)
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                output.write_gate.set()
+                await close()
+
+        with self.subTest('dismissal during the typed-only wait'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            handle, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, activate=False, memory_root=notes, native_events=events,
+            )
+            service = handle.service
+            manager = service.manager
+            try:
+                mark = len(events)
+                self.assertEqual(await service.submit(request), 'accepted')
+                await asyncio.wait_for(service.started.get(), 5)
+                await self.hear_exactly(spoken, deletion_question(target))
+                await wait_until(lambda: manager.typed_answer is not None, 'The question opened no typed answer')
+                self.assertEqual(await service.toggle(), 'starting')
+                await asyncio.wait_for(service.started.get(), 5)
+                await wait_until(lambda: any(kind == 'write' and 'tool_result' in event for kind, event in events[mark:]),
+                                 'The dismissed question was never refused')
+                await wait_until(lambda: len(brain.requests) == 3, 'The refused turn never finished')
+                self.assert_refused_once(events, mark)
+                self.assertEqual(read_notes(notes), seeded)
+                self.assertIsNone(manager.typed_answer)
+                self.assertTrue(spoken.empty(), 'A dismissed question speaks nothing more')
+            finally:
+                await close()
+
+        with self.subTest('engine pipe break'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            handle, spoken, _, _, processes, close = await self.open_session(
+                brain, through_service=True, activate=False, memory_root=notes,
+            )
+            service = handle.service
+            manager = service.manager
+            try:
+                self.assertEqual(await service.submit(request), 'accepted')
+                await asyncio.wait_for(service.started.get(), 5)
+                await self.hear_exactly(spoken, deletion_question(target))
+                await wait_until(lambda: manager.typed_answer is not None, 'The question opened no typed answer')
+                process, _ = processes[0]
+                process.kill()
+                await process.wait()
+                self.assertEqual(manager.submit('yes'), 'accepted')
+                await self.hear_exactly(spoken, "I couldn't reach Kestrel's engine. Restart Kestrel and try again.")
+                self.assertEqual(read_notes(notes), seeded)
+            finally:
+                await close()
+        self.assertTrue(windows.empty(), 'Only the capture-failure window opened')
+
+    async def test_forbidden_tools_are_refused_without_asking_and_cannot_be_preapproved(self):
+        target = 'Caller keeps the red notebook in the study'
+        notes = self.private_notes(memory=['Caller prefers cedar tea', target])
+        seeded = read_notes(notes)
+        windows = self.watch_answer_windows()
+        events = []
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.', scripted_say('Yes to what?'),
+            scripted_call('forbidden', 'delete_note', {'note': target}), scripted_say('Unspoken remark.'),
+            scripted_call('asked', 'delete_note', {'note': target}), scripted_say('Unspoken remark.'),
+        ])
+        self.addCleanup(brain.close)
+        handle, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, activate=False, memory_root=notes, native_events=events,
+        )
+        service = handle.service
+        manager = service.manager
+        try:
+            await asyncio.wait_for(service.waiting.get(), 5)
+            self.assertEqual(await service.submit('yes'), 'accepted')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            await self.hear_exactly(spoken, 'Yes to what?')
+            await self.reply_finished(transport, spoken)
+            self.assertEqual([m for m in brain.requests[-1][2]['messages'] if m['role'] == 'user'],
+                             [{'role': 'user', 'content': 'yes'}], 'A yes before any question is an ordinary request')
+            await asyncio.wait_for(service.waiting.get(), 5)
+
+            mark = len(events)
+            forbidden = bot.replace(bot.LOCAL_TOOLS['delete_note'], permission=bot.PermissionTier.FORBIDDEN)
+            with patch.dict(bot.LOCAL_TOOLS, delete_note=forbidden):
+                transport.output().generation_done.clear()
+                self.assertEqual(await service.submit('Please delete my notebook note.'), 'accepted')
+                await self.hear_exactly(spoken, "That isn't allowed by voice, so I didn't do it.")
+                await self.reply_finished(transport, spoken)
+            self.assertIsNone(manager.typed_answer)
+            self.assertEqual([event for kind, event in events[mark:] if kind == 'write' and 'tool_result' in event],
+                             [{'tool_result': brain_result(False, False, 'not allowed by voice'), 'source': 'kestrel'}])
+            self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
+            self.assertEqual(tool_contents(brain.requests[-1]), [brain_result(False, False, 'not allowed by voice')])
+            self.assertEqual(read_notes(notes), seeded)
+            await asyncio.wait_for(service.waiting.get(), 5)
+
+            # The earlier yes approves nothing: the next asking question still waits for its own answer.
+            mark = len(events)
+            with patch.object(bot, 'ANSWER_TYPED_SECONDS', 0.05):
+                transport.output().generation_done.clear()
+                self.assertEqual(await service.submit('Please delete my notebook note.'), 'accepted')
+                await self.hear_exactly(spoken, deletion_question(target))
+                await self.hear_exactly(spoken, "I didn't get an answer, so I won't.")
+                await self.reply_finished(transport, spoken)
+            self.assert_refused_once(events, mark)
+            self.assertEqual(read_notes(notes), seeded)
+            self.assertEqual(len(brain.requests), 6)
+            self.assertTrue(windows.empty())
+        finally:
+            await close()
+
+    async def test_permission_answer_audio_never_enters_the_conversation(self):
+        target = 'Caller keeps the red notebook in the study'
+        request = 'Please delete my notebook note.'
+        sentinel = 'nonce-951'
+        notes = self.private_notes(memory=['Caller prefers cedar tea', target])
+        seeded = read_notes(notes)
+        traces_home = tempfile.TemporaryDirectory(prefix='kestrel-answer-traces-')
+        self.addCleanup(traces_home.cleanup)
+        traces = Path(traces_home.name) / 'traces'
+        traces.mkdir(mode=0o700)
+        windows = self.watch_answer_windows()
+        events = []
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                               scripted_say('Unspoken remark.'), scripted_call('long', 'delete_note', {'note': target}),
+                               scripted_say('Unspoken remark.')])
+        self.addCleanup(brain.close)
+        analysers = []
+
+        def vad_factory(*, params):
+            analysers.append(answer_vad(params=params))
+            return analysers[-1]
+
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=vad_factory, memory_root=notes,
+            native_events=events, trace_root=traces,
+        )
+        service = transport.service
+        manager = service.manager
+        recognised = self.fake_answer_recognizer(service, f'Maybe {sentinel}.')
+        pipeline_audio, recognition_audio = [], []
+
+        @transport.input().event_handler('on_after_push_frame')
+        async def entered_pipeline(processor, frame):
+            if isinstance(frame, InputAudioRawFrame):
+                pipeline_audio.append(frame.audio)
+
+        @manager.stt.event_handler('on_before_process_frame')
+        async def entered_recognition(processor, frame):
+            if isinstance(frame, InputAudioRawFrame):
+                recognition_audio.append(frame.audio)
+
+        try:
+            await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+            await self.speak_request(transport, request)
+            await self.hear_exactly(spoken, deletion_question(target))
+            self.assertIsNotNone(await self.window_change(windows, transport))
+            transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+            self.assertIsNone(await self.window_change(windows, transport))
+            await self.hear_exactly(spoken, "I didn't catch a clear yes, so I won't.")
+            await self.reply_finished(transport, spoken)
+            self.assertEqual(len(recognised), 1)
+            # Ordinary capture after the window reaches both observers, so their silence about answer frames is real.
+            transport.capture.stdout.feed_data(b'z' * 640)
+            await wait_until(lambda: b'z' * 640 in pipeline_audio and b'z' * 640 in recognition_audio,
+                             'Ordinary capture never reached the pipeline observers')
+            for observed in (pipeline_audio, recognition_audio):
+                self.assertEqual([audio for audio in observed if audio in (ANSWER_SPEECH, ANSWER_QUIET)], [])
+
+            with self.subTest('speech past the cut-off is thrown away'):
+                await self.speak_request(transport, request)
+                await self.hear_exactly(spoken, deletion_question(target))
+                self.assertIsNotNone(await self.window_change(windows, transport))
+                heard = sum(vad.analysed.count(ANSWER_SPEECH) for vad in analysers)
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 301)
+                await wait_until(lambda: sum(vad.analysed.count(ANSWER_SPEECH) for vad in analysers) == heard + 301,
+                                 'Spoken capture never heard the answer reach its cut-off')
+                # Speech still going two seconds past the six second cut-off, arriving after it, then the quiet that ends it.
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 99 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, "I didn't catch a clear yes, so I won't.")
+                transport.capture.stdout.feed_data(b'x' * 640)
+                await wait_until(lambda: b'x' * 640 in pipeline_audio and b'x' * 640 in recognition_audio,
+                                 'Ordinary capture never resumed after the thrown-away tail')
+                for observed in (pipeline_audio, recognition_audio):
+                    self.assertEqual(sum(audio in (ANSWER_SPEECH, ANSWER_QUIET) for audio in observed), 0,
+                                     'Answer frames entered the conversation')
+                self.assertEqual(len(recognised), 1, 'A cut-off answer is never recognised')
+                await self.reply_finished(transport, spoken)
+                self.assertEqual(len(brain.requests), 5)
+            self.assertEqual(read_notes(notes), seeded)
+            self.assertNotIn(sentinel, json.dumps(manager.ingress[2].get_messages()))
+            self.assertNotIn(sentinel, json.dumps(manager.conversation.turns))
+            for brain_request in brain.requests:
+                self.assertNotIn(sentinel, json.dumps(brain_request[2]))
+            self.assertNotIn(sentinel, json.dumps([event for kind, event in events if kind == 'write']))
+        finally:
+            await close()
+        private_traces = list(traces.glob('session-*/events.jsonl'))
+        self.assertTrue(private_traces)
+        self.assertTrue(any(request in trace.read_text() for trace in private_traces))
+        for trace in private_traces:
+            self.assertNotIn(sentinel, trace.read_text())
 
     async def test_confirmed_brain_desktop_call_is_never_repeated_in_a_turn(self):
         brain = ScriptedBrain([
@@ -11335,7 +12635,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for m in request['messages'] if m['role'] != 'system'], [
             {'role': 'user', 'content': 'An ordinary conversation turn.'},
         ])
-        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot'})
+        self.assertEqual({tool['function']['name'] for tool in request['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
         self.assertIn(
             hermes_worker.SYSTEM_PROMPT,
             ' '.join(m['content'] for m in request['messages'] if m['role'] == 'system'),

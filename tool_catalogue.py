@@ -74,7 +74,7 @@ class ToolSpec:
     allowed_after_outside_text: bool
     needs_lookup: bool
     plain_words: str
-    phrase: str | Callable[[str], dict[str, int | str] | None]
+    phrase: str | Callable[[str], dict[str, int | str] | None] | None
     subject: str
     spoken: str
     counts_toward_stop: bool
@@ -86,6 +86,8 @@ class ToolSpec:
     lookup_miss: tuple[str, str] | None = None
     extra_guidance: str = ''
     app_name_byte_limit: int | None = None
+    read_back: str | None = None
+    engine_effect: bool = False
 
 
 TOOL_CATALOGUE: dict[str, ToolSpec] = {
@@ -133,12 +135,26 @@ TOOL_CATALOGUE: dict[str, ToolSpec] = {
                                 counts_toward_stop=False, confirmation='Screenshot saved.',
                                 failure_message="I couldn't confirm the screenshot. Check your screenshot folder. I won't retry.",
                                 extra_guidance='For take_screenshot, confirmed means a new screenshot file was saved; you never see it. '),
+    'delete_note': ToolSpec('Delete one saved note after Kestrel asks the owner and hears a clear yes.',
+                            {'note': (str, 1, 300)}, PermissionTier.ASK, False, False,
+                            'deleting a note after asking you', phrase=None, subject='delete note',
+                            spoken='delete one of your notes', counts_toward_stop=False,
+                            confirmation='I removed the note: {note}',
+                            failure_message="I couldn't confirm the note was removed. I won't retry.",
+                            extra_guidance="Use delete_note with the note's exact full text only when the owner asks to "
+                                           "delete or forget that note, and never memory remove for such a request. "
+                                           "Kestrel reads it back, asks and reports the result itself. "
+                                           "A new owner request to delete a note is never a retry, even after an earlier "
+                                           "delete_note for it was refused or unanswered: call delete_note again so Kestrel asks again. ",
+                            read_back='delete the note: {note}', engine_effect=True),
 }
 
 
 def match_local_phrase(text: str) -> tuple[str, dict[str, int | str]] | None:
     normalized = text.strip().lower()
     for name, spec in TOOL_CATALOGUE.items():
+        if spec.phrase is None:
+            continue
         if isinstance(spec.phrase, str):
             arguments = {} if normalized in (spec.phrase, spec.phrase + '.', spec.phrase + '!') else None
         else:

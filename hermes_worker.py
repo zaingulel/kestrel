@@ -129,6 +129,9 @@ KESTREL_SOURCE = 'kestrel'
 OUTSIDE_TEXT_RESULT = brain_result(False, False, 'outside text')
 OUTSIDE_TEXT_REFUSAL = ('Refused: this conversation contains outside text, so notes cannot change '
                         'until a fresh conversation.')
+ASKED_NOTE_REFUSAL = ('Refused: Kestrel already asked the owner about this note in this conversation, so only '
+                      'delete_note can remove or change it. If the owner asks to delete it, call delete_note '
+                      'so Kestrel asks again.')
 
 
 class ReplyDeliveryPrefix:
@@ -530,6 +533,9 @@ def main(*, base_url=BONSAI_URL):
 
             bridge_failed = False
             outside = False
+            notes_unsettled = False
+            asked_notes = set()
+            approved_removal = None
             privacy_failed = False
             reasoning_filter = None
 
@@ -538,6 +544,29 @@ def main(*, base_url=BONSAI_URL):
                 if privacy_failed or reasoning_filter is not None and reasoning_filter.failed:
                     privacy_failed = True
                     raise RuntimeError(REASONING_ERROR)
+
+            def delete_note(note):
+                nonlocal notes_unsettled, approved_removal
+                store = agent._memory_store
+                confirmed = True
+                approved_removal = note
+                try:
+                    for target in [target for target, entries in (('memory', store.memory_entries),
+                                                                  ('user', store.user_entries)) if note in entries]:
+                        try:
+                            response = store.remove(target, note, matched_entry=note)
+                        except (OSError, RuntimeError):
+                            notes_unsettled = True
+                            confirmed = False
+                            break
+                        if response.get('success') is not True or response.get('removed_entry') != note:
+                            confirmed = False
+                            break
+                finally:
+                    approved_removal = None
+                result = brain_result(confirmed, True, 'confirmed' if confirmed else 'note removal failed')
+                emit({'tool_observed': result})
+                return result
 
             def desktop_handler(name):
                 def handle(args):
@@ -549,23 +578,36 @@ def main(*, base_url=BONSAI_URL):
                         emit({'tool_refused': True})
                         return OUTSIDE_TEXT_RESULT
                     valid_arguments = valid_desktop_arguments(name, args)
+                    engine_effect = valid_arguments and TOOL_CATALOGUE[name].engine_effect
+                    if engine_effect:
+                        if notes_unsettled:
+                            return brain_result(False, False, 'note store needs a fresh conversation')
+                        store = agent._memory_store
+                        if args['note'] not in (*store.memory_entries, *store.user_entries):
+                            return brain_result(False, False, 'no exact note')
+                        asked_notes.add(args['note'])
                     emit({'tool_call': {'name': name, 'arguments': args}})
                     try:
                         line = sys.stdin.buffer.readline(4096)
                         reply = json.loads(line)
                         if (len(line) == 4096 and not line.endswith(b'\n')
-                                or not isinstance(reply, dict)
-                                or set(reply) not in ({'tool_result'}, {'tool_result', 'source'})
-                                or not valid_desktop_result(reply['tool_result'])):
+                                or not isinstance(reply, dict)):
                             raise ValueError('Invalid desktop result')
-                        if reply.get('source') != KESTREL_SOURCE:
-                            outside = True
-                        if not valid_arguments and reply['tool_result'] != brain_result(False, False, 'invalid arguments'):
-                            raise ValueError('Invalid desktop result')
-                        return reply['tool_result']
+                        approved = (engine_effect and set(reply) == {'approved', 'source'}
+                                    and reply['approved'] is True and reply['source'] == KESTREL_SOURCE)
+                        if not approved:
+                            if (set(reply) not in ({'tool_result'}, {'tool_result', 'source'})
+                                    or not valid_desktop_result(reply['tool_result'])):
+                                raise ValueError('Invalid desktop result')
+                            if reply.get('source') != KESTREL_SOURCE:
+                                outside = True
+                            if not valid_arguments and reply['tool_result'] != brain_result(False, False, 'invalid arguments'):
+                                raise ValueError('Invalid desktop result')
+                            return reply['tool_result']
                     except ValueError:
                         bridge_failed = True
                         return 'Kestrel desktop bridge failed'
+                    return delete_note(args['note'])
                 return handle
 
             native_memory = INLINE_TOOL_EXECUTORS['memory']
@@ -579,6 +621,24 @@ def main(*, base_url=BONSAI_URL):
                 return native_memory(agent, args, ctx)
 
             INLINE_TOOL_EXECUTORS['memory'] = gated_memory
+
+            # Every native note write, single or batch, reaches the conversation store's _mutate with its final
+            # entry list after argument coercion, old_text normalisation and matched_entry selection, so the
+            # outcome is checked there.
+            def guard_asked_notes(store):
+                native_mutate = store._mutate
+
+                def guarded_mutate(target, mutate, *, skip_drift=False):
+                    def checked(entries, limit):
+                        result = mutate(entries, limit)
+                        if not isinstance(result, dict) and any(
+                                note in entries and note not in result[0] and note != approved_removal
+                                for note in asked_notes):
+                            return {'success': False, 'error': ASKED_NOTE_REFUSAL}
+                        return result
+                    return native_mutate(target, checked, skip_drift=skip_drift)
+
+                store._mutate = guarded_mutate
 
             for name in TOOL_CATALOGUE:
                 registry.register(
@@ -679,6 +739,7 @@ def main(*, base_url=BONSAI_URL):
                         begun = False
                         close_agent()
                         outside = False
+                        asked_notes.clear()
                         validate_runtime_home(home)
                         if not attached:
                             attach_memory_storage(home, scaffold_identity=scaffold_identity)
@@ -689,6 +750,8 @@ def main(*, base_url=BONSAI_URL):
                             if not link.is_symlink() or os.readlink(link) != str(MEMORY_ROOT):
                                 raise RuntimeError(MEMORY_ERROR)
                         agent = construct_agent(memory=True)
+                        guard_asked_notes(agent._memory_store)
+                        notes_unsettled = False
                         begun = True
                         emit({'session_ready': True})
                         continue

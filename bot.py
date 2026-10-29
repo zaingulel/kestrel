@@ -54,19 +54,48 @@ from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMOR
 from speech import (
     ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
-    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, load_phonon, load_voice_preset, prepare_acknowledgements,
+    NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, capture_answer, load_phonon, load_voice_preset, prepare_acknowledgements,
 )
 from tool_actions import (
     TOOL_ACTIONS, AppLaunchResult, AudioResult, DesktopResult, notify_audio_failure, run_local_command,
     validate_tool_actions,
 )
-from tool_catalogue import TOOL_CATALOGUE, PermissionTier, brain_result, match_local_phrase, valid_desktop_arguments
+from tool_catalogue import (
+    TOOL_CATALOGUE, PermissionTier, brain_result, match_local_phrase, valid_desktop_arguments, valid_desktop_result,
+)
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
 TURN_TIMEOUT = 1800
 ANNOUNCEMENT_TIMEOUT = 5
+# The longest read-back, about 340 characters at an assumed slow 8 a second, plus a grace for synthesis to start.
+QUESTION_TIMEOUT = 60
+# With voice off: the spoken window's six second start wait plus its six second longest answer.
+ANSWER_TYPED_SECONDS = 12
+
+YES_ANSWERS = {'yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 'ok', 'go ahead', 'do it', 'yes please', 'please do',
+               'yes go ahead'}
+NO_ANSWERS = {'no', 'nope', 'no thanks', "don't", 'do not', 'stop', 'cancel', 'not now', 'never mind'}
+# (reason given to the brain, spoken line) for each answer that refuses.
+PERMISSION_REFUSALS = {
+    'no': ('permission declined', "Okay, I won't."),
+    'silence': ('no permission answer', "I didn't hear an answer, so I won't."),
+    'typed silence': ('no permission answer', "I didn't get an answer, so I won't."),
+    'unclear': ('unclear permission answer', "I didn't catch a clear yes, so I won't."),
+}
+PERMISSION_BROKEN = ('permission step failed', "I couldn't ask for permission, so I didn't do it.")
+
+
+def classify_answer(transcript: str) -> str:
+    """Exact whole-utterance yes or no; anything else is unclear."""
+    text = transcript.strip().lower().replace('’', "'").replace('‘', "'")
+    text = ' '.join(re.sub(r'[.,!?]', '', text).split())
+    if text in YES_ANSWERS:
+        return 'yes'
+    if text in NO_ANSWERS:
+        return 'no'
+    return 'unclear'
 
 
 @dataclass(frozen=True)
@@ -83,16 +112,19 @@ class LocalTool:
     failure_message: str | None = None
     lookup_failure: tuple[str, str] | None = None
     lookup_miss: tuple[str, str] | None = None
+    read_back: str | None = None
+    engine_effect: bool = False
 
 
 validate_tool_actions()
 
 LOCAL_TOOLS = {
-    name: LocalTool(spec.permission, TOOL_ACTIONS[name].run, spec.subject, spec.spoken,
+    name: LocalTool(spec.permission, None if spec.engine_effect else TOOL_ACTIONS[name].run, spec.subject, spec.spoken,
                     confirmation=spec.confirmation, announcement=spec.announcement,
-                    lookup=TOOL_ACTIONS[name].lookup, counts_toward_stop=spec.counts_toward_stop,
+                    lookup=None if spec.engine_effect else TOOL_ACTIONS[name].lookup,
+                    counts_toward_stop=spec.counts_toward_stop,
                     failure_message=spec.failure_message, lookup_failure=spec.lookup_failure,
-                    lookup_miss=spec.lookup_miss)
+                    lookup_miss=spec.lookup_miss, read_back=spec.read_back, engine_effect=spec.engine_effect)
     for name, spec in TOOL_CATALOGUE.items()
 }
 
@@ -119,23 +151,35 @@ def capability_help() -> str:
         message = ('You can say: ' + '; '.join(free) + '.' if free else
                    'No local tools are available without permission.')
         tools = (message + ' Permission required: ' + '; '.join(ask)
-                 + ". These tools aren't available by voice yet.")
+                 + ". I'll read the request back and ask you before doing it.")
     else:
         tools = 'You can say: ' + '; '.join(free) + '. None of these tools needs permission first.'
     return f'{HELP_INTRO} {tools} {HELP_PHRASES} {HELP_LIMITS}'
 
 
-def free_tool(key, *arguments) -> LocalTool | None:
+def end_sentence(text: str) -> str:
+    return text if text.endswith(('.', '!', '?')) else text + '.'
+
+
+def local_tool(key, *arguments) -> LocalTool:
     tool = LOCAL_TOOLS[key]
-    if tool.permission is not PermissionTier.FREE:
-        return None
     if tool.lookup is not None:
         return replace(tool, lookup=partial(tool.lookup, *arguments))
     if not arguments:
         return tool
-    confirmation = (tool.confirmation.format(**dict(zip(TOOL_CATALOGUE[key].bounds, arguments)))
-                    if tool.confirmation is not None else None)
-    return replace(tool, run=partial(tool.run, *arguments), confirmation=confirmation)
+    values = dict(zip(TOOL_CATALOGUE[key].bounds, arguments))
+    confirmation = end_sentence(tool.confirmation.format(**values)) if tool.confirmation is not None else None
+    read_back = tool.read_back.format(**values) if tool.read_back is not None else None
+    if tool.engine_effect:
+        # The engine performs this effect itself, so no local run is ever bound.
+        return replace(tool, confirmation=confirmation, read_back=read_back)
+    return replace(tool, run=partial(tool.run, *arguments), confirmation=confirmation, read_back=read_back)
+
+
+def free_tool(key, *arguments) -> LocalTool | None:
+    if LOCAL_TOOLS[key].permission is not PermissionTier.FREE:
+        return None
+    return local_tool(key, *arguments)
 
 
 def local_result_message(tool, result) -> str | None:
@@ -163,6 +207,25 @@ async def resolve_local_tool(tool: LocalTool, *, command=run_local_command) -> L
     operands, values = resolved
     confirmation = tool.confirmation.format(**values) if tool.confirmation is not None else None
     return replace(tool, run=partial(tool.run, *operands), confirmation=confirmation)
+
+
+@dataclass(frozen=True)
+class EngineApproval:
+    """A yes for one engine-effect call: re-checked at the approval write, then given the engine's observed result."""
+    admitted: Callable[[], bool]
+    observe: Callable[[str], None]
+
+
+def observed_result(value) -> bool:
+    if not valid_desktop_result(value):
+        return False
+    try:
+        result = json.loads(value)
+    except ValueError:
+        return False
+    return (isinstance(result, dict) and set(result) == {'confirmed', 'attempted', 'reason'}
+            and isinstance(result['confirmed'], bool) and isinstance(result['attempted'], bool)
+            and isinstance(result['reason'], str))
 
 
 def stop_kestrel():
@@ -378,6 +441,17 @@ class HermesRequestChannel:
                           and isinstance(event['tool_call']['arguments'], dict)):
                         call = event['tool_call']
                         content = await desktop(call['name'], call['arguments'])
+                        if isinstance(content, EngineApproval):
+                            # The only approval grant: no await separates this admission check from its write.
+                            if content.admitted():
+                                self.process.stdin.write(json.dumps({'approved': True, 'source': KESTREL_SOURCE}).encode() + b'\n')
+                                await self.process.stdin.drain()
+                                observed = await self.read_event()
+                                if set(observed) != {'tool_observed'} or not observed_result(observed['tool_observed']):
+                                    raise RuntimeError('Invalid or incomplete Hermes response')
+                                content.observe(observed['tool_observed'])
+                                continue
+                            content = brain_result(False, False, 'request superseded')
                         self.process.stdin.write(json.dumps({'tool_result': content, 'source': KESTREL_SOURCE}).encode() + b'\n')
                         await self.process.stdin.drain()
                     elif set(event) == {'done'} and event['done'] is True and has_text:
@@ -508,7 +582,7 @@ class BrainTurn:
 
 
 class HermesLLMService(LLMService):
-    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None, acknowledgement_output=None):
+    def __init__(self, channel: HermesRequestChannel, *, local_actions: LocalActions, admission, session_ready, dismiss, status=None, conversation=None, acknowledgement_output=None, hear_answer=None):
         super().__init__(settings=LLMSettings(
             model=None, system_instruction=None, temperature=None, max_tokens=None,
             top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None, seed=None,
@@ -516,6 +590,7 @@ class HermesLLMService(LLMService):
         ))
         self.output = None
         self.acknowledgement_output = acknowledgement_output
+        self.hear_answer = hear_answer
         self.channel = channel
         self.local_actions = local_actions
         self.admission = admission
@@ -532,7 +607,7 @@ class HermesLLMService(LLMService):
         self.status = status
         self.conversation = conversation
         self._reply = None
-        # (token, marker, future) for the one announcement LocalActions.lock lets wait at a time.
+        # (token, marker, future) for the one announcement or permission question LocalActions.lock lets wait at a time.
         self._announcement = None
         self._indicator_ready = False
         self._indicator_voice_failed = False
@@ -714,6 +789,40 @@ class HermesLLMService(LLMService):
             logger.warning(f'Playback of {message!r} was not confirmed: {outcome}')
         return await run(command=command)
 
+    async def ask_permission(self, turn, token, output, tool) -> str:
+        """Reads the call back aloud and returns the answer: yes, no, silence, typed silence, unclear or broken."""
+        async with self.local_actions.lock:
+            if tool.read_back is None or not tool.engine_effect or self.hear_answer is None:
+                logger.error(f'The permission step for {tool.subject} cannot ask')
+                return 'broken'
+            if self.channel.output is not output or not self.admission.may_speak(token):
+                return 'broken'
+            loop = asyncio.get_running_loop()
+            marker = AnnouncementMarkFrame()
+            played = loop.create_future()
+            self._announcement = (token, marker, played)
+            asked = loop.time()
+            try:
+                output.put_nowait({'question': f"I'm about to {end_sentence(tool.read_back)} Shall I?", 'marker': marker})
+                outcome = await asyncio.wait_for(played, QUESTION_TIMEOUT)
+            except TimeoutError:
+                outcome = 'timed out'
+            finally:
+                self._announcement = None
+            if outcome != 'played':
+                logger.warning(f'The permission question was not confirmed as played: {outcome}')
+                return 'broken'
+            logger.info(f'The permission question played in {loop.time() - asked:.1f} s')
+            spoken = self.admission.admits_microphone()
+            try:
+                answer = await self.hear_answer(
+                    admitted=lambda: self.admission.may_speak(token) and turn.epoch == self.stop_epoch, spoken=spoken,
+                )
+            except Exception as error:
+                logger.warning(f'The permission answer could not be taken: {type(error).__name__}')
+                return 'broken'
+            return 'typed silence' if answer == 'silence' and not spoken else answer
+
     def retire_outcomes(self, token):
         self.outcomes = [item for item in self.outcomes if item.reporter is not token or item.result is None]
 
@@ -733,9 +842,11 @@ class HermesLLMService(LLMService):
         )
 
     async def desktop_call(self, turn, token, output, name, arguments) -> str:
-        def advise(text):
+        def speak(kind, text):
             if self.channel.output is output and self.admission.may_speak(token):
-                output.put_nowait({'advisory': text})
+                output.put_nowait({kind: text})
+
+        advise = partial(speak, 'advisory')
 
         if not valid_desktop_arguments(name, arguments):
             turn.closed = True
@@ -753,11 +864,33 @@ class HermesLLMService(LLMService):
         if turn.closed:
             return record(brain_result(False, False, 'turn closed'))
         spec = TOOL_CATALOGUE[name]
-        tool = free_tool(name, *(arguments[key] for key in spec.bounds))
-        if tool is None:
+        tool = local_tool(name, *(arguments[key] for key in spec.bounds))
+        if tool.permission is PermissionTier.FORBIDDEN:
             turn.closed = True
-            advise("That needs permission, which isn't available by voice yet, so I didn't do it.")
-            return record(brain_result(False, False, 'permission required'))
+            advise("That isn't allowed by voice, so I didn't do it.")
+            return record(brain_result(False, False, 'not allowed by voice'))
+        if tool.permission is PermissionTier.ASK:
+            answer = await self.ask_permission(turn, token, output, tool)
+            if answer != 'yes':
+                turn.closed = True
+                if answer == 'broken':
+                    reason, line = PERMISSION_BROKEN
+                    advise(line)
+                else:
+                    reason, line = PERMISSION_REFUSALS[answer]
+                    speak('final', line)
+                return record(brain_result(False, False, reason))
+
+            def observe(result):
+                record(result)
+                if json.loads(result)['confirmed']:
+                    speak('final', tool.confirmation)
+                else:
+                    turn.closed = True
+                    advise(tool.failure_message)
+
+            return EngineApproval(admitted=lambda: self.admission.may_speak(token) and turn.epoch == self.stop_epoch,
+                                  observe=observe)
         if tool.lookup is not None:
             selected = tool
             try:
@@ -903,15 +1036,22 @@ class HermesLLMService(LLMService):
         output = None
         failed = False
         started = False
+        # The brain's delivery label opens its reply only with the first brain text, so a reply that Kestrel's own
+        # question opens carries no empty brain start, which would end in the no-speakable-text notice.
+        delivery = None
+        # Kestrel's own last line has been spoken; later brain text is dropped without failing the reply.
+        ended = False
+        # Kestrel's question opened the reply, so it has no brain reply start for an advisory to join.
+        question_opened = False
         request = None
 
-        async def push_reply_start(delivery):
+        async def push_reply_start(label):
             if not self.admission.may_speak(token):
                 return
             if self._reply is None or self._reply.token is not token:
                 self.begin_reply(token)
             start = self._labelled(LLMFullResponseStartFrame(), token)
-            start.reply_progress.delivery = delivery
+            start.reply_progress.delivery = label
             await self.push_frame(start)
 
         try:
@@ -947,16 +1087,34 @@ class HermesLLMService(LLMService):
                 if 'advisory' in event:
                     if self.acknowledgement_output is not None:
                         self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
-                    if not started:
-                        await push_reply_start('neutral')
-                        started = True
-                    await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + event['advisory']), token))
-                    failed = True
-                elif not failed:
-                    if 'delivery' in event:
-                        await push_reply_start(event['delivery'])
-                        started = True
+                    if question_opened:
+                        await self.push_local_speech(event['advisory'], token)
                     else:
+                        if not started:
+                            await push_reply_start(delivery or 'neutral')
+                            started = True
+                        await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + event['advisory']), token))
+                    failed = True
+                elif 'question' in event:
+                    if self.acknowledgement_output is not None:
+                        self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
+                    # Kestrel's own speech opens the reply, as a local reply does: a reply start with no brain text
+                    # would end in the no-speakable-text notice.
+                    if not started:
+                        question_opened = started = True
+                    await self.push_local_speech(event['question'], token)
+                    # Labelled after the question, so the marker carries the live record it was spoken in.
+                    await self.push_frame(self._labelled(event['marker'], token))
+                elif 'final' in event:
+                    await self.push_local_speech(event['final'], token)
+                    ended = True
+                elif not failed and not ended:
+                    if 'delivery' in event:
+                        delivery = event['delivery']
+                    else:
+                        if delivery is not None and not started:
+                            await push_reply_start(delivery)
+                            started = True
                         await self.push_frame(self._labelled(LLMTextFrame(event['text']), token))
             await request
             if self.admission.may_speak(token) and self.channel.failure:
@@ -968,7 +1126,7 @@ class HermesLLMService(LLMService):
             logger.error(f'Hermes session cannot answer: {error}')
             advisory = self.channel.failure_advisory or "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
             if not started:
-                await push_reply_start('neutral')
+                await push_reply_start(delivery or 'neutral')
                 started = True
             if self.admission.may_speak(token):
                 await self.push_frame(self._labelled(SpeechAdvisoryFrame(' ' + advisory), token))
@@ -982,7 +1140,7 @@ class HermesLLMService(LLMService):
                 await asyncio.gather(request, return_exceptions=True)
             await self.stop_processing_metrics()
             if not started:
-                await push_reply_start('neutral')
+                await push_reply_start(delivery or 'neutral')
             await self.push_reply_end(token, failed=failed)
 
 
@@ -1083,6 +1241,8 @@ class VoiceConversations:
         self.transitioning = False
         self.lifecycle_changed = False
         self.handover = None
+        # Open only while a permission question waits; whatever is typed then is its answer.
+        self.typed_answer: asyncio.Future | None = None
         self.submission_task = None
         self.ingress = None
         self.stt = None
@@ -1150,6 +1310,10 @@ class VoiceConversations:
     def submit(self, text):
         if self.closed or self.failure or not self.prepared:
             return 'unavailable'
+        if self.typed_answer is not None and not self.typed_answer.done():
+            # An answer is never a request: no ticket, handover, panel turn or context message.
+            self.typed_answer.set_result(text)
+            return 'accepted'
         if self.transitioning or self.lifecycle_changed or self.handover is not None or self.switching_output:
             return 'busy'
         if self.transport is not None and self.ingress is None:
@@ -1204,6 +1368,8 @@ class VoiceConversations:
     def revoke(self):
         self.invalidate_wake()
         self.wake_reply_token = None
+        if self.typed_answer is not None:
+            self.typed_answer.cancel()
         if self.handover is not None:
             self.handover.cancel()
             self.handover = None
@@ -1252,7 +1418,8 @@ class VoiceConversations:
         # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
                                     dismiss=partial(self.request_active, False), status=self.status if capture_enabled else None,
-                                    conversation=self.conversation, acknowledgement_output=self.transport.output())
+                                    conversation=self.conversation, acknowledgement_output=self.transport.output(),
+                                    hear_answer=self.hear_answer)
         adapter = self.llm
 
         def readiness_finished(task):
@@ -1277,6 +1444,56 @@ class VoiceConversations:
             on_frame_completed=self.frame_completed, typed_origin=self.typed_origin,
         ))
         self.pipeline.add_done_callback(lambda task: self.changed.set())
+
+    async def hear_answer(self, *, admitted, spoken) -> str:
+        """Takes one answer to the waiting permission question: yes, no, silence or unclear.
+
+        Spoken capture and a typed answer race while the microphone is admitted, and the first complete answer wins;
+        otherwise only a typed answer is awaited. Raises when the question is dismissed or the answer cannot be taken.
+        """
+        typed = asyncio.get_running_loop().create_future()
+        self.typed_answer = typed
+        capture = None
+        try:
+            if spoken:
+                capture = asyncio.create_task(capture_answer(
+                    self.transport, SileroVADAnalyzer(params=VADParams(confidence=0.5)),
+                    admitted=lambda: admitted() and self.admission.admits_microphone(),
+                    # Text typed once the spoken answer is decided, even before capture has finished, is an ordinary
+                    # new request.
+                    decided=lambda: setattr(self, 'typed_answer', None),
+                ))
+                await asyncio.wait({typed, capture}, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.wait({typed}, timeout=ANSWER_TYPED_SECONDS)
+            if not typed.done():
+                # Text typed from here on is an ordinary new request.
+                self.typed_answer = None
+                if capture is None:
+                    answer, source = 'silence', 'typed'
+                else:
+                    heard = capture.result()
+                    if heard is None:
+                        answer = 'silence'
+                    elif heard[1]:
+                        answer = 'unclear'
+                    else:
+                        text = await self.recognizer.transcribe(heard[0], admitted=admitted)
+                        if not isinstance(text, str):
+                            raise RuntimeError('Recognition returned no answer')
+                        answer = classify_answer(text)
+                    source = 'spoken'
+            elif typed.cancelled() or not admitted():
+                raise RuntimeError('The permission question was dismissed')
+            else:
+                answer, source = classify_answer(typed.result()), 'typed'
+            logger.info(f'Permission answer: {answer} ({source})')
+            return answer
+        finally:
+            self.typed_answer = None
+            if capture is not None:
+                capture.cancel()
+                await asyncio.gather(capture, return_exceptions=True)
 
     def record_failure(self, failure: str, trouble: str) -> None:
         self.failure = failure
