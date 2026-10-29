@@ -3023,6 +3023,25 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(channel.slow_start)
         self.assertTrue(channel.slow_start_pending())
 
+    async def test_failed_slow_preparation_never_marks_slow_start(self):
+        channel = bot.HermesRequestChannel()
+
+        async def fail_request(*args, **kwargs):
+            channel.failure = 'Hermes reply failed: TimeoutError'
+
+        channel._open = AsyncMock()
+        channel._request = AsyncMock(side_effect=fail_request)
+        with patch.object(channel, '_now', side_effect=[100.0, 109.0]):
+            await channel.prepare()
+        self.assertFalse(channel.slow_start)
+        self.assertFalse(channel.slow_start_pending())
+
+    async def test_engine_failure_ends_pending_slow_start(self):
+        channel, _ = await self.prepared_channel([100.0, 108.5])
+        self.assertTrue(channel.slow_start_pending())
+        channel.failure = 'Hermes reply failed: RuntimeError'
+        self.assertFalse(channel.slow_start_pending())
+
     async def test_failed_engine_open_is_never_timed(self):
         channel, now = await self.prepared_channel([], fail_open=True)
         now.assert_not_called()

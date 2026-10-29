@@ -313,7 +313,7 @@ class HermesRequestChannel:
         return asyncio.get_running_loop().time()
 
     def slow_start_pending(self) -> bool:
-        return self.slow_start
+        return self.slow_start and not self.failure
 
     async def prepare(self):
         await self._open()
@@ -321,8 +321,9 @@ class HermesRequestChannel:
             started = self._now()
             await self._request({'prepare': True}, asyncio.Queue(), admitted=lambda: True)
             seconds = self._now() - started
-            logger.info(f'Brain preparation took {seconds:.1f} seconds.')
-            self.slow_start = seconds > SLOW_START_SECONDS
+            if not self.failure:
+                logger.info(f'Brain preparation took {seconds:.1f} seconds.')
+                self.slow_start = seconds > SLOW_START_SECONDS
 
     async def begin_conversation(self, *, admitted) -> bool:
         if self.preparation is not None:
