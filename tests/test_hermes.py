@@ -1387,7 +1387,7 @@ raise SystemExit(status)
                       'Check runtime ownership and permissions, then restart Kestrel.')
         engine_close_error = 'Hermes engine could not close cleanly. Restart Kestrel.'
         subsystem_errors = {
-            'engine import': 'synthetic missing engine dependency',
+            'engine import': 'Hermes engine files could not be loaded. Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.',
             'engine construction': 'synthetic engine construction failure',
             'runtime home': home_error,
             'engine close': engine_close_error,
@@ -1419,6 +1419,8 @@ raise SystemExit(status)
                         self.assertEqual(errors, [subsystem_errors[case]])
                         self.assertIn(subsystem_errors[case], result.stderr)
                         self.assertNotIn(startup_error, result.stderr)
+                        if case == 'engine import':
+                            self.assertIn('synthetic missing engine dependency', result.stderr)
                     else:
                         self.assertEqual(errors, [startup_error] if startup_case else
                                          ['synthetic provider refusal', 'synthetic provider refusal', trace_error]
