@@ -4190,7 +4190,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 finished = self.sound_completions(manager)
                 try:
                     self.assertEqual(await service.toggle(), 'starting')
-                    transport = await asyncio.wait_for(service.started.get(), 5)
+                    await asyncio.wait_for(service.started.get(), 5)
                     await asyncio.wait_for(next(child for child in service.audio_children if child.stdin is not None).reaped.wait(), 5)
                     if case == 'provider':
                         await asyncio.shield(manager.session_ready)
