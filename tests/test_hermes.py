@@ -456,7 +456,8 @@ class HermesWorkerTests(unittest.TestCase):
             with self.subTest(invalid=(name, arguments)):
                 self.assertFalse(valid_desktop_arguments(name, arguments))
 
-    def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0):
+    def worker_main(self, agent, prompts, registry=None, *, reasoning_capability=False, expected_status=0,
+                    override=None):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
         registry_module.registry = registry or Mock()
@@ -492,10 +493,12 @@ class HermesWorkerTests(unittest.TestCase):
             output = StringIO()
             cwd, mask = os.getcwd(), os.umask(0o077)
             try:
-                with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
-                         'nemo_relay': native, 'tools.registry': registry_module,
-                         'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
-                         'agent.inline_tool_executors': inline_executors}),
+                modules = {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
+                           'nemo_relay': native, 'tools.registry': registry_module,
+                           'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                           'agent.inline_tool_executors': inline_executors}
+                modules.update(override or {})
+                with (patch.dict(sys.modules, modules),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
                       patch.object(hermes_worker, 'MEMORY_ROOT', home / 'notes'),
@@ -507,6 +510,21 @@ class HermesWorkerTests(unittest.TestCase):
                 os.chdir(cwd)
                 os.umask(mask)
             return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_unloadable_engine_files_refuse_ready(self):
+        import hermes_worker
+
+        advice = ('Hermes engine files could not be loaded. '
+                  'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
+        cases = {name: {name: None} for name in (
+            'run_agent', 'tools.registry', 'agent.relay_runtime', 'agent.turn_failure_copy',
+            'agent.reasoning_promotion', 'agent.inline_tool_executors', 'nemo_relay')}
+        cases['missing name'] = {'agent.reasoning_promotion': ModuleType('agent.reasoning_promotion')}
+        for label, override in cases.items():
+            with self.subTest(label):
+                events = self.worker_main(Mock(), [], expected_status=1, override=override)
+                self.assertEqual(events, [{'error': advice}])
+                self.assertEqual(hermes_worker.ENGINE_LOAD_ERROR, advice)
 
     def test_brain_key_file_refuses_unsafe_or_malformed_content(self):
         import hermes_worker
