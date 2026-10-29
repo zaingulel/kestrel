@@ -20,8 +20,10 @@ Item {
         "thinking": "Thinking. Microphone in use.",
         "speaking": "Speaking. Microphone in use.",
         "trouble": "Kestrel needs attention. Microphone in use. " + troubleAdvisory
-    })[state]
+    })[state] + (brainNotice ? " " + brainNotice : "")
     readonly property string troubleAdvisory: statusValue.advisory
+    readonly property string brainNotice: statusValue.notice
+    readonly property string markKind: brainNotice ? state + "-slow" : state
     readonly property var turns: conversationValue.turns
     readonly property bool conversationAvailable: conversationValue.available
     readonly property string conversationMessage: !conversationValue.available ? conversationValue.message
@@ -257,17 +259,17 @@ Item {
         onTriggered: root.conversationExited()
     }
 
-    QtObject { id: statusValue; property string value: "unavailable"; property string advisory: "" }
+    QtObject { id: statusValue; property string value: "unavailable"; property string advisory: ""; property string notice: "" }
     QtObject { id: motionValue; property bool enabled: false }
 
     function acceptStatusChunk(chunk) {
         if (typeof chunk !== "string" || chunk.length < 1 || chunk.length > 32
-                || /[^ADILTSBNUMPRVEOH]/.test(chunk)) {
+                || /[^ADILTSBNUMPRVEOHWY]/.test(chunk)) {
             expireStatus()
             return false
         }
         const states = { A: "starting", D: "inactive", I: "idle", L: "listening", T: "thinking",
-            S: "speaking", N: "not-running", U: "unavailable" }
+            S: "speaking", N: "not-running", U: "unavailable", W: "inactive", Y: "idle" }
         const advisories = {
             B: "Cause unknown. Check the service log, then restart Kestrel.",
             M: "Microphone capture failed. Restart Kestrel.",
@@ -281,6 +283,8 @@ Item {
         const letter = chunk.charAt(chunk.length - 1)
         statusValue.value = letter in advisories ? "trouble" : states[letter]
         statusValue.advisory = advisories[letter] || ""
+        statusValue.notice = letter === "W" || letter === "Y"
+            ? "The brain was slow to start. Replies may take longer." : ""
         toggleValue.awaitingStatus = false
         statusExpiry.restart()
         return true
@@ -292,6 +296,7 @@ Item {
         statusExpiry.stop()
         statusValue.value = "unavailable"
         statusValue.advisory = ""
+        statusValue.notice = ""
         toggleValue.awaitingStatus = false
     }
 

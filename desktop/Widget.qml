@@ -9,6 +9,7 @@ BarWidget {
     readonly property string currentState: service ? service.state : "unavailable"
     readonly property bool tooltipHovered: visible && (hover.containsMouse || placementAdvisory !== "")
     readonly property string statusSentence: service ? service.statusSentence : "Status unavailable. Microphone use unknown."
+    readonly property string brainNotice: service ? service.brainNotice : ""
     readonly property string placementAdvisory: service ? service.placementAdvisory : ""
     readonly property bool panelOpen: bar?.shell?.isPluginOpen("local.kestrel") ?? false
     readonly property string tooltipText: ({
@@ -21,7 +22,7 @@ BarWidget {
         "thinking": "Kestrel: thinking about your message. Microphone in use.",
         "speaking": "Kestrel: speaking. Microphone in use.",
         "trouble": statusSentence
-    })[currentState] + (placementAdvisory ? " " + placementAdvisory : "")
+    })[currentState] + (brainNotice ? " " + brainNotice : "") + (placementAdvisory ? " " + placementAdvisory : "")
     implicitWidth: 25
     implicitHeight: 30
     Accessible.role: Accessible.Button
@@ -34,7 +35,7 @@ BarWidget {
 
     Marks {
         anchors.fill: parent
-        kind: root.currentState
+        kind: root.service ? root.service.markKind : "unavailable"
         motionEnabled: root.service ? root.service.motionEnabled : false
         ink: root.bar?.transparent ? root.bar.barForeground : Color.flatColor(Color.pick("bar.text", Color.foreground), Color.foreground)
         troubleInk: Color.flatColor(Color.pick("bar.active", Color.urgent), Color.urgent)

@@ -250,6 +250,48 @@ TestCase {
         compare(service.troubleAdvisory, "", "expiry clears the advisory")
     }
 
+    function test_slow_start_notice() {
+        const service = createTemporaryObject(serviceComponent, this)
+        verify(service !== null)
+        const notice = "The brain was slow to start. Replies may take longer."
+        for (const [letter, state, base] of [
+            ["W", "inactive", "Voice off. Microphone in use. Press Super + Shift + K to start."],
+            ["Y", "idle", "Waiting. Microphone in use."]
+        ]) {
+            verify(service.acceptStatusChunk("L"))
+            verify(service.acceptStatusChunk(letter))
+            compare(service.state, state, letter)
+            compare(service.troubleAdvisory, "", letter)
+            compare(service.brainNotice, notice, letter)
+            compare(service.statusSentence, base + " " + notice, letter)
+            compare(service.markKind, state + "-slow", letter)
+            verify(service.acceptStatusChunk("L" + letter))
+            compare(service.brainNotice, notice, "the last letter of a chunk wins: " + letter)
+        }
+        verify(service.acceptStatusChunk("W"))
+        verify(service.acceptStatusChunk("D"))
+        compare(service.brainNotice, "", "a following D clears the notice")
+        compare(service.markKind, "inactive")
+        compare(service.statusSentence, "Voice off. Microphone in use. Press Super + Shift + K to start.")
+        for (const letter of ["A", "I", "L", "T", "S", "N", "U", "B", "O"]) {
+            verify(service.acceptStatusChunk("Y"))
+            verify(service.acceptStatusChunk(letter))
+            compare(service.brainNotice, "", "a following " + letter + " clears the notice")
+        }
+        verify(service.acceptStatusChunk("Y"))
+        service.expireStatus()
+        compare(service.brainNotice, "", "expiry clears the notice")
+        compare(service.markKind, "unavailable")
+        verify(service.acceptStatusChunk("W"))
+        service.watcherExited()
+        compare(service.brainNotice, "", "watcher exit clears the notice")
+        verify(service.acceptStatusChunk("Y"))
+        compare(service.acceptStatusChunk("WX"), false)
+        compare(service.state, "unavailable", "the near-miss chunk expires status")
+        compare(service.brainNotice, "")
+        compare(service.markKind, "unavailable")
+    }
+
     function test_toggle_runs_once_per_running_command() {
         const service = createTemporaryObject(serviceComponent, this)
         verify(service !== null)
