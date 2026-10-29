@@ -254,7 +254,33 @@ class StatusTests(unittest.TestCase):
                 self.assertEqual(status.read_indicator(runtime, proc_root=self.proc), 'trouble-microphone')
         self.assertEqual(status._WIRE, {
             'starting': 'A', 'idle': 'I', 'listening': 'L', 'thinking': 'T', 'speaking': 'S',
-            'trouble': 'B', 'not-running': 'N', 'unavailable': 'U', 'inactive': 'D', **causes})
+            'trouble': 'B', 'not-running': 'N', 'unavailable': 'U', 'inactive': 'D',
+            'inactive-slow': 'W', 'idle-slow': 'Y', **causes})
+
+    def test_slow_start_states_are_fixed_status(self):
+        with patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
+            self.process(100, 400)
+            publisher = status.IndicatorStatus(self.runtime)
+            for state, letter in (('inactive-slow', 'W'), ('idle-slow', 'Y')):
+                with self.subTest(state=state):
+                    publisher.set_state(state)
+                    self.assertEqual(status.read_indicator(self.runtime, proc_root=self.proc), state)
+                    self.assertEqual(status._WIRE[state], letter)
+        for near_miss in ('idle-SLOW', 'inactive-slow '):
+            with self.subTest(near_miss=near_miss), tempfile.TemporaryDirectory() as home, \
+                    patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
+                runtime = Path(home) / 'runtime'
+                runtime.mkdir(mode=0o700)
+                publisher = status.IndicatorStatus(runtime)
+                publisher.set_state('inactive-slow')
+                snapshot = runtime / 'kestrel/indicator.json'
+                before = snapshot.read_bytes()
+                errors = io.StringIO()
+                with redirect_stderr(errors):
+                    publisher.set_state(near_miss)
+                self.assertEqual(errors.getvalue().count('Microphone use unknown.'), 1)
+                self.assertEqual(snapshot.read_bytes(), before)
+                self.assertEqual(status.read_indicator(runtime, proc_root=self.proc), 'inactive-slow')
 
     def test_trouble_status_privacy_disclosure(self):
         self.assertIn(
