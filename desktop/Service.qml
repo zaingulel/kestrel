@@ -264,7 +264,7 @@ Item {
 
     function acceptStatusChunk(chunk) {
         if (typeof chunk !== "string" || chunk.length < 1 || chunk.length > 32
-                || /[^ADILTSBNUMPRVEOHWY]/.test(chunk)) {
+                || /[^ADILTSBNUMPRVEGOHWY]/.test(chunk)) {
             expireStatus()
             return false
         }
@@ -277,6 +277,7 @@ Item {
             R: "Speech recognition failed. Restart Kestrel.",
             V: "Voice generation failed. Restart Kestrel.",
             E: "Kestrel's engine is unavailable. Restart Kestrel.",
+            G: "Kestrel's engine is missing, has changed or couldn't be checked. Reinstall it as the manual describes, then restart Kestrel.",
             O: "Local notes are unavailable or unsafe. Check note ownership, permissions, encoding and size, then restart Kestrel.",
             H: "A typed message could not reach the conversation. Restart Kestrel."
         }
