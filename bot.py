@@ -48,7 +48,7 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
-                            ReplyProgress, SpeechAdvisoryFrame, token_of)
+                            ReplyProgress, SpeechAdvisoryFrame, TextSpan, token_of)
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
 from speech import (
@@ -631,6 +631,8 @@ class HermesLLMService(LLMService):
         self._indicator_pending_reply = None
         self._indicator_output_reply = None
         self.last_spoken_reply: str | None = None
+        # The slow-start notice's spoken text until its audio is heard.
+        self._slow_notice: TextSpan | None = None
 
     def valid_origin(self, frame):
         origin = getattr(frame, 'request_origin', None)
@@ -649,7 +651,7 @@ class HermesLLMService(LLMService):
                      'speaking' if self._indicator_output and self.admission.may_speak(self._indicator_output_reply) else
                      'thinking' if self._indicator_pending and self.admission.may_speak(self._indicator_pending_reply) else
                      ('trouble-notes' if self.channel.failure_advisory == MEMORY_ERROR else 'trouble-engine')
-                     if self.channel.failure else 'idle')
+                     if self.channel.failure else ('idle-slow' if self.channel.slow_start_pending() else 'idle'))
             self.status.set_state(state)
 
     def indicator_input_ready(self):
@@ -728,8 +730,13 @@ class HermesLLMService(LLMService):
             record.output_frame(frame)
         self.observe_announcement(frame)
         if record is not None and isinstance(frame, TTSTextFrame) and not frame.append_to_context:
-            record.remember_local_text(frame)
-            self._remember_local_reply(record)
+            if frame.text.strip() == SLOW_START_LINE:
+                # The slow-start notice is never repeat memory.
+                self._slow_notice = record.span_of(frame)
+                self._settle_slow_notice()
+            else:
+                record.remember_local_text(frame)
+                self._remember_local_reply(record)
 
     def _remember_local_reply(self, record):
         if self.admission.may_speak(record.token) and record.local_repeat_text is not None:
@@ -741,6 +748,14 @@ class HermesLLMService(LLMService):
             if self.admission.may_speak(section.reply.token):
                 section.reply.credit(section, start, end)
                 self._remember_local_reply(section.reply)
+                self._settle_slow_notice()
+
+    def _settle_slow_notice(self) -> None:
+        span = self._slow_notice
+        # Told once its first text byte reaches output; an interrupted notice counts as told.
+        if span is not None and any(span.start <= byte < span.end for byte in span.section.heard_text_starts):
+            self._slow_notice = None
+            self.channel.slow_start = False
 
     def observe_announcement(self, frame):
         if self._announcement is None:
@@ -1078,6 +1093,10 @@ class HermesLLMService(LLMService):
             await self.start_processing_metrics()
             if self.channel.failure:
                 raise RuntimeError(self.channel.failure)
+            if self.channel.slow_start_pending():
+                if self.acknowledgement_output is not None:
+                    self.acknowledgement_output.cancel_acknowledgement(self._reply_for(token))
+                await self.push_local_speech(SLOW_START_LINE, token)
             output = asyncio.Queue()
             self.output = output
             if not self.valid_origin(frame):
@@ -1375,9 +1394,12 @@ class VoiceConversations:
         self.revoke()
         if not active:
             self.conversation.clear()
-        self.status.set_state('starting' if active else 'inactive')
+        self.status.set_state('starting' if active else self.inactive_state())
         self.changed.set()
         return 'starting' if active else 'inactive'
+
+    def inactive_state(self) -> str:
+        return 'inactive-slow' if self.channel.slow_start_pending() else 'inactive'
 
     def revoke(self):
         self.invalidate_wake()
@@ -1402,6 +1424,7 @@ class VoiceConversations:
             raise RuntimeError('Invalid KESTREL_TTS_MODEL. Select phonon or voxcpm2 and restart Kestrel.')
         self.preset = load_voice_preset(os.environ.get('KESTREL_VOICE', 'irish-female'))
         self.channel.preparation = asyncio.create_task(self.channel.prepare())
+        self.channel.preparation.add_done_callback(lambda task: self.changed.set())
         await self.recognizer.load(self.preset.pcm)
         if self.tts_model == 'phonon':
             self.model = await asyncio.to_thread(load_phonon)
@@ -1782,7 +1805,7 @@ class VoiceConversations:
             self.changed.set()
 
     async def run(self):
-        self.status.set_state('inactive')
+        self.status.set_state(self.inactive_state())
         self.changed.set()
         while not self.closed:
             await self.changed.wait()
@@ -1826,7 +1849,7 @@ class VoiceConversations:
                 if self.handover is not None and self.ingress is not None and self.submission_task is None:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:
-                    self.status.set_state('inactive')
+                    self.status.set_state(self.inactive_state())
                     if self.prepared and not self.switching_output and not self.wake_disabled and self.handover is None and self.wake_reply_token is None and self.wake_detector is None:
                         interval = object()
                         self.wake_interval = interval

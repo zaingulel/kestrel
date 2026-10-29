@@ -4383,6 +4383,115 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             release_drain.set()
             await close()
 
+    def slow_start_channel(self):
+        channel = bot.HermesRequestChannel()
+        clock = patch.object(channel, '_now', side_effect=[100.0, 108.5])
+        clock.start()
+        self.addCleanup(clock.stop)
+        return channel
+
+    async def test_slow_brain_start_is_told_once_when_addressed(self):
+        notice_entered, notice_release, answer_release = threading.Event(), threading.Event(), threading.Event()
+        for event in (notice_entered, notice_release, answer_release):
+            self.addCleanup(event.set)
+
+        def chunks(**kwargs):
+            if kwargs['text'] == bot.SLOW_START_LINE and not notice_entered.is_set():
+                notice_entered.set()
+                if not notice_release.wait(45):
+                    raise AssertionError('Slow-start notice synthesis was not released')
+            yield np.zeros(4800, dtype=np.float32)
+
+        def held():
+            if not answer_release.wait(45):
+                raise AssertionError('Held answer was not released')
+            yield {'content': '[delivery:neutral] Held answer.'}, None
+            yield {}, 'stop'
+
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', '[delivery:neutral] Unheard answer.', held(),
+                               '[delivery:neutral] First answer.'])
+        self.addCleanup(brain.close)
+        channel = self.slow_start_channel()
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, activate=False, channel=channel, synthesis_chunks=chunks,
+        )
+        service, manager = handle.service, handle.service.manager
+
+        def shows(state):
+            return wait_until(lambda: manager.status._state == state, f'The indicator never showed {state}')
+
+        try:
+            await asyncio.shield(service.channel.preparation)
+            await shows('inactive-slow')
+            self.assertTrue(spoken.empty(), 'A slow start is shown silently')
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertEqual(await service.toggle(), 'starting')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            await shows('idle-slow')
+            await self.speak_request(transport, 'repeat that')
+            await self.hear_exactly(spoken, "I haven't said anything to repeat yet.")
+            await self.reply_finished(transport, spoken)
+            self.assertTrue(channel.slow_start, 'Repeat never uses up the notice')
+            await shows('idle-slow')
+            await self.speak_request(transport, 'First question')
+            await wait_until(lambda: notice_entered.is_set() and len(brain.requests) == 2,
+                             'The brain request waited for the notice synthesis')
+            self.assertEqual(await service.toggle(), 'inactive')
+            await shows('inactive-slow')
+            notice_release.set()
+            await wait_until(lambda: manager.transport is None, 'The cancelled conversation never finished cleanup')
+            self.assertEqual(await service.toggle(), 'starting')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            await shows('idle-slow')
+            self.assertTrue(channel.slow_start, 'A notice cancelled before any of its audio is still due')
+            self.assertTrue(spoken.empty(), 'Neither the cancelled notice nor its answer was spoken')
+            await self.speak_request(transport, 'Second question')
+            await self.hear_exactly(spoken, bot.SLOW_START_LINE)
+            await wait_until(lambda: not channel.slow_start and len(brain.requests) == 3,
+                             'The heard notice was not settled while its answer is held')
+            await self.speak_request(transport, 'repeat that')
+            await self.hear_exactly(spoken, "I haven't said anything to repeat yet.")
+            answer_release.set()
+            await self.reply_finished(transport, spoken)
+            self.assertTrue(committed.empty(), 'The superseded held answer is never committed')
+            await self.speak_request(transport, 'Third question')
+            await self.hear_exactly(spoken, 'First answer.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First answer.')
+            await self.reply_finished(transport, spoken)
+            for message in brain.requests[3][2]['messages']:
+                self.assertNotIn(bot.SLOW_START_LINE, json.dumps(message))
+            self.assertEqual(manager.llm.last_spoken_reply, 'First answer.')
+            await shows('idle')
+        finally:
+            notice_release.set()
+            answer_release.set()
+            await close()
+
+    async def test_typed_request_tells_slow_start_while_voice_is_off(self):
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', '[delivery:neutral] Typed answer.'])
+        self.addCleanup(brain.close)
+        channel = self.slow_start_channel()
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, activate=False, channel=channel,
+        )
+        service, manager = handle.service, handle.service.manager
+        try:
+            await asyncio.shield(service.channel.preparation)
+            await wait_until(lambda: manager.status._state == 'inactive-slow', 'A slow start never showed')
+            self.assertEqual(await service.submit('Typed question'), 'accepted')
+            await self.hear_exactly(spoken, bot.SLOW_START_LINE)
+            await self.hear_exactly(spoken, 'Typed answer.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Typed answer.')
+            await wait_until(lambda: manager.status._state == 'inactive', 'The told notice never cleared')
+            self.assertEqual(manager.llm.last_spoken_reply, 'Typed answer.')
+            self.assertEqual(await service.submit('repeat that'), 'accepted')
+            await self.hear_exactly(spoken, 'Typed answer.')
+            self.assertEqual(len(brain.requests), 2)
+            for message in brain.requests[1][2]['messages']:
+                self.assertNotIn(bot.SLOW_START_LINE, json.dumps(message))
+        finally:
+            await close()
+
     async def test_sound_cues_preserve_interruption_and_silent_controls(self):
         for replacement in ('replace', 'dismiss'):
             with self.subTest(replacement=replacement):
