@@ -2362,7 +2362,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     return frame
 
     async def test_sound_cue_playback_failure_is_terminal(self):
-        for case in ('drained', 'broken_pipe', 'nonzero', 'cancelled'):
+        for case in ('drained', 'broken_pipe', 'nonzero', 'cancelled', 'revoked'):
             with self.subTest(case=case):
                 admission = Admission(voice=False, output_switching=lambda: False)
                 token = admission.accept_typed(on_taken=lambda: None)
@@ -2375,6 +2375,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                                       exit_code=7 if case == 'nonzero' else 0)
                 children = []
                 cleanup_started, release_cleanup = asyncio.Event(), asyncio.Event()
+                first_drain, release_drain = asyncio.Event(), asyncio.Event()
                 native_wait = playback.wait.side_effect
 
                 async def wait_child():
@@ -2386,6 +2387,12 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                 playback.wait.side_effect = wait_child
                 if case == 'broken_pipe':
                     playback.stdin.drain = AsyncMock(side_effect=BrokenPipeError('Private playback detail'))
+                elif case == 'revoked':
+                    async def drain():
+                        first_drain.set()
+                        await release_drain.wait()
+
+                    playback.stdin.drain = AsyncMock(side_effect=drain)
 
                 async def spawn(*args, **kwargs):
                     children.append(playback)
@@ -2397,6 +2404,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
                 self.addCleanup(playback.release_exit)
                 self.addCleanup(release_cleanup.set)
+                self.addCleanup(release_drain.set)
                 task = None
                 with patch.object(transport, '_spawn', spawn), patch.object(speech, 'sleep', paced):
                     _, observed = await self.pipeline(output)
@@ -2404,6 +2412,21 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                         task = asyncio.create_task(output.play_cue('heard', token=token))
                         if case == 'broken_pipe':
                             self.assertFalse(await asyncio.wait_for(task, 5))
+                        elif case == 'revoked':
+                            await asyncio.wait_for(first_drain.wait(), 5)
+                            first_writes = list(playback.stdin.write.call_args_list)
+                            self.assertEqual(len(first_writes), 1)
+                            self.assertTrue(first_writes[0].args[0])
+                            self.assertLess(len(first_writes[0].args[0]), 6720)
+                            self.assertTrue(admission.may_speak(token))
+                            admission.accept_typed(on_taken=lambda: None)
+                            self.assertFalse(admission.may_speak(token))
+                            release_drain.set()
+                            await asyncio.wait_for(playback.eof.wait(), 5)
+                            playback.release_exit()
+                            self.assertFalse(await asyncio.wait_for(task, 5))
+                            self.assertEqual(playback.stdin.write.call_args_list, first_writes,
+                                             'Revoked cue authority must not write additional stale bytes')
                         else:
                             await asyncio.wait_for(playback.eof.wait(), 5)
                             pcm = b''.join(call.args[0] for call in playback.stdin.write.call_args_list)
@@ -2437,10 +2460,14 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsNone(transport.failure)
                             playback.kill.assert_not_called()
                             self.assertEqual(playback.returncode, 0)
+                        elif case == 'revoked':
+                            self.assertIsNone(transport.failure)
+                            stopped.assert_not_called()
                         else:
                             playback.kill.assert_called_once()
                     finally:
                         release_cleanup.set()
+                        release_drain.set()
                         playback.release_exit()
                         if task is not None and not task.done():
                             task.cancel()
