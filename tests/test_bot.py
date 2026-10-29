@@ -786,7 +786,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         advisory = "I couldn't confirm pause. Check the media player. I won't retry."
         self.assertEqual(service.push_frame.await_args_list[0].args[0].text, advisory)
         end = service.push_frame.await_args_list[-1].args[0]
-        self.assertFalse(end.reply_progress.answer_failed)
+        self.assertTrue(end.reply_progress.answer_failed)
         service.conversation_output(end)
         await request('stop')
         account = "Stopped. Couldn't confirm: pause. I won't undo anything."
