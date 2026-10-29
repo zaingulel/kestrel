@@ -129,6 +129,9 @@ KESTREL_SOURCE = 'kestrel'
 OUTSIDE_TEXT_RESULT = brain_result(False, False, 'outside text')
 OUTSIDE_TEXT_REFUSAL = ('Refused: this conversation contains outside text, so notes cannot change '
                         'until a fresh conversation.')
+ASKED_NOTE_REFUSAL = ('Refused: Kestrel already asked the owner about this note in this conversation, so only '
+                      'delete_note can remove or change it. If the owner asks to delete it, call delete_note '
+                      'so Kestrel asks again.')
 
 
 class ReplyDeliveryPrefix:
@@ -531,6 +534,7 @@ def main(*, base_url=BONSAI_URL):
             bridge_failed = False
             outside = False
             notes_unsettled = False
+            asked_notes = set()
             privacy_failed = False
             reasoning_filter = None
 
@@ -576,6 +580,7 @@ def main(*, base_url=BONSAI_URL):
                         store = agent._memory_store
                         if args['note'] not in (*store.memory_entries, *store.user_entries):
                             return brain_result(False, False, 'no exact note')
+                        asked_notes.add(args['note'])
                     emit({'tool_call': {'name': name, 'arguments': args}})
                     try:
                         line = sys.stdin.buffer.readline(4096)
@@ -602,12 +607,22 @@ def main(*, base_url=BONSAI_URL):
 
             native_memory = INLINE_TOOL_EXECUTORS['memory']
 
+            def targets_asked_note(operation):
+                # The native matcher accepts any unique substring of an entry as old_text.
+                return (isinstance(operation, dict) and operation.get('action') in ('remove', 'patch')
+                        and isinstance(operation.get('old_text'), str)
+                        and any(operation['old_text'] in note for note in asked_notes))
+
             # Hermes plugin hooks fail open, and both memory dispatch paths read this table at call time
             # before any memory validation, threat scan or write, so the private entry is the refusal seam.
             def gated_memory(agent, args, ctx):
                 if outside:
                     emit({'tool_refused': True})
                     return json.dumps({'success': False, 'error': OUTSIDE_TEXT_REFUSAL})
+                operations = args.get('operations')
+                if targets_asked_note(args) or (isinstance(operations, list)
+                                                and any(map(targets_asked_note, operations))):
+                    return json.dumps({'success': False, 'error': ASKED_NOTE_REFUSAL})
                 return native_memory(agent, args, ctx)
 
             INLINE_TOOL_EXECUTORS['memory'] = gated_memory
@@ -711,6 +726,7 @@ def main(*, base_url=BONSAI_URL):
                         begun = False
                         close_agent()
                         outside = False
+                        asked_notes.clear()
                         validate_runtime_home(home)
                         if not attached:
                             attach_memory_storage(home, scaffold_identity=scaffold_identity)

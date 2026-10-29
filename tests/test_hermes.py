@@ -2494,6 +2494,75 @@ class NativeHermesTests(unittest.TestCase):
                                                      'USER.md': seeded['USER.md']})
                 self.assertEqual(tool_contents(brain.requests[-1]), [not_confirmed])
 
+    ASKED_NOTE_REFUSAL = ('Refused: Kestrel already asked the owner about this note in this conversation, so only '
+                          'delete_note can remove or change it. If the owner asks to delete it, call delete_note '
+                          'so Kestrel asks again.')
+
+    def test_brain_cannot_remove_or_change_a_note_kestrel_asked_about(self):
+        asked_note = 'Caller keeps the red notebook in the study nonce-841.'
+        other = 'Caller prefers cedar tea nonce-842.'
+        prompt = [{'role': 'user', 'content': 'Delete the red notebook note.'}]
+        asked = {'tool_call': {'name': 'delete_note', 'arguments': {'note': asked_note}}}
+        refusal = {'success': False, 'error': self.ASKED_NOTE_REFUSAL}
+        attempts = (
+            ('remove with the whole note', {'action': 'remove', 'target': 'memory', 'old_text': asked_note}),
+            ('remove with part of the note', {'action': 'remove', 'target': 'memory', 'old_text': 'red notebook'}),
+            ('patch with part of the note', {'action': 'patch', 'target': 'memory', 'old_text': 'red notebook',
+                                            'content': 'blue notebook'}),
+            ('batch remove with part of the note', {'target': 'memory', 'operations': [
+                {'action': 'remove', 'old_text': 'red notebook'}]}))
+        for label, arguments in attempts:
+            with self.subTest(label):
+                replies = [scripted_call('ask', 'delete_note', {'note': asked_note}), scripted_say('Left it.'),
+                           scripted_call('sidestep', 'memory', arguments), scripted_say('Tried.')]
+                with seeded_worker(replies, memory=[other, asked_note]) as (worker, brain, notes):
+                    seeded = read_notes(notes)
+                    self.assertEqual(worker.request(prompt, results=[REFUSAL]), [asked, *spoken_turn('Left it.')])
+                    self.assertEqual(worker.request(prompt), spoken_turn('Tried.'))
+                    self.assertEqual([json.loads(content) for content in tool_contents(brain.requests[-1])], [refusal])
+                    self.assertEqual(read_notes(notes), seeded)
+
+    def test_asked_note_block_leaves_other_notes_and_ends_with_a_fresh_conversation(self):
+        asked_note = 'Caller keeps the red notebook in the study nonce-851.'
+        other = 'Caller prefers cedar tea nonce-852.'
+        unasked = 'Caller owns a green bicycle nonce-853.'
+        prompt = [{'role': 'user', 'content': 'Delete the red notebook note.'}]
+        asked = {'tool_call': {'name': 'delete_note', 'arguments': {'note': asked_note}}}
+
+        def remove(call_id, old_text):
+            return scripted_call(call_id, 'memory', {'action': 'remove', 'target': 'memory', 'old_text': old_text})
+
+        replies = [scripted_call('ask', 'delete_note', {'note': asked_note}), scripted_say('Left it.'),
+                   remove('other', other), scripted_say('Tidied.'),
+                   remove('asked-again', asked_note), scripted_say('Blocked.'),
+                   scripted_call('absent', 'delete_note', {'note': unasked}), scripted_say('Nothing there.'),
+                   scripted_call('add', 'memory', {'action': 'add', 'target': 'memory', 'content': unasked}),
+                   scripted_say('Added.'), remove('unasked', unasked), scripted_say('Removed.'),
+                   remove('fresh', asked_note), scripted_say('Cleared.')]
+        with seeded_worker(replies, memory=[other, asked_note]) as (worker, brain, notes):
+            self.assertEqual(worker.request(prompt, results=[REFUSAL]), [asked, *spoken_turn('Left it.')])
+            with self.subTest('another note keeps automatic tidying'):
+                self.assertEqual(worker.request(prompt), spoken_turn('Tidied.'))
+                self.assertTrue(json.loads(tool_contents(brain.requests[-1])[0])['success'])
+                self.assertEqual(read_notes(notes)['MEMORY.md'], note_bytes(asked_note))
+            with self.subTest('the asked note stays after the others change'):
+                self.assertEqual(worker.request(prompt), spoken_turn('Blocked.'))
+                self.assertEqual([json.loads(content) for content in tool_contents(brain.requests[-1])],
+                                 [{'success': False, 'error': self.ASKED_NOTE_REFUSAL}])
+                self.assertEqual(read_notes(notes)['MEMORY.md'], note_bytes(asked_note))
+            with self.subTest('a delete_note stopped before asking blocks nothing'):
+                self.assertEqual(worker.request(prompt), spoken_turn('Nothing there.'))
+                self.assertEqual(tool_contents(brain.requests[-1]), [brain_result(False, False, 'no exact note')])
+                self.assertEqual(worker.request(prompt), spoken_turn('Added.'))
+                self.assertEqual(worker.request(prompt), spoken_turn('Removed.'))
+                self.assertTrue(json.loads(tool_contents(brain.requests[-1])[0])['success'])
+                self.assertEqual(read_notes(notes)['MEMORY.md'], note_bytes(asked_note))
+            with self.subTest('a fresh conversation lifts the block'):
+                worker.begin()
+                self.assertEqual(worker.request(prompt), spoken_turn('Cleared.'))
+                self.assertTrue(json.loads(tool_contents(brain.requests[-1])[0])['success'])
+                self.assertNotIn(asked_note.encode(), read_notes(notes)['MEMORY.md'])
+
     def test_note_deletion_without_an_exact_note_asks_nothing(self):
         target = 'Caller keeps the red notebook in the study nonce-821.'
         longer = target + ' It has a torn cover.'
