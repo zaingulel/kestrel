@@ -672,12 +672,13 @@ class HermesLLMService(LLMService):
         if self._announcement is not None and not self._announcement[2].done():
             self._announcement[2].set_result(outcome)
 
-    async def push_reply_end(self, token, *, failed=False, cue=True):
+    async def push_reply_end(self, token, *, failed=False, cue_failed=False, cue=True):
         if not self.admission.may_speak(token):
             return
         end = self._labelled(LLMFullResponseEndFrame(), token)
         # The output queue, not generation completion, owns the visible reply's end.
         end.reply_progress.answer_failed |= failed
+        end.reply_progress.cue_failed |= cue_failed
         end.reply_progress.terminal_cue = cue
         if end.reply_progress.closed and failed:
             end.reply_progress.terminal_outcome = 'failed'
@@ -688,11 +689,11 @@ class HermesLLMService(LLMService):
             self.begin_reply(token)
         await self.push_frame(self._labelled(TTSSpeakFrame(message, append_to_context=False), token))
 
-    async def speak_local_reply(self, message, token, *, failed=False):
+    async def speak_local_reply(self, message, token, *, cue_failed=False):
         if not self.admission.may_speak(token):
             return
         await self.push_local_speech(message, token)
-        await self.push_reply_end(token, failed=failed)
+        await self.push_reply_end(token, cue_failed=cue_failed)
 
     async def announce_first(self, token, message, run, *, command):
         outcome = 'request superseded'
@@ -871,7 +872,7 @@ class HermesLLMService(LLMService):
                 raise
             except (ValueError, RuntimeError, OSError, TimeoutError):
                 remove_original()
-                await self.speak_local_reply(tool.lookup_failure[1], token, failed=True)
+                await self.speak_local_reply(tool.lookup_failure[1], token, cue_failed=True)
                 return
         if tool is not None:
             if not self.valid_origin(frame):
@@ -892,9 +893,9 @@ class HermesLLMService(LLMService):
                 if message is None:
                     self.retire_outcomes(token)
             if message is not None:
-                await self.speak_local_reply(message, token, failed=not effect_observed(result))
+                await self.speak_local_reply(message, token, cue_failed=not effect_observed(result))
             else:
-                await self.push_reply_end(token, cue=not mute, failed=not effect_observed(result))
+                await self.push_reply_end(token, cue=not mute, cue_failed=not effect_observed(result))
             return
         self.begin_reply(token)
         if self.acknowledgement_output is not None:
@@ -1742,7 +1743,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
             last_terminal_token = record.token
             record.terminal_notified = True
             if record.terminal_cue and record.terminal_outcome != 'interrupted':
-                await output.play_cue('failed' if record.terminal_outcome == 'failed' else 'finished', token=record.token)
+                await output.play_cue('failed' if record.cue_failed or record.terminal_outcome == 'failed' else 'finished', token=record.token)
             if on_reply_finished is not None:
                 on_reply_finished(record.token)
 

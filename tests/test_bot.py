@@ -786,7 +786,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         advisory = "I couldn't confirm pause. Check the media player. I won't retry."
         self.assertEqual(service.push_frame.await_args_list[0].args[0].text, advisory)
         end = service.push_frame.await_args_list[-1].args[0]
-        self.assertTrue(end.reply_progress.answer_failed)
+        self.assertFalse(end.reply_progress.answer_failed)
         service.conversation_output(end)
         await request('stop')
         account = "Stopped. Couldn't confirm: pause. I won't undo anything."
@@ -4284,7 +4284,15 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(sum(argv[:2] == ('/usr/bin/hyprctl', 'dispatch') for argv in calls), 1)
                         self.assertTrue(syntheses, 'Unconfirmed readback retains its spoken advisory')
-                        self.assertEqual(manager.conversation.turns[-1]['state'], 'failed')
+                        self.assertEqual(manager.conversation.turns[-1]['state'], 'complete')
+                        self.assertEqual(manager.llm.outcomes, [])
+                        pcm_length, synthesis_count = len(self.sound_pcm(service)), len(syntheses)
+                        self.assertEqual(await service.submit('stop'), 'accepted')
+                        await asyncio.wait_for(finished.get(), 5)
+                        self.assertEqual(len(self.sound_pcm(service)), pcm_length)
+                        self.assertEqual(len(syntheses), synthesis_count)
+                        self.assertEqual(manager.llm.outcomes, [])
+                        self.assertTrue(finished.empty())
                     if case == 'failed_synthesis':
                         self.assertTrue(manager.voice.generation_cleanup_failed)
                         self.assertEqual(await service.toggle(), 'inactive')

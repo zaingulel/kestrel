@@ -91,6 +91,7 @@ class ReplyProgress:
         self.on_finish = on_finish
         self.delivery = 'neutral'
         self.answer_failed = False
+        self.cue_failed = False
         self.interrupting = False
         self.sections: list[ReplySection] = []
         self.spans: list[TextSpan] = []
