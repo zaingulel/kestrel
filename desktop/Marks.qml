@@ -44,6 +44,8 @@ Item {
         "inactive": {h: [6, 6, 6], hollow: 1, opacity: faintOpacity},
         "starting": {h: [6, 6, 6], hollow: 1},
         "idle": {h: [6, 6, 6], opacity: faintOpacity},
+        "inactive-slow": {h: [3, 3, 3], hollow: 1, opacity: faintOpacity},
+        "idle-slow": {h: [3, 3, 3], opacity: faintOpacity},
         "listening": {h: [12, 12, 12]},
         "thinking": {h: [6, 12, 6]},
         "speaking": {h: [12, 6, 12]},

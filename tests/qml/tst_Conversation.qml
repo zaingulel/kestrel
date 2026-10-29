@@ -1071,7 +1071,8 @@ TestCase {
             accentInk: "#7aa2f7", troubleInk: "#D35F5F", motionEnabled: true,
             currentState: Qt.binding(function() { return service.state }),
             statusSentence: Qt.binding(function() { return service.statusSentence }),
-            troubleAdvisory: Qt.binding(function() { return service.troubleAdvisory })
+            troubleAdvisory: Qt.binding(function() { return service.troubleAdvisory }),
+            brainNotice: Qt.binding(function() { return service.brainNotice })
         })
         verify(content !== null)
         verify(waitForRendering(content))
@@ -1086,6 +1087,7 @@ TestCase {
         compare(label.width, microphone.width)
         compare(findChild(findChild(content, "conversationHeader"), "mark0"), null, "the header shows no state mark")
         const trouble = "Kestrel needs attention. Microphone in use. "
+        const slow = "The brain was slow to start. Replies may take longer."
         const expected = [
             ["N", "Not\u00a0running\u00a0· Mic\u00a0released", "Not running. Microphone released by Kestrel.", "ink", ""],
             ["D", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use", "Voice off. Microphone in use. Press Super + Shift + K to start.", "ink", ""],
@@ -1095,6 +1097,9 @@ TestCase {
             ["L", "Listening\u00a0· Mic\u00a0in\u00a0use", "Listening. Microphone in use.", "ink", ""],
             ["T", "Thinking\u00a0· Mic\u00a0in\u00a0use", "Thinking. Microphone in use.", "ink", ""],
             ["S", "Speaking\u00a0· Mic\u00a0in\u00a0use", "Speaking. Microphone in use.", "ink", ""],
+            ["W", "Voice\u00a0off\u00a0· Mic\u00a0in\u00a0use",
+                "Voice off. Microphone in use. Press Super + Shift + K to start. " + slow, "ink", "", slow],
+            ["Y", "Waiting\u00a0· Mic\u00a0in\u00a0use", "Waiting. Microphone in use. " + slow, "ink", "", slow],
             ["B", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Cause unknown. Check the service log, then restart Kestrel.", "trouble",
                 "Cause unknown. Check the service log, then restart Kestrel."],
             ["M", "Attention\u00a0· Mic\u00a0in\u00a0use", trouble + "Microphone capture failed. Restart Kestrel.", "trouble",
@@ -1113,7 +1118,8 @@ TestCase {
                 "A typed message could not reach the conversation. Restart Kestrel."]
         ]
         const band = findChild(content, "troubleAdvisory")
-        verify(band !== null)
+        const notice = findChild(content, "brainNotice")
+        verify(band !== null && notice !== null)
         for (const row of expected) {
             verify(service.acceptStatusChunk(row[0]))
             verify(waitForRendering(content))
@@ -1128,6 +1134,8 @@ TestCase {
             compare(textWith(content, "Move: Super + left drag"), null)
             compare(band.text, row[4], row[0])
             compare(band.visible, row[4] !== "", row[0])
+            compare(notice.text, row[5] || "", row[0])
+            compare(notice.visible, row[5] !== undefined, row[0])
         }
         content.width = 320
         content.textScale = 2

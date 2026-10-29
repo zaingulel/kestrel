@@ -26,6 +26,8 @@ TestCase {
         "starting": {h: [6, 6, 6], y: [12, 12, 12], hollow: true},
         "unavailable": {h: [4, 8, 12], y: [13, 11, 9]},
         "idle": {h: [6, 6, 6], y: [12, 12, 12], opacity: 0.6},
+        "inactive-slow": {h: [3, 3, 3], y: [13.5, 13.5, 13.5], hollow: true, opacity: 0.6},
+        "idle-slow": {h: [3, 3, 3], y: [13.5, 13.5, 13.5], opacity: 0.6},
         "listening": {h: [12, 12, 12], y: [9, 9, 9]},
         "thinking": {h: [6, 12, 6], y: [12, 9, 12]},
         "speaking": {h: [12, 6, 12], y: [9, 12, 9]},

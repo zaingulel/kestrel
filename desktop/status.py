@@ -15,11 +15,11 @@ _WIRE = {
     'starting': 'A', 'idle': 'I', 'listening': 'L', 'thinking': 'T', 'speaking': 'S', 'trouble': 'B',
     'trouble-microphone': 'M', 'trouble-playback': 'P', 'trouble-recognition': 'R', 'trouble-voice': 'V',
     'trouble-engine': 'E', 'trouble-notes': 'O', 'trouble-handover': 'H',
-    'not-running': 'N', 'unavailable': 'U', 'inactive': 'D',
+    'not-running': 'N', 'unavailable': 'U', 'inactive': 'D', 'inactive-slow': 'W', 'idle-slow': 'Y',
 }
-_STATES = {'inactive', 'starting', 'idle', 'listening', 'thinking', 'speaking', 'trouble', 'trouble-microphone',
-           'trouble-playback', 'trouble-recognition', 'trouble-voice', 'trouble-engine', 'trouble-notes',
-           'trouble-handover', 'unavailable', 'released'}
+_STATES = {'inactive', 'inactive-slow', 'starting', 'idle', 'idle-slow', 'listening', 'thinking', 'speaking',
+           'trouble', 'trouble-microphone', 'trouble-playback', 'trouble-recognition', 'trouble-voice',
+           'trouble-engine', 'trouble-notes', 'trouble-handover', 'unavailable', 'released'}
 _ADVISORY = 'Kestrel indicator status unavailable. Microphone use unknown.'
 
 

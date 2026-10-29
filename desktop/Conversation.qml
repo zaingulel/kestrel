@@ -23,6 +23,7 @@ FocusScope {
     property string conversationMessage: "Conversation unavailable. Reopen the panel."
     property string placementAdvisory: ""
     property string troubleAdvisory: ""
+    property string brainNotice: ""
     property var displayedTurns: []
     property int displayedCount: 0
     property string conversationSession: ""
@@ -283,7 +284,7 @@ FocusScope {
             id: advisories
             objectName: "headerAdvisories"
             width: parent.width
-            visible: root.troubleAdvisory.length > 0 || root.placementAdvisory.length > 0
+            visible: root.troubleAdvisory.length > 0 || root.brainNotice.length > 0 || root.placementAdvisory.length > 0
             // Never takes the transcript below one bubble line; what does not fit scrolls.
             height: Math.min(bands.height, Math.max(0,
                 footer.y - 12 - root.transcriptMinimum - header.y - headerRow.height - header.spacing))
@@ -295,7 +296,7 @@ FocusScope {
             activeFocusOnTab: keyboardStop
             onKeyboardStopChanged: if (!keyboardStop && focus && root.activeFocus) transcript.forceActiveFocus()
             Accessible.role: Accessible.StaticText
-            Accessible.name: [root.troubleAdvisory, root.placementAdvisory].filter(function(text) { return text.length > 0 }).join(" ")
+            Accessible.name: [root.troubleAdvisory, root.brainNotice, root.placementAdvisory].filter(function(text) { return text.length > 0 }).join(" ")
             Accessible.focusable: keyboardStop
             KeyNavigation.tab: transcript
             KeyNavigation.backtab: closeButton
@@ -320,6 +321,20 @@ FocusScope {
                     width: parent.width
                     visible: text.length > 0
                     text: root.troubleAdvisory
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: root.ink
+                    font.family: "monospace"
+                    font.pixelSize: root.bodyPixelSize
+                    lineHeight: root.bodyLineHeight
+                    lineHeightMode: Text.FixedHeight
+                    Accessible.ignored: true
+                }
+                Text {
+                    objectName: "brainNotice"
+                    width: parent.width
+                    visible: text.length > 0
+                    text: root.brainNotice
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     color: root.ink
