@@ -100,6 +100,9 @@ class ReplyProgress:
         self.delivered = False
         self.closed = False
         self.completed = False
+        self.terminal_outcome = None
+        self.terminal_cue = True
+        self.terminal_notified = False
         self._streamed = set()
         self._text_starts = {}
         self._sources = {}
@@ -118,6 +121,7 @@ class ReplyProgress:
     def silent(cls, token) -> 'ReplyProgress':
         record = cls(token, feed=None, feed_open=lambda: False)
         record.closed = True
+        record.terminal_outcome = 'complete'
         return record
 
     def open_section(self, delivery: str) -> ReplySection:
@@ -229,6 +233,7 @@ class ReplyProgress:
         if self.closed:
             return
         self.closed = True
+        self.terminal_outcome = 'interrupted' if interrupted else 'failed' if failed else 'complete'
         if self.feed is not None and self.feed_open():
             self.feed.finish(self.token, interrupted=interrupted, failed=failed)
         self.completed = self.delivered and not (interrupted or failed)

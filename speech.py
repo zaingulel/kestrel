@@ -639,6 +639,29 @@ class LaptopInput(BaseInputTransport):
 ACKNOWLEDGEMENT_DELAY = 2.0
 
 
+_CUE_RATE = 48000
+_CUE_PEAK = 0.10
+_CUE_RAMP = 480
+
+
+def _cue_pcm(frequencies, samples, gap):
+    ramp = (1 - np.cos(np.linspace(0, np.pi, _CUE_RAMP))) / 2
+    envelope = np.ones(samples)
+    envelope[:_CUE_RAMP] = ramp
+    envelope[-_CUE_RAMP:] = ramp[::-1]
+    tones = [(np.sin(2 * np.pi * frequency * np.arange(samples) / _CUE_RATE)
+              * envelope * _CUE_PEAK * 32767).astype('<i2').tobytes() for frequency in frequencies]
+    return bytes(gap * 2).join(tones)
+
+
+_CUES = {
+    'listening': _cue_pcm((660, 880), 2880, 960),
+    'heard': _cue_pcm((660,), 3360, 0),
+    'finished': _cue_pcm((880, 660), 2880, 960),
+    'failed': _cue_pcm((330, 330), 4320, 1920),
+}
+
+
 class LaptopOutput(BaseOutputTransport):
     def __init__(self, audio, params):
         super().__init__(params)
@@ -655,6 +678,60 @@ class LaptopOutput(BaseOutputTransport):
         self.acknowledgement_timer = None
         self.acknowledgement_tasks = set()
         self.acknowledgement_index = 0
+
+    async def play_cue(self, kind: str, *, token: object | None = None) -> bool:
+        admission = self.audio.admission
+        mark = admission.input_mark() if admission is not None and token is None else None
+
+        def allowed():
+            if self.audio.closed or self.audio.failure or not self.write_gate.is_set() or admission is None:
+                return False
+            if token is not None:
+                return kind != 'listening' and admission.may_speak(token)
+            return (kind == 'listening' and admission.is_current(mark) and admission.admits_microphone()
+                    and self.audio.verified and self.audio.input().ready)
+
+        if not allowed():
+            return False
+        pcm = _CUES[kind]
+        await self.write_gate.wait()
+        async with self.write_lock:
+            success = False
+            try:
+                if not allowed():
+                    return False
+                # A terminal cue starts only after the preceding speech child has drained.
+                if self.audio.playback is not None:
+                    await self.audio._finish_playback()
+                if not allowed() or not await self._open_playback_locked():
+                    return False
+                for offset in range(0, len(pcm), self.audio_chunk_size):
+                    try:
+                        written = await asyncio.wait_for(
+                            self._write_pcm_locked(pcm[offset:offset + self.audio_chunk_size], _CUE_RATE, 1, allowed),
+                            self._params.audio_out_write_timeout_secs,
+                        )
+                    except TimeoutError:
+                        self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
+                        return False
+                    if not written or not allowed():
+                        return False
+                await self.audio._finish_playback()
+                success = allowed()
+                return success
+            finally:
+                if not success and self.audio.playback is not None:
+                    cleanup = asyncio.create_task(self.audio._discard_playback())
+                    cancelled = None
+                    while True:
+                        try:
+                            await asyncio.shield(cleanup)
+                            break
+                        except asyncio.CancelledError as error:
+                            cancelled = error
+                    self.playback_deadline = None
+                    if cancelled is not None:
+                        raise cancelled
 
     def _acknowledgement_now(self) -> float:
         return monotonic()
@@ -884,13 +961,19 @@ class LaptopOutput(BaseOutputTransport):
             return False
 
     async def _write_audio_locked(self, frame, record) -> bool:
+        return await self._write_pcm_locked(
+            frame.audio, frame.sample_rate, frame.num_channels,
+            lambda: self._allowed(record) and (getattr(frame, 'prepared_credit', None) is None
+                                               or self.acknowledgement_record is record),
+        )
+
+    async def _write_pcm_locked(self, pcm, sample_rate, channels, allowed) -> bool:
         try:
-            duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+            duration = len(pcm) / (2 * channels * sample_rate)
             deadline = (self.playback_deadline if self.playback_deadline is not None else monotonic()) + duration
-            if (not self._allowed(record) or
-                    (getattr(frame, 'prepared_credit', None) is not None and self.acknowledgement_record is not record)):
+            if not allowed():
                 return False
-            self.audio.playback.stdin.write(frame.audio)
+            self.audio.playback.stdin.write(pcm)
             await self.audio.playback.stdin.drain()
             now = monotonic()
             if deadline <= now:
