@@ -174,8 +174,18 @@ MEASURED_FIRST_HI_SCORES = (
 WAKE_PHRASE_PCM = bytes([1]) * 1280
 # Production worker-startup budget, read at import so tests that patch bot.ENGINE_TIMEOUT cannot shrink it.
 ENGINE_STARTUP = bot.ENGINE_TIMEOUT
+# SessionTests.setUp replaces bot.VoiceConversations with a mock; tests of its real methods use this import-time class.
+NATIVE_VOICE_CONVERSATIONS = bot.VoiceConversations
 # Owner-approved wording, an oracle independent of bot.SLOW_START_LINE.
 SLOW_START_NOTICE = 'The brain was slow to start, so replies may take longer.'
+# Owner-approved wording, an oracle independent of bot's engine advice.
+ENGINE_MISSING_ADVICE = ("Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, "
+                         "keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine "
+                         "as the manual describes, then restart Kestrel.")
+# The worker's refusals for a missing or changed engine, an oracle independent of hermes_worker.
+SOURCE_IDENTITY_REFUSAL = ('Hermes source identity could not be verified. '
+                           'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
+ENGINE_LOAD_REFUSAL = 'Hermes engine files could not be loaded. Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.'
 
 
 def hermes_service(*, local_command=None):
@@ -3050,6 +3060,63 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         channel._request.assert_not_awaited()
         self.assertFalse(channel.slow_start)
 
+    async def opened_channel(self, spawned):
+        """Opens a real channel whose engine spawn raises `spawned`, or starts a worker whose first event is `spawned`."""
+        channel = bot.HermesRequestChannel()
+        self.addAsyncCleanup(channel.close)
+        if isinstance(spawned, BaseException):
+            spawn = AsyncMock(side_effect=spawned)
+        else:
+            process = Mock(returncode=0)
+            process.stdout.readline = AsyncMock(return_value=json.dumps(spawned).encode() + b'\n')
+            spawn = AsyncMock(return_value=process)
+        with patch.dict(os.environ), patch.object(bot.asyncio, 'create_subprocess_exec', spawn):
+            os.environ.pop('KESTREL_MANAGED_BRAIN', None)
+            await channel._open()
+        spawn.assert_awaited_once()
+        return channel
+
+    async def test_engine_open_names_only_verified_missing_causes(self):
+        generic = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+        for cause, spawned, advisory in (
+            ('spawn finds no interpreter', FileNotFoundError(2, 'No such file or directory'), ENGINE_MISSING_ADVICE),
+            ('spawn may not run the interpreter', PermissionError(13, 'Permission denied'), ENGINE_MISSING_ADVICE),
+            ('spawn hits another system error', OSError(24, 'Too many open files'), generic),
+            ('worker refuses the source identity', {'error': SOURCE_IDENTITY_REFUSAL}, ENGINE_MISSING_ADVICE),
+            ('worker cannot load engine files', {'error': ENGINE_LOAD_REFUSAL}, ENGINE_MISSING_ADVICE),
+            ('identity refusal cut short',
+             {'error': SOURCE_IDENTITY_REFUSAL[:SOURCE_IDENTITY_REFUSAL.index(' Reinstall')]}, generic),
+            ('error that is a list', {'error': [SOURCE_IDENTITY_REFUSAL]}, generic),
+            ('ready', {'ready': True}, None),
+        ):
+            with self.subTest(cause=cause):
+                channel = await self.opened_channel(spawned)
+                self.assertEqual(channel.failure_advisory, advisory)
+                if advisory is None:
+                    self.assertIsNone(channel.failure)
+                elif isinstance(spawned, dict) and isinstance(spawned['error'], list):
+                    self.assertEqual(channel.failure, f'Hermes engine unavailable: {[SOURCE_IDENTITY_REFUSAL]}')
+
+    async def test_engine_trouble_shows_whether_voice_is_on_or_off(self):
+        from types import SimpleNamespace
+        missing = await self.opened_channel(FileNotFoundError(2, 'No such file or directory'))
+        self.assertEqual(missing.failure_advisory, ENGINE_MISSING_ADVICE)
+        # Engine trouble outranks a slow start, whichever came first.
+        missing.slow_start = True
+        llm = SimpleNamespace(
+            status=Mock(), admission=SimpleNamespace(is_open=lambda: True), channel=missing, _indicator_ready=True,
+            _indicator_voice_failed=False, _indicator_user=False, _indicator_output=False, _indicator_pending=False,
+        )
+        bot.HermesLLMService.refresh_indicator(llm)
+        self.assertEqual(llm.status.set_state.call_args_list, [call('trouble-engine-missing')])
+        self.assertEqual(NATIVE_VOICE_CONVERSATIONS.inactive_state(SimpleNamespace(channel=missing)), 'trouble-engine-missing')
+
+    async def test_any_engine_failure_shows_trouble_while_voice_is_off(self):
+        from types import SimpleNamespace
+        unreached = await self.opened_channel(OSError(24, 'Too many open files'))
+        self.assertEqual(unreached.failure_advisory, "I couldn't reach Kestrel's engine. Restart Kestrel and try again.")
+        self.assertEqual(NATIVE_VOICE_CONVERSATIONS.inactive_state(SimpleNamespace(channel=unreached)), 'trouble-engine')
+
     async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
         preparing = asyncio.Event()
         loading = asyncio.Event()
@@ -4575,6 +4642,21 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(brain.requests), 2)
             for message in brain.requests[1][2]['messages']:
                 self.assertNotIn(SLOW_START_NOTICE, json.dumps(message))
+        finally:
+            await close()
+
+    async def test_missing_engine_shows_trouble_while_voice_is_off_and_explains_when_addressed(self):
+        refusal = f"import json; print(json.dumps({{'error': {SOURCE_IDENTITY_REFUSAL!r}}}), flush=True)"
+        handle, spoken, _, _, _, close = await self.open_session(
+            None, wire=refusal, through_service=True, native_audio=True, activate=False, startup='trouble-engine-missing',
+        )
+        service, manager = handle.service, handle.service.manager
+        try:
+            self.assertEqual(manager.status._state, 'trouble-engine-missing')
+            self.assertTrue(spoken.empty(), 'An engine failure is shown silently')
+            for request in ('Typed question', 'Another typed question'):
+                self.assertEqual(await service.submit(request), 'accepted')
+                await self.hear_exactly(spoken, ENGINE_MISSING_ADVICE)
         finally:
             await close()
 
@@ -6941,7 +7023,11 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def open_session(self, brain, *, wire=None, local_command=None, prepare_engine=False, status=None,
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
                            admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
-                           production_turn_strategies=False, wake_wire=None, tts_model='voxcpm2', vad_factory=None):
+                           production_turn_strategies=False, wake_wire=None, tts_model='voxcpm2', vad_factory=None,
+                           startup=None):
+        if startup is None:
+            # With neither brain nor wire the stub spawn below raises OSError, a generic engine failure.
+            startup = 'trouble-engine' if brain is None and wire is None else 'inactive'
         if brain is not None:
             require_native_hermes()
         from desktop import control, status as status_module
@@ -7432,7 +7518,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(prepared.wait(), 5)
         # Worker startup is CPU-bound and gets the production budget; later waits keep five seconds so a hang fails.
         await asyncio.wait_for(engine_opened.wait(), ENGINE_STARTUP)
-        await state('inactive')
+        await state(startup)
         if activate:
             self.assertEqual(await toggle(), 'starting')
             transport = await asyncio.wait_for(started.get(), 5)
@@ -12147,7 +12233,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 with (patch.dict(os.environ, {'KESTREL_MANAGED_BRAIN': marker}),
                       patch.object(bot, 'run_local_command', status)):
                     transport, spoken, committed, _, processes, close = await self.open_session(
-                        brain, local_command=command, prepare_engine=True,
+                        brain, local_command=command, prepare_engine=True, startup='trouble-engine',
                     )
                     try:
                         await asyncio.wait_for(asyncio.shield(transport.llm.channel.preparation or transport.llm.channel.reader), 5)
@@ -12520,6 +12606,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 transport, spoken, committed, _, processes, close = await self.open_session(
                     brain, local_command=command, prepare_engine=True, through_service=True,
                     memory_root=notes, native_events=events,
+                    startup='trouble-engine' if failure == 'prepare' else 'inactive',
                 )
                 service = transport.service
                 manager = service.manager
@@ -13678,7 +13765,9 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                     wire += ("assert json.loads(sys.stdin.readline()) == {'begin': True}; "
                              "print('{\"session_ready\":true}', flush=True); ")
                 wire += f'sys.stdin.readline(); print({response!r}, flush=True); sys.stdin.read()'
-                transport, spoken, committed, _, processes, close = await self.open_session(None, wire=wire)
+                transport, spoken, committed, _, processes, close = await self.open_session(
+                    None, wire=wire, startup='trouble-engine' if name == 'wrong ready type' else 'inactive',
+                )
                 try:
                     self.assertTrue(spoken.empty(), 'Even corrupt startup must not speak first')
                     if name == 'wrong ready type':
@@ -13736,7 +13825,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_engine_startup_timeout_waits_for_user_then_speaks_failure(self):
         with patch.object(bot, 'ENGINE_TIMEOUT', 1, create=True):
             transport, spoken, committed, _, processes, close = await asyncio.wait_for(
-                self.open_session(None, wire='import sys; sys.stdin.read()'), 5,
+                self.open_session(None, wire='import sys; sys.stdin.read()', startup='trouble-engine'), 5,
             )
             self.assertTrue(spoken.empty(), 'A hung startup must not speak first')
             await self.assert_failed_reply(

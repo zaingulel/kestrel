@@ -219,7 +219,7 @@ class StatusTests(unittest.TestCase):
         original = deepcopy(self.data)
         causes = {'trouble-microphone': 'M', 'trouble-playback': 'P', 'trouble-recognition': 'R',
                   'trouble-voice': 'V', 'trouble-engine': 'E', 'trouble-notes': 'O',
-                  'trouble-handover': 'H'}
+                  'trouble-handover': 'H', 'trouble-engine-missing': 'G'}
         with patch.object(status, '_PROC_ROOT', self.proc), patch.object(status.os, 'getpid', return_value=100):
             self.process(100, 400)
             publisher = status.IndicatorStatus(self.runtime)

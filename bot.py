@@ -49,8 +49,8 @@ from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
                             ReplyProgress, SpeechAdvisoryFrame, token_of)
-from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
-                           child_environment)
+from hermes_worker import (DELIVERY_LABELS, ENGINE_LOAD_ERROR, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
+                           SOURCE_IDENTITY_ERROR, child_environment)
 from speech import (
     ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
@@ -67,6 +67,10 @@ from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
+ENGINE_MISSING_ERRORS = frozenset({SOURCE_IDENTITY_ERROR, ENGINE_LOAD_ERROR})
+ENGINE_MISSING_ADVISORY = ("Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, "
+                           "keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine "
+                           "as the manual describes, then restart Kestrel.")
 SLOW_START_SECONDS = 8
 SLOW_START_LINE = 'The brain was slow to start, so replies may take longer.'
 TURN_TIMEOUT = 1800
@@ -281,6 +285,7 @@ class HermesRequestChannel:
                 self.detach(output)
 
     async def _open(self):
+        advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
         try:
             managed_brain = os.environ.get('KESTREL_MANAGED_BRAIN', '')
             if managed_brain not in ('', '1'):
@@ -294,17 +299,24 @@ class HermesRequestChannel:
                     raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
             self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
             async with asyncio.timeout(ENGINE_TIMEOUT):
-                self.process = await asyncio.create_subprocess_exec(
-                    str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
-                    env=child_environment(self.home.name),
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    limit=1024 * 1024 + 1,
-                )
+                try:
+                    self.process = await asyncio.create_subprocess_exec(
+                        str(HERMES_PYTHON), str(ROOT / 'hermes_worker.py'),
+                        env=child_environment(self.home.name),
+                        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                        limit=1024 * 1024 + 1,
+                    )
+                except (FileNotFoundError, PermissionError):
+                    advisory = ENGINE_MISSING_ADVISORY
+                    raise
                 event = await self.read_event()
                 if set(event) != {'ready'} or event['ready'] is not True:
-                    raise RuntimeError(event.get('error') or 'Hermes did not become ready')
+                    refusal = event.get('error')
+                    if isinstance(refusal, str) and refusal in ENGINE_MISSING_ERRORS:
+                        advisory = ENGINE_MISSING_ADVISORY
+                    raise RuntimeError(refusal or 'Hermes did not become ready')
         except Exception as error:
-            self.failure_advisory = "I couldn't reach Kestrel's engine. Restart Kestrel and try again."
+            self.failure_advisory = advisory
             self.failure = f'Hermes engine unavailable: {str(error) or type(error).__name__}'
             logger.error(self.failure)
             await self._reap()
@@ -314,6 +326,13 @@ class HermesRequestChannel:
 
     def slow_start_pending(self) -> bool:
         return self.slow_start and not self.failure
+
+    def trouble_state(self) -> str | None:
+        if not self.failure:
+            return None
+        if self.failure_advisory == MEMORY_ERROR:
+            return 'trouble-notes'
+        return 'trouble-engine-missing' if self.failure_advisory == ENGINE_MISSING_ADVISORY else 'trouble-engine'
 
     async def prepare(self):
         await self._open()
@@ -648,8 +667,7 @@ class HermesLLMService(LLMService):
                      'listening' if self._indicator_user else
                      'speaking' if self._indicator_output and self.admission.may_speak(self._indicator_output_reply) else
                      'thinking' if self._indicator_pending and self.admission.may_speak(self._indicator_pending_reply) else
-                     ('trouble-notes' if self.channel.failure_advisory == MEMORY_ERROR else 'trouble-engine')
-                     if self.channel.failure else ('idle-slow' if self.channel.slow_start_pending() else 'idle'))
+                     self.channel.trouble_state() or ('idle-slow' if self.channel.slow_start_pending() else 'idle'))
             self.status.set_state(state)
 
     def indicator_input_ready(self):
@@ -1389,7 +1407,7 @@ class VoiceConversations:
         return 'starting' if active else 'inactive'
 
     def inactive_state(self) -> str:
-        return 'inactive-slow' if self.channel.slow_start_pending() else 'inactive'
+        return self.channel.trouble_state() or ('inactive-slow' if self.channel.slow_start_pending() else 'inactive')
 
     def revoke(self):
         self.invalidate_wake()
