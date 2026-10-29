@@ -548,7 +548,7 @@ class HermesLLMService(LLMService):
         if origin is None:
             return False
         token, source, message, text, mark = origin
-        return (isinstance(text, str) and bool(text.strip()) and self.admission.may_speak(token)
+        return (isinstance(text, str) and self.admission.may_speak(token)
                 and (source != 'spoken' or self.admission.is_current(mark))
                 and any(item is message for item in frame.context.get_messages())
                 and message.get('role') == 'user' and message.get('content') == text)

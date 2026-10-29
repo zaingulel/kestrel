@@ -6740,6 +6740,14 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                         typed = await asyncio.wait_for(service.started.get(), 5)
                         self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Typed reply.')
                         self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Typed reply.')
+                        await asyncio.wait_for(service.waiting.get(), 5)
+                        command = AsyncMock(side_effect=[
+                            'selected', 'physical', 'Mute: no', '', 'selected', 'physical', 'Mute: yes',
+                        ])
+                        with patch.object(manager.local_actions, 'command', new=command):
+                            self.assertEqual(await service.submit('mute'), 'accepted')
+                            self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Muting.')
+                            await asyncio.wait_for(service.waiting.get(), 5)
                         playback = typed.playback
                         self.assertIsNotNone(playback)
                         self.assertIsNone(playback.returncode)
@@ -7009,12 +7017,21 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(fresh.capture)
             self.assertEqual(manager.conversation.turns, [])
             self.assertIsNone(fresh.llm.last_spoken_reply)
+            quick_finished = asyncio.Event()
+
+            @fresh.output().event_handler('on_after_push_frame')
+            async def quick_output_completed(processor, frame):
+                if (isinstance(frame, LLMFullResponseEndFrame)
+                        and manager.admission.may_speak(reply_progress.token_of(frame))):
+                    quick_finished.set()
+
             fresh.capture.stdout.feed_data(bytes(640))
             await fresh.input().queue_frame(ProposedUserStartedSpeakingFrame())
             await self.finish_user_turn(fresh, 'Fresh quick question')
             quick_callback, quick_args, quick_deadline = await asyncio.wait_for(timers.get(), 5)
             self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Quick fresh answer.')
             self.assertEqual(await asyncio.wait_for(spoken.get(), 5), 'Quick fresh answer.')
+            await asyncio.wait_for(quick_finished.wait(), 5)
             before = sum(len(data) for child in service.audio_children for data in child.writes)
             acknowledgement_time[0] = max(acknowledgement_time[0], quick_deadline)
             quick_callback(*quick_args)
