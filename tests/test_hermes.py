@@ -483,7 +483,7 @@ class HermesWorkerTests(unittest.TestCase):
                 (home / 'memories').mkdir(mode=0o700, exist_ok=True)
                 agent.valid_tool_names = {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'}
                 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
-                agent._memory_store = object()
+                agent._memory_store = SimpleNamespace(_mutate=lambda *args, **kwargs: None)
                 agent._memory_manager = None
                 return agent
             run_agent.AIAgent = Mock(side_effect=construct)
@@ -1211,7 +1211,7 @@ print('private storage matrix passed')
                 (home / 'memories').mkdir(mode=0o700, exist_ok=True)
                 agent.valid_tool_names = {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'}
                 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
-                agent._memory_store = object()
+                agent._memory_store = SimpleNamespace(_mutate=lambda *args, **kwargs: None)
                 agent._memory_manager = None
                 return agent
             run_agent.AIAgent.side_effect = construct_agent
@@ -1327,7 +1327,7 @@ agent.valid_tool_names = {'memory', 'mute', 'unmute', 'set_volume', 'pause_media
 if case == 'tool surface':
     agent.valid_tool_names.add('tool_search')
 agent.tools = [{'function': {'name': name}} for name in agent.valid_tool_names]
-agent._memory_store = object()
+agent._memory_store = SimpleNamespace(_mutate=lambda *args, **kwargs: None)
 agent._memory_manager = object() if case == 'memory manager' else None
 agent.run_conversation.return_value = {'completed': True, 'final_response': '[delivery:neutral]\\nSynthetic reply.'}
 if case == 'provider shutdown':
@@ -2510,7 +2510,15 @@ class NativeHermesTests(unittest.TestCase):
             ('patch with part of the note', {'action': 'patch', 'target': 'memory', 'old_text': 'red notebook',
                                             'content': 'blue notebook'}),
             ('batch remove with part of the note', {'target': 'memory', 'operations': [
-                {'action': 'remove', 'old_text': 'red notebook'}]}))
+                {'action': 'remove', 'old_text': 'red notebook'}]}),
+            ('remove with the whole note padded', {'action': 'remove', 'target': 'memory',
+                                                   'old_text': f'  {asked_note}  '}),
+            ('remove with the note typography-folded', {'action': 'remove', 'target': 'memory',
+                                                        'old_text': asked_note.replace('-', '\u2013')}),
+            ('batch encoded as a JSON string', {'target': 'memory', 'operations': json.dumps([
+                {'action': 'remove', 'old_text': 'red notebook'}])}),
+            ('batch pinning the note with matched_entry', {'target': 'memory', 'operations': [
+                {'action': 'remove', 'old_text': other, 'matched_entry': asked_note}]}))
         for label, arguments in attempts:
             with self.subTest(label):
                 replies = [scripted_call('ask', 'delete_note', {'note': asked_note}), scripted_say('Left it.'),
@@ -2531,6 +2539,26 @@ class NativeHermesTests(unittest.TestCase):
 
         def remove(call_id, old_text):
             return scripted_call(call_id, 'memory', {'action': 'remove', 'target': 'memory', 'old_text': old_text})
+
+        short_entry = 'Caller keeps the red notebook'
+        user_note = 'Caller wants the red notebook nonce-854.'
+        other_user_note = 'Caller likes jasmine tea nonce-855.'
+        for label, memory, user, arguments, kept_memory, kept_user in (
+                ('a user note sharing a word with the asked note', [asked_note], [user_note, other_user_note],
+                 {'action': 'remove', 'target': 'user', 'old_text': 'notebook'},
+                 [asked_note], [other_user_note]),
+                ('a short note contained in the asked note', [short_entry, asked_note], [],
+                 {'action': 'remove', 'target': 'memory', 'old_text': short_entry},
+                 [asked_note], [])):
+            with self.subTest(label):
+                replies = [scripted_call('ask', 'delete_note', {'note': asked_note}), scripted_say('Left it.'),
+                           scripted_call('tidy', 'memory', arguments), scripted_say('Tidied.')]
+                with seeded_worker(replies, memory=memory, user=user) as (worker, brain, notes):
+                    self.assertEqual(worker.request(prompt, results=[REFUSAL]), [asked, *spoken_turn('Left it.')])
+                    self.assertEqual(worker.request(prompt), spoken_turn('Tidied.'))
+                    self.assertTrue(json.loads(tool_contents(brain.requests[-1])[0])['success'])
+                    self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(*kept_memory),
+                                                         'USER.md': note_bytes(*kept_user)})
 
         replies = [scripted_call('ask', 'delete_note', {'note': asked_note}), scripted_say('Left it.'),
                    remove('other', other), scripted_say('Tidied.'),

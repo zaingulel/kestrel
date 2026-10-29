@@ -535,6 +535,7 @@ def main(*, base_url=BONSAI_URL):
             outside = False
             notes_unsettled = False
             asked_notes = set()
+            approved_removal = None
             privacy_failed = False
             reasoning_filter = None
 
@@ -545,20 +546,24 @@ def main(*, base_url=BONSAI_URL):
                     raise RuntimeError(REASONING_ERROR)
 
             def delete_note(note):
-                nonlocal notes_unsettled
+                nonlocal notes_unsettled, approved_removal
                 store = agent._memory_store
                 confirmed = True
-                for target in [target for target, entries in (('memory', store.memory_entries),
-                                                              ('user', store.user_entries)) if note in entries]:
-                    try:
-                        response = store.remove(target, note, matched_entry=note)
-                    except (OSError, RuntimeError):
-                        notes_unsettled = True
-                        confirmed = False
-                        break
-                    if response.get('success') is not True or response.get('removed_entry') != note:
-                        confirmed = False
-                        break
+                approved_removal = note
+                try:
+                    for target in [target for target, entries in (('memory', store.memory_entries),
+                                                                  ('user', store.user_entries)) if note in entries]:
+                        try:
+                            response = store.remove(target, note, matched_entry=note)
+                        except (OSError, RuntimeError):
+                            notes_unsettled = True
+                            confirmed = False
+                            break
+                        if response.get('success') is not True or response.get('removed_entry') != note:
+                            confirmed = False
+                            break
+                finally:
+                    approved_removal = None
                 result = brain_result(confirmed, True, 'confirmed' if confirmed else 'note removal failed')
                 emit({'tool_observed': result})
                 return result
@@ -607,25 +612,33 @@ def main(*, base_url=BONSAI_URL):
 
             native_memory = INLINE_TOOL_EXECUTORS['memory']
 
-            def targets_asked_note(operation):
-                # The native matcher accepts any unique substring of an entry as old_text.
-                return (isinstance(operation, dict) and operation.get('action') in ('remove', 'patch')
-                        and isinstance(operation.get('old_text'), str)
-                        and any(operation['old_text'] in note for note in asked_notes))
-
             # Hermes plugin hooks fail open, and both memory dispatch paths read this table at call time
             # before any memory validation, threat scan or write, so the private entry is the refusal seam.
             def gated_memory(agent, args, ctx):
                 if outside:
                     emit({'tool_refused': True})
                     return json.dumps({'success': False, 'error': OUTSIDE_TEXT_REFUSAL})
-                operations = args.get('operations')
-                if targets_asked_note(args) or (isinstance(operations, list)
-                                                and any(map(targets_asked_note, operations))):
-                    return json.dumps({'success': False, 'error': ASKED_NOTE_REFUSAL})
                 return native_memory(agent, args, ctx)
 
             INLINE_TOOL_EXECUTORS['memory'] = gated_memory
+
+            # Every native note write, single or batch, reaches the conversation store's _mutate with its final
+            # entry list after argument coercion, old_text normalisation and matched_entry selection, so the
+            # outcome is checked there.
+            def guard_asked_notes(store):
+                native_mutate = store._mutate
+
+                def guarded_mutate(target, mutate, *, skip_drift=False):
+                    def checked(entries, limit):
+                        result = mutate(list(entries), limit)
+                        if not isinstance(result, dict) and any(
+                                note in entries and note not in result[0] and note != approved_removal
+                                for note in asked_notes):
+                            return {'success': False, 'error': ASKED_NOTE_REFUSAL}
+                        return result
+                    return native_mutate(target, checked, skip_drift=skip_drift)
+
+                store._mutate = guarded_mutate
 
             for name in TOOL_CATALOGUE:
                 registry.register(
@@ -737,6 +750,7 @@ def main(*, base_url=BONSAI_URL):
                             if not link.is_symlink() or os.readlink(link) != str(MEMORY_ROOT):
                                 raise RuntimeError(MEMORY_ERROR)
                         agent = construct_agent(memory=True)
+                        guard_asked_notes(agent._memory_store)
                         notes_unsettled = False
                         begun = True
                         emit({'session_ready': True})
