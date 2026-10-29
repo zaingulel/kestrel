@@ -67,6 +67,8 @@ from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
+SLOW_START_SECONDS = 8
+SLOW_START_LINE = 'The brain was slow to start, so replies may take longer.'
 TURN_TIMEOUT = 1800
 ANNOUNCEMENT_TIMEOUT = 5
 # The longest read-back, about 340 characters at an assumed slow 8 a second, plus a grace for synthesis to start.
@@ -241,6 +243,7 @@ class HermesRequestChannel:
         self.output = None
         self.failure = None
         self.failure_advisory = None
+        self.slow_start = False
         self.lock = asyncio.Lock()
         self.closed = False
 
@@ -306,10 +309,20 @@ class HermesRequestChannel:
             logger.error(self.failure)
             await self._reap()
 
+    def _now(self) -> float:
+        return asyncio.get_running_loop().time()
+
+    def slow_start_pending(self) -> bool:
+        return self.slow_start
+
     async def prepare(self):
         await self._open()
         if not self.failure:
+            started = self._now()
             await self._request({'prepare': True}, asyncio.Queue(), admitted=lambda: True)
+            seconds = self._now() - started
+            logger.info(f'Brain preparation took {seconds:.1f} seconds.')
+            self.slow_start = seconds > SLOW_START_SECONDS
 
     async def begin_conversation(self, *, admitted) -> bool:
         if self.preparation is not None:

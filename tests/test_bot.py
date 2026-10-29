@@ -2999,6 +2999,36 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                             task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
 
+    async def prepared_channel(self, times, *, fail_open=False):
+        channel = bot.HermesRequestChannel()
+
+        async def open_engine():
+            if fail_open:
+                channel.failure = 'Hermes engine unavailable: boom'
+
+        channel._open = AsyncMock(side_effect=open_engine)
+        channel._request = AsyncMock()
+        with patch.object(channel, '_now', side_effect=times) as now:
+            await channel.prepare()
+        return channel, now
+
+    async def test_preparation_at_eight_seconds_is_not_slow(self):
+        channel, now = await self.prepared_channel([100.0, 108.0])
+        self.assertEqual(now.call_count, 2)
+        self.assertFalse(channel.slow_start)
+
+    async def test_preparation_over_eight_seconds_marks_slow_start(self):
+        channel, now = await self.prepared_channel([100.0, 108.5])
+        self.assertEqual(now.call_count, 2)
+        self.assertTrue(channel.slow_start)
+        self.assertTrue(channel.slow_start_pending())
+
+    async def test_failed_engine_open_is_never_timed(self):
+        channel, now = await self.prepared_channel([], fail_open=True)
+        now.assert_not_called()
+        channel._request.assert_not_awaited()
+        self.assertFalse(channel.slow_start)
+
     async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
         preparing = asyncio.Event()
         loading = asyncio.Event()
