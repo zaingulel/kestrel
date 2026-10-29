@@ -2747,7 +2747,8 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=admission)
         self.addAsyncCleanup(transport.close)
         transport.playback = playback
-        answer_playback = self.child(3301)
+        answer_playback = self.child(3301, normal_eof=True)
+        cue_playback = self.child(3302, normal_eof=True)
         output = transport.output()
         output.prepared_acknowledgements = (speech.PreparedAcknowledgement('One moment.', b'K' * 3840),)
         llm = bot.HermesLLMService(Mock(), local_actions=Mock(), admission=admission,
@@ -2802,7 +2803,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         with (patch.object(speech, 'monotonic', lambda: now), patch.object(speech, 'sleep', paced),
               patch.object(bot.UserBotLatencyObserver, '__init__', timed_observer),
               patch.object(bot.logger, 'info', side_effect=logged),
-              patch.object(transport, '_spawn', return_value=answer_playback)):
+              patch.object(transport, '_spawn', side_effect=[answer_playback, cue_playback])):
             task = asyncio.create_task(bot.run_conversation(
                 Forward(), Forward(), llm=llm, transport=transport, user_params=params,
                 on_frame_completed=completed, typed_origin=Mock(return_value=None),
@@ -2850,7 +2851,11 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(playback.reaped.is_set())
             self.assertEqual(playback.returncode, 0)
             playback.kill.assert_not_called()
-            self.assertIs(transport.playback, answer_playback)
+            self.assertIsNone(transport.playback)
+            for child in (answer_playback, cue_playback):
+                self.assertTrue(child.reaped.is_set())
+                self.assertEqual(child.returncode, 0)
+                child.kill.assert_not_called()
             self.assertEqual([call.args[0] for call in answer_playback.stdin.write.call_args_list],
                              [b'A' * 960 + bytes(2880)])
             self.assertEqual(answer_section.output_bytes, 960)
