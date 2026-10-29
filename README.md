@@ -65,7 +65,7 @@ Kestrel checks its conversation engine every time it starts, whether voice is on
 
 When the engine is missing, the indicator and panel show trouble at startup, with the cause **Kestrel's engine is missing, has changed or couldn't be checked. Reinstall it as the manual describes, then restart Kestrel.** Kestrel says nothing at startup. The next time you speak or type to it, Kestrel says **Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine as the manual describes, then restart Kestrel.** It says this again on every ordinary request until the engine is fixed. Exact local commands, help and repeat keep working.
 
-To fix it, reinstall the runtime with the recipe above. The recipe stops when `.runtime/hermes-0.22.2` already exists, so inspect that folder and move it out of the way first, then run the recipe from the checkout root and restart Kestrel. Any other engine failure, such as a stopped brain service, keeps the general advice **Kestrel's engine is unavailable. Restart Kestrel.** With the engine present, the check shows and says nothing extra.
+To fix it, reinstall the runtime with the recipe above. The recipe stops when `.runtime/hermes-0.22.2` already exists, so inspect that folder and move it out of the way first, then run the recipe from the checkout root and restart Kestrel. Any other engine failure, such as a stopped brain service, shows the general cause **Kestrel's engine is unavailable. Restart Kestrel.** in the indicator and panel, and Kestrel speaks that failure's own advice when you next address it. With the engine present, the check shows and says nothing extra.
 
 ### Brain key
 
