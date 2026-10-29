@@ -133,8 +133,8 @@ The status indicator is an accessible button named `Open panel` or `Close panel`
 | Starting | `Starting. Microphone may be in use.` |
 | Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Kestrel: waiting for you to speak. Microphone in use.` |
-| Slow start, voice off | The Inactive tooltip, then `The brain was slow to start. Replies may take longer.`
-| Slow start, voice on | The Idle tooltip, then `The brain was slow to start. Replies may take longer.`
+| Slow start, voice off | The Inactive tooltip, then `The brain was slow to start. Replies may take longer.` |
+| Slow start, voice on | The Idle tooltip, then `The brain was slow to start. Replies may take longer.` |
 | Listening | `Kestrel: listening to you. Microphone in use.` |
 | Thinking | `Kestrel: thinking about your message. Microphone in use.` |
 | Speaking | `Kestrel: speaking. Microphone in use.` |
@@ -163,8 +163,8 @@ A floating window of fixed size, 448 by 640, which the owner moves with `Super` 
 | Starting | `Starting. Microphone may be in use.` |
 | Status unavailable | `Status unavailable. Microphone use unknown.` |
 | Idle | `Waiting. Microphone in use.` |
-| Slow start, voice off | The Inactive sentence, then `The brain was slow to start. Replies may take longer.`
-| Slow start, voice on | The Idle sentence, then `The brain was slow to start. Replies may take longer.`
+| Slow start, voice off | The Inactive sentence, then `The brain was slow to start. Replies may take longer.` |
+| Slow start, voice on | The Idle sentence, then `The brain was slow to start. Replies may take longer.` |
 | Listening | `Listening. Microphone in use.` |
 | Thinking | `Thinking. Microphone in use.` |
 | Speaking | `Speaking. Microphone in use.` |
