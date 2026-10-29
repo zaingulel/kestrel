@@ -174,6 +174,8 @@ MEASURED_FIRST_HI_SCORES = (
 WAKE_PHRASE_PCM = bytes([1]) * 1280
 # Production worker-startup budget, read at import so tests that patch bot.ENGINE_TIMEOUT cannot shrink it.
 ENGINE_STARTUP = bot.ENGINE_TIMEOUT
+# Owner-approved wording, an oracle independent of bot.SLOW_START_LINE.
+SLOW_START_NOTICE = 'The brain was slow to start, so replies may take longer.'
 
 
 def hermes_service(*, local_command=None):
@@ -4396,7 +4398,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(event.set)
 
         def chunks(**kwargs):
-            if kwargs['text'] == bot.SLOW_START_LINE and not notice_entered.is_set():
+            if kwargs['text'] == SLOW_START_NOTICE and not notice_entered.is_set():
                 notice_entered.set()
                 if not notice_release.wait(45):
                     raise AssertionError('Slow-start notice synthesis was not released')
@@ -4446,7 +4448,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(channel.slow_start, 'A notice cancelled before any of its audio is still due')
             self.assertTrue(spoken.empty(), 'Neither the cancelled notice nor its answer was spoken')
             await self.speak_request(transport, 'Second question')
-            await self.hear_exactly(spoken, bot.SLOW_START_LINE)
+            await self.hear_exactly(spoken, SLOW_START_NOTICE)
             await wait_until(lambda: not channel.slow_start and len(brain.requests) == 3,
                              'The heard notice was not settled while its answer is held')
             await self.speak_request(transport, 'repeat that')
@@ -4459,12 +4461,66 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'First answer.')
             await self.reply_finished(transport, spoken)
             for message in brain.requests[3][2]['messages']:
-                self.assertNotIn(bot.SLOW_START_LINE, json.dumps(message))
+                self.assertNotIn(SLOW_START_NOTICE, json.dumps(message))
             self.assertEqual(manager.llm.last_spoken_reply, 'First answer.')
             await shows('idle')
         finally:
             notice_release.set()
             answer_release.set()
+            await close()
+
+    async def test_slow_start_notice_interrupted_after_its_first_audio_counts_as_told(self):
+        notice_held, notice_release = threading.Event(), threading.Event()
+        for event in (notice_held, notice_release):
+            self.addCleanup(event.set)
+
+        def chunks(**kwargs):
+            yield np.zeros(4800, dtype=np.float32)
+            if kwargs['text'] == SLOW_START_NOTICE and not notice_held.is_set():
+                # The notice's text frame follows its synthesis, so holding here keeps it from output.
+                notice_held.set()
+                if not notice_release.wait(45):
+                    raise AssertionError('Slow-start notice synthesis was not released')
+                yield np.zeros(4800, dtype=np.float32)
+
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', '[delivery:neutral] Unheard answer.',
+                               '[delivery:neutral] Second answer.'])
+        self.addCleanup(brain.close)
+        channel = self.slow_start_channel()
+        handle, spoken, committed, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, activate=False, channel=channel, synthesis_chunks=chunks,
+        )
+        service, manager = handle.service, handle.service.manager
+        try:
+            await asyncio.shield(service.channel.preparation)
+            await wait_until(lambda: manager.status._state == 'inactive-slow', 'A slow start never showed')
+            self.assertEqual(await service.toggle(), 'starting')
+            transport = await asyncio.wait_for(service.started.get(), 5)
+            await self.speak_request(transport, 'First question')
+            notice = None
+
+            def notice_heard():
+                nonlocal notice
+                notice = manager.llm.current_reply()
+                return notice_held.is_set() and len(brain.requests) == 2 and notice is not None and notice.delivered
+
+            await wait_until(notice_heard, "The notice's first audio was never heard")
+            self.assertTrue(spoken.empty(), "The notice's text frame has not reached output")
+            await self.speak_request(transport, 'repeat that')
+            await wait_until(lambda: notice.terminal_outcome == 'interrupted', 'The notice was never interrupted')
+            notice_release.set()
+            await self.hear_exactly(spoken, "I haven't said anything to repeat yet.")
+            await self.reply_finished(transport, spoken)
+            self.assertFalse(channel.slow_start, 'A notice interrupted after its first audio counts as told')
+            await self.speak_request(transport, 'Second question')
+            await self.hear_exactly(spoken, 'Second answer.')
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Second answer.')
+            await self.reply_finished(transport, spoken)
+            self.assertEqual(len(brain.requests), 3)
+            for message in brain.requests[2][2]['messages']:
+                self.assertNotIn(SLOW_START_NOTICE, json.dumps(message))
+        finally:
+            notice_release.set()
             await close()
 
     async def test_slow_start_shows_when_voice_started_during_preparation(self):
@@ -4509,7 +4565,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.shield(service.channel.preparation)
             await wait_until(lambda: manager.status._state == 'inactive-slow', 'A slow start never showed')
             self.assertEqual(await service.submit('Typed question'), 'accepted')
-            await self.hear_exactly(spoken, bot.SLOW_START_LINE)
+            await self.hear_exactly(spoken, SLOW_START_NOTICE)
             await self.hear_exactly(spoken, 'Typed answer.')
             self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Typed answer.')
             await wait_until(lambda: manager.status._state == 'inactive', 'The told notice never cleared')
@@ -4518,7 +4574,7 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             await self.hear_exactly(spoken, 'Typed answer.')
             self.assertEqual(len(brain.requests), 2)
             for message in brain.requests[1][2]['messages']:
-                self.assertNotIn(bot.SLOW_START_LINE, json.dumps(message))
+                self.assertNotIn(SLOW_START_NOTICE, json.dumps(message))
         finally:
             await close()
 

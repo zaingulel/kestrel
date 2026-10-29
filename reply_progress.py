@@ -219,13 +219,15 @@ class ReplyProgress:
         elif isinstance(frame, InterruptionFrame):
             self.finish(interrupted=True)
 
-    def credit(self, section: ReplySection, start: int, end: int) -> None:
+    def credit(self, section: ReplySection, start: int, end: int) -> list[str]:
+        """Returns each non-blank text whose first audio byte this credit heard."""
         if self.closed or not self.feed_open():
-            return
+            return []
         self.idle = False
         section.output_bytes = end
         if self.write_failed:
-            return
+            return []
+        heard = []
         # Credits within a section arrive in source order, so an earlier start left behind was discarded unplayed.
         while section.pending_text_starts and section.pending_text_starts[0][0] < end:
             byte, text = section.pending_text_starts.pop(0)
@@ -234,9 +236,11 @@ class ReplyProgress:
             if text.strip():
                 self.delivered = True
                 section.heard_text_starts.add(byte)
+                heard.append(text)
             if self.feed is not None:
                 self.feed.spoken(self.token, text)
         self._refresh_local_repeat()
+        return heard
 
     def output_lost(self) -> None:
         if not self.closed:

@@ -48,7 +48,7 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
-                            ReplyProgress, SpeechAdvisoryFrame, TextSpan, token_of)
+                            ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (DELIVERY_LABELS, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
                            child_environment)
 from speech import (
@@ -631,8 +631,6 @@ class HermesLLMService(LLMService):
         self._indicator_pending_reply = None
         self._indicator_output_reply = None
         self.last_spoken_reply: str | None = None
-        # The slow-start notice's spoken text until its audio is heard.
-        self._slow_notice: TextSpan | None = None
 
     def valid_origin(self, frame):
         origin = getattr(frame, 'request_origin', None)
@@ -729,14 +727,11 @@ class HermesLLMService(LLMService):
                 and (isinstance(frame, InterruptionFrame) or self.admission.may_speak(record.token))):
             record.output_frame(frame)
         self.observe_announcement(frame)
-        if record is not None and isinstance(frame, TTSTextFrame) and not frame.append_to_context:
-            if frame.text.strip() == SLOW_START_LINE:
-                # The slow-start notice is never repeat memory.
-                self._slow_notice = record.span_of(frame)
-                self._settle_slow_notice()
-            else:
-                record.remember_local_text(frame)
-                self._remember_local_reply(record)
+        # The slow-start notice is never repeat memory.
+        if (record is not None and isinstance(frame, TTSTextFrame) and not frame.append_to_context
+                and frame.text.strip() != SLOW_START_LINE):
+            record.remember_local_text(frame)
+            self._remember_local_reply(record)
 
     def _remember_local_reply(self, record):
         if self.admission.may_speak(record.token) and record.local_repeat_text is not None:
@@ -746,16 +741,11 @@ class HermesLLMService(LLMService):
     def conversation_audio(self, entries):
         for section, start, end in entries:
             if self.admission.may_speak(section.reply.token):
-                section.reply.credit(section, start, end)
+                heard = section.reply.credit(section, start, end)
                 self._remember_local_reply(section.reply)
-                self._settle_slow_notice()
-
-    def _settle_slow_notice(self) -> None:
-        span = self._slow_notice
-        # Told once its first text byte reaches output; an interrupted notice counts as told.
-        if span is not None and any(span.start <= byte < span.end for byte in span.section.heard_text_starts):
-            self._slow_notice = None
-            self.channel.slow_start = False
+                # Told once its first audio is heard, before its text frame follows; an interrupted notice counts as told.
+                if any(text.strip() == SLOW_START_LINE for text in heard):
+                    self.channel.slow_start = False
 
     def observe_announcement(self, frame):
         if self._announcement is None:
