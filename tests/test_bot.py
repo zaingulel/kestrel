@@ -5497,6 +5497,168 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await close()
 
+    async def test_question_after_the_waiting_acknowledgement_is_confirmed_as_played(self):
+        bike = 'Caller keeps the bike key under the blue pot'
+        garden = 'Caller plans tomatoes along the south fence'
+        notes = self.private_notes(memory=[bike, garden])
+        windows = self.watch_answer_windows()
+        events, logs = [], []
+        sink = logger.add(lambda message: logs.append(str(message).strip()), format='{message}')
+        self.addCleanup(logger.remove, sink)
+        calls = {'bike': threading.Event(), 'garden': threading.Event()}
+
+        def replies():
+            yield '[delivery:neutral] Prepared.'
+            for (call_id, call_due), note in zip(calls.items(), (bike, garden)):
+                # Holding the call keeps the turn waiting long enough for its acknowledgement to fall due.
+                if not call_due.wait(45):
+                    raise AssertionError('The held delete_note call was not released')
+                yield scripted_call(call_id, 'delete_note', {'note': note})
+                yield scripted_say('Unspoken remark.')
+
+        brain = ScriptedBrain(replies())
+        self.addCleanup(brain.close)
+        for call_due in calls.values():
+            self.addCleanup(call_due.set)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+            native_events=events,
+        )
+        service = transport.service
+        timers, acknowledgement_time = service.acknowledgement_timers, service.acknowledgement_time
+        output = transport.output()
+        self.fake_answer_recognizer(service, 'Yes.')
+        native_write = output._write_audio_locked
+        playing, release_acknowledgement = asyncio.Event(), asyncio.Event()
+
+        async def hold_after_first_acknowledgement_chunk(frame, record):
+            written = await native_write(frame, record)
+            if getattr(frame, 'prepared_credit', None) is not None and not playing.is_set():
+                playing.set()
+                await release_acknowledgement.wait()
+            return written
+
+        def verdicts():
+            return [line for line in logs if line.startswith('The permission question')]
+
+        async def answer_yes_and_hear_removal(note, mark):
+            await wait_until(verdicts, 'The question was never judged')
+            self.assertRegex(verdicts()[-1], r'^The permission question played in \d+\.\d s$')
+            self.assertIsNotNone(await self.window_change(windows, transport), 'The answer window opens after the question')
+            transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+            self.assertIsNone(await self.window_change(windows, transport))
+            await self.hear_exactly(spoken, f'I removed the note: {note}.')
+            await self.reply_finished(transport, spoken)
+            self.assert_approved_once(events, mark)
+
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+
+            # The acknowledgement plays whole before the question.
+            mark = len(events)
+            await self.speak_request(transport, 'Please delete my bike key note.')
+            callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
+            acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
+            callback(*args)
+            await self.hear_exactly(spoken, 'One moment.')
+            calls['bike'].set()
+            await self.hear_exactly(spoken, deletion_question(bike))
+            await answer_yes_and_hear_removal(bike, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(garden), 'USER.md': note_bytes()})
+
+            # The question arrives while the acknowledgement is mid-play and cuts it off.
+            logs.clear()
+            mark = len(events)
+            with patch.object(output, '_write_audio_locked', new=hold_after_first_acknowledgement_chunk):
+                await self.speak_request(transport, 'Please delete my garden plan note.')
+                callback, args, deadline = await asyncio.wait_for(timers.get(), 5)
+                acknowledgement_time[0] = max(acknowledgement_time[0], deadline)
+                callback(*args)
+                await asyncio.wait_for(playing.wait(), 5)
+                calls['garden'].set()
+                await wait_until(lambda: output.acknowledgement_record is None,
+                                 'The question never cut off the acknowledgement')
+                release_acknowledgement.set()
+                await self.hear_exactly(spoken, deletion_question(garden))
+                await answer_yes_and_hear_removal(garden, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(), 'USER.md': note_bytes()})
+        finally:
+            release_acknowledgement.set()
+            await close()
+
+    async def test_reply_speech_behind_a_cut_acknowledgement_still_plays(self):
+        bike, garden = 'Caller keeps the bike key under the blue pot', 'Caller plans tomatoes along the south fence'
+        notes = self.private_notes(memory=[bike, garden])
+        windows = self.watch_answer_windows()
+        events, logs = [], []
+        sink = logger.add(lambda message: logs.append(str(message).strip()), format='{message}')
+        self.addCleanup(logger.remove, sink)
+        speech_due, call_due = threading.Event(), threading.Event()
+        self.addCleanup(speech_due.set)
+        self.addCleanup(call_due.set)
+
+        def look_then_call():
+            # Holding the speech until the acknowledgement is due makes the speech play it first; holding the call
+            # keeps the question behind that speech. 'Checking.' is the lookahead that releases 'Let me look.'
+            # to synthesis before the call; it is itself held until the reply ends.
+            for due, delta in ((speech_due, [({'content': '[delivery:neutral] Let me look. Checking.'}, None)]),
+                               (call_due, scripted_call('bike', 'delete_note', {'note': bike}))):
+                if not due.wait(45):
+                    raise AssertionError('The held reply was not released')
+                yield from delta
+
+        brain = ScriptedBrain(['[delivery:neutral] Prepared.', look_then_call(), scripted_say('Unspoken remark.')])
+        self.addCleanup(brain.close)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+            native_events=events,
+        )
+        service = transport.service
+        output = transport.output()
+        self.fake_answer_recognizer(service, 'Yes.')
+        native_write = output._write_audio_locked
+        playing, release_acknowledgement = asyncio.Event(), asyncio.Event()
+
+        async def hold_after_first_acknowledgement_chunk(frame, record):
+            written = await native_write(frame, record)
+            if getattr(frame, 'prepared_credit', None) is not None and not playing.is_set():
+                playing.set()
+                await release_acknowledgement.wait()
+            return written
+
+        def verdicts():
+            return [line for line in logs if line.startswith('The permission question')]
+
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+            mark = len(events)
+            with patch.object(output, '_write_audio_locked', new=hold_after_first_acknowledgement_chunk):
+                await self.speak_request(transport, 'Please delete my bike key note.')
+                # The acknowledgement falls due without its own frame, so the reply speech plays it first.
+                _, _, deadline = await asyncio.wait_for(service.acknowledgement_timers.get(), 5)
+                service.acknowledgement_time[0] = max(service.acknowledgement_time[0], deadline)
+                speech_due.set()
+                await asyncio.wait_for(playing.wait(), 5)
+                call_due.set()
+                await wait_until(lambda: output.acknowledgement_record is None,
+                                 'The question never cut off the acknowledgement')
+                release_acknowledgement.set()
+                await self.hear_exactly(spoken, f'Let me look. {deletion_question(bike)}')
+                await wait_until(verdicts, 'The question was never judged')
+                self.assertRegex(verdicts()[-1], r'^The permission question played in \d+\.\d s$')
+                # The panel shows only speech whose audio reached the output.
+                self.assertEqual(service.manager.conversation.turns[-1]['text'],
+                                 f'One moment. Let me look. {deletion_question(bike)}')
+                self.assertIsNotNone(await self.window_change(windows, transport), 'The answer window opens after the question')
+                transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                self.assertIsNone(await self.window_change(windows, transport))
+                await self.hear_exactly(spoken, f'I removed the note: {bike}.')
+            self.assert_approved_once(events, mark)
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(garden), 'USER.md': note_bytes()})
+        finally:
+            release_acknowledgement.set()
+            await close()
+
     async def test_typed_answers_settle_a_pending_question(self):
         first, second, third = ('Caller keeps the red notebook in the study', 'Caller walks at dawn',
                                 'Caller works late on Thursdays')

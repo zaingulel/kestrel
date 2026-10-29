@@ -798,14 +798,18 @@ class LaptopOutput(BaseOutputTransport):
                      (record is not None and self.audio.admission.may_speak(record.token))))
 
     async def _play_acknowledgement_locked(self, record, *, answer_pending: bool) -> bool:
+        """Returns whether the reply may still speak: True when the clip played whole or was only cancelled."""
         if self.acknowledgement_record is not record or not self._allowed(record):
             return False
         clip = self.prepared_acknowledgements[self.acknowledgement_index]
         section = record.open_section('neutral')
         start = TTSStartedFrame()
         record.stream_frame(start, section)
-        success = False
-        marker_started = False
+        success = cancelled = marker_started = False
+
+        def only_cancelled():
+            return self.acknowledgement_record is not record and self._allowed(record)
+
         try:
             await self.push_frame(start)
             if not answer_pending:
@@ -813,7 +817,8 @@ class LaptopOutput(BaseOutputTransport):
                 await self.broadcast_frame(AcknowledgementStartedFrame, reply_progress=record)
             for offset in range(0, len(clip.pcm), self.audio_chunk_size):
                 if self.acknowledgement_record is not record or not self._allowed(record):
-                    return False
+                    cancelled = only_cancelled()
+                    return cancelled
                 frame = TTSAudioRawFrame(clip.pcm[offset:offset + self.audio_chunk_size], 48000, 1)
                 frame.reply_progress = record
                 if offset == 0:
@@ -830,7 +835,8 @@ class LaptopOutput(BaseOutputTransport):
                     self.audio.fail(LAPTOP_PLAYBACK_FAILURE)
                     return False
                 if not written or not self._allowed(record):
-                    return False
+                    cancelled = only_cancelled()
+                    return cancelled
                 if offset == 0:
                     self.acknowledgement_index = (self.acknowledgement_index + 1) % len(self.prepared_acknowledgements)
                 await self.push_frame(frame)
@@ -847,7 +853,8 @@ class LaptopOutput(BaseOutputTransport):
             success = True
             return True
         finally:
-            if not success:
+            # Cutting the acknowledgement short is not a playback failure of the reply it was covering.
+            if not success and not cancelled:
                 record.output_write_failed()
             self.cancel_acknowledgement(record)
             if marker_started:
