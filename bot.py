@@ -157,6 +157,10 @@ def capability_help() -> str:
     return f'{HELP_INTRO} {tools} {HELP_PHRASES} {HELP_LIMITS}'
 
 
+def end_sentence(text: str) -> str:
+    return text if text.endswith(('.', '!', '?')) else text + '.'
+
+
 def local_tool(key, *arguments) -> LocalTool:
     tool = LOCAL_TOOLS[key]
     if tool.lookup is not None:
@@ -164,7 +168,7 @@ def local_tool(key, *arguments) -> LocalTool:
     if not arguments:
         return tool
     values = dict(zip(TOOL_CATALOGUE[key].bounds, arguments))
-    confirmation = tool.confirmation.format(**values) if tool.confirmation is not None else None
+    confirmation = end_sentence(tool.confirmation.format(**values)) if tool.confirmation is not None else None
     read_back = tool.read_back.format(**values) if tool.read_back is not None else None
     if tool.engine_effect:
         # The engine performs this effect itself, so no local run is ever bound.
@@ -799,7 +803,7 @@ class HermesLLMService(LLMService):
             self._announcement = (token, marker, played)
             asked = loop.time()
             try:
-                output.put_nowait({'question': f"I'm about to {tool.read_back}. Shall I?", 'marker': marker})
+                output.put_nowait({'question': f"I'm about to {end_sentence(tool.read_back)} Shall I?", 'marker': marker})
                 outcome = await asyncio.wait_for(played, QUESTION_TIMEOUT)
             except TimeoutError:
                 outcome = 'timed out'

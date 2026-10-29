@@ -139,7 +139,7 @@ TOOL_CATALOGUE: dict[str, ToolSpec] = {
                             {'note': (str, 1, 300)}, PermissionTier.ASK, False, False,
                             'deleting a note after asking you', phrase=None, subject='delete note',
                             spoken='delete one of your notes', counts_toward_stop=False,
-                            confirmation='I removed the note: {note}.',
+                            confirmation='I removed the note: {note}',
                             failure_message="I couldn't confirm the note was removed. I won't retry.",
                             extra_guidance="Use delete_note with the note's exact full text only when the owner asks to "
                                            "delete or forget that note, and never memory remove for such a request. "

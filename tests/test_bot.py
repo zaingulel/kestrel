@@ -5346,6 +5346,58 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event for kind, event in events[mark:] if kind == 'read' and 'tool_observed' in event],
                          [{'tool_observed': brain_result(True, True, 'confirmed')}])
 
+    async def test_note_that_ends_a_sentence_gets_no_second_full_stop(self):
+        # Each pair is the exact wording Kestrel must speak: the question, then the removal confirmation.
+        cases = (
+            ('The library books are due back on Friday.',
+             "I'm about to delete the note: The library books are due back on Friday. Shall I?",
+             'I removed the note: The library books are due back on Friday.'),
+            ('Watch the step!',
+             "I'm about to delete the note: Watch the step! Shall I?",
+             'I removed the note: Watch the step!'),
+            ('Is the gate locked?',
+             "I'm about to delete the note: Is the gate locked? Shall I?",
+             'I removed the note: Is the gate locked?'),
+            ('Call the dentist',
+             "I'm about to delete the note: Call the dentist. Shall I?",
+             'I removed the note: Call the dentist.'),
+        )
+        notes = self.private_notes(memory=[case[0] for case in cases])
+        windows = self.watch_answer_windows()
+        brain = ScriptedBrain([
+            '[delivery:neutral] Prepared.',
+            *(reply for index, (note, _, _) in enumerate(cases)
+              for reply in (scripted_call(f'note-{index}', 'delete_note', {'note': note}), scripted_say('Unspoken remark.'))),
+        ])
+        self.addCleanup(brain.close)
+        transport, spoken, _, _, _, close = await self.open_session(
+            brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+        )
+        service = transport.service
+        try:
+            await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
+            for note, question, removal in cases:
+                with self.subTest(note=note):
+                    self.fake_answer_recognizer(service, 'Yes.')
+                    await self.speak_request(transport, 'Please delete that note.')
+                    await self.hear_exactly(spoken, question)
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    transport.capture.stdout.feed_data(ANSWER_SPEECH * 10 + ANSWER_QUIET * 40)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    await self.hear_exactly(spoken, removal)
+                    await self.reply_finished(transport, spoken)
+        finally:
+            await close()
+
+    def test_removal_confirmation_adds_no_second_full_stop_after_a_sentence_ending(self):
+        for note, confirmation in (
+                ('The spare bike key is in the blue drawer.', 'I removed the note: The spare bike key is in the blue drawer.'),
+                ('Watch the step!', 'I removed the note: Watch the step!'),
+                ('Is the gate locked?', 'I removed the note: Is the gate locked?'),
+                ('Call the dentist', 'I removed the note: Call the dentist.')):
+            with self.subTest(note=note):
+                self.assertEqual(bot.local_tool('delete_note', note).confirmation, confirmation)
+
     async def test_note_deletion_runs_only_after_a_clear_spoken_yes(self):
         target = 'Caller keeps the red notebook in the study'
         kept = 'Caller prefers cedar tea'
