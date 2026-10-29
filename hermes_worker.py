@@ -630,7 +630,7 @@ def main(*, base_url=BONSAI_URL):
 
                 def guarded_mutate(target, mutate, *, skip_drift=False):
                     def checked(entries, limit):
-                        result = mutate(list(entries), limit)
+                        result = mutate(entries, limit)
                         if not isinstance(result, dict) and any(
                                 note in entries and note not in result[0] and note != approved_removal
                                 for note in asked_notes):
