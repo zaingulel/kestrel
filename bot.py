@@ -1694,6 +1694,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
         on_frame_completed('assistant', frame)
 
     output = transport.output()
+    last_terminal_token = None
 
     @output.event_handler('on_before_process_frame')
     async def output_frame_entering(processor, frame):
@@ -1715,6 +1716,7 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
 
     @output.event_handler('on_after_push_frame')
     async def on_output_frame(processor, frame):
+        nonlocal last_terminal_token
         # The transport pushes audio only after its write succeeded.
         if isinstance(frame, OutputAudioRawFrame):
             prepared = getattr(frame, 'prepared_credit', None)
@@ -1732,7 +1734,9 @@ async def run_conversation(stt, voice: ConversationTTS, *, llm, transport, on_fr
                 llm.indicator_reply_finished(token_of(frame))
         record = getattr(frame, 'reply_progress', None)
         llm.conversation_output(frame)
-        if record is not None and record.closed and not record.terminal_notified:
+        if (record is not None and record.closed and not record.terminal_notified
+                and llm.admission.may_speak(record.token) and record.token is not last_terminal_token):
+            last_terminal_token = record.token
             record.terminal_notified = True
             if record.terminal_cue and record.terminal_outcome != 'interrupted':
                 await output.play_cue('failed' if record.terminal_outcome == 'failed' else 'finished', token=record.token)

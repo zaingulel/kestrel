@@ -4241,6 +4241,75 @@ class WholeConversationTests(unittest.IsolatedAsyncioTestCase):
                 if case == 'failed_synthesis':
                     self.assertEqual(str(service.shutdown_error), 'Voice generation cleanup failed. Restart Kestrel.')
 
+        with self.subTest(case='early_synthesis_failure_late_brain_end'):
+            held, release = threading.Event(), threading.Event()
+            self.addCleanup(release.set)
+
+            def continuing():
+                yield {'content': '[delivery:neutral] First sentence. Next'}, None
+                held.set()
+                if not release.wait(45):
+                    raise AssertionError('Late brain end was not released')
+                yield {'content': ' sentence.'}, None
+                yield {}, 'stop'
+
+            syntheses = []
+
+            def chunks(**kwargs):
+                syntheses.append(kwargs['text'])
+                if kwargs['text'] == 'First sentence.':
+                    yield np.array(['controlled invalid PCM'], dtype=object)
+                else:
+                    yield np.zeros(4800, dtype=np.float32)
+
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', continuing()])
+            self.addCleanup(brain.close)
+            handle, _, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, synthesis_chunks=chunks, activate=False,
+            )
+            service, manager = handle.service, handle.service.manager
+            finished = self.sound_completions(manager)
+            token, late_end = None, asyncio.Event()
+            try:
+                self.assertEqual(await service.toggle(), 'starting')
+                transport = await asyncio.wait_for(service.started.get(), 5)
+                voice = manager.voice
+                await asyncio.wait_for(next(child for child in service.audio_children if child.stdin is not None).reaped.wait(), 5)
+                await asyncio.shield(manager.session_ready)
+
+                @transport.output().event_handler('on_after_push_frame')
+                async def ended(processor, frame):
+                    if isinstance(frame, LLMFullResponseEndFrame) and reply_progress.token_of(frame) is token:
+                        late_end.set()
+
+                before = len(self.sound_pcm(service))
+                self.assertEqual(await service.submit('Fail before the brain finishes'), 'accepted')
+                token = await asyncio.wait_for(finished.get(), 5)
+                self.assertTrue(held.is_set())
+                self.assertFalse(release.is_set())
+                self.assertEqual(syntheses, ['First sentence.'])
+                pcm = self.sound_pcm(service)[before:]
+                self.assertEqual(len(pcm), 6720 + 21120)
+                self.assert_sound_cue(pcm[:6720], 'heard')
+                self.assert_sound_cue(pcm[6720:], 'failed')
+                self.assertTrue(finished.empty())
+                self.assertFalse(voice.generation_cleanup_failed)
+                late_end.clear()
+                transport.capture.stdout.feed_data(bytes(640))
+                release.set()
+                await asyncio.wait_for(late_end.wait(), 5)
+                with self.subTest(oracle='terminal_pcm'):
+                    additional = self.sound_pcm(service)[before + len(pcm):]
+                    self.assertEqual(np.count_nonzero(np.frombuffer(additional, dtype='<i2')), 0,
+                                     'A late brain end cannot sound another terminal cue')
+                with self.subTest(oracle='completion_callback'):
+                    self.assertTrue(finished.empty(), 'The accepted token completes only once')
+            finally:
+                release.set()
+                await close()
+            self.assertFalse(voice.generation_cleanup_failed)
+            self.assertIsNone(getattr(service, 'shutdown_error', None))
+
     async def test_deep_reply_is_private_and_stoppable(self):
         blocked, release = threading.Event(), threading.Event()
         self.addCleanup(release.set)
