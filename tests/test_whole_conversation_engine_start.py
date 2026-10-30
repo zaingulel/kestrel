@@ -230,6 +230,60 @@ class WholeConversationTests(WholeConversationCase):
         finally:
             await close()
 
+    async def test_engine_refusal_speaks_its_own_fix_when_addressed(self):
+        # Refusal texts and spoken lines are the plan's reviewed literals, oracles independent of hermes_worker and bot.
+        complete_reply = "I couldn't get a complete reply from the brain. Restart Kestrel and try again."
+        delivery = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+        ready = 'import json, sys; print(\'{"ready":true}\', flush=True); '
+        begins = 'sys.stdin.readline(); '
+        begun = begins + 'print(\'{"session_ready":true}\', flush=True); '
+        # Each wire reads the request it is due, refuses it with the engine's own text, then waits to be reaped.
+        cases = (
+            ('open, brain key', 'import json, sys; ',
+             'The brain key .runtime/brain-api-key is missing or unsafe. '
+             'Create it as README.md describes under Brain key, then restart Kestrel.',
+             "Kestrel's brain key is missing or unsafe. Create it as the manual describes under Brain key, "
+             "then restart Kestrel.", 'trouble-engine', True),
+            ('prepare, prompt identity', ready + begins,
+             "Kestrel's identity could not be applied to the brain's instructions. "
+             'Check the pinned engine, then restart Kestrel.',
+             "I couldn't apply Kestrel's identity to the brain's instructions. Check the pinned engine as the manual "
+             "describes, then restart Kestrel.", 'trouble-engine', True),
+            ('prepare, tracing failure', ready + begins,
+             'Local conversation tracing failed. Check free space and runtime permissions, then restart Kestrel.',
+             "Kestrel's local conversation tracing failed. Check free disk space and the runtime folder's permissions, "
+             "then restart Kestrel.", 'trouble-engine', True),
+            ('prepare, reasoning markup', ready + begins,
+             'Hermes returned unsafe reasoning markup. Try again.',
+             "The brain sent unsafe reasoning markup while starting up, so I won't use it. Check the service log, "
+             "then restart Kestrel.", 'trouble-engine', True),
+            ('prepare, delivery', ready + begins, delivery,
+             "The brain's first reply while starting up was empty or not in the form Kestrel needs. "
+             "Check the service log, then restart Kestrel.", 'trouble-engine', True),
+            ('ordinary turn, delivery', ready + begun + begins, delivery, complete_reply, 'inactive', False),
+            ('begin, tool set', ready + begins,
+             "Hermes offered tools other than memory and Kestrel's desktop tools. "
+             'Check the pinned Hermes configuration, then restart Kestrel.',
+             "The engine offered tools other than notes and Kestrel's desktop tools, so I won't use it. Check the pinned "
+             "engine configuration as the manual describes, then restart Kestrel.", 'inactive', False),
+            ('begin, unrecognised', ready + begins, 'Some future refusal.', complete_reply, 'inactive', False),
+        )
+        for name, steps, refusal, advisory, startup, preparing in cases:
+            with self.subTest(refusal=name):
+                wire = steps + f"print(json.dumps({{'error': {refusal!r}}}), flush=True); sys.stdin.read()"
+                handle, spoken, _, _, _, close = await self.open_session(
+                    None, wire=wire, prepare_engine=preparing, through_service=preparing,
+                    native_audio=True, activate=False, startup=startup,
+                )
+                try:
+                    self.assertTrue(spoken.empty(), 'An engine failure is shown silently')
+                    for request in ('Typed question', 'Another typed question'):
+                        self.assertEqual(await handle.service.submit(request), 'accepted')
+                        await self.hear_exactly(spoken, advisory)
+                    self.assertEqual(handle.service.manager.channel.trouble_state(), 'trouble-engine')
+                finally:
+                    await close()
+
     async def test_failed_managed_brain_does_not_contact_unrelated_provider(self):
         for marker, error in [('1', RuntimeError('command failed')), ('1', RuntimeError('command unavailable')),
                               ('invalid', None)]:
