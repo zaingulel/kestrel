@@ -1380,6 +1380,16 @@ class VoiceConversations:
             self.switching_output = True
             self.invalidate_wake()
             self.changed.set()
+        else:
+            self.capture_unrecoverable()
+
+    def capture_unrecoverable(self):
+        logger.error(LAPTOP_CAPTURE_FAILURE)
+        self.record_failure(LAPTOP_CAPTURE_FAILURE, 'trouble-microphone')
+        self.desired_active = False
+        self.fail_submission()
+        self.revoke()
+        self.changed.set()
 
     def waiting_capture_stopped(self):
         if self.waiting_owner is not None or self.capture_recovery.recovering:
@@ -1722,6 +1732,7 @@ class VoiceConversations:
 
     def output_watch_failed(self):
         if not self.closed:
+            logger.error(OUTPUT_WATCH_FAILURE)
             self.switching_output = True
             self.record_failure(OUTPUT_WATCH_FAILURE, 'trouble')
             self.changed.set()
@@ -1883,7 +1894,11 @@ class VoiceConversations:
                         if self.capture_owner is not None:
                             self.status.retire_owner(self.capture_owner)
                             self.capture_owner = None
-        except Exception:
+        except Exception as error:
+            if self.capture_recovery.recovering and str(error) == LAPTOP_CAPTURE_FAILURE:
+                self.capture_unrecoverable()
+                return
+            logger.error(f'{OUTPUT_SWITCH_FAILURE} ({type(error).__name__})')
             self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
             self.desired_active = False
             self.fail_submission()

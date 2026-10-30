@@ -3591,6 +3591,25 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(transport.reader.done())
         self.assertIsNotNone(capture.returncode)
 
+    def test_capture_recovery_is_bounded(self):
+        cases = {
+            'single_loss': [('attempt', 100, True), ('attempt', 129.9, True), ('attempt', 130, False)],
+            'flap': [('attempt', 100, True), ('reopened', 108), ('attempt', 113, True), ('reopened', 121),
+                     ('attempt', 126, True), ('reopened', 134), ('attempt', 139, False)],
+            'held': [('attempt', 100, True), ('reopened', 108), ('attempt', 138, True),
+                     ('attempt', 167.9, True), ('attempt', 168, False)],
+        }
+        for case, steps in cases.items():
+            with self.subTest(case=case):
+                now = [0]
+                recovery = speech.CaptureRecovery(clock=lambda: now[0])
+                for action, at, *allowed in steps:
+                    now[0] = at
+                    if action == 'attempt':
+                        self.assertIs(recovery.attempt(), allowed[0], f'attempt at {at}')
+                    else:
+                        recovery.reopened()
+
     async def test_capture_failure_stops_without_fallback(self):
         for case in ("eof", "truncated", "missing", "timeout"):
             with self.subTest(case=case):
