@@ -33,6 +33,7 @@ RESTARTED_GRAPH = [RESTARTED_METADATA, {'id': 10, 'type': 'PipeWire:Interface:No
     'node.name': 'A', 'media.class': 'Audio/Sink', 'object.serial': 910,
 }}}]
 CAPTURE_LOST_LOG = 'Microphone capture lost; reopening'
+REOPENED_LOG = 'Microphone capture reopened.'
 PAUSE_THAT_NEVER_ELAPSES = 3600
 # Differs from the fixture's 900, so a serial remembered from an earlier opening cannot satisfy the test.
 OWNED_SERIAL = 901
@@ -200,6 +201,74 @@ class WholeConversationTests(WholeConversationCase):
                 await self.assert_active_conversation_survives_restart()
             with self.subTest(case='restart_typed_only_failed_capture'):
                 await self.assert_typed_only_restart_survives_failed_capture()
+
+    async def assert_recovery_log_lines(self, case):
+        lines = self.log_lines()
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+
+        def logged(text):
+            return sum(text in line for line in lines)
+
+        try:
+            if case == 'verified':
+                first = await asyncio.wait_for(service.waiting.get(), 5)
+                first.capture.stdout.feed_eof()
+                await self.next_waiting(service)
+                await wait_until(lambda: not manager.capture_recovery.recovering, 'Recovery never ended')
+                self.assertEqual(logged(REOPENED_LOG), 1, lines)
+            elif case == 'wake_disabled_during_recovery':
+                first = await asyncio.wait_for(service.waiting.get(), 5)
+                first.capture.stdout.feed_eof()
+                await wait_until(lambda: logged(CAPTURE_LOST_LOG), 'The loss was never logged')
+                manager.wake_failed()
+                await wait_until(lambda: not manager.capture_recovery.recovering,
+                                 'A disabled wake phrase left the recovery sticky')
+                self.assertEqual(logged(CAPTURE_LOST_LOG), 1, lines)
+                self.assertEqual(logged(REOPENED_LOG), 0, 'Nothing was reopened, so nothing may be logged as reopened')
+            else:
+                active = case == 'wake_disabled_active_restart'
+                first = await asyncio.wait_for(service.waiting.get(), 5)
+                await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+                manager.wake_failed()
+                await asyncio.wait_for(first.capture.reaped.wait(), 5)
+                if active:
+                    self.assertEqual(await service.toggle(), 'starting')
+                    transport = await asyncio.wait_for(service.started.get(), 5)
+                    await asyncio.shield(manager.session_ready)
+                echoes = len(service.echo_generations)
+                async with real_output_watch(manager) as monitor:
+                    monitor.feed_data(METADATA_REMOVED)
+                    if active:
+                        await asyncio.wait_for(transport.capture.reaped.wait(), 5)
+                    monitor.feed_data(METADATA_REPLACED)
+                    await wait_until(lambda: len(service.echo_generations) > echoes and not manager.switching_output,
+                                     'The restarted audio system never got a fresh echo process')
+                    if active:
+                        await wait_until(lambda: not manager.capture_recovery.recovering, 'Recovery never ended')
+                        self.assertTrue(transport.verified)
+                        self.assertEqual(logged(CAPTURE_LOST_LOG), 1, lines)
+                        self.assertEqual(logged(REOPENED_LOG), 1, lines)
+                    else:
+                        # The toggle round trip lets the run loop pass every check a false line could come from.
+                        self.assertEqual(await service.toggle(), 'starting')
+                        await asyncio.wait_for(service.started.get(), 5)
+                        await asyncio.shield(manager.session_ready)
+                        self.assertEqual(await service.toggle(), 'inactive')
+                        self.assertEqual(logged(REOPENED_LOG), 0, f'Nothing was open, so nothing was reopened: {lines}')
+                        self.assertEqual(logged(CAPTURE_LOST_LOG), 0, lines)
+                        self.assertFalse(manager.capture_recovery.recovering)
+                        self.assertIsNone(manager.failure)
+        finally:
+            await close()
+
+    async def test_recovery_log_lines_match_what_reopened(self):
+        for case in ('verified', 'wake_disabled_restart', 'wake_disabled_during_recovery', 'wake_disabled_active_restart'):
+            pause = PAUSE_THAT_NEVER_ELAPSES if case == 'wake_disabled_during_recovery' else 0
+            with self.subTest(case=case), patch.object(bot, 'CAPTURE_RETRY_PAUSE', pause), \
+                    patch.object(speech, '_pipewire_graph', new=AsyncMock(return_value=RESTARTED_GRAPH)):
+                await self.assert_recovery_log_lines(case)
 
     async def assert_recovery_pause_yields(self, case):
         _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)

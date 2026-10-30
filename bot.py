@@ -1730,7 +1730,8 @@ class VoiceConversations:
             self.changed.set()
 
     def output_changed(self):
-        if self.output_watch.metadata_id is None:
+        if self.output_watch.metadata_id is None and (
+                not self.wake_disabled or (self.transport is not None and self.transport.capture_enabled)):
             self.capture_lost()
             return
         if not self.closed and not self.failure:
@@ -1966,12 +1967,13 @@ class VoiceConversations:
                     self.cleanup = None
                     await self.activate(capture_enabled=self.desired_active)
                 self.transitioning = False
-                # Only a verified recorder counts, and a disabled wake phrase has nothing to reopen.
-                if self.capture_recovery.recovering and not self.switching_output and (
-                        self.wake_disabled
-                        or any(t is not None and t.verified for t in (self.transport, self.waiting_transport))):
-                    self.capture_recovery.reopened()
-                    logger.info('Microphone capture reopened.')
+                if self.capture_recovery.recovering and not self.switching_output:
+                    reopened = any(t is not None and t.verified for t in (self.transport, self.waiting_transport))
+                    # A disabled wake phrase has nothing left to reopen, which is not the same as having reopened.
+                    if reopened or self.wake_disabled:
+                        self.capture_recovery.reopened()
+                    if reopened:
+                        logger.info('Microphone capture reopened.')
                 if self.handover is not None and self.ingress is not None and self.submission_task is None:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:
