@@ -10,6 +10,9 @@
 #   * the scripts/lib node:test suite — the guard scripts, board scripts and the pre-commit
 #     hook. Runs on every push once the dependency prerequisite passes: editing .claude/agents/ or
 #     AGENTS.md alone trips no staged-path trigger that runs it.
+#   * the Git LFS upload — last, so a push any gate above refuses uploads nothing: a pushed ref whose commits use Git LFS
+#     goes to git lfs pre-push, because core.hooksPath displaces the hook Git LFS installs. Without git-lfs
+#     that push is refused before lint or tests.
 #
 # Install dependencies at the repository root before pushing: npm install for a first install
 # without a lockfile, or npm ci with an existing lockfile. Missing installed ESLint fails
@@ -100,10 +103,61 @@ judge_main() (
   fi
 )
 
+# An attributes line giving a path Git LFS's filter, as `git lfs track` writes it. A comment does not count.
+lfs_attribute='^[[:space:]]*[^#[:space:]].*[[:space:]]filter=lfs([[:space:]]|$)'
+
+lfs_unreadable() {
+  echo "pre-push: cannot read the attributes files for the pushed commit $1, so whether this push uses Git LFS is unknown; repair them and push again." >&2
+  exit 1
+}
+
+# carries_lfs <remote> <local sha>: whether the pushed commits use Git LFS, judged from attributes files
+# because this machine's config is absent exactly where git-lfs is. This repository's and this user's own
+# files, the tip's committed files, or a tracking line the range changed, so a tip that dropped tracking
+# still uploads what the range added. A deletion's all-zero name and a tag of a non-commit have no commits to scan.
+carries_lfs() {
+  git rev-parse -q --verify "$2^{commit}" >/dev/null || return 1
+  info_file=$(git rev-parse --git-path info/attributes) || lfs_unreadable "$2"
+  # core.attributesFile replaces the per-user default, as it does for Git itself. Status 1 means unset.
+  user_file=$(git config --path --get core.attributesFile) || {
+    [ $? -eq 1 ] || lfs_unreadable "$2"
+    user_file=${XDG_CONFIG_HOME:-$HOME/.config}/git/attributes
+  }
+  for file in "$info_file" "$user_file"; do
+    [ -e "$file" ] || continue
+    if grep -qE "$lfs_attribute" "$file"; then
+      return 0
+    elif [ $? -ne 1 ]; then
+      lfs_unreadable "$2"
+    fi
+  done
+  if GIT_NO_REPLACE_OBJECTS=1 git grep -qE "$lfs_attribute" "$2" -- .gitattributes '*/.gitattributes'; then
+    return 0
+  elif [ $? -ne 1 ]; then
+    lfs_unreadable "$2"
+  fi
+  # --text and --no-textconv: a pushed attribute must not hide a line or run a converter. --full-history
+  # and -m: a side branch or a merge may be the only place tracking changed. Git's transfer
+  # ignores replacements, so the check and the upload must too.
+  changed=$(GIT_NO_REPLACE_OBJECTS=1 git log -1 --format=%H -m --full-history --text --no-textconv -G"$lfs_attribute" "$2" --not --remotes="$1" -- .gitattributes '*/.gitattributes') || lfs_unreadable "$2"
+  [ -n "$changed" ]
+}
+
+lfs_refs=
 while read -r local_ref local_sha remote_ref remote_sha; do
-  [ "$remote_ref" = "refs/heads/main" ] || continue
-  judge_main "$remote_sha" "$local_sha" </dev/null || exit 1
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    judge_main "$remote_sha" "$local_sha" </dev/null || exit 1
+  fi
+  if carries_lfs "$1" "$local_sha" </dev/null; then
+    lfs_refs="$lfs_refs$local_ref $local_sha $remote_ref $remote_sha
+"
+  fi
 done
+
+if [ -n "$lfs_refs" ] && ! git lfs version >/dev/null 2>&1; then
+  echo "pre-push: this push uses Git LFS (its .gitattributes files or this machine's attributes files set filter=lfs) but git-lfs is not installed on this machine, so its files cannot be uploaded; install Git LFS, run \`git lfs install --skip-repo\` rather than a plain \`git lfs install\`, which conflicts with this hook, and push again." >&2
+  exit 1
+fi
 
 # Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
 # .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
@@ -134,6 +188,16 @@ node --test --test-concurrency=2 "scripts/lib/*.test.mjs"
 if [ "${RUN_TESTS:-0}" = "1" ]; then
   echo "pre-push: RUN_TESTS=1 → npm test…"
   npm test
+fi
+
+# Last, so a push any gate above refuses uploads nothing. Git runs this hook on --dry-run with no signal,
+# so a dry run uploads, as Git LFS's own hook does.
+if [ -n "$lfs_refs" ]; then
+  echo "pre-push: git lfs pre-push…"
+  if ! printf '%s' "$lfs_refs" | GIT_NO_REPLACE_OBJECTS=1 git lfs pre-push "$@"; then
+    echo "pre-push: git lfs pre-push failed, so this push's Git LFS objects did not all reach the remote and the push is refused; fix the cause above and push again." >&2
+    exit 1
+  fi
 fi
 
 exit 0

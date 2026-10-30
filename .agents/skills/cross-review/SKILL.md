@@ -7,14 +7,21 @@ description: The fresh reviewer pass for a code diff, run by the model family th
 
 The `resume` skill's review step for the code and sign-off tiers. A writer's own family shares its blind spots,
 so the `reviewer` charter runs on the other family. Both seats carry the same charter; this skill chooses which
-one and how to call it. Plain single commands from the job worktree, read-only, nothing wrapped.
+one and how to call it. Use the runtime-specific job-directory invocation in `resume` section 3; keep review
+commands read-only and follow Claude Code's isolated-worktree command restrictions.
 
 Section 4 carries the other review this skill reaches: the plan review the `resume` skill's Plan step names, run
 on the Codex `plan-reviewer` seat before any build.
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
 what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
-`docs/LINEAR-CARDS.md` says what each card step here becomes.
+`docs/LINEAR-CARDS.md` says what each card step here becomes. Where it exports `TRACKER = "jira"`, read
+`docs/JIRA-CARDS.md` before any card action and apply its Jira substitutions throughout this skill. Where it exports
+`TRACKER = "azure"`, read `docs/AZURE-CARDS.md` before any card action and apply its Azure substitutions
+throughout this skill, including complete native-comment review before claiming.
+
+For Jira or Azure card captures in every route below, use the selected guide's "Review snapshots" substitution, retaining the
+route's existing output file and redirection.
 
 ## 1. Dispatch the other family's seat as configured
 

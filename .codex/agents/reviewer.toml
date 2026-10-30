@@ -56,7 +56,11 @@ Lenses:
    "6. Verify and review"; later mutations cannot repair history. Derive base behaviour from the job base, not
    implementation earlier in the same job. A test that accepts the claimed wrong behaviour,
    or asserts wall-clock timing instead of the behaviour, is a finding.
-7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Read the
+7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Where
+   `scripts/lib/board-config.mjs` exports `TRACKER = "jira"`, first read `docs/JIRA-CARDS.md` and use its
+   "Review snapshots" card-text substitution instead of the GitHub issue read below. Where it exports
+   `TRACKER = "azure"`, first read `docs/AZURE-CARDS.md` and apply its "Review snapshots" substitution and
+   complete native-comment review instead of that GitHub issue read. Read the
    issue (`gh issue view <N> --json title,body,comments --jq '.title, .body, (.comments[] | "--- comment by " +
    .author.login + " (" + .authorAssociation + ") ---", .body)'`), then flag missing or partial acceptance
    criteria, scope creep, and requirements implemented wrong. No issue: say so and skip this lens. Where

@@ -1,4 +1,4 @@
-// board-rules.test.mjs — mutation-proof unit tests for the eight board drift rules.
+// board-rules.test.mjs — mutation-proof unit tests for the board drift rules.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
 // The rules are judged from ONE board read, so every rule test drives the real

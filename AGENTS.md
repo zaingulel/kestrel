@@ -67,9 +67,13 @@ must decide, the options. The owner reads pull request descriptions and screensh
 reader. `resume` starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
 Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
 for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
-Report outcomes as they are: show the failing output, name any step skipped and anything guessed, never invent a
-number, and call work done only once it is verified; a value that cannot be computed fails loudly with its cause,
-never as a blank or zero that reads as real.
+In owner-facing progress, approval and completion messages, summarize evidence concisely as Passed, Failed and
+Untested: group related passes, state failure causes or say when unknown, report the latest valid outcome of repeated
+runs while retaining unresolved or unexplained earlier failures, and name relevant unrun checks and any skipped step
+with their reasons and consequences. Say when there are no failures. Include the log path or link; keep full receipts,
+timestamps, hashes and repeated runs in the log and existing published evidence. Show requested raw evidence, or a short diagnostic excerpt when needed to explain
+a failure. Name guesses, never invent numbers, and call work done only once verified; a value that cannot be computed
+fails loudly with its cause, never as a blank or zero that reads as real.
 
 Every rule this file does not hold in full has one home:
 

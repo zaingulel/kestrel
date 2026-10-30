@@ -11,7 +11,10 @@ routing, body shape, publish, and verify are identical).
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
 what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
-`docs/LINEAR-CARDS.md` says what each card step here becomes.
+`docs/LINEAR-CARDS.md` says what each card step here becomes. Where it exports `TRACKER = "jira"`, read
+`docs/JIRA-CARDS.md` before any card action and apply its Jira substitutions throughout this skill. Where it exports
+`TRACKER = "azure"`, read `docs/AZURE-CARDS.md` before any card action and apply its Azure substitutions
+throughout this skill, including complete native-comment review before claiming.
 
 Claude may invoke this skill, but Step 4 (owner approval) is a HARD gate on every ordinary model-invoked
 proposal: create or update NOTHING on the board until the owner approves. Exceptions, none owned or gated by

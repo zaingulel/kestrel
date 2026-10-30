@@ -2,7 +2,7 @@
 // board-add.mjs — put an issue on the board with its Status AND routing field set in one step.
 // Run: node scripts/board-add.mjs <issue#> <Status> <ROUTING_FIELD value>
 // A board configured with no routing field takes <issue#> <Status> only. A markdown-tracked board
-// (TRACKER = 'markdown' in board-config.mjs) or Linear-tracked board (TRACKER = 'linear') files no card this
+// (TRACKER = 'markdown' in board-config.mjs), Linear, Jira or Azure board files no card this
 // way and refuses.
 
 import { pathToFileURL } from 'node:url';
@@ -27,6 +27,12 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     }
     if (configuredTracker() === 'linear') {
       throw new Error('the linear tracker files a card with node scripts/linear-card.mjs create; see docs/LINEAR-CARDS.md');
+    }
+    if (configuredTracker() === 'jira') {
+      throw new Error('the Jira tracker files a card with node scripts/jira-card.mjs create');
+    }
+    if (configuredTracker() === 'azure') {
+      throw new Error('the Azure tracker files a card with node scripts/azure-card.mjs create');
     }
     if (args.length !== (ROUTING_FIELD ? 3 : 2)) throw new Error(USAGE);
     const [numRaw, statusName, workstreamName] = args;

@@ -471,6 +471,8 @@ function refusedShapes(block) {
 test('the resume skill with its references, and the cross-review and to-issues skills, give only command shapes an isolated worktree session accepts', () => {
   const refuse = (path, markdown) => {
     for (const { where, body, shapes } of skillShapeFindings(markdown)) {
+      // This Codex invocation is outside Claude Code's single-command restriction.
+      if (path === '.agents/skills/resume/SKILL.md' && body === 'cd "<absolute-job-worktree>" && <command>') continue;
       assert.fail(`${path}, ${where}, must be one plain command, but has ${shapes.join(', ')}:\n${body}`);
     }
   };

@@ -3,7 +3,7 @@
 // or park cards in (and release them from) the parked lane board-config.mjs names. Where
 // board-config.mjs sets TRACKER = 'markdown', the card is a file: Backlog, Ready and Done rewrite
 // its Status line and the other columns are checks (lib/board-markdown.mjs). Where it sets
-// TRACKER = 'linear', the card moves to the Linear state its column maps to (lib/board-linear.mjs).
+// TRACKER = 'linear', 'jira' or 'azure', the native provider moves the card to its mapped state.
 //
 //   node scripts/board-move.mjs <issue#> <Status>
 //   node scripts/board-move.mjs 272 Done
@@ -34,14 +34,19 @@ import { moveLinearCards } from './lib/board-linear.mjs';
 import { configuredTracker, gitRunner, moveMarkdownCards } from './lib/board-markdown.mjs';
 import { ghExec } from './lib/gh-exec.mjs';
 import { linearExec } from './lib/linear-api.mjs';
-import { LINEAR_IDENTIFIER, cardRef } from './lib/tracker.mjs';
+import { jiraExec } from './lib/jira-api.mjs';
+import { azureExec } from './lib/azure-api.mjs';
+import { moveJiraCards } from './lib/board-jira.mjs';
+import { moveAzureCards } from './lib/board-azure.mjs';
+import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, cardRef, isAzureIdentifier } from './lib/tracker.mjs';
 
 function usageError(output) {
   output.error(
     'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
     '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
     '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
-    '       on a Linear board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready',
+    '       on a Linear or Jira board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready\n' +
+    '       on an Azure board use AB-<positive int32>   e.g. board-move.mjs AB-299 Ready',
   );
   return 2;
 }
@@ -61,16 +66,20 @@ function reportLine({ issueNumber, statusName, skipped, cleared, checked, movedB
     : `board-move: ${cardRef(issueNumber)} → ${laneField}: ${statusName}`;
 }
 
-// Moves on the configured tracker. The markdown and Linear trackers have no lane, so a lane given by hand is
+// Moves on the configured tracker. Markdown, Linear, Jira and Azure have no lane, so a lane given by hand is
 // refused (on markdown with PARKED_LANE = null, moveLanes refuses first).
-function moveAll(pairs, lane, executor, tracker, linearExecutor) {
+function moveAll(pairs, lane, executor, tracker, linearExecutor, jiraExecutor, azureExecutor) {
   const markdown = tracker === 'markdown';
   if (lane) {
+    if (tracker === 'azure') throw new Error('the Azure tracker has no parked lane');
+    if (tracker === 'jira') throw new Error('the Jira tracker has no parked lane');
     if (tracker === 'linear') throw new Error('the linear tracker has no parked lane');
     if (markdown && PARKED_LANE) throw new Error('the markdown tracker has no parked lane');
     return moveLanes(pairs, executor);
   }
   if (tracker === 'linear') return moveLinearCards(pairs, linearExecutor);
+  if (tracker === 'jira') return moveJiraCards(pairs, jiraExecutor);
+  if (tracker === 'azure') return moveAzureCards(pairs, azureExecutor);
   return markdown ? moveMarkdownCards(pairs, gitRunner(), executor) : moveCards(pairs, executor);
 }
 
@@ -78,6 +87,8 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   const executor = dependencies.ghExec ?? ghExec;
   const linearExecutor = dependencies.linearExec ?? linearExec;
+  const jiraExecutor = dependencies.jiraExec ?? jiraExec;
+  const azureExecutor = dependencies.azureExec ?? azureExec;
   const lane = args[0] === '--lane';
   let tracker;
   try {
@@ -97,16 +108,17 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     }
   } else {
     const [issueRaw, ...statusParts] = args;
-    const linear = tracker === 'linear';
-    const issueNumber = linear ? issueRaw : Number(issueRaw);
+    const keyed = tracker === 'linear' || tracker === 'jira' || tracker === 'azure';
+    const identifier = tracker === 'jira' ? JIRA_IDENTIFIER : LINEAR_IDENTIFIER;
+    const issueNumber = keyed ? issueRaw : Number(issueRaw);
     const statusName = statusParts.join(' ').trim();
-    const validIssue = linear ? LINEAR_IDENTIFIER.test(issueRaw) : Number.isInteger(issueNumber) && issueNumber > 0;
+    const validIssue = tracker === 'azure' ? isAzureIdentifier(issueRaw) : keyed ? identifier.test(issueRaw) : Number.isInteger(issueNumber) && issueNumber > 0;
     if (!validIssue || !statusName) return usageError(output);
     pairs = [{ issueNumber, statusName }];
   }
   let completed;
   try {
-    completed = moveAll(pairs, lane, executor, tracker, linearExecutor);
+    completed = moveAll(pairs, lane, executor, tracker, linearExecutor, jiraExecutor, azureExecutor);
   } catch (err) {
     output.error(`board-move: ${err.message}`);
     return 1;
