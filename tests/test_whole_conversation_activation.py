@@ -33,6 +33,7 @@ RESTARTED_GRAPH = [RESTARTED_METADATA, {'id': 10, 'type': 'PipeWire:Interface:No
     'node.name': 'A', 'media.class': 'Audio/Sink', 'object.serial': 910,
 }}}]
 CAPTURE_LOST_LOG = 'Microphone capture lost; reopening'
+PAUSE_THAT_NEVER_ELAPSES = 3600
 
 
 @asynccontextmanager
@@ -188,6 +189,83 @@ class WholeConversationTests(WholeConversationCase):
                 await self.assert_active_conversation_survives_restart()
             with self.subTest(case='restart_typed_only_failed_capture'):
                 await self.assert_typed_only_restart_survives_failed_capture()
+
+    async def assert_recovery_pause_yields(self, case):
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+        native_sleep = asyncio.sleep
+        paused = asyncio.Event()
+
+        async def sleep(delay, result=None):
+            if delay == PAUSE_THAT_NEVER_ELAPSES:
+                paused.set()
+            return await native_sleep(delay, result)
+
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            original = manager.wake_startup
+            with patch.object(bot.asyncio, 'sleep', side_effect=sleep):
+                first.capture.stdout.feed_eof()
+                try:
+                    await asyncio.wait_for(paused.wait(), 5)
+                except TimeoutError:
+                    self.fail('A retry pause was never requested after the recorder ended: '
+                              f'{service.waiting.qsize()} recorder(s) reopened with no pause')
+                self.assertIsNot(manager.wake_startup, original)
+                self.assertTrue(first.capture.reaped.is_set())
+                self.assertFalse(manager.switching_output)
+                self.assertTrue(service.waiting.empty(), 'The pause must hold no recorder')
+                self.assertIsNone(manager.wake_detector.process, 'The pause must hold no worker')
+                if case == 'shortcut':
+                    self.assertEqual(await service.toggle(), 'starting')
+                    active = await asyncio.wait_for(service.started.get(), 5)
+                    self.assertIsNot(active, first)
+                    self.assertTrue(active.verified)
+                    self.assertTrue(first.capture.reaped.is_set())
+                    self.assertIsNone(manager.wake_detector)
+                    await wait_until(lambda: not manager.capture_recovery.recovering,
+                                     'The verified conversation capture never counted as reopened')
+                    self.assertEqual(await service.toggle(), 'inactive')
+                    # A further pause would never elapse, so this arrival proves there was none.
+                    await self.next_waiting(service)
+                else:
+                    await asyncio.wait_for(close(), 5)
+                    self.assertIsNone(manager.wake_startup)
+                    self.assertTrue(service.waiting.empty())
+        finally:
+            await close()
+
+    async def assert_uncertain_recovery_cleanup_refuses(self):
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            detector = manager.wake_detector
+            original_close = detector.close
+
+            async def refuse_close():
+                await original_close()
+                raise RuntimeError('Wake capture cleanup failed. Restart Kestrel.')
+
+            with patch.object(detector, 'close', side_effect=refuse_close):
+                first.capture.stdout.feed_eof()
+                await wait_until(lambda: manager.failure is not None, 'The uncertain cleanup was never reported')
+                self.assertEqual(manager.failure, 'Wake capture cleanup failed. Restart Kestrel.')
+                self.assertEqual(manager.trouble, 'trouble')
+                self.assertEqual(await service.toggle(), 'unavailable')
+                self.assertTrue(service.waiting.empty())
+        finally:
+            await close()
+
+    async def test_capture_recovery_yields_to_shortcut_and_shutdown(self):
+        with patch.object(bot, 'CAPTURE_RETRY_PAUSE', PAUSE_THAT_NEVER_ELAPSES, create=True):
+            for case in ('shortcut', 'shutdown'):
+                with self.subTest(case=case):
+                    await self.assert_recovery_pause_yields(case)
+            with self.subTest(case='uncertain_cleanup'):
+                await self.assert_uncertain_recovery_cleanup_refuses()
 
     async def test_thats_all_ends_conversation_without_brain_request_or_activation(self):
         brain = ScriptedBrain([

@@ -70,6 +70,7 @@ from tool_catalogue import (
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
+CAPTURE_RETRY_PAUSE = 2
 ENGINE_TIMEOUT = 45
 ENGINE_MISSING_ADVISORY = ("Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, "
                            "keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine "
@@ -1400,6 +1401,8 @@ class VoiceConversations:
 
     async def open_waiting(self, interval):
         detector = self.wake_detector
+        if self.capture_recovery.recovering:
+            await asyncio.sleep(CAPTURE_RETRY_PAUSE)
         await detector.start()
         if self.wake_interval is not interval:
             return
