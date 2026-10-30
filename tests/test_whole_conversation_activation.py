@@ -32,7 +32,7 @@ METADATA_REPLACED = json.dumps([RESTARTED_METADATA]).encode() + b'\n'
 RESTARTED_GRAPH = [RESTARTED_METADATA, {'id': 10, 'type': 'PipeWire:Interface:Node', 'info': {'props': {
     'node.name': 'A', 'media.class': 'Audio/Sink', 'object.serial': 910,
 }}}]
-CAPTURE_LOST_LOG = 'Microphone capture lost; reopening'
+CAPTURE_LOST_LOG = 'Audio system restarted or microphone capture lost; reopening'
 REOPENED_LOG = 'Microphone capture reopened.'
 PAUSE_THAT_NEVER_ELAPSES = 3600
 # Differs from the fixture's 900, so a serial remembered from an earlier opening cannot satisfy the test.
@@ -339,6 +339,24 @@ class WholeConversationTests(WholeConversationCase):
         finally:
             await close()
 
+    async def assert_waiting_uncertain_cleanup_is_final(self):
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+        serial = AsyncMock(side_effect=speech.PipeWireGraphCleanupFailure(speech.OUTPUT_SWITCH_FAILURE))
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            with patch.object(bot.ECHO_REMOVAL, 'microphone_serial', serial):
+                first.capture.stdout.feed_eof()
+                await wait_until(lambda: manager.failure is not None, 'The uncertain cleanup was never reported')
+                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                self.assertEqual(manager.trouble, 'trouble')
+                self.assertEqual(await service.toggle(), 'unavailable')
+                self.assertEqual(await service.submit('Typed after the failure.'), 'unavailable')
+                self.assertEqual(serial.await_count, 1, 'The reopening must not be retried after uncertain cleanup')
+        finally:
+            await close()
+
     async def test_capture_recovery_yields_to_shortcut_and_shutdown(self):
         with patch.object(bot, 'CAPTURE_RETRY_PAUSE', PAUSE_THAT_NEVER_ELAPSES, create=True):
             for case in ('shortcut', 'shutdown'):
@@ -346,6 +364,8 @@ class WholeConversationTests(WholeConversationCase):
                     await self.assert_recovery_pause_yields(case)
             with self.subTest(case='uncertain_cleanup'):
                 await self.assert_uncertain_recovery_cleanup_refuses()
+            with self.subTest(case='waiting_uncertain_cleanup_is_final'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                await self.assert_waiting_uncertain_cleanup_is_final()
 
     def assert_owned_capture(self, recorder, output_serial):
         argv = recorder.argv

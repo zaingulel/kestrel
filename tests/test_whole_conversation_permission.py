@@ -827,6 +827,44 @@ class WholeConversationTests(WholeConversationCase):
             self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
             self.assertEqual(read_notes(notes), seeded)
 
+        with self.subTest('capture lost with the answer window open'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            recognised = self.fake_answer_recognizer(service, 'yes')
+            try:
+                with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                    await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                    await self.speak_request(transport, request)
+                    await self.hear_exactly(spoken, deletion_question(target))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    self.assertIsNotNone(transport.capture_pcm)
+                    lost = transport.capture
+                    lost.stdout.feed_data(ANSWER_SPEECH * 10)
+                    await wait_until(lambda: not lost.stdout._buffer, 'The answer speech was never read')
+                    lost.stdout.feed_eof()
+                    await wait_until(lambda: transport.capture is not None and transport.capture is not lost
+                                     and transport.verified and not manager.switching_output, 'Capture never reopened')
+                    await self.hear_exactly(spoken, broken)
+                    self.assertIsNone(manager.failure)
+                    self.assertIs(manager.transport, transport)
+                    self.assertIsNone(transport.capture_pcm)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    self.assertEqual(recognised, [])
+            finally:
+                await close()
+            self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
+            self.assertEqual(read_notes(notes), seeded)
+
         with self.subTest('a typed-only question survives a lost capture'):
             notes = self.private_notes(memory=[kept, target])
             seeded = read_notes(notes)

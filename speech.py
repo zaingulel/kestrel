@@ -1057,6 +1057,7 @@ class LaptopAudioTransport:
         self.on_stopped = on_stopped
         self.on_capture_lost = on_capture_lost
         self.failure: str | None = None
+        self.cleanup_uncertain = False
         self.capture = None
         self.playback = None
         self.playback_watcher = None
@@ -1175,6 +1176,7 @@ class LaptopAudioTransport:
                 if isinstance(error, PipeWireGraphCleanupFailure):
                     raise
                 raise RuntimeError(LAPTOP_CAPTURE_FAILURE) from None
+            self.cleanup_uncertain = isinstance(error, PipeWireGraphCleanupFailure)
             self.fail(LAPTOP_CAPTURE_FAILURE)
             await self.close()
             raise RuntimeError(self.failure) from None

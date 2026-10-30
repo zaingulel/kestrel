@@ -1378,7 +1378,7 @@ class VoiceConversations:
         if self.closed or self.failure:
             return
         if self.capture_recovery.attempt():
-            logger.warning('Microphone capture lost; reopening for up to 30 seconds.')
+            logger.warning('Audio system restarted or microphone capture lost; reopening for up to 30 seconds.')
             # An answer that lost its capture fails closed; it never resumes across the gap.
             if self.typed_answer is not None and self.answer_uses_capture:
                 self.typed_answer.cancel()
@@ -1389,15 +1389,21 @@ class VoiceConversations:
             self.capture_unrecoverable()
 
     def capture_unrecoverable(self):
-        logger.error(LAPTOP_CAPTURE_FAILURE)
-        self.record_failure(LAPTOP_CAPTURE_FAILURE, 'trouble-microphone')
+        self.give_up(LAPTOP_CAPTURE_FAILURE, 'trouble-microphone')
+
+    def give_up(self, failure, trouble):
+        logger.error(failure)
+        self.record_failure(failure, trouble)
         self.desired_active = False
         self.fail_submission()
         self.revoke()
         self.changed.set()
 
     def waiting_capture_stopped(self):
-        if self.waiting_owner is not None or self.capture_recovery.recovering:
+        # A graph child that could not be reaped is final, the same as on the active route.
+        if self.capture_recovery.recovering and self.waiting_transport.cleanup_uncertain:
+            self.give_up(OUTPUT_SWITCH_FAILURE, 'trouble')
+        elif self.waiting_owner is not None or self.capture_recovery.recovering:
             self.capture_lost()
         else:
             logger.error(LAPTOP_CAPTURE_FAILURE)
@@ -1833,7 +1839,7 @@ class VoiceConversations:
                         await self.ingress[1].reset_audio()
                 if (self.capture_recovery.recovering and transport is not None and transport.capture_enabled
                         and not interrupted()):
-                    # Nothing can cancel the run loop, so any notice ends this pause early; it holds no recorder.
+                    # Dismissal has no task to cancel, so any notice ends this pause early; it holds no recorder.
                     self.changed.clear()
                     try:
                         await asyncio.wait_for(self.changed.wait(), CAPTURE_RETRY_PAUSE)
