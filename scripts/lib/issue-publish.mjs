@@ -13,7 +13,7 @@
 // rather than asserted, because a lone number cannot distinguish a standalone issue from an Epic
 // whose children were forgotten: showing the count resolves that ambiguity visibly.
 // verifyMarkdownPublication applies the same checks to a markdown-tracked board's card files, and
-// verifyLinearPublication to a Linear team's issues.
+// verifyLinearPublication, verifyJiraPublication and verifyAzurePublication to their native provider issues.
 
 import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD, TERMINAL_STATUSES } from './board-config.mjs';
 import { allNodes, linearTeamKey, readLinearBoard } from './board-linear.mjs';
@@ -21,22 +21,29 @@ import { CARDS_DIR } from './board-markdown.mjs';
 import { lookupIssueBoardItem } from './board-move.mjs';
 import { isContentUnresolved, normalizeItem, parseNode } from './board.mjs';
 import { isClosedState } from './linear-card.mjs';
-import { LINEAR_IDENTIFIER, cardRef, compareCardIds } from './tracker.mjs';
+import { readJiraChildren, readJiraIssue, readJiraProject } from './board-jira.mjs';
+import { readAzureChildren, readAzureIssue, readAzureProject, azureTags } from './board-azure.mjs';
+import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, cardRef, compareCardIds, isAzureIdentifier } from './tracker.mjs';
 
 const FIELDS_VERIFIED = ROUTING_FIELD ? `Statuses and ${ROUTING_FIELD}s` : 'Statuses';
 const KIND_LABEL_NAMES = Object.values(KIND_LABELS);
 
-// On a Linear board an issue is its identifier, such as ENG-123, and "number" below carries that string.
+// On native providers "number" carries the provider's public card identifier.
 export function parseIssuePublishArgs(args, tracker = 'github') {
   if (!Array.isArray(args) || args.length < 1) {
-    throw new Error('expected an issue number, optionally followed by child numbers');
+    throw new Error(tracker === 'jira' ? 'expected a Jira issue key, optionally followed by child keys' : 'expected an issue number, optionally followed by child numbers');
   }
 
-  const linear = tracker === 'linear';
+  const keyed = tracker === 'linear' || tracker === 'jira' || tracker === 'azure';
+  const identifier = tracker === 'jira' ? JIRA_IDENTIFIER : LINEAR_IDENTIFIER;
   const numbers = args.map((arg) => {
-    if (linear) {
-      if (typeof arg !== 'string' || !LINEAR_IDENTIFIER.test(arg)) {
-        throw new Error(`expected a Linear issue ID such as ENG-123, received ${JSON.stringify(arg)}`);
+    if (tracker === 'azure') {
+      if (!isAzureIdentifier(arg)) throw new Error('expected an Azure card identifier AB-<positive int32>');
+      return arg;
+    }
+    if (keyed) {
+      if (typeof arg !== 'string' || !identifier.test(arg)) {
+        throw new Error(`expected a ${tracker === 'jira' ? 'Jira issue key' : 'Linear issue ID'} such as ENG-123, received ${JSON.stringify(arg)}`);
       }
       return arg;
     }
@@ -52,7 +59,7 @@ export function parseIssuePublishArgs(args, tracker = 'github') {
 
   const seen = new Set();
   for (const number of numbers) {
-    if (seen.has(number)) throw new Error(`duplicate issue ${linear ? `ID ${number}` : `number #${number}`}`);
+    if (seen.has(number)) throw new Error(`duplicate issue ${keyed ? `ID ${number}` : `number #${number}`}`);
     seen.add(number);
   }
 
@@ -380,4 +387,45 @@ export function verifyLinearPublication(args, exec) {
     ...verified,
     `issue-publish: child set verified: ${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`,
   ];
+}
+
+
+// Direct project-bound Jira reads need no GitHub board or pull-request call to verify filing.
+export function verifyJiraPublication(args, exec) {
+  const { subjectNumber, childNumbers } = parseIssuePublishArgs(args, 'jira');
+  const project = readJiraProject(exec);
+  const requested = [subjectNumber, ...childNumbers];
+  for (const key of requested) {
+    const issue = readJiraIssue(key, exec);
+    if (!Array.isArray(issue.fields.labels)) throw new Error(`requested issue ${key} has unavailable labels`);
+    checkCardFields(key, { status: project.columnOf(issue.fields.status), routing: null, labels: issue.fields.labels });
+    const kind = Object.keys(KIND_LABELS).find((name) => issue.fields.labels.includes(KIND_LABELS[name]));
+    if (issue.fields.issuetype.id !== project.config.issueTypes[kind]) throw new Error(`requested issue ${key} has an issue type that does not match its ${kind} kind`);
+  }
+  const children = readJiraChildren(subjectNumber, exec);
+  const verified = boardVerifiedLines(requested);
+  if (childNumbers.length === 0) {
+    return [...verified, `issue-publish: ${subjectNumber} verified as a standalone issue; it has ${children.total} child issues (none supplied; pass them as arguments to verify an Epic).`];
+  }
+  assertChildSet(subjectNumber, childNumbers, children.issues.map(({ key }) => key));
+  return [...verified, `issue-publish: child set verified: ${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`];
+}
+
+// Native direct reads prove the exact child identities and reciprocal parent evidence.
+export function verifyAzurePublication(args, exec) {
+  const { subjectNumber, childNumbers } = parseIssuePublishArgs(args, 'azure');
+  const project = readAzureProject(exec);
+  const requested = [subjectNumber, ...childNumbers];
+  let subject;
+  for (const id of requested) {
+    const issue = readAzureIssue(id, exec, project);
+    if (id === subjectNumber) subject = issue;
+    const labels = azureTags(issue);
+    checkCardFields(id, { status: project.columnOf(issue.fields['System.WorkItemType'], issue.fields['System.State']), routing: null, labels });
+  }
+  const children = readAzureChildren(subjectNumber, exec, project, subject);
+  const verified = boardVerifiedLines(requested);
+  if (childNumbers.length === 0) return [...verified, `issue-publish: ${subjectNumber} verified as a standalone issue; it has ${children.total} child issues (none supplied; pass them as arguments to verify an Epic).`];
+  assertChildSet(subjectNumber, childNumbers, children.issues.map(({ id }) => 'AB-' + id));
+  return [...verified, `issue-publish: child set verified: ${subjectNumber} has exactly the ${childNumbers.length} supplied child issues.`];
 }

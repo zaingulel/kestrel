@@ -10,7 +10,10 @@ Owner-invoked to park unfinished work. Completed work uses `closeout`.
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
 what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
-`docs/LINEAR-CARDS.md` says what each card step here becomes.
+`docs/LINEAR-CARDS.md` says what each card step here becomes. Where it exports `TRACKER = "jira"`, read
+`docs/JIRA-CARDS.md` before any card action and apply its Jira substitutions throughout this skill. Where it exports
+`TRACKER = "azure"`, read `docs/AZURE-CARDS.md` before any card action and apply its Azure substitutions
+throughout this skill, including complete native-comment review before claiming.
 
 1. **Commit what exists** on the job branch with a message that says it is work in progress. Regenerate any
    artifact the `generated artifacts` row of the Conventions table in `.agents/REPOSITORY.md` names and commit it with its
@@ -19,7 +22,8 @@ what each card step here becomes. Where it exports `TRACKER = "linear"`, cards a
    `.github/pull_request_template.md`, as the `resume` skill says under "7. Push authorisation"; its Which
    template wins rule applies here too. Write the **Not done** section for a reader with no memory of this
    session: what is finished, what is not, the next concrete step, and any decision the owner still owes.
-3. **Get publication authorization.** Show the prepared body to the owner and name the proposed push and draft
+3. **Get publication authorization.** Present the prepared body as the `resume` skill's "7. Push authorisation"
+   Chat presentation rule says, and name the proposed push and draft
    pull-request creation or update. A bare `handoff` or `park` request authorizes only local preparation and the
    commit. Do not push the branch or create or update a draft pull request until the owner explicitly authorizes
    those outward actions. An invocation that explicitly names both push and draft pull-request publication

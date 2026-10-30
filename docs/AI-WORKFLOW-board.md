@@ -91,6 +91,37 @@ board tools reach Linear with a personal key kept in a private file on the machi
 a cloud environment. [`docs/LINEAR-CARDS.md`](LINEAR-CARDS.md) owns the team and key setup and what each card step
 becomes.
 
+### Cards in Jira
+
+A team that plans in Jira Cloud can keep cards in one existing project, chosen by `TRACKER = "jira"` and
+`JIRA_CONFIG` in [board-config.mjs](../scripts/lib/board-config.mjs). The six columns map to native status IDs and
+moves use explicit available transitions with direct read-back. Unlike Linear's automation, the agent explicitly moves
+a Jira card after marking its pull request ready and after confirming merge. A card key such as `ENG-2` names both
+`job/ENG-2` and the standalone `Closes ENG-2` pull request line; the pull request route always applies.
+
+Account IDs identify assignees and claim authors. A private file supplies classic personal API-token authentication
+only to the configured tenant. The adapter has no Workstream, parked lane, cloud card build or documentation sweep.
+[Jira cards](JIRA-CARDS.md) owns setup, native permissions, complete evidence, failure recovery and every workflow
+substitution, including the agent's complete-child proof before moving a parent to Done. These closeout instructions
+are distinct from the status-write checks in the command.
+
+### Cards in Azure Boards
+
+A team that plans in Azure Boards can use one existing project, chosen by `TRACKER = "azure"` and `AZURE_CONFIG`
+in [board-config.mjs](../scripts/lib/board-config.mjs). Each distinct configured native type maps all six columns to
+native states. Init validates the nonsecret mapping without contacting Azure; runtime reads validate the project,
+types, states and relationships. A public card such as `AB-299` names `job/AB-299`; its GitHub pull request binds
+that identifier to the exact organization and project through two standalone body lines.
+
+Native identity UUIDs identify assignees and claim authors. Full native comments retain their format, including HTML
+that can wrap a claim, so an agent reads them completely before claiming. A private credential file supplies an
+externally provisioned Entra token or organization-scoped personal access token. The agent explicitly moves In review
+after marking the pull request ready and Done after confirming merge. Azure has no Workstream, parked lane, cloud
+card build, direct-main documentation route or documentation sweep in this adapter.
+[Azure Boards cards](AZURE-CARDS.md) owns setup, command forms, permissions, complete evidence, write recovery and
+workflow substitutions, including complete direct-child evidence before moving a parent to Done. Synthetic workflows
+prove composition; live Azure writes and native platform compatibility need their own executed evidence.
+
 ### The board's own automation
 
 The project's Workflows page (the workflow icon in the project header, not the Settings sidebar) carries the
@@ -127,6 +158,8 @@ titled.
 - [`docs/MARKDOWN-CARDS.md`](MARKDOWN-CARDS.md): the card format and the card steps where cards are files.
 - [`docs/LINEAR-CARDS.md`](LINEAR-CARDS.md): the Linear team and key setup and the card steps where cards are Linear
   issues.
+- [`docs/JIRA-CARDS.md`](JIRA-CARDS.md): Jira configuration, private credentials and card workflow substitutions.
+- [`docs/AZURE-CARDS.md`](AZURE-CARDS.md): Azure project mappings, private credentials and native card workflow substitutions.
 - The heads of [`scripts/board.mjs`](../scripts/board.mjs), [`scripts/board-add.mjs`](../scripts/board-add.mjs) and
   [`scripts/board-move.mjs`](../scripts/board-move.mjs): each script's modes and argument forms.
 - [`scripts/lib/gh-exec.mjs`](../scripts/lib/gh-exec.mjs): the `BOARD_TOOLKIT_GH` contract.
@@ -155,6 +188,8 @@ titled.
 - `scripts/verify-issue-publish.mjs`: checks a published issue.
 - `scripts/lib/board-config.mjs`: the one file that differs between repositories.
 - `scripts/lib/board-markdown.mjs`: the reader and mover for cards kept as files.
+- `scripts/lib/board-jira.mjs`, `scripts/lib/jira-card.mjs` and `scripts/lib/jira-api.mjs`: native Jira reads, card operations and credential custody.
+- `scripts/lib/board-azure.mjs`, `scripts/lib/azure-card.mjs` and `scripts/lib/azure-api.mjs`: native Azure reads, revision-checked operations and credential custody.
 - `scripts/lib/board-toolkit-copy.mjs`: the test support that loads the board toolkit from a copy with a fixed
   configuration, so no shipped board test reads an install's own `board-config.mjs`.
 - `scripts/lib/gh-exec.mjs`: the one route every `gh` call takes.

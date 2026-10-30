@@ -368,7 +368,8 @@ test('board-move --batch moves every pair, prints one line each on stdout and re
 const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
   '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
   '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
-  '       on a Linear board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready';
+  '       on a Linear or Jira board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready\n' +
+  '       on an Azure board use AB-<positive int32>   e.g. board-move.mjs AB-299 Ready';
 
 test('board-move rejects bad arguments before any gh call: usage problems return 2 and a malformed batch pair returns 1', () => {
   for (const args of [[], ['abc', 'Done'], ['453'], ['--batch']]) {

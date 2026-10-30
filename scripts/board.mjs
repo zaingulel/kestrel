@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // board.mjs — the one board command: it lists the board (the GitHub Projects board, the
 // cards under .agents/cards where scripts/lib/board-config.mjs sets TRACKER = 'markdown', or a
-// Linear team where it sets TRACKER = 'linear') and judges it from
+// Linear team, Jira project or Azure project where it selects that tracker) and judges it from
 // the SAME single read, so a session never pays twice for one answer and the listing
 // can never disagree with the drift verdict printed under it.
 //
@@ -12,8 +12,8 @@
 //   node scripts/board.mjs --closeout      # the strict proof gate: the scan alone
 //   node scripts/board.mjs --intake        # the intake document on stdout, the outcome on stderr
 //
-// Fail-loud (self-improvement-loop rule): a gh error, malformed JSON, or a zero-item
-// read exits non-zero — a broken board read never prints an empty "nothing to pick"
+// Fail-loud: a provider error or malformed data exits non-zero. On GitHub a zero-item
+// read also exits non-zero — a broken board read never prints an empty "nothing to pick"
 // and returns success. The exit code of every mode but --intake is scanOutcome's, so an
 // ordinary read exits 1 on drift too: the session-start bookend exists to surface exactly
 // that, and only --closeout spares the advisory rows (one merge's proof gate is not a
@@ -22,7 +22,7 @@
 // --intake reads the board once, then the details of each pickable card and each claimed
 // card with no closing pull request (body, parent, latest claim, every comment) through
 // two read-only GraphQL queries, and writes nothing and reads no checkout (a markdown install
-// reads its cards, origin/main and its job branches instead, and a Linear install reads its team). Stdout is the
+// reads its cards, origin/main and its job branches instead; Linear, Jira and Azure use native reads). Stdout is the
 // document alone and ends with a line counting itself; the scan, the details outcome and
 // the line count go to stderr. Exit 0: whole and clean. 1: a rejected argument. 2: the
 // board read failed or returned no items. 3: drift. 4: a card's details, or the board,
@@ -43,6 +43,11 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { ghExec } from './lib/gh-exec.mjs';
 import { linearExec } from './lib/linear-api.mjs';
+import { jiraExec } from './lib/jira-api.mjs';
+import { azureExec } from './lib/azure-api.mjs';
+import * as boardConfig from './lib/board-config.mjs';
+import { jiraCardDetails, readJiraBoard } from './lib/board-jira.mjs';
+import { azureCardDetails, readAzureBoard } from './lib/board-azure.mjs';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PICKABLE_STATUSES } from './lib/board-config.mjs';
 import { CARDS_DIR, configuredTracker, markdownCardDetails, readMarkdownBoard } from './lib/board-markdown.mjs';
 import {
@@ -62,6 +67,8 @@ import { intakeCards, intakeOutcome, scanBoard, scanOutcome } from './lib/board-
 const boardName = (tracker) => {
   if (tracker === 'markdown') return `markdown ${CARDS_DIR}`;
   if (tracker === 'linear') return `linear team ${linearTeamKey()}`;
+  if (tracker === 'jira') return `jira project ${boardConfig.JIRA_CONFIG.project} at ${boardConfig.JIRA_CONFIG.site}`;
+  if (tracker === 'azure') return `azure project ${boardConfig.AZURE_CONFIG.project} at ${boardConfig.AZURE_CONFIG.organization}`;
   return `${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER}`;
 };
 
@@ -70,12 +77,14 @@ const headerLine = (label, selected, items, tracker) =>
 
 // The pick listing and the card details as one document on stdout; the scan and the
 // details outcome on stderr, so a caller that captures stdout holds the document alone.
-function printIntake(items, args, { executor, linear, output, tracker, markdown }) {
+function printIntake(items, args, { executor, linear, jira, azure, output, tracker, markdown }) {
   const { candidates, claims, numberless } = intakeCards(items);
   const numbers = [...candidates, ...claims].map((card) => card.number);
   const details = {
     markdown: () => markdownCardDetails(markdown.cards, numbers, markdown.refs),
     linear: () => linearCardDetails(linear, numbers),
+    jira: () => jiraCardDetails(jira, numbers),
+    azure: () => azureCardDetails(azure, numbers),
     github: () => fetchCardDetails(executor, numbers),
   }[tracker]();
   const picks = pickable(items);
@@ -94,6 +103,8 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   const executor = dependencies.ghExec ?? ghExec;
   const linear = dependencies.linearExec ?? linearExec;
+  const jira = dependencies.jiraExec ?? jiraExec;
+  const azure = dependencies.azureExec ?? azureExec;
 
   let parsed;
   try {
@@ -123,21 +134,25 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
       ({ items } = markdown);
     } else if (tracker === 'linear') {
       ({ items } = readLinearBoard(linear));
+    } else if (tracker === 'jira') {
+      ({ items } = readJiraBoard(jira, executor));
+    } else if (tracker === 'azure') {
+      ({ items } = readAzureBoard(azure, executor));
     } else {
       items = fetchBoard(executor);
     }
   } catch (err) {
-    const source = { markdown: 'markdown cards', linear: `Linear team ${linearTeamKey()}`, github: 'GitHub Projects board' }[tracker];
+    const source = { markdown: 'markdown cards', linear: `Linear team ${linearTeamKey()}`, jira: 'Jira project', azure: 'Azure project', github: 'GitHub Projects board' }[tracker];
     output.error(`board: failed to read the ${source} — ${err.message}`);
     return readFailed;
   }
-  // A repository with no card yet is a real, empty markdown board, and a team with no issue a real, empty Linear board; on GitHub zero items means a failed read.
+  // Empty markdown, Linear, Jira and Azure boards are valid; on GitHub zero items means a failed read.
   if (items.length === 0 && tracker === 'github') {
     output.error('board: gh returned 0 items — auth/network/project problem, not an empty backlog.');
     return readFailed;
   }
 
-  if (parsed.intake) return printIntake(items, parsed, { executor, linear, output, tracker, markdown });
+  if (parsed.intake) return printIntake(items, parsed, { executor, linear, jira, azure, output, tracker, markdown });
 
   // Under --json stdout is a document a caller parses, so the scan goes to stderr rather
   // than corrupting it; the verdict still reaches the operator and still sets the exit code.

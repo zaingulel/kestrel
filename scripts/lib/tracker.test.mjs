@@ -2,12 +2,12 @@
 // Run: node --test scripts/lib/tracker.test.mjs
 //
 // tracker.mjs imports no configuration, so these tests load it directly. Each expected value is
-// written by hand from Linear's schema (Issue.identifier "e.g. ENG-123", Team.key the prefix) or from
-// the GitHub output the board tools already print.
+// written by hand from the Jira tracker contract, Linear's schema (Issue.identifier "e.g. ENG-123",
+// Team.key the prefix) or the GitHub output the board tools already print.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LINEAR_IDENTIFIER, cardRef, compareCardIds, trackerOf } from './tracker.mjs';
+import { LINEAR_IDENTIFIER, cardRef, compareCardIds, isAzureIdentifier, trackerOf } from './tracker.mjs';
 
 test('trackerOf reads a configuration without TRACKER as github and accepts github, markdown and linear', () => {
   assert.equal(trackerOf({}), 'github');
@@ -16,13 +16,35 @@ test('trackerOf reads a configuration without TRACKER as github and accepts gith
   assert.equal(trackerOf({ TRACKER: 'linear' }), 'linear');
 });
 
-test('trackerOf refuses a value other than github, markdown or linear', () => {
+test('Jira is accepted without changing existing identities', () => {
+  assert.equal(trackerOf({}), 'github');
+  assert.equal(trackerOf({ TRACKER: 'github' }), 'github');
+  assert.equal(trackerOf({ TRACKER: 'markdown' }), 'markdown');
+  assert.equal(trackerOf({ TRACKER: 'linear' }), 'linear');
+  assert.equal(cardRef('ENG-2'), 'ENG-2');
+  assert.deepEqual(['ENG-10', 'ENG-2'].sort(compareCardIds), ['ENG-2', 'ENG-10']);
+  assert.equal(trackerOf({ TRACKER: 'jira' }), 'jira');
+});
+
+test('trackerOf refuses a value other than github, markdown, linear, jira or azure', () => {
   assert.throws(
     () => trackerOf({ TRACKER: 'Markdown' }),
-    { message: 'scripts/lib/board-config.mjs: TRACKER must be "github", "markdown" or "linear"; found "Markdown"' },
+    { message: 'scripts/lib/board-config.mjs: TRACKER must be "github", "markdown", "linear", "jira" or "azure"; found "Markdown"' },
   );
   assert.throws(() => trackerOf({ TRACKER: 'Linear' }), { message: /; found "Linear"$/ });
   assert.throws(() => trackerOf({ TRACKER: null }), { message: /; found null$/ });
+});
+
+test('Azure accepts exactly AB identifiers in the positive int32 range', () => {
+  assert.equal(trackerOf({ TRACKER: 'azure' }), 'azure');
+  for (const id of ['AB-1', 'AB-299', 'AB-2147483647']) {
+    assert.equal(isAzureIdentifier(id), true, id);
+    assert.equal(cardRef(id), id);
+  }
+  for (const id of ['AB-0', 'AB-01', 'AB--1', 'AB-2147483648', 'AB-999999999999999999999', 'AB-1.5', 'ab-1', 'ENG-1', 'AB-1\n', ' AB-1', 'AB-1 ', '1', 1, null]) {
+    assert.equal(isAzureIdentifier(id), false, JSON.stringify(id));
+  }
+  assert.deepEqual(['AB-10', 'AB-2', 'AB-1'].sort(compareCardIds), ['AB-1', 'AB-2', 'AB-10']);
 });
 
 test('LINEAR_IDENTIFIER accepts ENG-123 and refuses lowercase, a zero or leading-zero number, a missing team or number and trailing text', () => {

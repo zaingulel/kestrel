@@ -10,7 +10,10 @@ Git is the state. A branch is a job; a draft pull request is its handoff; the bo
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
 what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
-`docs/LINEAR-CARDS.md` says what each card step here becomes.
+`docs/LINEAR-CARDS.md` says what each card step here becomes. Where it exports `TRACKER = "jira"`, read
+`docs/JIRA-CARDS.md` before any card action and apply its Jira substitutions throughout this skill. Where it exports
+`TRACKER = "azure"`, read `docs/AZURE-CARDS.md` before any card action and apply its Azure substitutions
+throughout this skill, including complete native-comment review before claiming.
 
 ## Before intake
 
@@ -277,7 +280,10 @@ session, as gate one in `AGENTS.md` says. Without the instruction below, the pic
   of a run, and the command is rerun in the form the repository's `docs/TESTING-STRATEGY.md` names for a focused
   run in a job worktree.
 - On Codex: a Codex-managed worktree per chat, or
-  `git worktree add ../jobs/<issue> -b job/<issue> <recorded-origin-main>`.
+  `git worktree add ../jobs/<issue> -b job/<issue> <recorded-origin-main>`. For each shell command in the job
+  worktree, use `cd "<absolute-job-worktree>" && <command>` so the directory is visible to the git guard. Use this
+  explicit prefix even when the tool also sets its working directory; the command runs only if the directory change
+  succeeds.
 - Before edits in any newly created runtime worktree, require `git rev-parse HEAD` to equal that newly recorded
   commit. Preserve and report a mismatch before edits.
 - Keep scratch files, plans, and local draft or review prompts inside the job worktree where possible;
@@ -590,9 +596,9 @@ session, as gate one in `AGENTS.md` says. Without the instruction below, the pic
 
 Move the card to `Awaiting push`: `node scripts/board-move.mjs <issue> "Awaiting push"`. Write the pull request
 body with the vendored `pr` skill: read `.agents/skills/pr/SKILL.md`, fill `.github/pull_request_template.md` as
-the body under the Which template wins rule below, and show its chat presentation to the owner with the screenshot.
-The owner still sees that same filled body's information in chat, with the review line at tier `document`; on the direct
-route section 8 describes, the filled body becomes the squash commit's message, since there is no pull request
+the body under the Which template wins rule below, and present it to the owner as the Chat presentation rule says,
+with the review line at tier `document` and the screenshot. On the direct route section 8 describes, the filled body
+becomes the squash commit's message, since there is no pull request
 to hold it. The job's own `Closes #<issue>` line is the only closing word in a pull request body or a
 direct-route commit message: GitHub closes, as completed, any issue whose link follows close, fix or resolve in any
 tense, another repository's `owner/repo#N` included. Every other mention, such as the
@@ -602,7 +608,10 @@ push, the draft pull request, the comments that request the external review wher
 branch, rebasing onto `main`, marking ready, and the auto-merge. Nothing in section 8 stops to ask again; a public comment there is delivery, not a new
 action. Push only after it.
 
-**Chat presentation.** Use the filled body's sections, labels and order, with each disclosure summary as an ordinary Markdown heading followed by its complete contents. Omit HTML disclosure tags and template comments. Keep every required approval detail, review outcome and screenshot; copy test receipts verbatim into fenced `text` blocks. Put the approval question after the body, outside every code fence. Keep the GitHub body in the repository template's format.
+**Chat presentation.** Apply the outcome-reporting rule in `AGENTS.md`. Preserve every detail outside the
+repository template's disclosures, including Summary, Not done, Merge Danger with Undo and Reach, Before and After
+evidence, the review outcome and line, and screenshots. Summarize disclosed test receipts and review findings. Put
+the clear approval question after the presentation. Keep the GitHub body in the repository template's format.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
 the two differ, `.github/pull_request_template.md` wins: it decides which sections and lines the body has, their

@@ -20,7 +20,7 @@ import {
   BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PARKED_LANE, ROUTING_FIELD,
 } from './board-config.mjs';
 import { BOARD_CARD_FIELDS } from './board.mjs';
-import { LINEAR_IDENTIFIER } from './tracker.mjs';
+import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, isAzureIdentifier } from './tracker.mjs';
 
 // The value that clears a non-Status field (`--lane 12:none` releases a parked card).
 // Status is never cleared: an unfielded card is drift the board scan reports.
@@ -146,18 +146,19 @@ export function lookupIssueBoardItem(number, exec, { fieldName = null, card = fa
 // Parse `--batch <issue#>:<Status> [...]` (or `--lane <issue#>:<Lane>`) CLI args into
 // { issueNumber, statusName } pairs. Splits on the FIRST colon so a value is never
 // truncated. Fail-loud on a malformed pair — missing colon, non-numeric issue, or empty
-// value. `valueLabel` only names the value in those messages. On a Linear board the issue is its
-// identifier, such as ENG-123, and `issueNumber` carries that string.
+// value. `valueLabel` only names the value in those messages. On Linear, Jira and Azure the card is its
+// identifier, such as ENG-123 or AB-299, and `issueNumber` carries that string.
 export function parseBatchArgs(args, valueLabel = 'Status', tracker = 'github') {
   return args.map((arg) => {
     const idx = arg.indexOf(':');
     if (idx <= 0) throw new Error(`malformed batch pair "${arg}" — expected "<issue#>:<${valueLabel}>"`);
     const issue = arg.slice(0, idx);
     const statusName = arg.slice(idx + 1).trim();
-    const linear = tracker === 'linear';
-    const issueNumber = linear ? issue : Number(issue);
-    if (!(linear ? LINEAR_IDENTIFIER.test(issue) : Number.isInteger(issueNumber) && issueNumber > 0)) {
-      throw new Error(`malformed batch pair "${arg}" — issue ${linear ? 'must be a Linear issue ID such as ENG-123' : 'number must be a positive integer'}`);
+    const keyed = tracker === 'linear' || tracker === 'jira' || tracker === 'azure';
+    const identifier = tracker === 'jira' ? JIRA_IDENTIFIER : LINEAR_IDENTIFIER;
+    const issueNumber = keyed ? issue : Number(issue);
+    if (!(tracker === 'azure' ? isAzureIdentifier(issue) : keyed ? identifier.test(issue) : Number.isInteger(issueNumber) && issueNumber > 0)) {
+      throw new Error(`malformed batch pair "${arg}" — issue ${tracker === 'azure' ? 'must be an Azure card ID AB-<positive int32>' : keyed ? (tracker === 'jira' ? 'must be a Jira issue key such as ENG-123' : 'must be a Linear issue ID such as ENG-123') : 'number must be a positive integer'}`);
     }
     if (!statusName) throw new Error(`malformed batch pair "${arg}" — ${valueLabel.toLowerCase()} must not be empty`);
     return { issueNumber, statusName };

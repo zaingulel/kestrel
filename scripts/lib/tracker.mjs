@@ -1,25 +1,30 @@
 // tracker.mjs — which tracker an install runs, and how a card's identity prints and sorts on all
 // of them. Pure and free of any configuration import, so every tool can share it.
 //
-// A GitHub or markdown card is identified by a positive integer. A Linear card is identified by
-// its identifier string such as ENG-123 (Issue.identifier; the prefix is Team.key), so on a Linear
-// board every field the other trackers call a number carries that string.
+// A GitHub or markdown card is identified by a positive integer. A Linear or Jira card carries
+// an issue key such as ENG-123, with a team or project prefix, in fields the other trackers call
+// a number. An Azure Boards work item uses AB-<positive int32>.
 
-const TRACKERS = ['github', 'markdown', 'linear'];
+const TRACKERS = ['github', 'markdown', 'linear', 'jira', 'azure'];
 
 // A configuration without TRACKER is a GitHub install; any other value is refused, so a typo can
 // never silently pick another tracker.
 export function trackerOf(config) {
   const tracker = config.TRACKER === undefined ? 'github' : config.TRACKER;
   if (!TRACKERS.includes(tracker)) {
-    throw new Error(`scripts/lib/board-config.mjs: TRACKER must be "github", "markdown" or "linear"; found ${JSON.stringify(config.TRACKER)}`);
+    throw new Error(`scripts/lib/board-config.mjs: TRACKER must be "github", "markdown", "linear", "jira" or "azure"; found ${JSON.stringify(config.TRACKER)}`);
   }
   return tracker;
 }
 
 export const LINEAR_IDENTIFIER = /^[A-Z][A-Z0-9]*-[1-9]\d*$/;
+export const JIRA_IDENTIFIER = /^[A-Z][A-Z0-9]+-[1-9]\d*$/;
 
-// A Linear identifier prints as it is. Anything else prints as `#<value>`, so every GitHub and
+export function isAzureIdentifier(id) {
+  return typeof id === 'string' && /^AB-[1-9]\d*$/.test(id) && Number(id.slice(3)) <= 2147483647;
+}
+
+// An issue key prints as it is. Anything else prints as `#<value>`, so every GitHub and
 // markdown output stays as it was, including the string sentinels `(summary)` and `?` that the
 // unfielded rule supplies in place of a number.
 export function cardRef(id) {
@@ -33,7 +38,7 @@ const splitIdentifier = (id) => {
   return [id.slice(0, dash), id.slice(dash + 1)];
 };
 
-// Null sorts last. Two numbers compare numerically. Two identifiers compare by team, then by the
+// Null sorts last. Two numbers compare numerically. Two issue keys compare by prefix, then by the
 // digit string's length, then the digit string itself, so a number is never converted and ENG-9
 // sorts before ENG-10. A number sorts before an identifier.
 export function compareCardIds(a, b) {

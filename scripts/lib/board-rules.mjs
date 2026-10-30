@@ -86,12 +86,17 @@ export function blockedClaimDrift(card) {
 // progress that no session has actually taken. Advisory for the same reason as above —
 // a card is claimed at pick time, before the assignment is necessarily made. A markdown
 // card's claim is its job branch, which carries no assignee, so a card with one is exempt. A Linear card is
-// assigned through the card command.
+// assigned through the provider card command, as are Jira and Azure cards.
 export function unassignedClaimDrift(card) {
   if (card.state !== 'OPEN' || !isInFlight(card.status) || card.assignees.length > 0 || card.jobBranch) return null;
-  const remedy = configuredTracker() === 'linear'
+  const tracker = configuredTracker();
+  const remedy = tracker === 'linear'
     ? `node scripts/linear-card.mjs assign ${card.number}`
-    : `gh issue edit ${card.number} --add-assignee @me`;
+    : tracker === 'jira'
+      ? `node scripts/jira-card.mjs assign ${card.number}`
+      : tracker === 'azure'
+        ? `node scripts/azure-card.mjs assign ${card.number}`
+        : `gh issue edit ${card.number} --add-assignee @me`;
   return advisory(card, `claimed in "${card.status}" with no assignee — assign the session's owner (${remedy}) or return it to ${PICKABLE_PHRASE}`);
 }
 
@@ -138,6 +143,14 @@ export function epicUnstartedDrift(card) {
   if (!isEpic(card) || card.state !== 'OPEN' || !isInFlight(card.status)) return null;
   if (card.subIssues.total !== 0) return null;
   return advisory(card, `claimed in "${card.status}" but has no sub-issues — if no session is actively decomposing it, decompose it or return it to ${READY}`);
+}
+
+export function kindLabelDrift(card) {
+  if (configuredTracker() !== 'azure') return null;
+  const kinds = Object.values(KIND_LABELS);
+  const labels = card.labels.filter((label) => kinds.includes(label));
+  if (labels.length === 1) return null;
+  return advisory(card, `card has ${labels.length} kind labels; set exactly one of ${kinds.join(', ')}`);
 }
 
 // One unreadable card → the one-line report row. Keyed by `id`: an unresolved card
@@ -269,7 +282,7 @@ export function unfieldedDrift(cards) {
   return drift;
 }
 
-// The seven per-card rules, in report order. scanBoard calls every one of them on every
+// The per-card rules, in report order. scanBoard calls every one of them on every
 // readable card: the rules are disjoint only where their conditions make them so (a
 // CLOSED card cannot also be open in Done), and a card genuinely breaking two rules
 // is told both things.
@@ -281,6 +294,7 @@ const CARD_RULES = [
   stalledClaimDrift,
   epicDoneDrift,
   epicUnstartedDrift,
+  kindLabelDrift,
 ];
 
 // One board read → the two channels. Every rule is answered from the cards already in
