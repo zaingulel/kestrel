@@ -2214,7 +2214,9 @@ class EchoRemovalTests(unittest.TestCase):
                         process.kill.assert_called_once_with()
                         self.assertEqual(process.wait.await_count, 2)
 
-        asyncio.run(graph_boundaries())
+        real_timeout = asyncio.timeout
+        with patch.object(speech.asyncio, 'timeout', lambda delay: real_timeout(0.3 if delay == 5 else delay)):
+            asyncio.run(graph_boundaries())
 
     def test_capture_requires_the_owned_echo_source_and_client(self):
         self.assertEqual(self.serial(self.graph(), None), 900)
@@ -3180,6 +3182,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                             receipt.cancel()
                         await asyncio.gather(*receipts, return_exceptions=True)
 
+    @patch.object(speech, 'LAPTOP_CAPTURE_STALL_TIMEOUT', 0.5)
     async def test_capture_refresh_requires_fresh_audio_and_owned_links(self):
         for case in ('fresh', 'no_fresh_audio', 'changed_source', 'foreign_reference', 'cancelled', 'failed_reap', 'failed_pump', 'graph_cleanup_failure', 'graph_query_recovers'):
             with self.subTest(case=case):
