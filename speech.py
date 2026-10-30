@@ -318,6 +318,13 @@ async def _pipewire_graph():
                 raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE) from None
 
 
+OUTPUT_WATCH_REMOVAL_WAIT = 5
+
+
+class MetadataReplaced(ValueError):
+    pass
+
+
 class OutputDeviceWatch:
     def __init__(self):
         self.process = None
@@ -365,6 +372,9 @@ class OutputDeviceWatch:
         if not isinstance(batch, list) or len(batch) != 1:
             raise ValueError
         item = batch[0]
+        if (isinstance(item, dict) and type(item.get('id')) is int and self.metadata_id is not None
+                and item == {'id': self.metadata_id, 'info': None}):
+            return None
         if (not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] < 0
                 or item.get('type') != 'PipeWire:Interface:Metadata'
                 or not isinstance(item.get('props'), dict) or item['props'].get('metadata.name') != 'default'
@@ -380,21 +390,40 @@ class OutputDeviceWatch:
         graph = await _pipewire_graph()
         metadata = [item for item in graph if item['type'] == 'PipeWire:Interface:Metadata'
                     and item.get('props', {}).get('metadata.name') == 'default']
-        if len(metadata) != 1 or metadata[0]['id'] != self.metadata_id:
+        if not metadata:
+            return None
+        if len(metadata) != 1:
             raise ValueError
+        if metadata[0]['id'] != self.metadata_id:
+            raise MetadataReplaced
         selected = EchoRemoval._selected_output(graph)
         return selected['info']['props']['object.serial'] if selected is not None else None
 
     async def _watch(self, on_change, on_failed):
         try:
+            removal_wait = None
             while True:
-                record = await self._record()
+                async with asyncio.timeout(removal_wait):
+                    record = await self._record()
+                removal_wait = None
+                if record is None:
+                    self.metadata_id = self.selected_serial = None
+                    self.revision += 1
+                    on_change()
+                    continue
+                if self.metadata_id is None:
+                    self.metadata_id = record['id']
                 explicit = any(entry['subject'] == 0 and entry['key'] == 'default.audio.sink'
                                for entry in record['metadata'])
                 if explicit:
                     self.revision += 1
                     on_change()
-                selected = await self._selection()
+                try:
+                    selected = await self._selection()
+                except MetadataReplaced:
+                    # The stream is ordered, so the old id's removal record must follow within moments.
+                    removal_wait = OUTPUT_WATCH_REMOVAL_WAIT
+                    continue
                 if not explicit and selected != self.selected_serial:
                     self.revision += 1
                     on_change()
