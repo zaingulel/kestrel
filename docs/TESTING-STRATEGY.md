@@ -74,7 +74,7 @@ user, so its named anti-regression test keeps pinning it.
 
 Drive the real `run_voice_service` activation boundary and its `run_conversation` sessions in
 [bot.py](../bot.py), retaining pipeline workers, context aggregators, cancellation and speech adapters.
-[WholeConversationTests.open_session](../tests/test_bot.py) owns a real Hermes service and registers cleanup
+[WholeConversationCase.open_session](../tests/conversation_fixtures.py) owns a real Hermes service and registers cleanup
 before startup. Production lifecycle cases activate through the public control socket; existing active-turn
 fixtures explicitly activate before supplying turns. Dedicated pending-preparation cases observe concurrent
 preparation, private provider requests/history, pending mute and cleanup. Held-preparation cases prove that
@@ -83,7 +83,7 @@ session begin acknowledgement and fresh note snapshot before native submission. 
 before its write and after its write to observe revocation and drainage without stale authority. Preparation
 messages never enter caller history, panel or audio and have no note authority.
 
-[WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_bot.py)
+[WholeConversationTests.test_conversation_preserves_context_and_interrupts_reply](../tests/test_whole_conversation_replies.py)
 drives native user-turn frames through the installed Hermes worker against a controlled streaming provider.
 It observes speech at the transport output and committed assistant context, not merely synthesis activity.
 Captured requests establish ordered history and exclude the interrupted unheard tail. Lifecycle cases assert
@@ -133,7 +133,7 @@ and accessible-tree acceptance remain separate installed-host evidence; silent a
 
 ### Local wake evidence
 
-The wake cases in [tests/test_bot.py](../tests/test_bot.py) drive the existing native-audio service fixture. They observe private verified waiting capture, no ordinary recognizer invocation or caller history from waiting audio, recorder reaping before fresh activation, rejection of stale or active hits, typed-output suppression through actual output completion, silent typed controls and optional refusal with the shortcut retained. Existing source-verification and capture-cleanup cases in [tests/test_speech.py](../tests/test_speech.py) remain required.
+The wake cases in [tests/test_whole_conversation_activation.py](../tests/test_whole_conversation_activation.py) drive the existing native-audio service fixture. They observe private verified waiting capture, no ordinary recognizer invocation or caller history from waiting audio, recorder reaping before fresh activation, rejection of stale or active hits, typed-output suppression through actual output completion, silent typed controls and optional refusal with the shortcut retained. Existing source-verification and capture-cleanup cases in [tests/test_speech.py](../tests/test_speech.py) remain required.
 
 [tests/test_wakeword.py](../tests/test_wakeword.py) covers actual loader admission before native construction, hostile paths and asset identities, a wake only at two consecutive scores strictly above 0.80, malformed scores and protocol bytes, bounded queue/startup/frame handling and cleanup. Its native fixture pair runs the production worker with the independently provisioned environment and accepted private `.runtime/wakeword/positive.wav`, identified by 24,204 bytes and SHA-256 `ed4d9ddcc6dbf0835eb212dee74514fd5423f95b9c221578e5d24638c6611422`. It requires a hit for that recording plus silence and none for equal-length silence in a fresh child. A wholly absent wake runtime may skip hosted native execution; an existing partial or unsafe runtime must fail rather than skip. Any local skip blocks delivery, and hosted skips do not establish native behavior. Provision the owned real wake environment separately under [README's wake asset rules](../README.md#wake-phrase-assets); do not add it to the shared runtime links.
 
@@ -223,7 +223,7 @@ Performance budgets stay advisory and labelled with the environment they were me
 Focused evidence during construction follows the selection rule in [section 1, point 7](#1-the-decision-path).
 
 ```sh
-node scripts/run-log.mjs quality mute-wire -- env PYTHONPATH=tests .runtime/voice-venv/bin/python -m unittest test_bot.LocalMuteTests.test_local_command_wire_success_and_failure -v
+node scripts/run-log.mjs quality mute-wire -- env PYTHONPATH=tests .runtime/voice-venv/bin/python -m unittest test_local_commands.LocalMuteTests.test_local_command_wire_success_and_failure -v
 node scripts/run-log.mjs quality flags -- node --test --test-name-pattern='^an absent flag returns the default and a present valid value is returned as a number$' scripts/lib/cli-flags.test.mjs
 ```
 
