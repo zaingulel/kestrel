@@ -3423,6 +3423,25 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=None)
         self.assertFalse(transport.input_admitted())
 
+    async def test_failure_logging_follows_capture_owner(self):
+        # An answer window on the active transport still logs; the waiting capture's owner decides what its end means.
+        admission = Admission(voice=True, output_switching=lambda: False)
+        cases = (
+            ("answer window", admission, Mock(), True),
+            ("waiting capture", None, Mock(), False),
+            ("no capture handed out", admission, None, True),
+        )
+        for name, owner, capture_pcm, logged in cases:
+            with self.subTest(name):
+                messages = []
+                sink = logger.add(lambda message: messages.append(message.record["message"]), level="ERROR")
+                try:
+                    transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=owner, capture_pcm=capture_pcm)
+                    transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                finally:
+                    logger.remove(sink)
+                self.assertEqual(messages, [speech.LAPTOP_CAPTURE_FAILURE] if logged else [])
+
     async def test_output_only_and_reply_token_gate(self):
         admission = Admission(voice=False, output_switching=lambda: False)
         old, _ = admission.accept_spoken()

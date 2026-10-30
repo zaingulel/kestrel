@@ -1090,7 +1090,7 @@ class LaptopAudioTransport:
             self.verified = False
             self.received_audio.set()
             # The waiting capture's owner decides what its end means; a retry must not log "Restart Kestrel".
-            if self.capture_pcm is None:
+            if self.admission is not None:
                 logger.error(reason)
             self.on_stopped()
 
