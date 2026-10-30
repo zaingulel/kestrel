@@ -144,7 +144,7 @@ const REFUSED = [
   '.claude/agents/builder.md', '.codex/agents/builder.toml',
   '.githooks/pre-push', '.githooks/README.md', '.github/workflows/tests.yml',
   '.github/pull_request_template.md', 'scripts/gates/pre-push-main',
-  'scripts/lib/docs-route.mjs', 'scripts/lib/docs-route.test.mjs', 'tests/test_bot.py',
+  'scripts/lib/docs-route.mjs', 'scripts/lib/docs-route.test.mjs', 'tests/test_local_commands.py',
   'package.json', 'package-lock.json', 'eslint.config.mjs', 'requirements-test.txt',
   'Docs/research/note.md', 'docs/Research/note.md', 'docsx/research/note.md',
   'docs/researchx/note.md', 'src/docs/research/note.md', 'docs/README.md.md',
