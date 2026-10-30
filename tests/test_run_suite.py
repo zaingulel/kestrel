@@ -34,6 +34,15 @@ class T(unittest.TestCase):
             file.write(str(os.getpid()))
         time.sleep(60)
 '''
+NESTED = '''import os, subprocess, sys, time, unittest
+
+class T(unittest.TestCase):
+    def test_nested(self):
+        nested = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        with open({pid_file!r}, "w") as file:
+            file.write(f"{{os.getpid()}} {{nested.pid}}")
+        time.sleep(60)
+'''
 
 
 class RunSuiteTests(unittest.TestCase):
@@ -98,6 +107,35 @@ class RunSuiteTests(unittest.TestCase):
         self.assertEqual(runner.wait(timeout=30), 143)
         with self.assertRaises(ProcessLookupError):
             os.kill(child, 0)
+
+    def test_sigterm_ends_a_nested_child_holding_the_output_pipe(self):
+        pid_file = self.directory / 'nested.pid'
+        self.write('test_nested.py', NESTED.format(pid_file=str(pid_file)))
+        runner = subprocess.Popen(
+            [sys.executable, '-c',
+             f'import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent)!r}); '
+             f'import run_suite; sys.exit(run_suite.main({str(self.directory)!r}))'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(runner.kill)
+        deadline = time.monotonic() + 30
+        while not (pid_file.exists() and len(pid_file.read_text().split()) == 2):
+            self.assertIsNone(runner.poll(), 'runner exited before its module ran')
+            self.assertLess(time.monotonic(), deadline, 'module never started')
+            time.sleep(0.05)
+        pids = [int(pid) for pid in pid_file.read_text().split()]
+        for pid in pids:
+            self.addCleanup(self.kill_quietly, pid)
+        runner.send_signal(signal.SIGTERM)
+        self.assertEqual(runner.wait(timeout=30), 143)
+        for pid in pids:
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                self.assertLess(time.monotonic(), deadline, f'process {pid} still running')
+                time.sleep(0.05)
 
     @staticmethod
     def kill_quietly(pid):

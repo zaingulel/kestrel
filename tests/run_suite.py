@@ -5,13 +5,22 @@ The exit status is authoritative: any module that does not exit 0, or an empty s
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import os
 import signal
 import subprocess
 import sys
 import threading
 
 WORKERS = 4
+STOP_GRACE_SECONDS = 5
 SUITE = Path(__file__).resolve().parent
+
+
+def signal_group(child, number):
+    try:
+        os.killpg(child.pid, number)
+    except ProcessLookupError:
+        pass
 
 
 def run_suite(directory, arguments):
@@ -32,7 +41,7 @@ def run_suite(directory, arguments):
                 [sys.executable, '-m', 'unittest', 'discover', '-s', str(directory),
                  '-p', module.name, '-v', *arguments],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors='replace')
+                text=True, errors='replace', start_new_session=True)
             running.add(child)
         output, _ = child.communicate()
         with lock:
@@ -51,9 +60,14 @@ def run_suite(directory, arguments):
     finally:
         with lock:
             stopping.set()
-            for child in running:
-                child.terminate()
+            stopped = list(running)
+            for child in stopped:
+                signal_group(child, signal.SIGTERM)
+        killer = threading.Timer(
+            STOP_GRACE_SECONDS, lambda: [signal_group(child, signal.SIGKILL) for child in stopped])
+        killer.start()
         pool.shutdown(wait=True, cancel_futures=True)
+        killer.cancel()
     if failed:
         print(f'FAILED modules: {", ".join(failed)}', flush=True)
         return 1
