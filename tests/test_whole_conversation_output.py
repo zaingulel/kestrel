@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 import unittest
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
@@ -17,6 +18,21 @@ from conversation_fixtures import WholeConversationCase, microphone_admitted
 import reply_progress
 import speech
 from test_hermes import ScriptedBrain
+
+HANDOVER_LIMIT = 3
+
+
+def shortened_handover(deadlines):
+    """Shorten the production 30-second handover deadline so tests do not wait it out; other delays pass through."""
+    native_timeout = asyncio.timeout
+
+    def timeout(delay):
+        if delay == 30:
+            deadlines.append(delay)
+            delay = HANDOVER_LIMIT
+        return native_timeout(delay)
+
+    return patch.object(bot.asyncio, 'timeout', side_effect=timeout)
 
 
 class WholeConversationTests(WholeConversationCase):
@@ -840,7 +856,7 @@ class WholeConversationTests(WholeConversationCase):
                         self.assertIsNotNone(playback)
                         self.assertIsNone(playback.returncode)
                         failed = asyncio.Event()
-                        attempts, graph_children = [], []
+                        attempts, graph_children, deadlines = [], [], []
                         original_state = manager.status.set_state
 
                         def state(value):
@@ -864,10 +880,11 @@ class WholeConversationTests(WholeConversationCase):
                             return 800
 
                         with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=invalid_route)), \
-                                patch.object(manager.status, 'set_state', side_effect=state):
+                                patch.object(manager.status, 'set_state', side_effect=state), \
+                                (shortened_handover(deadlines) if case == 'persistent_route' else nullcontext()):
                             service.output_watch.emit()
-                            # Watchdog includes the existing 30-second handover and bounded cleanup.
-                            await asyncio.wait_for(failed.wait(), 35)
+                            # Watchdog includes the handover shortened to HANDOVER_LIMIT and bounded cleanup.
+                            await asyncio.wait_for(failed.wait(), 10)
                         if case == 'graph_cleanup_route':
                             self.assertEqual(len(attempts), 1)
                             self.assertEqual(len(graph_children), 1)
@@ -876,6 +893,7 @@ class WholeConversationTests(WholeConversationCase):
                             graph_children[0].kill.assert_called_once_with()
                             self.assertEqual(len(service.echo_generations), 2)
                         else:
+                            self.assertTrue(deadlines, 'The production handover deadline was never requested')
                             self.assertGreaterEqual(len(attempts), 2)
                         self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
                         self.assertFalse(microphone_admitted(manager))
@@ -887,6 +905,7 @@ class WholeConversationTests(WholeConversationCase):
                         self.assertEqual(await service.submit('new request'), 'unavailable')
                     elif case == 'verification_failure':
                         failed = asyncio.Event()
+                        deadlines = []
                         original_state = manager.status.set_state
 
                         def state(value):
@@ -895,11 +914,13 @@ class WholeConversationTests(WholeConversationCase):
                                 failed.set()
 
                         with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=RuntimeError('private graph'))), \
-                                patch.object(manager.status, 'set_state', side_effect=state):
+                                patch.object(manager.status, 'set_state', side_effect=state), \
+                                shortened_handover(deadlines):
                             service.output_watch.emit()
                             self.assertFalse(microphone_admitted(manager))
-                            # Persistent unresolved selection uses the existing 30-second total deadline.
-                            await asyncio.wait_for(failed.wait(), 35)
+                            # Persistent unresolved selection uses the total deadline shortened to HANDOVER_LIMIT.
+                            await asyncio.wait_for(failed.wait(), 10)
+                        self.assertTrue(deadlines, 'The production handover deadline was never requested')
                         self.assertFalse(microphone_admitted(manager))
                         self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
                         self.assertNotIn('private graph', manager.failure)
