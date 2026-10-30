@@ -40,6 +40,12 @@ ENGINE_LOAD_ERROR = ('Hermes engine files could not be loaded. '
                      'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
 TOOL_SURFACE_ERROR = ("Hermes offered tools other than memory and Kestrel's desktop tools. "
                       'Check the pinned Hermes configuration, then restart Kestrel.')
+SOURCE_ENV_ERROR = ('Hermes source .env is not supported. Keep environment files outside '
+                    'the pinned source and restart Kestrel.')
+SYSTEM_PLUGINS_ERROR = ('System NeMo Relay plugins are not supported by Kestrel. Use an environment '
+                        'without /etc/nemo-relay/plugins.toml and restart Kestrel.')
+CONFIGURATION_CHECK_ERROR = ('Kestrel could not verify isolated Hermes configuration. '
+                             'Check runtime permissions and restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 ORDINARY_MAX_TOKENS = 180
 ORDINARY_REASONING_ENABLED = False
@@ -277,20 +283,15 @@ def validate_hermes_source() -> None:
 
 def validate_local_configuration() -> None:
     for path, refusal in (
-        (HERMES_SOURCE / '.env',
-         'Hermes source .env is not supported. Keep environment files outside '
-         'the pinned source and restart Kestrel.'),
-        (Path('/etc/nemo-relay/plugins.toml'),
-         'System NeMo Relay plugins are not supported by Kestrel. Use an environment '
-         'without /etc/nemo-relay/plugins.toml and restart Kestrel.'),
+        (HERMES_SOURCE / '.env', SOURCE_ENV_ERROR),
+        (Path('/etc/nemo-relay/plugins.toml'), SYSTEM_PLUGINS_ERROR),
     ):
         try:
             path.lstat()
         except FileNotFoundError:
             continue
         except OSError:
-            raise RuntimeError('Kestrel could not verify isolated Hermes configuration. '
-                               'Check runtime permissions and restart Kestrel.') from None
+            raise RuntimeError(CONFIGURATION_CHECK_ERROR) from None
         raise RuntimeError(refusal)
 
 
