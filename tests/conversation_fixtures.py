@@ -178,7 +178,7 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
         identity(os.getpid())
         identity(70001)
         echo_generations = []
-        output_watch = SimpleNamespace(revision=0, on_change=None, on_failed=None)
+        output_watch = SimpleNamespace(revision=0, metadata_id=32, on_change=None, on_failed=None)
 
         async def watch_start(on_change, on_failed):
             output_watch.on_change, output_watch.on_failed = on_change, on_failed

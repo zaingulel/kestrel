@@ -138,6 +138,7 @@ LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
 LAPTOP_PLAYBACK_FAILURE = "Audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Microphone capture failed. Restart Kestrel."
+CAPTURE_RECOVERY_WINDOW = 30
 
 
 def _standalone_number(token: str, start: int, stop: int) -> bool:
@@ -1024,6 +1025,28 @@ class LaptopOutput(BaseOutputTransport):
             return False
 
 
+class CaptureRecovery:
+    """Bounds reopening after one capture loss; capture must hold a whole window before a later loss counts as new."""
+
+    def __init__(self, clock=monotonic):
+        self.clock = clock
+        self.recovering = False
+        self.deadline = 0.0
+        self.held_until = 0.0
+
+    def attempt(self) -> bool:
+        now = self.clock()
+        if not self.recovering and now >= self.held_until:
+            self.deadline = now + CAPTURE_RECOVERY_WINDOW
+        self.recovering = True
+        return now < self.deadline
+
+    def reopened(self) -> None:
+        if self.recovering:
+            self.recovering = False
+            self.held_until = self.clock() + CAPTURE_RECOVERY_WINDOW
+
+
 class LaptopAudioTransport:
     def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
         self.echo_removal = echo_removal
@@ -1066,7 +1089,9 @@ class LaptopAudioTransport:
             self.failure = reason
             self.verified = False
             self.received_audio.set()
-            logger.error(reason)
+            # The waiting capture's owner decides what its end means; a retry must not log "Restart Kestrel".
+            if self.capture_pcm is None:
+                logger.error(reason)
             self.on_stopped()
 
     async def _source(self, capture_pid=None, *, output_serial=None):

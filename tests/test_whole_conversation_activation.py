@@ -1,10 +1,11 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import tempfile
 import threading
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from loguru import logger
@@ -14,7 +15,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 
 import bot
-from conversation_fixtures import WholeConversationCase
+from conversation_fixtures import WholeConversationCase, wait_until
 import reply_progress
 import speech
 from test_hermes import ScriptedBrain
@@ -22,9 +23,172 @@ from test_hermes import ScriptedBrain
 
 # Two 1.0 scores in a row: the wake fires at the second.
 WAKE_PHRASE_PCM = bytes([1]) * 1280
+# What pw-dump reports when WirePlumber restarts: the old default metadata goes, then its replacement appears.
+METADATA_REMOVED = json.dumps([{'id': 32, 'info': None}]).encode() + b'\n'
+RESTARTED_METADATA = {'id': 40, 'type': 'PipeWire:Interface:Metadata', 'props': {'metadata.name': 'default'},
+                      'metadata': [{'subject': 0, 'key': 'default.audio.sink', 'type': 'Spa:String:JSON',
+                                    'value': {'name': 'A'}}]}
+METADATA_REPLACED = json.dumps([RESTARTED_METADATA]).encode() + b'\n'
+RESTARTED_GRAPH = [RESTARTED_METADATA, {'id': 10, 'type': 'PipeWire:Interface:Node', 'info': {'props': {
+    'node.name': 'A', 'media.class': 'Audio/Sink', 'object.serial': 910,
+}}}]
+CAPTURE_LOST_LOG = 'Microphone capture lost; reopening'
+
+
+@asynccontextmanager
+async def real_output_watch(manager):
+    """Puts a real monitor on the service; the fixture's double would hide how a restart reaches the conversation."""
+    watch = speech.OutputDeviceWatch()
+    watch.metadata_id, watch.revision = 32, manager.output_watch.revision
+    watch.process = Mock(stdout=asyncio.StreamReader(), returncode=None, wait=AsyncMock(return_value=0))
+    manager.output_watch = watch
+    watch.reader = asyncio.create_task(watch._watch(manager.output_changed, manager.output_watch_failed))
+    try:
+        yield watch.process.stdout
+    finally:
+        await watch.close()
 
 
 class WholeConversationTests(WholeConversationCase):
+    def log_lines(self):
+        lines = []
+        sink = logger.add(lambda message: lines.append(str(message)), format='{message}')
+        self.addCleanup(logger.remove, sink)
+        return lines
+
+    async def next_waiting(self, service):
+        try:
+            return await asyncio.wait_for(service.waiting.get(), 5)
+        except TimeoutError:
+            self.fail('No fresh waiting capture arrived: '
+                      f'wake_disabled={service.manager.wake_disabled}, failure={service.manager.failure!r}')
+
+    async def wake_session(self, *replies, **options):
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')], *replies])
+        self.addCleanup(brain.close)
+        session = await self.open_session(brain, through_service=True, native_audio=True, **options)
+        return brain, session
+
+    async def assert_waiting_resumes(self, case):
+        lines = self.log_lines()
+        brain, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+            if case == 'restart':
+                async with real_output_watch(manager) as monitor:
+                    monitor.feed_data(METADATA_REMOVED)
+                    await asyncio.wait_for(first.capture.reaped.wait(), 5)
+                    monitor.feed_data(METADATA_REPLACED)
+                    await self.assert_fresh_waiting_starts_conversation(service, brain, first, lines)
+            elif case == 'end_of_stream':
+                first.capture.stdout.feed_eof()
+                await self.assert_fresh_waiting_starts_conversation(service, brain, first, lines)
+            else:
+                with patch.object(speech, 'LAPTOP_CAPTURE_STALL_TIMEOUT', 0.05):
+                    first.capture.stdout.feed_data(bytes(640))
+                    # Reader completion leaves the shortened stall bound before any replacement recorder can read.
+                    await asyncio.wait({first.reader}, timeout=5)
+                self.assertEqual(first.failure, speech.LAPTOP_CAPTURE_FAILURE)
+                await self.assert_fresh_waiting_starts_conversation(service, brain, first, lines)
+        finally:
+            await close()
+
+    async def assert_fresh_waiting_starts_conversation(self, service, brain, first, lines):
+        manager = service.manager
+        second = await self.next_waiting(service)
+        self.assertIsNot(second, first)
+        self.assertTrue(first.capture.reaped.is_set())
+        self.assertTrue(first.reader.done())
+        self.assertIs(manager.waiting_transport, second)
+        self.assertIsNone(second.capture.returncode)
+        self.assertIsNone(manager.failure)
+        self.assertFalse(manager.wake_disabled)
+        self.assertGreaterEqual(len(service.echo_generations), 2)
+        self.assertFalse(any(speech.LAPTOP_CAPTURE_FAILURE in line for line in lines), lines)
+        self.assertTrue(any(CAPTURE_LOST_LOG in line for line in lines), 'Losing capture must log the reopening')
+        with patch.object(service.recognizer, 'transcribe', wraps=service.recognizer.transcribe) as recognition:
+            second.capture.stdout.feed_data(bytes(640))
+            second.capture.stdout.feed_data(WAKE_PHRASE_PCM)
+            await asyncio.wait_for(service.started.get(), 5)
+            self.assertTrue(second.capture.reaped.is_set(), 'Waiting recorder must exit before recognition')
+            self.assertEqual(manager.conversation.turns, [])
+            self.assertIsNone(service.recognizer.reader, 'Waiting PCM must not open ordinary recognition')
+            recognition.assert_not_called()
+            self.assertEqual(len(brain.requests), 1, 'Only fixed preparation, no waiting-audio request')
+
+    async def assert_active_conversation_survives_restart(self):
+        lines = self.log_lines()
+        _, (transport, _, _, _, _, close) = await self.wake_session()
+        manager = transport.service.manager
+        try:
+            await asyncio.shield(manager.session_ready)
+            old_capture = transport.capture
+            async with real_output_watch(manager) as monitor:
+                monitor.feed_data(METADATA_REMOVED)
+                await asyncio.wait_for(old_capture.reaped.wait(), 5)
+                self.assertTrue(any(CAPTURE_LOST_LOG in line for line in lines), 'A restart must log the reopening')
+                self.assertIsNone(manager.failure)
+                monitor.feed_data(METADATA_REPLACED)
+                await wait_until(lambda: not manager.switching_output, 'The handover never finished')
+                self.assertIs(manager.transport, transport)
+                self.assertIsNot(transport.capture, old_capture)
+                self.assertTrue(transport.verified)
+                self.assertFalse(manager.capture_recovery.recovering)
+        finally:
+            await close()
+
+    async def assert_typed_only_restart_survives_failed_capture(self):
+        reply = [({'content': '[delivery:neutral]\nTyped reply.'}, None), ({}, 'stop')]
+        _, (handle, _, committed, _, _, close) = await self.wake_session(reply, activate=False)
+        service = handle.service
+        manager = service.manager
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            self.assertEqual(await service.submit('Typed request.'), 'accepted')
+            typed = await asyncio.wait_for(service.started.get(), 5)
+            fresh = await asyncio.wait_for(service.waiting.get(), 5)
+            self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Typed reply.')
+            self.assertIsNot(fresh, first)
+            self.assertIs(manager.transport, typed)
+            self.assertIsNone(typed.capture)
+            factory = bot.LaptopAudioTransport.side_effect
+            refused = []
+
+            def failing_once(*args, **kwargs):
+                transport = factory(*args, **kwargs)
+                if not refused:
+                    transport._spawn = AsyncMock(side_effect=OSError('Native capture could not start'))
+                    refused.append(transport)
+                return transport
+
+            async with real_output_watch(manager) as monitor:
+                with patch.object(bot.LaptopAudioTransport, 'side_effect', side_effect=failing_once):
+                    monitor.feed_data(METADATA_REMOVED)
+                    await asyncio.wait_for(fresh.capture.reaped.wait(), 5)
+                    monitor.feed_data(METADATA_REPLACED)
+                    reopened = await self.next_waiting(service)
+                self.assertEqual([transport.failure for transport in refused], [speech.LAPTOP_CAPTURE_FAILURE])
+                self.assertFalse(manager.wake_disabled)
+                self.assertIsNone(manager.failure)
+                self.assertTrue(reopened.verified)
+                await wait_until(lambda: not manager.capture_recovery.recovering, 'Recovery never ended')
+        finally:
+            await close()
+
+    async def test_wake_listening_resumes_after_audio_system_restart(self):
+        with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0, create=True), \
+                patch.object(speech, '_pipewire_graph', new=AsyncMock(return_value=RESTARTED_GRAPH)):
+            for case in ('restart', 'end_of_stream', 'stall'):
+                with self.subTest(case=case):
+                    await self.assert_waiting_resumes(case)
+            with self.subTest(case='restart_active'):
+                await self.assert_active_conversation_survives_restart()
+            with self.subTest(case='restart_typed_only_failed_capture'):
+                await self.assert_typed_only_restart_survives_failed_capture()
+
     async def test_thats_all_ends_conversation_without_brain_request_or_activation(self):
         brain = ScriptedBrain([
             [({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')],
