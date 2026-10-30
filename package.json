@@ -9,7 +9,7 @@
     "lint:docs": "node scripts/doc-lint.mjs",
     "prepare": "git config core.hooksPath .githooks || true",
     "test:scripts": "node --test \"scripts/lib/*.test.mjs\"",
-    "test:speech": ".runtime/voice-venv/bin/python -m unittest discover -s tests -v",
+    "test:speech": ".runtime/voice-venv/bin/python tests/run_suite.py",
     "test": "npm run test:scripts && npm run test:speech"
   },
   "dependencies": {
