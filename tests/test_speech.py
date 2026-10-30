@@ -33,6 +33,11 @@ import speech
 from speech import NemotronSTT, VoicePreset, VoxCPMTTS, load_voice_preset
 
 
+def setUpModule():
+    # pipecat's idle limit is shortened so tests do not wait it out.
+    unittest.enterModuleContext(patch.dict(speech.TTSService.__init__.__kwdefaults__, stop_frame_timeout_s=0.5))
+
+
 TEST_PRESET = VoicePreset(Path("/fixture/voice.wav"), "Fixture voice.", bytes(9600))
 
 

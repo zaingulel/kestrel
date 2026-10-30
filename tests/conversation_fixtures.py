@@ -580,6 +580,8 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
             handlers[sig] = callback, arguments
 
         for binding in (
+            # pipecat's idle limit is shortened so tests do not wait it out.
+            patch.dict(speech.TTSService.__init__.__kwdefaults__, stop_frame_timeout_s=0.5),
             patch.object(speech.LaptopOutput, '_acknowledgement_now', lambda output: acknowledgement_time[0]),
             patch.object(loop, 'call_later', side_effect=call_later),
             patch.object(bot.asyncio, 'create_subprocess_exec', spawn),
