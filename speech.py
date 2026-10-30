@@ -1048,12 +1048,14 @@ class CaptureRecovery:
 
 
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
+    def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None,
+                 on_capture_lost=None):
         self.echo_removal = echo_removal
         self.admission = admission
         self.capture_pcm = capture_pcm
         self.capture_enabled = capture_enabled
         self.on_stopped = on_stopped
+        self.on_capture_lost = on_capture_lost
         self.failure: str | None = None
         self.capture = None
         self.playback = None
@@ -1094,10 +1096,15 @@ class LaptopAudioTransport:
                 logger.error(reason)
             self.on_stopped()
 
+    def _require_live_capture(self):
+        if self.failure:
+            raise RuntimeError(self.failure)
+        if self.reader is not None and self.reader.done():
+            raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
+
     async def _source(self, capture_pid=None, *, output_serial=None):
         while True:
-            if self.failure:
-                raise RuntimeError(self.failure)
+            self._require_live_capture()
             try:
                 return await self.echo_removal.microphone_serial(capture_pid, output_serial=output_serial)
             except PipeWireGraphCleanupFailure:
@@ -1143,14 +1150,12 @@ class LaptopAudioTransport:
                     "--properties", json.dumps(props), "--rate", "16000", "--channels", "1",
                     "--format", "s16", "--latency", "20ms", "-", stdout=asyncio.subprocess.PIPE,
                 )
-                self.reader = asyncio.create_task(self._read())
+                self.reader = asyncio.create_task(self._read(refreshing))
                 if await self._source(self.capture.pid, output_serial=output_serial) != serial:
                     raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
-                if self.failure:
-                    raise RuntimeError(self.failure)
+                self._require_live_capture()
                 await asyncio.wait_for(self.received_audio.wait(), LAPTOP_CAPTURE_STALL_TIMEOUT)
-                if self.failure:
-                    raise RuntimeError(self.failure)
+                self._require_live_capture()
                 self.verified = True
         except asyncio.CancelledError:
             if refreshing:
@@ -1163,15 +1168,18 @@ class LaptopAudioTransport:
             else:
                 await self.close()
             raise
-        except (OSError, RuntimeError, TimeoutError):
+        except (OSError, RuntimeError, TimeoutError) as error:
             if refreshing:
                 await self.suspend_capture()
+                # A graph child that could not be reaped is final; only an ordinary failure may be retried.
+                if isinstance(error, PipeWireGraphCleanupFailure):
+                    raise
                 raise RuntimeError(LAPTOP_CAPTURE_FAILURE) from None
             self.fail(LAPTOP_CAPTURE_FAILURE)
             await self.close()
             raise RuntimeError(self.failure) from None
 
-    async def _read(self):
+    async def _read(self, replacing):
         try:
             while True:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
@@ -1182,7 +1190,13 @@ class LaptopAudioTransport:
                     elif self._input.ready and self.input_admitted():
                         await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
-            self.fail(LAPTOP_CAPTURE_FAILURE)
+            # Only a first opening has failed outright; anything later is its owner's to reopen.
+            if self.on_capture_lost is None or not (replacing or self.verified):
+                self.fail(LAPTOP_CAPTURE_FAILURE)
+            elif not self.closed:
+                self.verified = False
+                self.received_audio.set()
+                self.on_capture_lost()
 
     async def _open_playback(self):
         try:

@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 import json
 import tempfile
 import threading
@@ -34,6 +34,8 @@ RESTARTED_GRAPH = [RESTARTED_METADATA, {'id': 10, 'type': 'PipeWire:Interface:No
 }}}]
 CAPTURE_LOST_LOG = 'Microphone capture lost; reopening'
 PAUSE_THAT_NEVER_ELAPSES = 3600
+# Differs from the fixture's 900, so a serial remembered from an earlier opening cannot satisfy the test.
+OWNED_SERIAL = 901
 
 
 @asynccontextmanager
@@ -48,6 +50,15 @@ async def real_output_watch(manager):
         yield watch.process.stdout
     finally:
         await watch.close()
+
+
+def live_capture_children(service):
+    return [child for child in service.audio_children if child.stdout is not None and child.returncode is None]
+
+
+def conversation_recorders(service):
+    # An activated session may first have opened a waiting recorder, depending on how quickly it was activated.
+    return [child for child in service.audio_children if child.stdout is not None and not child.wake_capture]
 
 
 class WholeConversationTests(WholeConversationCase):
@@ -266,6 +277,252 @@ class WholeConversationTests(WholeConversationCase):
                     await self.assert_recovery_pause_yields(case)
             with self.subTest(case='uncertain_cleanup'):
                 await self.assert_uncertain_recovery_cleanup_refuses()
+
+    def assert_owned_capture(self, recorder, output_serial):
+        argv = recorder.argv
+        self.assertEqual(argv[argv.index('--target') + 1], str(OWNED_SERIAL))
+        properties = json.loads(argv[argv.index('--properties') + 1])
+        for name in ('node.dont-fallback', 'node.dont-move', 'node.dont-reconnect'):
+            self.assertIs(properties[name], True, name)
+        bot.ECHO_REMOVAL.microphone_serial.assert_any_await(recorder.pid, output_serial=output_serial)
+
+    async def assert_capture_reopens_through_owned_source(self, route, refusing):
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=route == 'active')
+        service = handle.service
+        manager = service.manager
+        serial = bot.ECHO_REMOVAL.microphone_serial
+        refused = []
+
+        async def source(pid=None, *, output_serial=None):
+            # The recorder is refused while holding wake audio, so a refusal that still listens would be caught.
+            if pid is None:
+                return OWNED_SERIAL
+            if not refused or pid == refused[0]:
+                if not refused:
+                    refused.append(pid)
+                    recorder = next(c for c in service.audio_children if c.pid == pid)
+                    recorder.stdout.feed_data(WAKE_PHRASE_PCM)
+                    await wait_until(lambda: not recorder.stdout._buffer, 'The refused recorder was never read')
+                raise RuntimeError('The owned microphone is missing. Restart Kestrel.')
+            return OWNED_SERIAL
+
+        if route == 'waiting':
+            spy = patch.object(bot.WakeWordDetector, 'submit', autospec=True, side_effect=bot.WakeWordDetector.submit)
+        else:
+            spy = patch.object(handle.input(), 'push_audio_frame', wraps=handle.input().push_audio_frame)
+        timeout = 0.2 if refusing else speech.LAPTOP_AUDIO_START_TIMEOUT
+        try:
+            if route == 'waiting':
+                lost = (await asyncio.wait_for(service.waiting.get(), 5)).capture
+                await asyncio.wait_for(asyncio.shield(service.channel.preparation), 5)
+            else:
+                await asyncio.shield(manager.session_ready)
+                lost = handle.capture
+            serial.return_value = OWNED_SERIAL
+            if refusing:
+                serial.side_effect = source
+            with spy as heard, patch.object(speech, 'LAPTOP_AUDIO_START_TIMEOUT', timeout):
+                lost.stdout.feed_eof()
+                if route == 'waiting':
+                    fresh = (await self.next_waiting(service)).capture
+                else:
+                    def reopened():
+                        fresh = handle.capture
+                        return (fresh is not None and fresh is not lost and fresh.pid not in refused
+                                and bool(refused) == refusing and handle.verified and not manager.switching_output)
+
+                    await wait_until(reopened, 'Capture never reopened')
+                    fresh = handle.capture
+                    self.assertIs(manager.transport, handle)
+                self.assertIsNot(fresh, lost)
+                self.assert_owned_capture(fresh, 800 if route == 'active' else None)
+                self.assertIsNone(manager.failure)
+                if refusing:
+                    refused_recorder = next(c for c in service.audio_children if c.pid == refused[0])
+                    self.assertIsNot(fresh, refused_recorder)
+                    heard.assert_not_called()
+                    if route == 'active':
+                        self.assertIsNone(manager.wake_detector)
+                    else:
+                        self.assertTrue(service.started.empty(), 'A refused recorder must not start a conversation')
+                        self.assertTrue(refused_recorder.reaped.is_set())
+                        # The same audio on the verified recorder wakes, so the silence above was the refusal.
+                        fresh.stdout.feed_data(bytes(640))
+                        fresh.stdout.feed_data(WAKE_PHRASE_PCM)
+                        await asyncio.wait_for(service.started.get(), 5)
+                        heard.assert_called()
+        finally:
+            await close()
+
+    async def test_capture_reopens_only_through_the_owned_source(self):
+        with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+            for case in ('waiting', 'waiting_refused', 'active', 'active_refused'):
+                with self.subTest(case=case):
+                    await self.assert_capture_reopens_through_owned_source(case.split('_')[0], case.endswith('_refused'))
+
+    async def lose_active_capture(self, case, transport, monitor):
+        lost = transport.capture
+        if case == 'stall':
+            with patch.object(speech, 'LAPTOP_CAPTURE_STALL_TIMEOUT', 0.05):
+                lost.stdout.feed_data(bytes(640))
+                # Reader completion leaves the shortened stall bound before any replacement recorder can read.
+                await asyncio.wait({transport.reader}, timeout=5)
+        elif case == 'removal_before_stream_end':
+            monitor.feed_data(METADATA_REMOVED)
+            lost.stdout.feed_eof()
+        else:
+            lost.stdout.feed_eof()
+            if case == 'stream_ends_before_removal':
+                monitor.feed_data(METADATA_REMOVED)
+        if case in ('stream_ends_before_removal', 'removal_before_stream_end'):
+            await asyncio.wait_for(lost.reaped.wait(), 5)
+            monitor.feed_data(METADATA_REPLACED)
+
+    async def assert_conversation_reopens(self, case):
+        lines = self.log_lines()
+        reply = [({'content': '[delivery:neutral]\nStill here.'}, None), ({}, 'stop')]
+        _, (transport, spoken, _, _, _, close) = await self.wake_session(reply)
+        service = transport.service
+        manager = service.manager
+        refused = []
+        route_checks = []
+        native_spawn = transport._spawn
+
+        async def refuse_first_recorder(*argv, **kwargs):
+            if '--record' in argv and not refused:
+                refused.append(argv)
+                raise OSError('Native capture could not start')
+            return await native_spawn(*argv, **kwargs)
+
+        async def lose_fresh_capture_during_route_check(pid=None):
+            route_checks.append(pid)
+            if len(route_checks) == 2:
+                transport.capture.stdout.feed_eof()
+                await asyncio.wait({transport.reader}, timeout=5)
+            return 800
+
+        try:
+            await asyncio.shield(manager.session_ready)
+            lost = transport.capture
+            if case == 'replacement_refused_then_reopens':
+                transport._spawn = refuse_first_recorder
+            route = (patch.object(bot.ECHO_REMOVAL, 'output_serial',
+                                  new=AsyncMock(side_effect=lose_fresh_capture_during_route_check))
+                     if case == 'lost_during_route_check' else nullcontext())
+
+            def reopened():
+                # A removal leaves no metadata until its replacement is read, and that replacement starts a handover.
+                return (manager.output_watch.metadata_id is not None and transport.capture is not None
+                        and transport.capture is not lost and transport.verified
+                        and not manager.switching_output and not manager.capture_recovery.recovering)
+
+            async with real_output_watch(manager) as monitor:
+                with route:
+                    await self.lose_active_capture(case, transport, monitor)
+                    try:
+                        await wait_until(reopened, 'Capture never reopened')
+                    except AssertionError:
+                        self.fail(f'Capture never reopened: failure={manager.failure!r}, trouble={manager.trouble!r}, '
+                                  f'desired_active={manager.desired_active}')
+                self.assertIs(manager.transport, transport)
+                self.assertTrue(manager.desired_active)
+                self.assertIsNone(manager.failure)
+                self.assertIsNone(manager.trouble)
+                self.assertFalse(manager.capture_recovery.recovering)
+                self.assertTrue(transport.verified)
+                self.assertFalse(any(speech.LAPTOP_CAPTURE_FAILURE in line for line in lines), lines)
+                self.assertTrue(any(CAPTURE_LOST_LOG in line for line in lines), 'Losing capture must log the reopening')
+                self.assertEqual(live_capture_children(service), [transport.capture])
+                if case == 'replacement_refused_then_reopens':
+                    self.assertEqual(len(refused), 1)
+                await self.speak_request(transport, 'Are you still there?')
+                await self.hear_exactly(spoken, 'Still here.')
+        finally:
+            await close()
+
+    async def assert_uncertain_cleanup_is_final(self):
+        _, (transport, _, _, _, _, close) = await self.wake_session()
+        service = transport.service
+        manager = service.manager
+
+        async def source(pid=None, *, output_serial=None):
+            if pid is None:
+                return 900
+            raise speech.PipeWireGraphCleanupFailure(speech.OUTPUT_SWITCH_FAILURE)
+
+        serial = AsyncMock(side_effect=source)
+        try:
+            await asyncio.shield(manager.session_ready)
+            with patch.object(bot.ECHO_REMOVAL, 'microphone_serial', serial):
+                transport.capture.stdout.feed_eof()
+                await wait_until(lambda: manager.failure is not None, 'The uncertain cleanup was never reported')
+                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                self.assertEqual(manager.trouble, 'trouble')
+                self.assertFalse(manager.desired_active)
+                self.assertEqual(await service.toggle(), 'unavailable')
+                self.assertEqual(await service.submit('Typed after the failure.'), 'unavailable')
+                recorders = conversation_recorders(service)
+                self.assertEqual(len(recorders), 2, 'The original and one replacement, with no later reopening')
+                for capture in recorders:
+                    self.assertTrue(capture.reaped.is_set())
+                self.assertEqual(len([call for call in serial.await_args_list if call.args and call.args[0] is not None]), 1)
+        finally:
+            await close()
+
+    async def test_microphone_loss_during_conversation_reopens(self):
+        with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0), \
+                patch.object(speech, '_pipewire_graph', new=AsyncMock(return_value=RESTARTED_GRAPH)):
+            for case in ('stream_ends_before_removal', 'removal_before_stream_end', 'stall',
+                         'replacement_refused_then_reopens', 'lost_during_route_check'):
+                with self.subTest(case=case):
+                    await self.assert_conversation_reopens(case)
+            with self.subTest(case='uncertain_cleanup_is_final'):
+                await self.assert_uncertain_cleanup_is_final()
+
+    async def assert_reopening_yields(self, case):
+        _, (transport, _, _, _, _, close) = await self.wake_session()
+        service = transport.service
+        manager = service.manager
+        native_wait_for = asyncio.wait_for
+        paused = asyncio.Event()
+
+        async def wait_for(awaitable, timeout):
+            if timeout == PAUSE_THAT_NEVER_ELAPSES:
+                paused.set()
+            return await native_wait_for(awaitable, timeout)
+
+        try:
+            await asyncio.shield(manager.session_ready)
+            lost = transport.capture
+            with patch.object(bot.asyncio, 'wait_for', side_effect=wait_for):
+                waiting_before = service.waiting.qsize()
+                lost.stdout.feed_eof()
+                try:
+                    await asyncio.wait_for(paused.wait(), 5)
+                except TimeoutError:
+                    self.fail(f'A reopening pause was never requested: failure={manager.failure!r}, '
+                              f'trouble={manager.trouble!r}, recorders={len(conversation_recorders(service))}')
+                self.assertTrue(lost.reaped.is_set())
+                self.assertIsNone(transport.capture)
+                self.assertEqual(conversation_recorders(service), [lost], 'The pause must hold no recorder')
+                self.assertEqual(live_capture_children(service), [], 'The pause must hold no recorder')
+                self.assertEqual(await service.submit('Typed during the reopening.'), 'busy')
+                if case == 'dismissal':
+                    self.assertEqual(await service.toggle(), 'inactive')
+                    await asyncio.wait_for(asyncio.shield(transport.cleanup_finished), 5)
+                    await wait_until(lambda: manager.transport is None, 'The dismissed conversation never finished')
+                    self.assertIsNone(manager.failure)
+                    self.assertEqual(service.waiting.qsize(), waiting_before, 'Dismissal during the pause must queue no new waiting recorder')
+                else:
+                    await asyncio.wait_for(close(), 5)
+        finally:
+            await close()
+
+    async def test_reopening_yields_to_dismissal_and_shutdown(self):
+        with patch.object(bot, 'CAPTURE_RETRY_PAUSE', PAUSE_THAT_NEVER_ELAPSES):
+            for case in ('dismissal', 'shutdown'):
+                with self.subTest(case=case):
+                    await self.assert_reopening_yields(case)
 
     async def test_thats_all_ends_conversation_without_brain_request_or_activation(self):
         brain = ScriptedBrain([

@@ -13,7 +13,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 
 import bot
-from conversation_fixtures import ENGINE_STARTUP, WholeConversationCase, microphone_admitted
+from conversation_fixtures import ENGINE_STARTUP, WholeConversationCase, microphone_admitted, wait_until
 import reply_progress
 import speech
 from test_hermes import ScriptedBrain, require_native_hermes
@@ -643,10 +643,13 @@ class WholeConversationTests(WholeConversationCase):
                     await native_queue(frame, direction, callback)
 
                 if path == 'capture':
+                    # The first attempt is refused, so the loss reports at once instead of reopening.
+                    manager.capture_recovery.held_until = float('inf')
                     with patch.object(user, 'queue_frame', side_effect=queue):
                         self.assertEqual(manager.submit('Typed during failure'), 'accepted')
                         await asyncio.wait_for(held.wait(), 5)
-                        transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                        transport.capture.stdout.feed_eof()
+                        await wait_until(lambda: manager.failure is not None, 'The lost capture was never reported')
                         release.set()
                         await service.state(trouble)
                 else:

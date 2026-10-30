@@ -3664,6 +3664,78 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     if capture.wait.await_count:
                         self.assertIsNotNone(capture.returncode)
 
+    async def opened_capture_with_owner(self):
+        capture = self.child(3200)
+        capture.stdout.feed_data(bytes(640))
+        lost = asyncio.Event()
+        stopped, owner = Mock(), Mock(side_effect=lost.set)
+        transport = speech.LaptopAudioTransport(
+            Mock(microphone_serial=AsyncMock(return_value=900)), on_stopped=stopped,
+            admission=Admission(voice=True, output_switching=lambda: False), on_capture_lost=owner,
+        )
+        self.addAsyncCleanup(transport.close)
+        with patch.object(transport, '_spawn', return_value=capture):
+            await asyncio.wait_for(transport.open(), 5)
+        return transport, capture, stopped, owner, lost
+
+    async def test_capture_loss_goes_to_its_owner(self):
+        for case in ('end_of_input', 'truncated', 'read_failure', 'stall'):
+            with self.subTest(case=case):
+                transport, capture, stopped, owner, lost = await self.opened_capture_with_owner()
+                with patch.object(speech, 'LAPTOP_CAPTURE_STALL_TIMEOUT', 0.05 if case == 'stall' else 5):
+                    if case == 'read_failure':
+                        capture.stdout.set_exception(OSError())
+                    elif case == 'stall':
+                        capture.stdout.feed_data(bytes(640))
+                    else:
+                        if case == 'truncated':
+                            capture.stdout.feed_data(b'X' * 639)
+                        capture.stdout.feed_eof()
+                    await asyncio.wait_for(lost.wait(), 5)
+                owner.assert_called_once_with()
+                stopped.assert_not_called()
+                self.assertIsNone(transport.failure)
+                self.assertFalse(transport.verified)
+
+        with self.subTest(case='first_opening'):
+            capture = self.child(3200)
+            capture.stdout.feed_eof()
+            stopped, owner = Mock(), Mock()
+            transport = speech.LaptopAudioTransport(
+                Mock(microphone_serial=AsyncMock(return_value=900)), on_stopped=stopped,
+                admission=Admission(voice=True, output_switching=lambda: False), on_capture_lost=owner,
+            )
+            self.addAsyncCleanup(transport.close)
+            with patch.object(transport, '_spawn', return_value=capture), self.assertRaises(RuntimeError):
+                await asyncio.wait_for(transport.open(), 5)
+            stopped.assert_called_once_with()
+            owner.assert_not_called()
+
+        with self.subTest(case='replacement_ends_before_verified'):
+            transport, _, _, _, _ = await self.opened_capture_with_owner()
+            await transport.suspend_capture()
+            replacement = self.child(3201)
+            replacement.stdout.feed_data(bytes(640))
+            replacement.stdout.feed_eof()
+            with patch.object(transport, '_spawn', return_value=replacement), self.assertRaises(RuntimeError) as refused:
+                await asyncio.wait_for(transport.resume_capture(output_serial=800), 5)
+            self.assertEqual(str(refused.exception), speech.LAPTOP_CAPTURE_FAILURE)
+            self.assertIsNone(transport.failure)
+            self.assertIsNotNone(replacement.returncode)
+
+        with self.subTest(case='after_close'):
+            transport, capture, _, owner, _ = await self.opened_capture_with_owner()
+            transport.closed = True
+            capture.stdout.feed_eof()
+            await asyncio.wait({transport.reader}, timeout=5)
+            owner.assert_not_called()
+
+        with self.subTest(case='playback_failure'):
+            transport, _, stopped, owner, _ = await self.opened_capture_with_owner()
+            transport.fail(speech.LAPTOP_PLAYBACK_FAILURE)
+            stopped.assert_called_once_with()
+            owner.assert_not_called()
+
     async def test_playback_clock_compensates_overhead_and_rebases_after_gaps(self):
         now = 100.000
         waits = []

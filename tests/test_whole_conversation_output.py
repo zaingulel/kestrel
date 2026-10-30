@@ -956,14 +956,15 @@ class WholeConversationTests(WholeConversationCase):
                     await close()
 
     async def test_capture_recovery_exhausted_reports_microphone_failure(self):
-        for case in ('exhausted', 'handover_deadline', 'active_capture_failure', 'held_capture_earns_a_new_window', 'monitor_failure'):
+        for case in ('exhausted', 'handover_deadline', 'active_capture_failure', 'active_stream_ended',
+                     'held_capture_earns_a_new_window', 'monitor_failure'):
             with self.subTest(case=case), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0, create=True):
                 brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
                 self.addCleanup(brain.close)
                 lines = []
                 self.addCleanup(logger.remove, logger.add(lambda message: lines.append(str(message)), format='{message}'))
                 handle, _, _, _, _, close = await self.open_session(
-                    brain, through_service=True, native_audio=True, activate=case == 'active_capture_failure',
+                    brain, through_service=True, native_audio=True, activate=case in ('active_capture_failure', 'active_stream_ended'),
                 )
                 try:
                     service, manager = handle.service, handle.service.manager
@@ -1028,14 +1029,29 @@ class WholeConversationTests(WholeConversationCase):
                         self.assertFalse(any(speech.LAPTOP_CAPTURE_FAILURE in line for line in lines), lines)
                         self.assertTrue(any(speech.OUTPUT_SWITCH_FAILURE in line for line in lines),
                                         'The cause-unknown advisory sends the reader to the service log')
-                    elif case == 'active_capture_failure':
+                    elif case in ('active_capture_failure', 'active_stream_ended'):
                         await asyncio.shield(manager.session_ready)
-                        manager.transport._spawn = AsyncMock(side_effect=OSError('Native capture could not start'))
-                        service.output_watch.metadata_id = None
-                        service.output_watch.emit()
+                        spawns = []
+
+                        async def refused_replacement(*args, **kwargs):
+                            spawns.append(args)
+                            if len(spawns) == 2:
+                                now[0] = 131
+                            raise OSError('Native capture could not start')
+
+                        manager.transport._spawn = refused_replacement
+                        if case == 'active_capture_failure':
+                            service.output_watch.metadata_id = None
+                            service.output_watch.emit()
+                        else:
+                            handle.capture.stdout.feed_eof()
                         await wait_until(lambda: manager.failure is not None, 'The failed replacement recorder was never reported')
+                        self.assertEqual(len(spawns), 2, f'Reported after too few reopenings: failure={manager.failure!r}')
                         self.assertEqual(manager.failure, speech.LAPTOP_CAPTURE_FAILURE)
                         self.assertEqual(manager.trouble, 'trouble-microphone')
+                        self.assertEqual(await service.toggle(), 'unavailable')
+                        self.assertEqual([child.pid for child in service.audio_children
+                                          if child.stdout is not None and child.returncode is None], [])
                     elif case == 'held_capture_earns_a_new_window':
                         first = await asyncio.wait_for(service.waiting.get(), 5)
                         first.capture.stdout.feed_eof()

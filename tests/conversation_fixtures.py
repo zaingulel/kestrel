@@ -315,16 +315,17 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
             audio_children.append(process)
             return process
 
-        def new_transport(echo, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
+        def new_transport(echo, *, on_stopped, admission, capture_enabled=True, capture_pcm=None, **owners):
             def active():
                 return (admission is None or admission.is_open()) and (admitted_override is None or admitted_override())
 
             if native_audio or capture_pcm is not None:
                 transport = native_transport(echo, on_stopped=on_stopped, admission=admission,
-                                             capture_enabled=capture_enabled, capture_pcm=capture_pcm)
+                                             capture_enabled=capture_enabled, capture_pcm=capture_pcm, **owners)
 
                 async def spawn_audio(*argv, **kwargs):
                     process = child(capture='--record' in argv)
+                    process.argv = argv
                     process.wake_capture = capture_pcm is not None
                     return process
 

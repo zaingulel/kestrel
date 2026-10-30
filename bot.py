@@ -1336,6 +1336,7 @@ class VoiceConversations:
         self.handover = None
         # Open only while a permission question waits; whatever is typed then is its answer.
         self.typed_answer: asyncio.Future | None = None
+        self.answer_uses_capture = False
         self.submission_task = None
         self.ingress = None
         self.stt = None
@@ -1378,6 +1379,9 @@ class VoiceConversations:
             return
         if self.capture_recovery.attempt():
             logger.warning('Microphone capture lost; reopening for up to 30 seconds.')
+            # An answer that lost its capture fails closed; it never resumes across the gap.
+            if self.typed_answer is not None and self.answer_uses_capture:
+                self.typed_answer.cancel()
             self.switching_output = True
             self.invalidate_wake()
             self.changed.set()
@@ -1546,7 +1550,7 @@ class VoiceConversations:
             return
         self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admission.is_open))
         self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admission=admission,
-                                             capture_enabled=capture_enabled)
+                                             capture_enabled=capture_enabled, on_capture_lost=self.capture_lost)
         self.transport.output().prepared_acknowledgements = self.prepared_acknowledgements
         # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
@@ -1586,6 +1590,7 @@ class VoiceConversations:
         """
         typed = asyncio.get_running_loop().create_future()
         self.typed_answer = typed
+        self.answer_uses_capture = spoken
         capture = None
         try:
             if spoken:
@@ -1825,6 +1830,14 @@ class VoiceConversations:
                         await self.ingress[1].reset()
                         await fifo(self.ingress[1], ProposedUserStoppedSpeakingFrame())
                         await self.ingress[1].reset_audio()
+                if (self.capture_recovery.recovering and transport is not None and transport.capture_enabled
+                        and not interrupted()):
+                    # Nothing can cancel the run loop, so any notice ends this pause early; it holds no recorder.
+                    self.changed.clear()
+                    try:
+                        await asyncio.wait_for(self.changed.wait(), CAPTURE_RETRY_PAUSE)
+                    except TimeoutError:
+                        pass
                 while not interrupted():
                     await self.close_echo()
                     if self.echo_owner is not None:
@@ -1888,6 +1901,9 @@ class VoiceConversations:
                         # Playback can appear during graph I/O; verify that exact child too.
                         if transport is not None and transport.playback is not playback:
                             continue
+                        # A recorder that ended while the route was checked takes the bounded route again.
+                        if transport is not None and transport.capture_enabled and not transport.verified:
+                            raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
                         self.switching_output = False
                         if self.llm is not None:
                             self.llm.refresh_indicator()
@@ -1899,7 +1915,7 @@ class VoiceConversations:
                             self.capture_owner = None
         except Exception as error:
             if self.capture_recovery.recovering and str(error) == LAPTOP_CAPTURE_FAILURE:
-                self.capture_unrecoverable()
+                self.capture_lost()
                 return
             logger.error(f'{OUTPUT_SWITCH_FAILURE} ({type(error).__name__})')
             self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
