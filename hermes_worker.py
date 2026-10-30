@@ -55,6 +55,7 @@ REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
 REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
                                  'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+EMPTY_REPLY_ERROR = 'Hermes returned an empty reply.'
 KESTREL_IDENTITY = "You are Kestrel, Zain's local voice assistant."
 PROMPT_IDENTITY_ERROR = ("Kestrel's identity could not be applied to the brain's instructions. "
                          'Check the pinned engine, then restart Kestrel.')
@@ -983,7 +984,7 @@ def main(*, base_url=BONSAI_URL):
                         raise RuntimeError(reason or 'Hermes did not complete the reply.')
                     final = result.get('final_response')
                     if not isinstance(final, str) or not final.strip():
-                        raise RuntimeError('Hermes returned an empty reply.')
+                        raise RuntimeError(EMPTY_REPLY_ERROR)
                     if not streamed:
                         for event in delivery.feed(final):
                             emit(event)

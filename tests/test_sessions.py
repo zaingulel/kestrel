@@ -829,7 +829,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             'ENGINE_LOAD_ERROR': ENGINE_MISSING_ADVICE,
         }
         # These have their own lines only while the brain prepares at startup, which the whole-conversation test proves.
-        preparation_only = {'TRACE_FAILURE_ERROR', 'REASONING_ERROR', 'DELIVERY_ERROR'}
+        preparation_only = {'TRACE_FAILURE_ERROR', 'REASONING_ERROR', 'DELIVERY_ERROR', 'EMPTY_REPLY_ERROR'}
         refusals = {name for name, value in vars(hermes_worker).items() if name.endswith('_ERROR') and isinstance(value, str)}
         self.assertEqual(refusals, set(opening) | preparation_only, 'Every worker refusal needs its own spoken line')
         leak = re.compile(r'[/\\]|\.(md|toml|env|py)\b|Hermes')

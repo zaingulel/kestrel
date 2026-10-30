@@ -260,6 +260,9 @@ class WholeConversationTests(WholeConversationCase):
             ('prepare, delivery', ready + begins, delivery,
              "The brain's first reply while starting up was empty or not in the form Kestrel needs. "
              "Check the service log, then restart Kestrel.", 'trouble-engine', True),
+            ('prepare, empty reply', ready + begins, 'Hermes returned an empty reply.',
+             "The brain's first reply while starting up was empty or not in the form Kestrel needs. "
+             "Check the service log, then restart Kestrel.", 'trouble-engine', True),
             ('ordinary turn, delivery', ready + begun + begins, delivery, complete_reply, 'inactive', False),
             ('begin, tool set', ready + begins,
              "Hermes offered tools other than memory and Kestrel's desktop tools. "

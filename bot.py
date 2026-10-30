@@ -50,9 +50,9 @@ from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
                             ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (
-    BRAIN_KEY_ERROR, CONFIGURATION_CHECK_ERROR, DELIVERY_ERROR, DELIVERY_LABELS, ENGINE_CLOSE_ERROR, ENGINE_LOAD_ERROR,
-    HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR, PROMPT_IDENTITY_ERROR, REASONING_CONFIGURATION_ERROR, REASONING_ERROR,
-    RUNTIME_HOME_ERROR, SOURCE_ENV_ERROR, SOURCE_IDENTITY_ERROR, SYSTEM_PLUGINS_ERROR, TOOL_SURFACE_ERROR,
+    BRAIN_KEY_ERROR, CONFIGURATION_CHECK_ERROR, DELIVERY_ERROR, DELIVERY_LABELS, EMPTY_REPLY_ERROR, ENGINE_CLOSE_ERROR,
+    ENGINE_LOAD_ERROR, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR, PROMPT_IDENTITY_ERROR, REASONING_CONFIGURATION_ERROR,
+    REASONING_ERROR, RUNTIME_HOME_ERROR, SOURCE_ENV_ERROR, SOURCE_IDENTITY_ERROR, SYSTEM_PLUGINS_ERROR, TOOL_SURFACE_ERROR,
     TRACE_FAILURE_ERROR, TRACE_STARTUP_ERROR, child_environment,
 )
 from speech import (
@@ -104,13 +104,15 @@ ENGINE_OPENING_ADVICE = {
     MEMORY_ERROR: ("Kestrel's local notes couldn't be set up safely. Check the ownership and permissions of its runtime "
                    "folder and notes, then restart Kestrel."),
 }
+ENGINE_PREPARATION_REPLY_ADVISORY = ("The brain's first reply while starting up was empty or not in the form Kestrel needs. "
+                                     "Check the service log, then restart Kestrel.")
 ENGINE_PREPARATION_ADVICE = {
     TRACE_FAILURE_ERROR: ("Kestrel's local conversation tracing failed. Check free disk space and the runtime folder's "
                           "permissions, then restart Kestrel."),
     REASONING_ERROR: ("The brain sent unsafe reasoning markup while starting up, so I won't use it. Check the service log, "
                       "then restart Kestrel."),
-    DELIVERY_ERROR: ("The brain's first reply while starting up was empty or not in the form Kestrel needs. Check the "
-                     "service log, then restart Kestrel."),
+    DELIVERY_ERROR: ENGINE_PREPARATION_REPLY_ADVISORY,
+    EMPTY_REPLY_ERROR: ENGINE_PREPARATION_REPLY_ADVISORY,
 }
 
 
