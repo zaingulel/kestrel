@@ -6,6 +6,7 @@ import struct
 import wave
 from functools import partial
 import os
+import re
 import runpy
 import signal
 import socket
@@ -30,6 +31,7 @@ import bot
 from conversation_fixtures import (
     ENGINE_LOAD_REFUSAL, ENGINE_MISSING_ADVICE, SOURCE_IDENTITY_REFUSAL, hermes_service, request_frame,
 )
+import hermes_worker
 import reply_progress
 import speech
 import tool_actions
@@ -808,6 +810,36 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(channel.failure)
                 elif isinstance(spawned, dict) and isinstance(spawned['error'], list):
                     self.assertEqual(channel.failure, f'Hermes engine unavailable: {[SOURCE_IDENTITY_REFUSAL]}')
+
+    async def test_engine_open_speaks_each_refusal_as_its_own_fix(self):
+        # The plan's reviewed wording, an oracle independent of bot's advice tables, keyed by the worker's constant.
+        opening = {
+            'BRAIN_KEY_ERROR': "Kestrel's brain key is missing or unsafe. Create it as the manual describes under Brain key, then restart Kestrel.",
+            'TRACE_STARTUP_ERROR': "Kestrel's local conversation tracing couldn't start. The service log has the cause. Check free disk space, the runtime folder's permissions or the tracing setup, then restart Kestrel.",
+            'RUNTIME_HOME_ERROR': "Kestrel's private engine folder isn't private to your account. Check the ownership and permissions of its runtime folder, then restart Kestrel.",
+            'SOURCE_ENV_ERROR': "The pinned engine's source folder holds an environment file, which Kestrel doesn't support. Move that file out of the source folder, then restart Kestrel.",
+            'SYSTEM_PLUGINS_ERROR': "This computer has a system-wide tracing plugin file, which Kestrel doesn't support. Use a setup without it, as the manual describes under Local conversation traces, then restart Kestrel.",
+            'CONFIGURATION_CHECK_ERROR': "Kestrel couldn't check that the engine's setup is isolated. Make sure it can read its runtime folder and the system tracing settings folder, then restart Kestrel.",
+            'TOOL_SURFACE_ERROR': "The engine offered tools other than notes and Kestrel's desktop tools, so I won't use it. Check the pinned engine configuration as the manual describes, then restart Kestrel.",
+            'REASONING_CONFIGURATION_ERROR': "The engine's reasoning setup isn't safe to use. Check the pinned engine configuration as the manual describes, then restart Kestrel.",
+            'PROMPT_IDENTITY_ERROR': "I couldn't apply Kestrel's identity to the brain's instructions. Check the pinned engine as the manual describes, then restart Kestrel.",
+            'ENGINE_CLOSE_ERROR': "Kestrel's engine couldn't close cleanly. Restart Kestrel.",
+            'MEMORY_ERROR': "Kestrel's local notes couldn't be set up safely. Check the ownership and permissions of its runtime folder and notes, then restart Kestrel.",
+            'SOURCE_IDENTITY_ERROR': ENGINE_MISSING_ADVICE,
+            'ENGINE_LOAD_ERROR': ENGINE_MISSING_ADVICE,
+        }
+        # These have their own lines only while the brain prepares at startup, which the whole-conversation test proves.
+        preparation_only = {'TRACE_FAILURE_ERROR', 'REASONING_ERROR', 'DELIVERY_ERROR', 'EMPTY_REPLY_ERROR'}
+        refusals = {name for name, value in vars(hermes_worker).items() if name.endswith('_ERROR') and isinstance(value, str)}
+        self.assertEqual(refusals, set(opening) | preparation_only, 'Every worker refusal needs its own spoken line')
+        leak = re.compile(r'[/\\]|\.(md|toml|env|py)\b|Hermes')
+        for name, advisory in opening.items():
+            with self.subTest(refusal=name):
+                channel = await self.opened_channel({'error': getattr(hermes_worker, name)})
+                self.assertEqual(channel.failure_advisory, advisory)
+                self.assertEqual(channel.trouble_state(),
+                                 'trouble-engine-missing' if advisory == ENGINE_MISSING_ADVICE else 'trouble-engine')
+                self.assertIsNone(leak.search(advisory), 'A spoken line names no path, file or engine internals')
 
     async def test_engine_trouble_shows_whether_voice_is_on_or_off(self):
         from types import SimpleNamespace

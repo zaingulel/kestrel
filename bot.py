@@ -49,8 +49,12 @@ from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
                             ReplyProgress, SpeechAdvisoryFrame, token_of)
-from hermes_worker import (DELIVERY_LABELS, ENGINE_LOAD_ERROR, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR,
-                           SOURCE_IDENTITY_ERROR, child_environment)
+from hermes_worker import (
+    BRAIN_KEY_ERROR, CONFIGURATION_CHECK_ERROR, DELIVERY_ERROR, DELIVERY_LABELS, EMPTY_REPLY_ERROR, ENGINE_CLOSE_ERROR,
+    ENGINE_LOAD_ERROR, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR, PROMPT_IDENTITY_ERROR, REASONING_CONFIGURATION_ERROR,
+    REASONING_ERROR, RUNTIME_HOME_ERROR, SOURCE_ENV_ERROR, SOURCE_IDENTITY_ERROR, SYSTEM_PLUGINS_ERROR, TOOL_SURFACE_ERROR,
+    TRACE_FAILURE_ERROR, TRACE_STARTUP_ERROR, child_environment,
+)
 from speech import (
     ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
@@ -67,10 +71,58 @@ from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
 ENGINE_TIMEOUT = 45
-ENGINE_MISSING_ERRORS = frozenset({SOURCE_IDENTITY_ERROR, ENGINE_LOAD_ERROR})
 ENGINE_MISSING_ADVISORY = ("Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, "
                            "keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine "
                            "as the manual describes, then restart Kestrel.")
+ENGINE_REFUSAL_ADVICE = {
+    BRAIN_KEY_ERROR: ("Kestrel's brain key is missing or unsafe. Create it as the manual describes under Brain key, "
+                      "then restart Kestrel."),
+    TRACE_STARTUP_ERROR: ("Kestrel's local conversation tracing couldn't start. The service log has the cause. Check free "
+                          "disk space, the runtime folder's permissions or the tracing setup, then restart Kestrel."),
+    RUNTIME_HOME_ERROR: ("Kestrel's private engine folder isn't private to your account. Check the ownership and "
+                         "permissions of its runtime folder, then restart Kestrel."),
+    SOURCE_ENV_ERROR: ("The pinned engine's source folder holds an environment file, which Kestrel doesn't support. "
+                       "Move that file out of the source folder, then restart Kestrel."),
+    SYSTEM_PLUGINS_ERROR: ("This computer has a system-wide tracing plugin file, which Kestrel doesn't support. Use a "
+                           "setup without it, as the manual describes under Local conversation traces, then restart "
+                           "Kestrel."),
+    CONFIGURATION_CHECK_ERROR: ("Kestrel couldn't check that the engine's setup is isolated. Make sure it can read its "
+                                "runtime folder and the system tracing settings folder, then restart Kestrel."),
+    TOOL_SURFACE_ERROR: ("The engine offered tools other than notes and Kestrel's desktop tools, so I won't use it. Check "
+                         "the pinned engine configuration as the manual describes, then restart Kestrel."),
+    REASONING_CONFIGURATION_ERROR: ("The engine's reasoning setup isn't safe to use. Check the pinned engine configuration "
+                                    "as the manual describes, then restart Kestrel."),
+    PROMPT_IDENTITY_ERROR: ("I couldn't apply Kestrel's identity to the brain's instructions. Check the pinned engine as "
+                            "the manual describes, then restart Kestrel."),
+    ENGINE_CLOSE_ERROR: "Kestrel's engine couldn't close cleanly. Restart Kestrel.",
+}
+# The opening notes line must differ from MEMORY_ERROR, because trouble_state reads that text as trouble-notes.
+ENGINE_OPENING_ADVICE = {
+    **ENGINE_REFUSAL_ADVICE,
+    SOURCE_IDENTITY_ERROR: ENGINE_MISSING_ADVISORY,
+    ENGINE_LOAD_ERROR: ENGINE_MISSING_ADVISORY,
+    MEMORY_ERROR: ("Kestrel's local notes couldn't be set up safely. Check the ownership and permissions of its runtime "
+                   "folder and notes, then restart Kestrel."),
+}
+ENGINE_PREPARATION_REPLY_ADVISORY = ("The brain's first reply while starting up was empty or not in the form Kestrel needs. "
+                                     "Check the service log, then restart Kestrel.")
+ENGINE_PREPARATION_ADVICE = {
+    TRACE_FAILURE_ERROR: ("Kestrel's local conversation tracing failed. Check free disk space and the runtime folder's "
+                          "permissions, then restart Kestrel."),
+    REASONING_ERROR: ("The brain sent unsafe reasoning markup while starting up, so I won't use it. Check the service log, "
+                      "then restart Kestrel."),
+    DELIVERY_ERROR: ENGINE_PREPARATION_REPLY_ADVISORY,
+    EMPTY_REPLY_ERROR: ENGINE_PREPARATION_REPLY_ADVISORY,
+}
+
+
+def running_refusal_advisory(refusal: str) -> str:
+    if refusal == MEMORY_ERROR:
+        return MEMORY_ERROR
+    return ENGINE_REFUSAL_ADVICE.get(
+        refusal, "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
+
+
 SLOW_START_SECONDS = 8
 SLOW_START_LINE = 'The brain was slow to start, so replies may take longer.'
 TURN_TIMEOUT = 1800
@@ -312,8 +364,8 @@ class HermesRequestChannel:
                 event = await self.read_event()
                 if set(event) != {'ready'} or event['ready'] is not True:
                     refusal = event.get('error')
-                    if isinstance(refusal, str) and refusal in ENGINE_MISSING_ERRORS:
-                        advisory = ENGINE_MISSING_ADVISORY
+                    if isinstance(refusal, str):
+                        advisory = ENGINE_OPENING_ADVICE.get(refusal, advisory)
                     raise RuntimeError(refusal or 'Hermes did not become ready')
         except Exception as error:
             self.failure_advisory = advisory
@@ -368,8 +420,7 @@ class HermesRequestChannel:
                 if set(event) == {'session_ready'} and event['session_ready'] is True:
                     return True
                 if set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                    advisory = (MEMORY_ERROR if event['error'] == MEMORY_ERROR else
-                                "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
+                    advisory = running_refusal_advisory(event['error'])
                     raise RuntimeError(event['error'])
                 raise RuntimeError('Invalid Hermes conversation readiness response')
         except Exception as error:
@@ -494,8 +545,8 @@ class HermesRequestChannel:
                             output.put_nowait({'advisory': "I couldn't get a complete reply from the brain."})
                         break
                     elif set(event) == {'error'} and isinstance(event['error'], str) and event['error'].strip():
-                        advisory = (MEMORY_ERROR if event['error'] == MEMORY_ERROR else
-                                    "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
+                        advisory = ((ENGINE_PREPARATION_ADVICE.get(event['error']) if 'prepare' in request else None)
+                                    or running_refusal_advisory(event['error']))
                         raise RuntimeError(event['error'])
                     else:
                         raise RuntimeError('Invalid or incomplete Hermes response')

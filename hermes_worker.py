@@ -40,6 +40,12 @@ ENGINE_LOAD_ERROR = ('Hermes engine files could not be loaded. '
                      'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
 TOOL_SURFACE_ERROR = ("Hermes offered tools other than memory and Kestrel's desktop tools. "
                       'Check the pinned Hermes configuration, then restart Kestrel.')
+SOURCE_ENV_ERROR = ('Hermes source .env is not supported. Keep environment files outside '
+                    'the pinned source and restart Kestrel.')
+SYSTEM_PLUGINS_ERROR = ('System NeMo Relay plugins are not supported by Kestrel. Use an environment '
+                        'without /etc/nemo-relay/plugins.toml and restart Kestrel.')
+CONFIGURATION_CHECK_ERROR = ('Kestrel could not verify isolated Hermes configuration. '
+                             'Check runtime permissions and restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
 ORDINARY_MAX_TOKENS = 180
 ORDINARY_REASONING_ENABLED = False
@@ -49,6 +55,7 @@ REASONING_ERROR = 'Hermes returned unsafe reasoning markup. Try again.'
 REASONING_CONFIGURATION_ERROR = ('Hermes reasoning configuration is unsafe. Check the pinned '
                                  'Hermes configuration, then restart Kestrel.')
 DELIVERY_ERROR = 'Hermes returned an invalid delivery header or empty reply. Restart Kestrel and try again.'
+EMPTY_REPLY_ERROR = 'Hermes returned an empty reply.'
 KESTREL_IDENTITY = "You are Kestrel, Zain's local voice assistant."
 PROMPT_IDENTITY_ERROR = ("Kestrel's identity could not be applied to the brain's instructions. "
                          'Check the pinned engine, then restart Kestrel.')
@@ -277,20 +284,15 @@ def validate_hermes_source() -> None:
 
 def validate_local_configuration() -> None:
     for path, refusal in (
-        (HERMES_SOURCE / '.env',
-         'Hermes source .env is not supported. Keep environment files outside '
-         'the pinned source and restart Kestrel.'),
-        (Path('/etc/nemo-relay/plugins.toml'),
-         'System NeMo Relay plugins are not supported by Kestrel. Use an environment '
-         'without /etc/nemo-relay/plugins.toml and restart Kestrel.'),
+        (HERMES_SOURCE / '.env', SOURCE_ENV_ERROR),
+        (Path('/etc/nemo-relay/plugins.toml'), SYSTEM_PLUGINS_ERROR),
     ):
         try:
             path.lstat()
         except FileNotFoundError:
             continue
         except OSError:
-            raise RuntimeError('Kestrel could not verify isolated Hermes configuration. '
-                               'Check runtime permissions and restart Kestrel.') from None
+            raise RuntimeError(CONFIGURATION_CHECK_ERROR) from None
         raise RuntimeError(refusal)
 
 
@@ -982,7 +984,7 @@ def main(*, base_url=BONSAI_URL):
                         raise RuntimeError(reason or 'Hermes did not complete the reply.')
                     final = result.get('final_response')
                     if not isinstance(final, str) or not final.strip():
-                        raise RuntimeError('Hermes returned an empty reply.')
+                        raise RuntimeError(EMPTY_REPLY_ERROR)
                     if not streamed:
                         for event in delivery.feed(final):
                             emit(event)
