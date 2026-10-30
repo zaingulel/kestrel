@@ -12,6 +12,7 @@ from pipecat.frames.frames import DataFrame, LLMContextFrame, ProposedUserStarte
 from pipecat.processors.frame_processor import FrameDirection
 
 import bot
+import conversation_fixtures
 from conversation_fixtures import ENGINE_MISSING_ADVICE, SOURCE_IDENTITY_REFUSAL, WholeConversationCase, wait_until
 from test_hermes import ROOT, ScriptedBrain
 
@@ -772,6 +773,35 @@ class WholeConversationTests(WholeConversationCase):
                     self.assertFalse(processes[0][1].exists())
                     self.assertTrue(spoken.empty())
                     self.assertTrue(committed.empty())
+
+
+class EngineOpeningTimeoutTests(unittest.TestCase):
+    def test_timed_out_engine_opening_fails_alone(self):
+        ready = 'import sys; print(\'{"ready":true}\', flush=True); sys.stdin.read()'
+
+        class Inner(WholeConversationCase):
+            async def opens_cleanly(self):
+                _, _, _, _, processes, close = await self.open_session(None, wire=ready, activate=False)
+                self.assertEqual(len(processes), 1, 'this session started its own worker')
+                await close()
+
+            async def test_timed_out_opening(self):
+                with self.subTest('hung'), patch.object(conversation_fixtures, 'ENGINE_STARTUP', 0.2):
+                    await self.open_session(None, wire='import sys; sys.stdin.read()', activate=False)
+                with self.subTest('next subtest'):
+                    await self.opens_cleanly()
+
+            async def test_later_test(self):
+                await self.opens_cleanly()
+
+        result = unittest.TestResult()
+        unittest.TestSuite([Inner('test_timed_out_opening'), Inner('test_later_test')]).run(result)
+        self.assertEqual(result.testsRun, 2)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(len(result.errors), 1, result.errors)
+        test, trace = result.errors[0]
+        self.assertIn('hung', str(test))
+        self.assertIn('TimeoutError', trace)
 
 
 if __name__ == '__main__':

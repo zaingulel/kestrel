@@ -618,15 +618,19 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
         service_task = asyncio.create_task(bot.run_voice_service())
         service_handle.task = service_task
         service_handle.stop = lambda: handlers[signal.SIGTERM][0](*handlers[signal.SIGTERM][1])
-        await asyncio.wait_for(prepared.wait(), 5)
-        # Worker startup is CPU-bound and gets the production budget; later waits keep five seconds so a hang fails.
-        await asyncio.wait_for(engine_opened.wait(), ENGINE_STARTUP)
-        await state(startup)
-        if activate:
-            self.assertEqual(await toggle(), 'starting')
-            transport = await asyncio.wait_for(started.get(), 5)
-        else:
-            transport = SimpleNamespace(service=service_handle, sessions=sessions, audio_children=audio_children)
+        try:
+            await asyncio.wait_for(prepared.wait(), 5)
+            # Worker startup is CPU-bound and gets the production budget; later waits keep five seconds so a hang fails.
+            await asyncio.wait_for(engine_opened.wait(), ENGINE_STARTUP)
+            await state(startup)
+            if activate:
+                self.assertEqual(await toggle(), 'starting')
+                transport = await asyncio.wait_for(started.get(), 5)
+            else:
+                transport = SimpleNamespace(service=service_handle, sessions=sessions, audio_children=audio_children)
+        except BaseException:
+            await close()
+            raise
         return transport, spoken, committed, interrupted, processes, close
 
     @staticmethod
