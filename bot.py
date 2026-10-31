@@ -48,7 +48,7 @@ from desktop.conversation import ConversationFeed
 from desktop.control import ConversationControl
 from desktop.status import IndicatorStatus
 from reply_progress import (AcknowledgementStartedFrame, AcknowledgementStoppedFrame, AnnouncementMarkFrame, ConversationSynthesisFailedFrame,
-                            ReplyProgress, SpeechAdvisoryFrame, token_of)
+                            ReplyLimitFrame, ReplyProgress, SpeechAdvisoryFrame, token_of)
 from hermes_worker import (
     BRAIN_KEY_ERROR, CONFIGURATION_CHECK_ERROR, DELIVERY_ERROR, DELIVERY_LABELS, EMPTY_REPLY_ERROR, ENGINE_CLOSE_ERROR,
     ENGINE_LOAD_ERROR, HERMES_PYTHON, KESTREL_SOURCE, MEMORY_ERROR, PROMPT_IDENTITY_ERROR, REASONING_CONFIGURATION_ERROR,
@@ -124,6 +124,7 @@ def running_refusal_advisory(refusal: str) -> str:
         refusal, "I couldn't get a complete reply from the brain. Restart Kestrel and try again.")
 
 
+REPLY_LIMIT_NOTE = "That's as far as one reply can go. Ask me to carry on if you want more."
 SLOW_START_SECONDS = 8
 SLOW_START_LINE = 'The brain was slow to start, so replies may take longer.'
 TURN_TIMEOUT = 1800
@@ -540,6 +541,10 @@ class HermesRequestChannel:
                         self.process.stdin.write(json.dumps({'tool_result': content, 'source': KESTREL_SOURCE}).encode() + b'\n')
                         await self.process.stdin.drain()
                     elif set(event) == {'done'} and event['done'] is True and has_text:
+                        break
+                    elif set(event) == {'reply_limit'} and event['reply_limit'] is True and has_text:
+                        if self.output is output:
+                            output.put_nowait({'reply_limit': True})
                         break
                     elif set(event) == {'incomplete'} and event['incomplete'] is True:
                         if self.output is output:
@@ -1201,6 +1206,8 @@ class HermesLLMService(LLMService):
                 elif 'final' in event:
                     await self.push_local_speech(event['final'], token)
                     ended = True
+                elif 'reply_limit' in event:
+                    await self.push_frame(self._labelled(ReplyLimitFrame(' ' + REPLY_LIMIT_NOTE), token))
                 elif not failed and not ended:
                     if 'delivery' in event:
                         delivery = event['delivery']

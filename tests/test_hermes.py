@@ -283,7 +283,7 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
             events.append(event)
             if 'tool_call' in event:
                 self.send(next(results))
-            if 'done' in event or 'error' in event or 'incomplete' in event:
+            if 'done' in event or 'error' in event or 'incomplete' in event or 'reply_limit' in event:
                 return events
 
     def prepare(self):
@@ -461,6 +461,8 @@ class HermesWorkerTests(unittest.TestCase):
         import hermes_worker
         registry_module = ModuleType('tools.registry')
         registry_module.registry = registry or Mock()
+        turn_truncation = ModuleType('agent.turn_truncation')
+        turn_truncation._continue_text = Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = lambda result: False
         promotion = ModuleType('agent.reasoning_promotion')
@@ -495,7 +497,7 @@ class HermesWorkerTests(unittest.TestCase):
             try:
                 modules = {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
                            'nemo_relay': native, 'tools.registry': registry_module,
-                           'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                           'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation, 'agent.reasoning_promotion': promotion,
                            'agent.inline_tool_executors': inline_executors}
                 modules.update(override or {})
                 with (patch.dict(sys.modules, modules),
@@ -517,7 +519,7 @@ class HermesWorkerTests(unittest.TestCase):
         advice = ('Hermes engine files could not be loaded. '
                   'Reinstall the pinned Hermes 0.22.2 runtime and restart Kestrel.')
         cases = {name: {name: None} for name in (
-            'run_agent', 'tools.registry', 'agent.relay_runtime', 'agent.turn_failure_copy',
+            'run_agent', 'tools.registry', 'agent.relay_runtime', 'agent.turn_failure_copy', 'agent.turn_truncation',
             'agent.reasoning_promotion', 'agent.inline_tool_executors', 'nemo_relay')}
         cases['missing name'] = {'agent.reasoning_promotion': ModuleType('agent.reasoning_promotion')}
         for label, override in cases.items():
@@ -620,7 +622,7 @@ class HermesWorkerTests(unittest.TestCase):
             {'delivery': 'neutral'}, {'text': 'Reset.'}, {'done': True},
         ])
         self.assertNotIn('PRIVATE', json.dumps(events))
-        self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 180)])
+        self.assertEqual(settings, [({'enabled': True, 'effort': 'medium'}, 16384)] * 6 + [({'enabled': False}, 2700)])
         self.assertIs(transport.normalize_response, normalizer)
 
     def test_engine_prompt_keeps_kestrel_identity_and_removes_engine_blocks(self):
@@ -820,7 +822,7 @@ class HermesWorkerTests(unittest.TestCase):
         ])
         self.assertNotIn('PRIVATE', json.dumps(events))
         self.assertFalse(any('tool_call' in event for event in events))
-        self.assertEqual([item[0] for item in runs], [16384, 16384, 180])
+        self.assertEqual([item[0] for item in runs], [16384, 16384, 2700])
         self.assertEqual([item[1] for item in runs],
                          [{'enabled': True, 'effort': 'medium'}] * 2 + [{'enabled': False}])
         self.assertEqual([item[2] for item in runs], [
@@ -844,6 +846,28 @@ class HermesWorkerTests(unittest.TestCase):
         refused_agent.close.assert_called_once_with()
         refused_agent.run_conversation.assert_not_called()
         refused_agent._get_transport.assert_not_called()
+
+    def test_only_visible_text_from_a_finished_call_ends_at_the_limit(self):
+        import hermes_worker
+
+        for label, stub, filled, content, ends in (
+                ('visible text', False, None, 'Whole sentence. Cut', True),
+                ('cut stream', True, None, 'Whole sentence. Cut', False),
+                ('full context', False, (1000, 1000), 'Whole sentence. Cut', False),
+                ('no text', False, None, None, False),
+                ('blank text', False, None, ' \n', False)):
+            with self.subTest(label):
+                truncation = Mock(is_stub=stub, window_filled=filled)
+                native = Mock()
+                outcome = hermes_worker.end_reply_at_limit(native, truncation, 'retry', SimpleNamespace(content=content))
+                if ends:
+                    truncation.end_turn.assert_called_once_with(content, hermes_worker.REPLY_LIMIT_REACHED)
+                    native.assert_not_called()
+                    self.assertIs(outcome, truncation.end_turn.return_value)
+                else:
+                    native.assert_called_once_with(truncation, 'retry', SimpleNamespace(content=content))
+                    truncation.end_turn.assert_not_called()
+                    self.assertIs(outcome, native.return_value)
 
     def test_reasoning_filter(self):
         import hermes_worker
@@ -1192,6 +1216,8 @@ print('private storage matrix passed')
         # Exercise the worker's final-response fallback without a provider stream callback.
         registry_module = ModuleType('tools.registry')
         registry_module.registry = Mock()
+        turn_truncation = ModuleType('agent.turn_truncation')
+        turn_truncation._continue_text = Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
         promotion = ModuleType('agent.reasoning_promotion')
@@ -1239,7 +1265,7 @@ print('private storage matrix passed')
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'agent.relay_runtime': relay_runtime,
                                                 'nemo_relay': native, 'tools.registry': registry_module,
-                                                'agent.turn_failure_copy': turn_failure_copy,
+                                                'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation,
                                                 'agent.reasoning_promotion': promotion,
                                                 'agent.inline_tool_executors': inline_executors}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
@@ -1306,6 +1332,8 @@ registry_module = ModuleType('tools.registry')
 registry_module.registry = Mock()
 relay_runtime = ModuleType('agent.relay_runtime')
 relay_runtime.get_runtime = Mock(return_value=None if case == 'missing runtime' else runtime)
+turn_truncation = ModuleType('agent.turn_truncation')
+turn_truncation._continue_text = Mock()
 turn_failure_copy = ModuleType('agent.turn_failure_copy')
 turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
 promotion = ModuleType('agent.reasoning_promotion')
@@ -1370,7 +1398,7 @@ else:
 try:
     with (patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                     'agent.relay_runtime': relay_runtime,
-                                    'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                                    'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation, 'agent.reasoning_promotion': promotion,
                                     'agent.inline_tool_executors': inline_executors,
                                     'tools.registry': registry_module}),
           patch.object(hermes_worker, 'validate_hermes_source')):
@@ -1549,6 +1577,8 @@ raise SystemExit(status)
                     registry_module.registry = Mock()
                     relay_runtime = ModuleType('agent.relay_runtime')
                     relay_runtime.get_runtime = Mock(return_value=runtime)
+                    turn_truncation = ModuleType('agent.turn_truncation')
+                    turn_truncation._continue_text = Mock()
                     turn_failure_copy = ModuleType('agent.turn_failure_copy')
                     turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
                     promotion = ModuleType('agent.reasoning_promotion')
@@ -1595,7 +1625,7 @@ raise SystemExit(status)
                         with (patch.dict(os.environ, HERMES_HOME=str(home_setting)),
                               patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                         'agent.relay_runtime': relay_runtime,
-                                                        'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                                                        'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation, 'agent.reasoning_promotion': promotion,
                                                         'agent.inline_tool_executors': inline_executors,
                                                         'tools.registry': registry_module}),
                               patch.object(hermes_worker, 'validate_hermes_source'),
@@ -1807,7 +1837,7 @@ class NativeHermesTests(unittest.TestCase):
             self.assertNotIn('PRIVATE', json.dumps(events))
             self.assertEqual(len(brain.requests), 3)
             self.assertEqual([r[2].get('stream', False) for r in brain.requests], [False, False, False])
-            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [16384, 16384, 180])
+            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [16384, 16384, 2700])
             self.assertEqual([r[2]['chat_template_kwargs']['enable_thinking'] for r in brain.requests],
                              [True, True, False])
 
@@ -1848,7 +1878,7 @@ class NativeHermesTests(unittest.TestCase):
             for (_, _, body), deep in zip(brain.requests, (False, True, True, False, True, False)):
                 self.assertTrue(body['stream'])
                 self.assertEqual(body['temperature'], 0.4)
-                self.assertEqual(body['max_tokens'], 16384 if deep else 180)
+                self.assertEqual(body['max_tokens'], 16384 if deep else 2700)
                 self.assertEqual(body['reasoning_effort'], 'medium' if deep else 'none')
                 self.assertEqual(body['reasoning_format'], 'deepseek')
                 self.assertEqual(body['chat_template_kwargs'],
@@ -1926,6 +1956,8 @@ class NativeHermesTests(unittest.TestCase):
         registry_module.registry = Mock()
         relay_runtime = ModuleType('agent.relay_runtime')
         relay_runtime.get_runtime = Mock(return_value=Mock())
+        turn_truncation = ModuleType('agent.turn_truncation')
+        turn_truncation._continue_text = Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=True)
         promotion = ModuleType('agent.reasoning_promotion')
@@ -1966,7 +1998,7 @@ class NativeHermesTests(unittest.TestCase):
             try:
                 with (patch.dict(sys.modules, {'run_agent': run_agent, 'tools.registry': registry_module,
                                               'agent.relay_runtime': relay_runtime,
-                                              'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                                              'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation, 'agent.reasoning_promotion': promotion,
                                               'agent.inline_tool_executors': inline_executors, 'nemo_relay': native}),
                       patch.dict(os.environ, HERMES_HOME=str(home)),
                       patch.object(hermes_worker, 'TRACE_ROOT', home / 'traces'),
@@ -3131,6 +3163,8 @@ class NativeHermesTests(unittest.TestCase):
         relay_runtime = ModuleType('agent.relay_runtime')
         relay_runtime.get_runtime = Mock()
         relay_runtime.get_runtime.return_value.managed_execution_enabled.return_value = True
+        turn_truncation = ModuleType('agent.turn_truncation')
+        turn_truncation._continue_text = Mock()
         turn_failure_copy = ModuleType('agent.turn_failure_copy')
         turn_failure_copy.is_max_iteration_handoff = Mock(return_value=False)
         promotion = ModuleType('agent.reasoning_promotion')
@@ -3162,7 +3196,7 @@ class NativeHermesTests(unittest.TestCase):
                 with (patch.dict(os.environ, {'HERMES_HOME': str(home)}),
                       patch.dict('sys.modules', {'run_agent': run_agent, 'nemo_relay': native,
                                                 'agent.relay_runtime': relay_runtime,
-                                                'agent.turn_failure_copy': turn_failure_copy, 'agent.reasoning_promotion': promotion,
+                                                'agent.turn_failure_copy': turn_failure_copy, 'agent.turn_truncation': turn_truncation, 'agent.reasoning_promotion': promotion,
                                                 'agent.inline_tool_executors': inline_executors,
                                                 'tools.registry': registry_module}),
                       patch.object(hermes_worker, 'validate_hermes_source'),
@@ -3181,7 +3215,7 @@ class NativeHermesTests(unittest.TestCase):
             disabled_toolsets=['terminal'], skip_memory=True, skip_background_review=True, skip_context_files=True,
             load_soul_identity=True, session_db=None, fallback_model=None,
             ephemeral_system_prompt=None, save_trajectories=False, checkpoints_enabled=False,
-            quiet_mode=True, max_tokens=180, max_iterations=9,
+            quiet_mode=True, max_tokens=2700, max_iterations=9,
             reasoning_config={'enabled': False}, request_overrides={'temperature': 0.4},
         )
         self.assertEqual(config, {
@@ -3241,7 +3275,7 @@ class NativeHermesTests(unittest.TestCase):
             body = brain.requests[1][2]
             self.assertEqual([m for m in body['messages'] if m['role'] != 'system'], history)
             self.assertIn('You are Kestrel', body['messages'][0]['content'])
-            self.assertEqual(body['max_tokens'], 180)
+            self.assertEqual(body['max_tokens'], 2700)
             self.assertEqual(body.get('reasoning_effort'), 'none')
             self.assertEqual(body.get('temperature'), 0.4)
             self.assertEqual({tool['function']['name'] for tool in body['tools']}, {'memory', 'mute', 'unmute', 'set_volume', 'pause_media', 'next_track', 'focus_workspace', 'open_app', 'take_screenshot', 'delete_note'})
@@ -3389,8 +3423,23 @@ case.assertEqual(messages, original)
                 self.assertTrue(event['error'].strip())
             self.assertEqual(brain.requests, [])
 
+    def test_length_finish_ends_reply_without_continuation(self):
+        replies = [[({'content': '[delivery:neutral]\nFirst sentence. Second sentence. Unfinished frag'}, None),
+                    ({}, 'length')],
+                   '[delivery:neutral]\nNext reply.']
+        with native_worker(replies) as (worker, brain):
+            self.assertEqual(worker.event(), {'ready': True})
+            worker.begin()
+            events = worker.request([{'role': 'user', 'content': 'Answer at length.'}])
+            self.assertEqual(events, [{'delivery': 'neutral'},
+                                      {'text': 'First sentence. Second sentence. Unfinished frag'},
+                                      {'reply_limit': True}])
+            self.assertEqual([request[2]['max_tokens'] for request in brain.requests], [2700])
+            events = worker.request([{'role': 'user', 'content': 'Carry on.'}])
+            self.assertEqual(events, [{'delivery': 'neutral'}, {'text': 'Next reply.'}, {'done': True}])
+
     def test_partial_provider_reply_is_explicit_failure(self):
-        with native_worker([[({'content': '[delivery:neutral]\nIncomplete nonce-24'}, None), ({}, 'length')]] * 4) as (worker, brain):
+        with native_worker([[({'content': '[delivery:neutral]\nIncomplete nonce-24'}, None)]] * 4) as (worker, brain):
             self.assertEqual(worker.event(), {'ready': True})
             worker.begin()
             events = worker.request([{'role': 'user', 'content': 'Answer completely.'}])
@@ -3400,8 +3449,7 @@ case.assertEqual(messages, original)
             self.assertTrue(events[-1]['error'].strip())
             self.assertNotIn({'done': True}, events)
             self.assertIn('truncated', events[-1]['error'].lower())
-            self.assertEqual([request[2]['max_tokens'] for request in brain.requests],
-                             [180, 360, 720, 1440])
+            self.assertEqual(len(brain.requests), 4)
 
     def test_unsolicited_tools_are_refused_without_effects_or_reusable_state(self):
         # These names are native installed tools, offered unsolicited by the scripted provider.

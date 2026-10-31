@@ -34,6 +34,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings, TTSSettings
 from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.services.tts_service import TTSService
+from pipecat.utils.string import match_endofsentence
 from pipecat.utils.time import time_now_iso8601
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
@@ -42,7 +43,7 @@ from pipecat.transports.base_transport import TransportParams
 from hermes_worker import DELIVERY_LABELS
 from reply_progress import (
     REPLY_MESSAGES, AcknowledgementDueFrame, AcknowledgementStartedFrame, AcknowledgementStoppedFrame, ConversationSynthesisFailedFrame,
-    OutputBuffer, ReplyProgress, SpeechAdvisoryFrame, token_of,
+    OutputBuffer, ReplyLimitFrame, ReplyProgress, SpeechAdvisoryFrame, token_of,
 )
 
 _ENGLISH_NORMALIZER = Normalizer(lang="en", operator="tn")
@@ -1553,6 +1554,7 @@ class SpokenReplyText:
     def reset(self) -> None:
         self.active = False
         self.code = False
+        self.at_limit = False
         self.mode = 'text'
         self.space = ''
         self.join = False
@@ -1665,7 +1667,8 @@ class SpokenReplyText:
         self.heading = self.line_prose = False
 
     def _end_sentence(self, *, strip_space=False) -> None:
-        if self.last not in '.!?':
+        # A line the length limit cut was never ended by the model, so no period is made for it.
+        if self.last not in '.!?' and not self.at_limit:
             if strip_space:
                 self.space = ''
             self._emit('.')
@@ -2257,9 +2260,10 @@ class SpokenReplyText:
             self._scan(char)
         return ''.join(self.output)
 
-    def finish(self, *, failed: bool = False) -> str:
+    def finish(self, *, failed: bool = False, at_limit: bool = False) -> str:
         if not self.active:
             return ''
+        self.at_limit = at_limit
         self.output = []
         if self.line_pending_kind == 'rule':
             if self.rule_count >= 3:
@@ -2296,7 +2300,7 @@ class SpokenReplyText:
         if self.label is not None:
             self._release_label(closed=self.label_closed)
         result = ''.join(self.output)
-        if self.code:
+        if self.code and not at_limit:
             result += ' There is code in this reply.'
         if self.refused and not failed:
             result += " I couldn't safely prepare this reply for speech. Please ask me to rephrase."
@@ -2308,6 +2312,16 @@ class SpokenReplyText:
             result += self.space + self.indent
         self.reset()
         return result
+
+
+def finished_sentences(text, language):
+    """The leading whole sentences of text, by Pipecat's own boundary rule."""
+    finished = []
+    text = text.lstrip()
+    while end := match_endofsentence(text, language=language):
+        finished.append(text[:end].rstrip())
+        text = text[end:].lstrip()
+    return ' '.join(finished)
 
 
 @dataclass(frozen=True)
@@ -2400,7 +2414,12 @@ class ConversationTTS(TTSService):
                 section = self.section(context_id)
                 if section is not None:
                     section.delivery = 'neutral'
-                tail = self._spoken_reply.finish(failed=True)
+                at_limit = isinstance(frame, ReplyLimitFrame)
+                tail = self._spoken_reply.finish(failed=True, at_limit=at_limit)
+                if at_limit:
+                    # Whole sentences still awaiting lookahead are spoken; the unfinished rest never is.
+                    tail = finished_sentences(self._text_aggregator._text + tail, self._text_aggregator.language)
+                    await self._text_aggregator.reset()
                 if tail.strip():
                     separator = ' ' if tail.rstrip().endswith(('.', '!', '?')) else '. '
                     frame.text = tail.rstrip() + separator + frame.text.lstrip()

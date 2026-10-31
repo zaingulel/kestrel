@@ -1,4 +1,5 @@
 import asyncio
+import json
 from copy import deepcopy
 import threading
 from pathlib import Path
@@ -65,7 +66,7 @@ class WholeConversationTests(WholeConversationCase):
             self.assertTrue(any(isinstance(frame, speech.SpeechAdvisoryFrame) for frame, _ in interval))
 
     async def test_partial_native_reply_speaks_failure(self):
-        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None), ({}, 'length')]] * 4)
+        brain = ScriptedBrain([[({'content': '[delivery:neutral]\nIncomplete synthetic reply.'}, None)]] * 4)
         self.addCleanup(brain.close)
         transport, spoken, committed, _, processes, _ = await self.open_session(brain)
         await asyncio.shield(transport.service.manager.session_ready)
@@ -74,12 +75,47 @@ class WholeConversationTests(WholeConversationCase):
         self.assertIn('Incomplete synthetic reply.', context)
         self.assertIsNotNone(processes[0][0].returncode)
 
+    async def test_reply_at_length_limit_ends_clean_and_keeps_the_session(self):
+        brain = ScriptedBrain([
+            [({'content': '[delivery:neutral]\nFirst whole sentence. Second whole sentence. Unfinished'}, None),
+             ({}, 'length')],
+            [({'content': '[delivery:neutral]\nStarted over. Next answer.'}, None), ({}, 'stop')],
+        ])
+        self.addCleanup(brain.close)
+        transport, spoken, committed, _, processes, _ = await self.open_session(brain)
+        await asyncio.shield(transport.service.manager.session_ready)
+        records = []
+
+        @transport.llm.event_handler('on_before_push_frame')
+        async def collect_records(processor, frame):
+            if isinstance(frame, bot.LLMFullResponseStartFrame):
+                records.append(transport.llm.current_reply())
+
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Answer at length.')
+        context = await asyncio.wait_for(committed.get(), 5)
+        self.assertEqual(len(brain.requests), 1, 'A reply at its limit is one provider call')
+        heard = []
+        while len(heard) < 4:
+            heard.append(await asyncio.wait_for(spoken.get(), 5))
+        self.assertEqual(heard, ['First whole sentence.', 'Second whole sentence.',
+                                 "That's as far as one reply can go.", 'Ask me to carry on if you want more.'])
+        self.assertNotIn('Unfinished', context)
+        self.assertIsNone(processes[0][0].returncode)
+        self.assertFalse(records[0].answer_failed)
+        await transport.input().queue_frame(ProposedUserStartedSpeakingFrame())
+        await self.finish_user_turn(transport, 'Carry on.')
+        self.assertEqual(await asyncio.wait_for(committed.get(), 5), 'Started over. Next answer.')
+        self.assertEqual(len(brain.requests), 2)
+        self.assertNotIn('Unfinished', json.dumps(brain.requests[1][2]['messages']))
+
     async def test_corrupt_worker_response_speaks_failure(self):
         # External process stand-ins cover malformed JSON and wrongly typed terminal events.
         cases = [
             ('malformed JSON', '{"ready":true}', 'not json'),
             ('wrong done type', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"done":1}'),
             ('malformed incomplete', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"incomplete":1}'),
+            ('malformed reply limit', '{"ready":true}', '{"delivery":"neutral"}\n{"text":"Synthetic prefix."}\n{"reply_limit":1}'),
             ('wrong ready type', '{"ready":1}', ''),
         ]
         for name, ready, response in cases:
@@ -116,10 +152,9 @@ class WholeConversationTests(WholeConversationCase):
             blocked.set()
             if not release.wait(45):
                 raise AssertionError('Scripted partial reply was never released')
-            yield {}, 'length'
             finished.set()
 
-        brain = ScriptedBrain([partial_reply()] + [[({'content': '[delivery:neutral]\nUnheard tail.'}, None), ({}, 'length')]] * 3)
+        brain = ScriptedBrain([partial_reply()] + [[({'content': '[delivery:neutral]\nUnheard tail.'}, None)]] * 3)
         self.addCleanup(brain.close)
         self.addCleanup(release.set)
         transport, spoken, committed, interrupted, processes, _ = await self.open_session(brain)
