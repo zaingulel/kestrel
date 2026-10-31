@@ -1447,7 +1447,7 @@ class VoiceConversations:
             await self.wake_detector.close()
             self.wake_detector = None
         # This failure can arrive after the transport already failed, so its notification cannot carry it.
-        if uncertain and self.capture_recovery.recovering and not self.failure and not self.closed:
+        if uncertain and self.capture_recovery.recovering and not self.failure:
             raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE)
 
     def submit(self, text):

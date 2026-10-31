@@ -357,7 +357,7 @@ class WholeConversationTests(WholeConversationCase):
         finally:
             await close()
 
-    async def assert_waiting_uncertain_cleanup_after_recorder_ended(self):
+    async def assert_waiting_uncertain_cleanup_after_recorder_ended(self, budget_spent=False):
         _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
         service = handle.service
         manager = service.manager
@@ -381,11 +381,21 @@ class WholeConversationTests(WholeConversationCase):
                 first.capture.stdout.feed_eof()
                 await wait_until(lambda: probing, 'The replacement recorder never reached its graph probe')
                 opened = len(recorders())
-                next(child for child in recorders() if child.pid == probing[0]).stdout.feed_eof()
-                await wait_until(lambda: manager.failure is not None,
-                                 'Recovery continued after the graph cleanup failure instead of giving up')
-                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
-                self.assertEqual(manager.trouble, 'trouble')
+                transport = manager.waiting_transport
+                exhausted = patch.object(manager.capture_recovery, 'attempt', return_value=False)
+                with exhausted if budget_spent else nullcontext():
+                    next(child for child in recorders() if child.pid == probing[0]).stdout.feed_eof()
+                    await wait_until(lambda: manager.failure is not None,
+                                     'Recovery continued after the graph cleanup failure instead of giving up')
+                    if budget_spent:
+                        # The closing runs after the failure is recorded; its end is the moment an overwrite would land.
+                        await wait_until(lambda: transport.cleanup_uncertain and manager.waiting_transport is None
+                                         and manager.wake_detector is None,
+                                         'The uncertain cleanup never surfaced after the transport failed')
+                failure, trouble = ((speech.LAPTOP_CAPTURE_FAILURE, 'trouble-microphone') if budget_spent
+                                    else (speech.OUTPUT_SWITCH_FAILURE, 'trouble'))
+                self.assertEqual(manager.failure, failure)
+                self.assertEqual(manager.trouble, trouble)
                 self.assertEqual(len(recorders()), opened, 'No recorder may open after the uncertain cleanup')
         finally:
             await close()
@@ -415,6 +425,8 @@ class WholeConversationTests(WholeConversationCase):
                 await self.assert_waiting_uncertain_cleanup_is_final()
             with self.subTest(case='waiting_uncertain_cleanup_after_recorder_ended'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
                 await self.assert_waiting_uncertain_cleanup_after_recorder_ended()
+            with self.subTest(case='late_uncertain_cleanup_keeps_earlier_failure'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                await self.assert_waiting_uncertain_cleanup_after_recorder_ended(budget_spent=True)
             with self.subTest(case='first_opening_uncertain_cleanup_disables_wake'):
                 await self.assert_first_opening_uncertain_cleanup_disables_wake()
 
