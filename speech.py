@@ -34,7 +34,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import STTSettings, TTSSettings
 from pipecat.services.stt_service import SegmentedSTTService
 from pipecat.services.tts_service import TTSService
-from pipecat.utils.string import match_endofsentence
+from pipecat.utils.string import SENTENCE_ENDING_PUNCTUATION, match_endofsentence
 from pipecat.utils.time import time_now_iso8601
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
@@ -2314,6 +2314,9 @@ class SpokenReplyText:
         return result
 
 
+CLOSING_QUOTES = '"\'\u201d\u2019'
+
+
 def finished_sentences(text, language):
     """The leading whole sentences of text, by Pipecat's own boundary rule."""
     finished = []
@@ -2321,6 +2324,11 @@ def finished_sentences(text, language):
     while end := match_endofsentence(text, language=language):
         finished.append(text[:end].rstrip())
         text = text[end:].lstrip()
+    # Pipecat's rule never ends a sentence at a closing quote, so a quoted sentence that did finish is kept here.
+    text = text.rstrip()
+    unquoted = text.rstrip(CLOSING_QUOTES)
+    if unquoted != text and unquoted[-1:] in SENTENCE_ENDING_PUNCTUATION:
+        finished.append(text)
     return ' '.join(finished)
 
 
@@ -2421,7 +2429,7 @@ class ConversationTTS(TTSService):
                     tail = finished_sentences(self._text_aggregator._text + tail, self._text_aggregator.language)
                     await self._text_aggregator.reset()
                 if tail.strip():
-                    separator = ' ' if tail.rstrip().endswith(('.', '!', '?')) else '. '
+                    separator = ' ' if tail.rstrip().rstrip(CLOSING_QUOTES).endswith(('.', '!', '?')) else '. '
                     frame.text = tail.rstrip() + separator + frame.text.lstrip()
             elif isinstance(frame, LLMTextFrame):
                 frame.text = self._spoken_reply.feed(frame.text)

@@ -855,7 +855,9 @@ class HermesWorkerTests(unittest.TestCase):
                 ('cut stream', True, None, 'Whole sentence. Cut', False),
                 ('full context', False, (1000, 1000), 'Whole sentence. Cut', False),
                 ('no text', False, None, None, False),
-                ('blank text', False, None, ' \n', False)):
+                ('blank text', False, None, ' \n', False),
+                ('delivery header alone', False, None, '[delivery:neutral]\n', False),
+                ('header then text', False, None, '[delivery:neutral]\nWhole sentence. Cut', True)):
             with self.subTest(label):
                 truncation = Mock(is_stub=stub, window_filled=filled)
                 native = Mock()

@@ -71,7 +71,9 @@ def deeper_thought_requested(text: str) -> bool:
 def end_reply_at_limit(native_continue_text, truncation, retry, message):
     # Speech already delivered cannot be recalled and a continuation repeats or garbles it.
     # A cut stream, a full context and reasoning-only truncation keep native handling.
-    if truncation.is_stub or truncation.window_filled or not (message.content or '').strip():
+    delivery = ReplyDeliveryPrefix()
+    delivery.feed(message.content or '')
+    if truncation.is_stub or truncation.window_filled or not delivery.has_text:
         return native_continue_text(truncation, retry, message)
     return truncation.end_turn(message.content, REPLY_LIMIT_REACHED)
 

@@ -764,7 +764,11 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                     ('First. Second.', ('Second.',), ()),
                     ('First. [Beta one. Gamma two. Unfin', ('Gamma two.',), ('Unfin',)),
                     ('First. Unfinished `Hidden. More.', (), ('Unfinished', 'There is code')),
-                    ('First.\n- Serve cust', (), ('cust',))):
+                    ('First.\n- Serve cust', (), ('cust',)),
+                    ('First. He said, "You can go."', ('He said, "You can go."',), ('.".',)),
+                    ('First. He said, \u201cYou can go.\u201d', ('He said, \u201cYou can go.\u201d',), ('.\u201d.',)),
+                    ('First. He said, "You can go', (), ('He said',)),
+                    ('First. The dogs\' owner said "Go"', (), ('owner',))):
                 with self.subTest(text=text):
                     start = LLMFullResponseStartFrame()
                     start.reply_progress = reply_record(delivery='curious')
