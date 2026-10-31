@@ -3481,6 +3481,7 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
 
         async def spawn(*argv, **kwargs):
             self.assertIn('--playback', argv)
+            self.assertEqual(argv[argv.index('--latency') + 1], '1024')
             opened.set()
             await release.wait()
             return playback

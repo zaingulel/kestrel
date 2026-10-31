@@ -1205,7 +1205,7 @@ class LaptopAudioTransport:
         try:
             self.playback = await self._spawn(
                 "pw-cat", "--playback", "--raw", "--rate", "48000", "--channels", "1",
-                "--format", "s16", "--latency", "20ms", "-", stdin=asyncio.subprocess.PIPE,
+                "--format", "s16", "--latency", "1024", "-", stdin=asyncio.subprocess.PIPE,
             )
         except OSError:
             self.fail(LAPTOP_PLAYBACK_FAILURE)
