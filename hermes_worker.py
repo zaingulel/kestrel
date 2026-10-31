@@ -47,7 +47,8 @@ SYSTEM_PLUGINS_ERROR = ('System NeMo Relay plugins are not supported by Kestrel.
 CONFIGURATION_CHECK_ERROR = ('Kestrel could not verify isolated Hermes configuration. '
                              'Check runtime permissions and restart Kestrel.')
 BONSAI_URL = 'http://127.0.0.1:8080/v1'
-ORDINARY_MAX_TOKENS = 180
+ORDINARY_MAX_TOKENS = 2700
+REPLY_LIMIT_REACHED = 'Reply reached its output limit.'
 ORDINARY_REASONING_ENABLED = False
 GENERATION_TEMPERATURE = 0.4
 DELIVERY_LABELS = frozenset(('neutral', 'curious', 'gently_pleased', 'reassuring'))
@@ -65,6 +66,16 @@ def deeper_thought_requested(text: str) -> bool:
     text = text.strip()
     prefix = 'think more deeply about '
     return text.lower().startswith(prefix) and bool(text[len(prefix):].strip())
+
+
+def end_reply_at_limit(native_continue_text, truncation, retry, message):
+    # Speech already delivered cannot be recalled and a continuation repeats or garbles it.
+    # A cut stream, a full context and reasoning-only truncation keep native handling.
+    delivery = ReplyDeliveryPrefix()
+    delivery.feed(message.content or '')
+    if truncation.is_stub or truncation.window_filled or not delivery.has_text:
+        return native_continue_text(truncation, retry, message)
+    return truncation.end_turn(message.content, REPLY_LIMIT_REACHED)
 
 
 class ReplyReasoningFilter:
@@ -534,9 +545,14 @@ def main(*, base_url=BONSAI_URL):
                 from agent.turn_failure_copy import is_max_iteration_handoff
                 from agent.reasoning_promotion import answer_in_reasoning_capability
                 from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
+                from agent.turn_truncation import _continue_text as native_continue_text
                 import nemo_relay
             except ImportError as error:
                 raise RuntimeError(ENGINE_LOAD_ERROR) from error
+            # Hermes offers no hook for a reply that reaches its limit; its truncation handler looks this
+            # private name up at call time, so replacing it here changes that one decision and nothing else.
+            sys.modules['agent.turn_truncation']._continue_text = (
+                lambda *call: end_reply_at_limit(native_continue_text, *call))
 
             bridge_failed = False
             outside = False
@@ -978,8 +994,9 @@ def main(*, base_url=BONSAI_URL):
                         print(f"Hermes turn incomplete: {result['turn_exit_reason']}", file=sys.stderr, flush=True)
                         emit({'incomplete': True})
                         continue
-                    if (not isinstance(result, dict) or result.get('completed') is not True
-                            or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
+                    at_limit = isinstance(result, dict) and result.get('error') == REPLY_LIMIT_REACHED
+                    if not at_limit and (not isinstance(result, dict) or result.get('completed') is not True
+                                         or any(result.get(key) for key in ('partial', 'interrupted', 'failed', 'error'))):
                         reason = result.get('error') if isinstance(result, dict) else None
                         raise RuntimeError(reason or 'Hermes did not complete the reply.')
                     final = result.get('final_response')
@@ -992,7 +1009,11 @@ def main(*, base_url=BONSAI_URL):
                         emit(event)
                     if preparing:
                         close_agent()
-                    emit({'done': True})
+                    if at_limit:
+                        print('Hermes reply reached its output limit', file=sys.stderr, flush=True)
+                        emit({'reply_limit': True})
+                    else:
+                        emit({'done': True})
                 except Exception as error:
                     print(f'Hermes turn failed: {error}', file=sys.stderr, flush=True)
                     emit({'error': str(error) or type(error).__name__})

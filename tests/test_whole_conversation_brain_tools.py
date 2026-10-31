@@ -92,7 +92,7 @@ class WholeConversationTests(WholeConversationCase):
                 {'role': 'assistant', 'content': 'Answer.'},
                 {'role': 'user', 'content': 'Next ordinary answer.'},
             ])
-            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [180, 16384, 16384, 180])
+            self.assertEqual([r[2]['max_tokens'] for r in brain.requests], [2700, 16384, 16384, 2700])
             self.assertTrue(any('tool_call' in event for kind, event in native_events if kind == 'read'))
             self.assertTrue(any(child.writes for child in service.audio_children if child.stdin is not None))
             self.assertTrue(spoken.empty())

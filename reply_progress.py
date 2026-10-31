@@ -17,6 +17,10 @@ class SpeechAdvisoryFrame(LLMTextFrame):
     """Fixed application speech that generated syntax cannot suppress."""
 
 
+class ReplyLimitFrame(SpeechAdvisoryFrame):
+    """Fixed speech that replaces the unfinished sentence when a reply reaches its limit."""
+
+
 class AnnouncementMarkFrame(DataFrame):
     """Its output push follows the full synthesis and playback of the announcement pushed before it."""
 

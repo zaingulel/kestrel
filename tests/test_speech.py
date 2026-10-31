@@ -758,6 +758,33 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(calls[-1]['text'], 'Tail Restart Kestrel.')
             self.assertEqual(calls[-1]['prompt_text'], 'Fixture voice.')
 
+            # A reply at its limit speaks whole sentences, never the unfinished one, then the fixed note.
+            for text, present, absent in (
+                    ('First. Unfinished tail', (), ('Unfinished',)),
+                    ('First. Second.', ('Second.',), ()),
+                    ('First. [Beta one. Gamma two. Unfin', ('Gamma two.',), ('Unfin',)),
+                    ('First. Unfinished `Hidden. More.', (), ('Unfinished', 'There is code')),
+                    ('First.\n- Serve cust', (), ('cust',)),
+                    ('First. He said, "You can go."', ('He said, "You can go."',), ('.".',)),
+                    ('First. He said, \u201cYou can go.\u201d', ('He said, \u201cYou can go.\u201d',), ('.\u201d.',)),
+                    ('First. He said, "You can go', (), ('He said',)),
+                    ('First. The dogs\' owner said "Go"', (), ('owner',))):
+                with self.subTest(text=text):
+                    start = LLMFullResponseStartFrame()
+                    start.reply_progress = reply_record(delivery='curious')
+                    before = len(calls)
+                    await worker.queue_frames([start, LLMTextFrame(text), speech.ReplyLimitFrame(' Note.'),
+                                               LLMFullResponseEndFrame()])
+                    while not isinstance(await asyncio.wait_for(completed.get(), 5), LLMFullResponseEndFrame):
+                        pass
+                    spoken = [call['text'] for call in calls[before:]]
+                    self.assertEqual(spoken[-1], 'Note.')
+                    self.assertTrue(spoken[0].endswith('First.'))
+                    for fragment in present:
+                        self.assertIn(fragment, ' '.join(spoken[1:-1]))
+                    for fragment in absent:
+                        self.assertNotIn(fragment, ' '.join(spoken))
+
             await worker.queue_frames([speech.TTSSpeakFrame('Local reply.'), DataFrame()])
             while type(await asyncio.wait_for(completed.get(), 5)) is not DataFrame:
                 pass
