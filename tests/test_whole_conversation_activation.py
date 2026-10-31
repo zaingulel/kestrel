@@ -357,6 +357,20 @@ class WholeConversationTests(WholeConversationCase):
         finally:
             await close()
 
+    async def assert_first_opening_uncertain_cleanup_disables_wake(self):
+        serial = AsyncMock(side_effect=speech.PipeWireGraphCleanupFailure(speech.OUTPUT_SWITCH_FAILURE))
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False, microphone_serial=serial)
+        manager = handle.service.manager
+        try:
+            await wait_until(lambda: manager.wake_disabled or manager.failure is not None,
+                             'The first opening never reported its uncertain cleanup')
+            self.assertEqual(serial.await_count, 1, 'The first opening must reach the raising microphone source')
+            self.assertTrue(manager.wake_disabled)
+            self.assertIsNone(manager.failure)
+            self.assertFalse(manager.capture_recovery.recovering)
+        finally:
+            await close()
+
     async def test_capture_recovery_yields_to_shortcut_and_shutdown(self):
         with patch.object(bot, 'CAPTURE_RETRY_PAUSE', PAUSE_THAT_NEVER_ELAPSES, create=True):
             for case in ('shortcut', 'shutdown'):
@@ -366,6 +380,8 @@ class WholeConversationTests(WholeConversationCase):
                 await self.assert_uncertain_recovery_cleanup_refuses()
             with self.subTest(case='waiting_uncertain_cleanup_is_final'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
                 await self.assert_waiting_uncertain_cleanup_is_final()
+            with self.subTest(case='first_opening_uncertain_cleanup_disables_wake'):
+                await self.assert_first_opening_uncertain_cleanup_disables_wake()
 
     def assert_owned_capture(self, recorder, output_serial):
         argv = recorder.argv
