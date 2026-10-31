@@ -357,6 +357,39 @@ class WholeConversationTests(WholeConversationCase):
         finally:
             await close()
 
+    async def assert_waiting_uncertain_cleanup_after_recorder_ended(self):
+        _, (handle, _, _, _, _, close) = await self.wake_session(activate=False)
+        service = handle.service
+        manager = service.manager
+        probing = []
+
+        async def source(pid=None, *, output_serial=None):
+            if pid is None or probing:
+                return 900
+            probing.append(pid)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise speech.PipeWireGraphCleanupFailure(speech.OUTPUT_SWITCH_FAILURE) from None
+
+        def recorders():
+            return [child for child in service.audio_children if child.stdout is not None]
+
+        try:
+            first = await asyncio.wait_for(service.waiting.get(), 5)
+            with patch.object(bot.ECHO_REMOVAL, 'microphone_serial', AsyncMock(side_effect=source)):
+                first.capture.stdout.feed_eof()
+                await wait_until(lambda: probing, 'The replacement recorder never reached its graph probe')
+                opened = len(recorders())
+                next(child for child in recorders() if child.pid == probing[0]).stdout.feed_eof()
+                await wait_until(lambda: manager.failure is not None,
+                                 'Recovery continued after the graph cleanup failure instead of giving up')
+                self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                self.assertEqual(manager.trouble, 'trouble')
+                self.assertEqual(len(recorders()), opened, 'No recorder may open after the uncertain cleanup')
+        finally:
+            await close()
+
     async def assert_first_opening_uncertain_cleanup_disables_wake(self):
         serial = AsyncMock(side_effect=speech.PipeWireGraphCleanupFailure(speech.OUTPUT_SWITCH_FAILURE))
         _, (handle, _, _, _, _, close) = await self.wake_session(activate=False, microphone_serial=serial)
@@ -380,6 +413,8 @@ class WholeConversationTests(WholeConversationCase):
                 await self.assert_uncertain_recovery_cleanup_refuses()
             with self.subTest(case='waiting_uncertain_cleanup_is_final'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
                 await self.assert_waiting_uncertain_cleanup_is_final()
+            with self.subTest(case='waiting_uncertain_cleanup_after_recorder_ended'), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                await self.assert_waiting_uncertain_cleanup_after_recorder_ended()
             with self.subTest(case='first_opening_uncertain_cleanup_disables_wake'):
                 await self.assert_first_opening_uncertain_cleanup_disables_wake()
 

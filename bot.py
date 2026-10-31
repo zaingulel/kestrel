@@ -1436,6 +1436,7 @@ class VoiceConversations:
             self.wake_startup.cancel()
             await asyncio.gather(self.wake_startup, return_exceptions=True)
             self.wake_startup = None
+        uncertain = self.waiting_transport is not None and self.waiting_transport.cleanup_uncertain
         if self.waiting_transport is not None:
             await self.waiting_transport.close()
             if self.waiting_owner is not None:
@@ -1445,6 +1446,9 @@ class VoiceConversations:
         if self.wake_detector is not None:
             await self.wake_detector.close()
             self.wake_detector = None
+        # This failure can arrive after the transport already failed, so its notification cannot carry it.
+        if uncertain and self.capture_recovery.recovering and not self.failure and not self.closed:
+            raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE)
 
     def submit(self, text):
         if self.closed or self.failure or not self.prepared:
