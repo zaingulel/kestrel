@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
+from loguru import logger
 from pipecat.audio.vad.vad_analyzer import VADState
 from pipecat.frames.frames import (
     DataFrame, InputAudioRawFrame, LLMFullResponseEndFrame, ProposedUserStartedSpeakingFrame,
@@ -14,7 +15,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection
 
 import bot
-from conversation_fixtures import WholeConversationCase, microphone_admitted
+from conversation_fixtures import WholeConversationCase, microphone_admitted, wait_until
 import reply_progress
 import speech
 from test_hermes import ScriptedBrain
@@ -952,6 +953,124 @@ class WholeConversationTests(WholeConversationCase):
                 finally:
                     for release in releases:
                         release.set()
+                    await close()
+
+    async def test_capture_recovery_exhausted_reports_microphone_failure(self):
+        for case in ('exhausted', 'handover_deadline', 'active_capture_failure', 'active_stream_ended',
+                     'held_capture_earns_a_new_window', 'monitor_failure'):
+            with self.subTest(case=case), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0, create=True):
+                brain = ScriptedBrain([[({'content': '[delivery:neutral]\nPrepared.'}, None), ({}, 'stop')]])
+                self.addCleanup(brain.close)
+                lines = []
+                self.addCleanup(logger.remove, logger.add(lambda message: lines.append(str(message)), format='{message}'))
+                handle, _, _, _, _, close = await self.open_session(
+                    brain, through_service=True, native_audio=True, activate=case in ('active_capture_failure', 'active_stream_ended'),
+                )
+                try:
+                    service, manager = handle.service, handle.service.manager
+                    now = [100]
+                    manager.capture_recovery.clock = lambda: now[0]
+                    if case == 'exhausted':
+                        first = await asyncio.wait_for(service.waiting.get(), 5)
+                        factory = bot.LaptopAudioTransport.side_effect
+                        detectors = []
+
+                        async def refused_spawn(*args, **kwargs):
+                            detectors.append(manager.wake_detector)
+                            if len(detectors) == 2:
+                                now[0] = 131
+                            raise OSError('Native capture could not start')
+
+                        def failing_capture(*args, **kwargs):
+                            transport = factory(*args, **kwargs)
+                            transport._spawn = AsyncMock(side_effect=refused_spawn)
+                            return transport
+
+                        with patch.object(bot.LaptopAudioTransport, 'side_effect', side_effect=failing_capture):
+                            first.capture.stdout.feed_eof()
+                            try:
+                                await service.state('trouble-microphone')
+                            except TimeoutError:
+                                self.fail('Past its budget, recovery must report the microphone: '
+                                          f'spawns={len(detectors)}, failure={manager.failure!r}, '
+                                          f'trouble={manager.trouble!r}, state={manager.status._state!r}')
+                            self.assertEqual(len(detectors), 2)
+                            self.assertEqual(manager.failure, speech.LAPTOP_CAPTURE_FAILURE)
+                            self.assertEqual(manager.trouble, 'trouble-microphone')
+                            self.assertEqual(await service.toggle(), 'unavailable')
+                            self.assertTrue(any(speech.LAPTOP_CAPTURE_FAILURE in line for line in lines), lines)
+                            self.assertEqual([child.pid for child in service.audio_children if child.returncode is None], [])
+                            self.assertIsNone(manager.wake_detector)
+                            for detector in detectors:
+                                self.assertIsNotNone(detector.process.returncode)
+                            self.assertTrue(service.waiting.empty())
+                    elif case == 'handover_deadline':
+                        first = await asyncio.wait_for(service.waiting.get(), 5)
+                        failed = asyncio.Event()
+                        deadlines = []
+                        original_state = manager.status.set_state
+
+                        def state(value):
+                            original_state(value)
+                            if value == 'trouble':
+                                failed.set()
+
+                        with patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(side_effect=RuntimeError('private graph'))), \
+                                patch.object(manager.status, 'set_state', side_effect=state), \
+                                shortened_handover(deadlines):
+                            first.capture.stdout.feed_eof()
+                            # Watchdog includes the handover shortened to HANDOVER_LIMIT and bounded cleanup.
+                            await asyncio.wait_for(failed.wait(), 10)
+                        self.assertTrue(deadlines, 'The production handover deadline was never requested')
+                        self.assertEqual(manager.failure, speech.OUTPUT_SWITCH_FAILURE)
+                        self.assertEqual(manager.trouble, 'trouble')
+                        self.assertEqual(manager.status._state, 'trouble')
+                        self.assertEqual(await service.toggle(), 'unavailable')
+                        self.assertFalse(any(speech.LAPTOP_CAPTURE_FAILURE in line for line in lines), lines)
+                        self.assertTrue(any(speech.OUTPUT_SWITCH_FAILURE in line for line in lines),
+                                        'The cause-unknown advisory sends the reader to the service log')
+                    elif case in ('active_capture_failure', 'active_stream_ended'):
+                        await asyncio.shield(manager.session_ready)
+                        spawns = []
+
+                        async def refused_replacement(*args, **kwargs):
+                            spawns.append(args)
+                            if len(spawns) == 2:
+                                now[0] = 131
+                            raise OSError('Native capture could not start')
+
+                        manager.transport._spawn = refused_replacement
+                        if case == 'active_capture_failure':
+                            service.output_watch.metadata_id = None
+                            service.output_watch.emit()
+                        else:
+                            handle.capture.stdout.feed_eof()
+                        await wait_until(lambda: manager.failure is not None, 'The failed replacement recorder was never reported')
+                        self.assertEqual(len(spawns), 2, f'Reported after too few reopenings: failure={manager.failure!r}')
+                        self.assertEqual(manager.failure, speech.LAPTOP_CAPTURE_FAILURE)
+                        self.assertEqual(manager.trouble, 'trouble-microphone')
+                        self.assertEqual(await service.toggle(), 'unavailable')
+                        self.assertEqual([child.pid for child in service.audio_children
+                                          if child.stdout is not None and child.returncode is None], [])
+                    elif case == 'held_capture_earns_a_new_window':
+                        first = await asyncio.wait_for(service.waiting.get(), 5)
+                        first.capture.stdout.feed_eof()
+                        second = await asyncio.wait_for(service.waiting.get(), 5)
+                        await wait_until(lambda: not manager.capture_recovery.recovering, 'The first loss never counted as reopened')
+                        now[0] = 200
+                        second.capture.stdout.feed_eof()
+                        third = await asyncio.wait_for(service.waiting.get(), 5)
+                        await wait_until(lambda: not manager.capture_recovery.recovering, 'The second loss never counted as reopened')
+                        self.assertTrue(third.verified)
+                        self.assertIsNone(manager.failure)
+                    else:
+                        await asyncio.wait_for(service.waiting.get(), 5)
+                        manager.output_watch_failed()
+                        await service.state('trouble')
+                        self.assertEqual(manager.failure, speech.OUTPUT_WATCH_FAILURE)
+                        self.assertTrue(any(speech.OUTPUT_WATCH_FAILURE in line for line in lines),
+                                        'The cause-unknown advisory sends the reader to the service log')
+                finally:
                     await close()
 
     async def test_acknowledgement_output_preserves_history_repeat_and_typed_admission(self):

@@ -138,6 +138,7 @@ LAPTOP_AUDIO_START_TIMEOUT = 10
 LAPTOP_CAPTURE_STALL_TIMEOUT = 5
 LAPTOP_PLAYBACK_FAILURE = "Audio playback failed. Restart Kestrel."
 LAPTOP_CAPTURE_FAILURE = "Microphone capture failed. Restart Kestrel."
+CAPTURE_RECOVERY_WINDOW = 30
 
 
 def _standalone_number(token: str, start: int, stop: int) -> bool:
@@ -318,6 +319,13 @@ async def _pipewire_graph():
                 raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE) from None
 
 
+OUTPUT_WATCH_REMOVAL_WAIT = 5
+
+
+class MetadataReplaced(ValueError):
+    pass
+
+
 class OutputDeviceWatch:
     def __init__(self):
         self.process = None
@@ -365,6 +373,9 @@ class OutputDeviceWatch:
         if not isinstance(batch, list) or len(batch) != 1:
             raise ValueError
         item = batch[0]
+        if (isinstance(item, dict) and type(item.get('id')) is int and self.metadata_id is not None
+                and item == {'id': self.metadata_id, 'info': None}):
+            return None
         if (not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] < 0
                 or item.get('type') != 'PipeWire:Interface:Metadata'
                 or not isinstance(item.get('props'), dict) or item['props'].get('metadata.name') != 'default'
@@ -380,21 +391,40 @@ class OutputDeviceWatch:
         graph = await _pipewire_graph()
         metadata = [item for item in graph if item['type'] == 'PipeWire:Interface:Metadata'
                     and item.get('props', {}).get('metadata.name') == 'default']
-        if len(metadata) != 1 or metadata[0]['id'] != self.metadata_id:
+        if not metadata:
+            return None
+        if len(metadata) != 1:
             raise ValueError
+        if metadata[0]['id'] != self.metadata_id:
+            raise MetadataReplaced
         selected = EchoRemoval._selected_output(graph)
         return selected['info']['props']['object.serial'] if selected is not None else None
 
     async def _watch(self, on_change, on_failed):
         try:
+            removal_wait = None
             while True:
-                record = await self._record()
+                async with asyncio.timeout(removal_wait):
+                    record = await self._record()
+                removal_wait = None
+                if record is None:
+                    self.metadata_id = self.selected_serial = None
+                    self.revision += 1
+                    on_change()
+                    continue
+                if self.metadata_id is None:
+                    self.metadata_id = record['id']
                 explicit = any(entry['subject'] == 0 and entry['key'] == 'default.audio.sink'
                                for entry in record['metadata'])
                 if explicit:
                     self.revision += 1
                     on_change()
-                selected = await self._selection()
+                try:
+                    selected = await self._selection()
+                except MetadataReplaced:
+                    # The stream is ordered, so the old id's removal record must follow within moments.
+                    removal_wait = OUTPUT_WATCH_REMOVAL_WAIT
+                    continue
                 if not explicit and selected != self.selected_serial:
                     self.revision += 1
                     on_change()
@@ -995,14 +1025,39 @@ class LaptopOutput(BaseOutputTransport):
             return False
 
 
+class CaptureRecovery:
+    """Bounds reopening after one capture loss; capture must hold a whole window before a later loss counts as new."""
+
+    def __init__(self, clock=monotonic):
+        self.clock = clock
+        self.recovering = False
+        self.deadline = 0.0
+        self.held_until = 0.0
+
+    def attempt(self) -> bool:
+        now = self.clock()
+        if not self.recovering and now >= self.held_until:
+            self.deadline = now + CAPTURE_RECOVERY_WINDOW
+        self.recovering = True
+        return now < self.deadline
+
+    def reopened(self) -> None:
+        if self.recovering:
+            self.recovering = False
+            self.held_until = self.clock() + CAPTURE_RECOVERY_WINDOW
+
+
 class LaptopAudioTransport:
-    def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
+    def __init__(self, echo_removal, *, on_stopped, admission, capture_enabled=True, capture_pcm=None,
+                 on_capture_lost=None):
         self.echo_removal = echo_removal
         self.admission = admission
         self.capture_pcm = capture_pcm
         self.capture_enabled = capture_enabled
         self.on_stopped = on_stopped
+        self.on_capture_lost = on_capture_lost
         self.failure: str | None = None
+        self.cleanup_uncertain = False
         self.capture = None
         self.playback = None
         self.playback_watcher = None
@@ -1037,13 +1092,20 @@ class LaptopAudioTransport:
             self.failure = reason
             self.verified = False
             self.received_audio.set()
-            logger.error(reason)
+            # The waiting capture's owner decides what its end means; a retry must not log "Restart Kestrel".
+            if self.admission is not None:
+                logger.error(reason)
             self.on_stopped()
+
+    def _require_live_capture(self):
+        if self.failure:
+            raise RuntimeError(self.failure)
+        if self.reader is not None and self.reader.done():
+            raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
 
     async def _source(self, capture_pid=None, *, output_serial=None):
         while True:
-            if self.failure:
-                raise RuntimeError(self.failure)
+            self._require_live_capture()
             try:
                 return await self.echo_removal.microphone_serial(capture_pid, output_serial=output_serial)
             except PipeWireGraphCleanupFailure:
@@ -1089,14 +1151,12 @@ class LaptopAudioTransport:
                     "--properties", json.dumps(props), "--rate", "16000", "--channels", "1",
                     "--format", "s16", "--latency", "20ms", "-", stdout=asyncio.subprocess.PIPE,
                 )
-                self.reader = asyncio.create_task(self._read())
+                self.reader = asyncio.create_task(self._read(refreshing))
                 if await self._source(self.capture.pid, output_serial=output_serial) != serial:
                     raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
-                if self.failure:
-                    raise RuntimeError(self.failure)
+                self._require_live_capture()
                 await asyncio.wait_for(self.received_audio.wait(), LAPTOP_CAPTURE_STALL_TIMEOUT)
-                if self.failure:
-                    raise RuntimeError(self.failure)
+                self._require_live_capture()
                 self.verified = True
         except asyncio.CancelledError:
             if refreshing:
@@ -1109,15 +1169,19 @@ class LaptopAudioTransport:
             else:
                 await self.close()
             raise
-        except (OSError, RuntimeError, TimeoutError):
+        except (OSError, RuntimeError, TimeoutError) as error:
             if refreshing:
                 await self.suspend_capture()
+                # A graph child that could not be reaped is final; only an ordinary failure may be retried.
+                if isinstance(error, PipeWireGraphCleanupFailure):
+                    raise
                 raise RuntimeError(LAPTOP_CAPTURE_FAILURE) from None
+            self.cleanup_uncertain = isinstance(error, PipeWireGraphCleanupFailure)
             self.fail(LAPTOP_CAPTURE_FAILURE)
             await self.close()
             raise RuntimeError(self.failure) from None
 
-    async def _read(self):
+    async def _read(self, replacing):
         try:
             while True:
                 pcm = await asyncio.wait_for(self.capture.stdout.readexactly(640), LAPTOP_CAPTURE_STALL_TIMEOUT)
@@ -1128,7 +1192,13 @@ class LaptopAudioTransport:
                     elif self._input.ready and self.input_admitted():
                         await self._input.push_audio_frame(InputAudioRawFrame(pcm, 16000, 1))
         except (OSError, RuntimeError, asyncio.IncompleteReadError, TimeoutError):
-            self.fail(LAPTOP_CAPTURE_FAILURE)
+            # Only a first opening has failed outright; anything later is its owner's to reopen.
+            if self.on_capture_lost is None or not (replacing or self.verified):
+                self.fail(LAPTOP_CAPTURE_FAILURE)
+            elif not self.closed:
+                self.verified = False
+                self.received_audio.set()
+                self.on_capture_lost()
 
     async def _open_playback(self):
         try:

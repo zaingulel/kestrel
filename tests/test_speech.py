@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 import threading
 import unittest
@@ -1701,7 +1701,7 @@ class EchoRemovalTests(unittest.TestCase):
                                                 'type': 'Spa:String:JSON', 'value': {'name': name}}])
                        for name in ('B', 'A')]
             updates.append(dict(baseline, metadata=[]))
-            tombstone = {'id': 32, 'info': None}
+            foreign_removal = {'id': 33, 'info': None}
             selected_node = self.node(10, 'A', 30, 910)
             selected_node['info']['props']['media.class'] = 'Audio/Sink'
             selection_graph = [baseline, selected_node]
@@ -1785,8 +1785,8 @@ class EchoRemovalTests(unittest.TestCase):
                         frames = ([(baseline, foreign_graph)] if case == 'snapshot_identity_startup'
                                   else [(baseline, graph_a), (updates[-1], foreign_graph)])
                         expected = []
-                    completed = asyncio.Event()
-                    seen, failed = [], Mock(side_effect=completed.set)
+                    completed, refused = asyncio.Event(), asyncio.Event()
+                    seen, failed = [], Mock(side_effect=refused.set)
 
                     async def next_record():
                         nonlocal selection_graph
@@ -1799,14 +1799,16 @@ class EchoRemovalTests(unittest.TestCase):
                     monitor = Mock(returncode=None, stdout=Mock(readline=AsyncMock(side_effect=next_record),
                                    _transport=Mock()), wait=AsyncMock(return_value=0))
                     watch = speech.OutputDeviceWatch()
-                    with patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_churn):
+                    with (patch.object(speech.asyncio, 'create_subprocess_exec', side_effect=spawn_churn),
+                          patch.object(speech, 'OUTPUT_WATCH_REMOVAL_WAIT', 0.05, create=True)):
                         try:
                             if case == 'snapshot_identity_startup':
                                 with self.assertRaisesRegex(RuntimeError, speech.OUTPUT_WATCH_FAILURE):
                                     await watch.start(lambda: seen.append(watch.revision), failed)
                             else:
                                 await watch.start(lambda: seen.append(watch.revision), failed)
-                                await asyncio.wait_for(completed.wait(), 5)
+                                # next_record sets completed as soon as the stream runs dry, before the wait ends.
+                                await asyncio.wait_for((refused if case == 'snapshot_identity' else completed).wait(), 5)
                             if case == 'snapshot_identity':
                                 failed.assert_called_once_with()
                             else:
@@ -1945,7 +1947,7 @@ class EchoRemovalTests(unittest.TestCase):
                     else:
                         self.assertEqual(command, (*speech.BOUND_TO_KESTREL, str(os.getpid()), 'stdbuf', '-oL',
                                                   'pw-dump', '-m', '-N', '-R', 'default'))
-                        records = [[baseline], [1]] if malformed else [[baseline], *[[item] for item in updates], [tombstone]]
+                        records = [[baseline], [1]] if malformed else [[baseline], *[[item] for item in updates], [foreign_removal]]
                         wire = ''.join(json.dumps(record) + '\n' for record in records)
                     return await native_spawn(sys.executable, '-u', '-c',
                         'import sys,signal;sys.stdout.write(' + repr(wire) + ');sys.stdout.flush();signal.pause()',
@@ -1955,7 +1957,7 @@ class EchoRemovalTests(unittest.TestCase):
                     try:
                         await watch.start(lambda: seen.put_nowait(watch.revision), failed_callback)
                         await asyncio.wait_for(failed.wait(), 5)
-                        self.assertIsNone(watch.process.returncode, 'Metadata loss must fail while the monitor stays alive')
+                        self.assertIsNone(watch.process.returncode, 'A foreign removal must fail while the monitor stays alive')
                         failed_callback.assert_called_once_with()
                         if malformed:
                             self.assertEqual(watch.revision, 1)
@@ -1971,7 +1973,9 @@ class EchoRemovalTests(unittest.TestCase):
 
             nested = b'[' * 4095 + b'0' + b']' * 4095 + b'\n'
             records = (b'', b'partial', b'x' * 8193 + b'\n', b'private\x00data\n', b'[1]\n', nested,
-                       json.dumps([tombstone]).encode() + b'\n' + json.dumps([dict(baseline, id=33)]).encode() + b'\n',
+                       *(json.dumps([hostile]).encode() + b'\n' for hostile in (
+                           {'id': 33, 'info': None}, {'id': 32}, {'id': 32, 'info': None, 'extra': True},
+                           {'id': 32, 'info': {}}, {'id': 32.0, 'info': None})),
                        json.dumps([dict(baseline, id=33)]).encode() + b'\n',
                        json.dumps([baseline, baseline]).encode() + b'\n')
             for record in records:
@@ -1985,10 +1989,12 @@ class EchoRemovalTests(unittest.TestCase):
                     watch.process.stdout.feed_eof()
                 failure_seen = asyncio.Event()
                 failed = Mock(side_effect=failure_seen.set)
-                watch.reader = asyncio.create_task(watch._watch(lambda: self.fail('Corrupt record admitted'), failed))
+                changes = Mock()
+                watch.reader = asyncio.create_task(watch._watch(changes, failed))
                 try:
                     await asyncio.wait_for(failure_seen.wait(), 5)
                     failed.assert_called_once_with()
+                    changes.assert_not_called()
                     if live_record:
                         self.assertIsNone(watch.process.returncode)
                         self.assertFalse(watch.process.stdout.at_eof())
@@ -2125,6 +2131,97 @@ class EchoRemovalTests(unittest.TestCase):
             for child in graph_children:
                 child.stdout._transport.close.assert_called_once_with()
                 child.wait.assert_awaited()
+
+        asyncio.run(check())
+
+    def test_output_watch_survives_session_manager_restart(self):
+        baseline = {'id': 32, 'type': 'PipeWire:Interface:Metadata', 'props': {'metadata.name': 'default'},
+                    'metadata': [{'subject': 0, 'key': 'default.audio.sink', 'type': 'Spa:String:JSON',
+                                  'value': {'name': 'A'}}]}
+        restarted = dict(baseline, id=40)
+        sink = self.node(10, 'A', 30, 910)
+        sink['info']['props']['media.class'] = 'Audio/Sink'
+
+        def record(item):
+            return json.dumps([item]).encode() + b'\n'
+
+        def removal(metadata_id):
+            return record({'id': metadata_id, 'info': None})
+
+        async def notice(notices):
+            return await asyncio.wait_for(notices.get(), 5)
+
+        async def check():
+            graph = [restarted, sink]
+            querying, release = asyncio.Event(), asyncio.Event()
+            release.set()
+
+            async def snapshot():
+                querying.set()
+                await release.wait()
+                return graph
+
+            @asynccontextmanager
+            async def watching():
+                watch = speech.OutputDeviceWatch()
+                watch.metadata_id, watch.revision, watch.selected_serial = 32, 1, 910
+                watch.process = Mock(stdout=asyncio.StreamReader(), returncode=None, wait=AsyncMock(return_value=0))
+                notices = asyncio.Queue()
+                failed = Mock(side_effect=lambda: notices.put_nowait('failed'))
+                watch.reader = asyncio.create_task(watch._watch(
+                    lambda: notices.put_nowait((watch.metadata_id, watch.revision)), failed))
+                try:
+                    yield watch.process.stdout, notices, failed
+                finally:
+                    await watch.close()
+
+            with patch.object(speech, '_pipewire_graph', new=snapshot):
+                # The monitor survives the session manager going away: its removal record clears the pin and
+                # the next default metadata is adopted; only an unpinned removal record is refused.
+                async with watching() as (stream, notices, failed):
+                    stream.feed_data(removal(32))
+                    self.assertEqual(await notice(notices), (None, 2))
+                    stream.feed_data(record(restarted))
+                    self.assertEqual(await notice(notices), (40, 3))
+                    stream.feed_data(removal(40))
+                    self.assertEqual(await notice(notices), (None, 4))
+                    failed.assert_not_called()
+                    stream.feed_data(removal(32))
+                    self.assertEqual(await notice(notices), 'failed')
+                    failed.assert_called_once_with()
+                    self.assertTrue(notices.empty())
+
+                # A snapshot without default metadata, taken while the session manager restarts, is not a failure.
+                graph = [sink]
+                async with watching() as (stream, notices, failed):
+                    stream.feed_data(record(dict(baseline, metadata=[])))
+                    self.assertEqual(await notice(notices), (32, 2))
+                    graph = [baseline, sink]
+                    stream.feed_data(record(dict(baseline, metadata=[])))
+                    self.assertEqual(await notice(notices), (32, 3))
+                    failed.assert_not_called()
+
+                # A snapshot taken after the replacement waits for the removal record queued behind it.
+                graph = [baseline, sink]
+                release.clear()
+                querying.clear()
+                async with watching() as (stream, notices, failed):
+                    stream.feed_data(record(baseline))
+                    self.assertEqual(await notice(notices), (32, 2))
+                    await asyncio.wait_for(querying.wait(), 5)
+                    stream.feed_data(removal(32) + record(restarted))
+                    graph = [restarted, sink]
+                    release.set()
+                    self.assertEqual(await notice(notices), (None, 3))
+                    self.assertEqual(await notice(notices), (40, 4))
+                    stream.feed_data(removal(40))
+                    self.assertEqual(await notice(notices), (None, 5))
+                    failed.assert_not_called()
+
+                async with watching() as (stream, notices, failed):
+                    stream.feed_eof()
+                    self.assertEqual(await notice(notices), 'failed')
+                    failed.assert_called_once_with()
 
         asyncio.run(check())
 
@@ -3326,6 +3423,25 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=None)
         self.assertFalse(transport.input_admitted())
 
+    async def test_failure_logging_follows_capture_owner(self):
+        # An answer window on the active transport still logs; the waiting capture's owner decides what its end means.
+        admission = Admission(voice=True, output_switching=lambda: False)
+        cases = (
+            ("answer window", admission, Mock(), True),
+            ("waiting capture", None, Mock(), False),
+            ("no capture handed out", admission, None, True),
+        )
+        for name, owner, capture_pcm, logged in cases:
+            with self.subTest(name):
+                messages = []
+                sink = logger.add(lambda message: messages.append(message.record["message"]), level="ERROR")
+                try:
+                    transport = speech.LaptopAudioTransport(Mock(), on_stopped=Mock(), admission=owner, capture_pcm=capture_pcm)
+                    transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
+                finally:
+                    logger.remove(sink)
+                self.assertEqual(messages, [speech.LAPTOP_CAPTURE_FAILURE] if logged else [])
+
     async def test_output_only_and_reply_token_gate(self):
         admission = Admission(voice=False, output_switching=lambda: False)
         old, _ = admission.accept_spoken()
@@ -3475,6 +3591,25 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(transport.reader.done())
         self.assertIsNotNone(capture.returncode)
 
+    def test_capture_recovery_is_bounded(self):
+        cases = {
+            'single_loss': [('attempt', 100, True), ('attempt', 129.9, True), ('attempt', 130, False)],
+            'flap': [('attempt', 100, True), ('reopened', 108), ('attempt', 113, True), ('reopened', 121),
+                     ('attempt', 126, True), ('reopened', 134), ('attempt', 139, False)],
+            'held': [('attempt', 100, True), ('reopened', 108), ('attempt', 138, True),
+                     ('attempt', 167.9, True), ('attempt', 168, False)],
+        }
+        for case, steps in cases.items():
+            with self.subTest(case=case):
+                now = [0]
+                recovery = speech.CaptureRecovery(clock=lambda: now[0])
+                for action, at, *allowed in steps:
+                    now[0] = at
+                    if action == 'attempt':
+                        self.assertIs(recovery.attempt(), allowed[0], f'attempt at {at}')
+                    else:
+                        recovery.reopened()
+
     async def test_capture_failure_stops_without_fallback(self):
         for case in ("eof", "truncated", "missing", "timeout"):
             with self.subTest(case=case):
@@ -3528,6 +3663,78 @@ class LaptopAudioTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(transport.failure)
                     if capture.wait.await_count:
                         self.assertIsNotNone(capture.returncode)
+
+    async def opened_capture_with_owner(self):
+        capture = self.child(3200)
+        capture.stdout.feed_data(bytes(640))
+        lost = asyncio.Event()
+        stopped, owner = Mock(), Mock(side_effect=lost.set)
+        transport = speech.LaptopAudioTransport(
+            Mock(microphone_serial=AsyncMock(return_value=900)), on_stopped=stopped,
+            admission=Admission(voice=True, output_switching=lambda: False), on_capture_lost=owner,
+        )
+        self.addAsyncCleanup(transport.close)
+        with patch.object(transport, '_spawn', return_value=capture):
+            await asyncio.wait_for(transport.open(), 5)
+        return transport, capture, stopped, owner, lost
+
+    async def test_capture_loss_goes_to_its_owner(self):
+        for case in ('end_of_input', 'truncated', 'read_failure', 'stall'):
+            with self.subTest(case=case):
+                transport, capture, stopped, owner, lost = await self.opened_capture_with_owner()
+                with patch.object(speech, 'LAPTOP_CAPTURE_STALL_TIMEOUT', 0.05 if case == 'stall' else 5):
+                    if case == 'read_failure':
+                        capture.stdout.set_exception(OSError())
+                    elif case == 'stall':
+                        capture.stdout.feed_data(bytes(640))
+                    else:
+                        if case == 'truncated':
+                            capture.stdout.feed_data(b'X' * 639)
+                        capture.stdout.feed_eof()
+                    await asyncio.wait_for(lost.wait(), 5)
+                owner.assert_called_once_with()
+                stopped.assert_not_called()
+                self.assertIsNone(transport.failure)
+                self.assertFalse(transport.verified)
+
+        with self.subTest(case='first_opening'):
+            capture = self.child(3200)
+            capture.stdout.feed_eof()
+            stopped, owner = Mock(), Mock()
+            transport = speech.LaptopAudioTransport(
+                Mock(microphone_serial=AsyncMock(return_value=900)), on_stopped=stopped,
+                admission=Admission(voice=True, output_switching=lambda: False), on_capture_lost=owner,
+            )
+            self.addAsyncCleanup(transport.close)
+            with patch.object(transport, '_spawn', return_value=capture), self.assertRaises(RuntimeError):
+                await asyncio.wait_for(transport.open(), 5)
+            stopped.assert_called_once_with()
+            owner.assert_not_called()
+
+        with self.subTest(case='replacement_ends_before_verified'):
+            transport, _, _, _, _ = await self.opened_capture_with_owner()
+            await transport.suspend_capture()
+            replacement = self.child(3201)
+            replacement.stdout.feed_data(bytes(640))
+            replacement.stdout.feed_eof()
+            with patch.object(transport, '_spawn', return_value=replacement), self.assertRaises(RuntimeError) as refused:
+                await asyncio.wait_for(transport.resume_capture(output_serial=800), 5)
+            self.assertEqual(str(refused.exception), speech.LAPTOP_CAPTURE_FAILURE)
+            self.assertIsNone(transport.failure)
+            self.assertIsNotNone(replacement.returncode)
+
+        with self.subTest(case='after_close'):
+            transport, capture, _, owner, _ = await self.opened_capture_with_owner()
+            transport.closed = True
+            capture.stdout.feed_eof()
+            await asyncio.wait({transport.reader}, timeout=5)
+            owner.assert_not_called()
+
+        with self.subTest(case='playback_failure'):
+            transport, _, stopped, owner, _ = await self.opened_capture_with_owner()
+            transport.fail(speech.LAPTOP_PLAYBACK_FAILURE)
+            stopped.assert_called_once_with()
+            owner.assert_not_called()
 
     async def test_playback_clock_compensates_overhead_and_rebases_after_gaps(self):
         now = 100.000

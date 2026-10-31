@@ -56,7 +56,7 @@ from hermes_worker import (
     TRACE_FAILURE_ERROR, TRACE_STARTUP_ERROR, child_environment,
 )
 from speech import (
-    ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
+    CaptureRecovery, ConversationTTS, EchoRemoval, OutputDeviceWatch, PipeWireGraphCleanupFailure, OUTPUT_SWITCH_FAILURE, OUTPUT_WATCH_FAILURE,
     LAPTOP_CAPTURE_FAILURE, LAPTOP_PLAYBACK_FAILURE, LaptopAudioTransport,
     NemotronRecognizer, NemotronSTT, PhononTTS, ROOT, VoxCPMTTS, capture_answer, load_phonon, load_voice_preset, prepare_acknowledgements,
 )
@@ -70,6 +70,7 @@ from tool_catalogue import (
 from wakeword import WakeWordDetector, ADVICE as WAKE_ADVICE
 
 ECHO_REMOVAL = EchoRemoval()
+CAPTURE_RETRY_PAUSE = 2
 ENGINE_TIMEOUT = 45
 ENGINE_MISSING_ADVISORY = ("Kestrel's engine is missing, has changed or couldn't be checked, so I can't answer questions, "
                            "keep notes or choose desktop tools. Exact commands like mute still work. Reinstall the engine "
@@ -1335,6 +1336,7 @@ class VoiceConversations:
         self.handover = None
         # Open only while a permission question waits; whatever is typed then is its answer.
         self.typed_answer: asyncio.Future | None = None
+        self.answer_uses_capture = False
         self.submission_task = None
         self.ingress = None
         self.stt = None
@@ -1346,6 +1348,7 @@ class VoiceConversations:
         self.wake_disabled = False
         self.wake_reply_token = None
         self.switching_output = False
+        self.capture_recovery = CaptureRecovery()
         self.output_watch = None
         self.echo_revision = 0
         self.echo_owner = None
@@ -1370,16 +1373,60 @@ class VoiceConversations:
             logger.warning(WAKE_ADVICE)
             self.changed.set()
 
+    def capture_lost(self):
+        # A restart and a broken microphone look alike here, so both get the same bounded reopening.
+        if self.closed or self.failure:
+            return
+        if self.capture_recovery.attempt():
+            logger.warning('Audio system restarted or microphone capture lost; reopening for up to 30 seconds.')
+            # An answer that lost its capture fails closed; it never resumes across the gap.
+            if self.typed_answer is not None and self.answer_uses_capture:
+                self.typed_answer.cancel()
+            self.switching_output = True
+            self.invalidate_wake()
+            self.changed.set()
+        else:
+            self.capture_unrecoverable()
+
+    def capture_unrecoverable(self):
+        self.give_up(LAPTOP_CAPTURE_FAILURE, 'trouble-microphone')
+
+    def give_up(self, failure, trouble):
+        logger.error(failure)
+        self.record_failure(failure, trouble)
+        self.desired_active = False
+        self.fail_submission()
+        self.revoke()
+        self.changed.set()
+
+    def waiting_capture_stopped(self):
+        # A graph child that could not be reaped is final, the same as on the active route.
+        if self.capture_recovery.recovering and self.waiting_transport.cleanup_uncertain:
+            self.give_up(OUTPUT_SWITCH_FAILURE, 'trouble')
+        elif self.waiting_owner is not None or self.capture_recovery.recovering:
+            self.capture_lost()
+        else:
+            logger.error(LAPTOP_CAPTURE_FAILURE)
+            self.wake_failed()
+
     async def open_waiting(self, interval):
         detector = self.wake_detector
+        if self.capture_recovery.recovering:
+            await asyncio.sleep(CAPTURE_RETRY_PAUSE)
         await detector.start()
         if self.wake_interval is not interval:
             return
         self.waiting_transport = LaptopAudioTransport(
-            ECHO_REMOVAL, on_stopped=self.wake_failed, admission=None,
+            ECHO_REMOVAL, on_stopped=self.waiting_capture_stopped, admission=None,
             capture_pcm=lambda pcm: detector.submit(pcm) if self.wake_interval is interval else None,
         )
-        await self.waiting_transport.open()
+        try:
+            await self.waiting_transport.open()
+        except RuntimeError:
+            # waiting_capture_stopped has already decided; the run loop must not make a recovery attempt sticky.
+            if self.waiting_transport.failure is None:
+                raise
+            return
         if self.waiting_transport.capture is not None:
             self.waiting_owner = self.status.remember_owner(self.waiting_transport.capture.pid)
 
@@ -1389,6 +1436,7 @@ class VoiceConversations:
             self.wake_startup.cancel()
             await asyncio.gather(self.wake_startup, return_exceptions=True)
             self.wake_startup = None
+        uncertain = self.waiting_transport is not None and self.waiting_transport.cleanup_uncertain
         if self.waiting_transport is not None:
             await self.waiting_transport.close()
             if self.waiting_owner is not None:
@@ -1398,6 +1446,9 @@ class VoiceConversations:
         if self.wake_detector is not None:
             await self.wake_detector.close()
             self.wake_detector = None
+        # This failure can arrive after the transport already failed, so its notification cannot carry it.
+        if uncertain and self.capture_recovery.recovering and not self.failure:
+            raise PipeWireGraphCleanupFailure(OUTPUT_SWITCH_FAILURE)
 
     def submit(self, text):
         if self.closed or self.failure or not self.prepared:
@@ -1509,7 +1560,7 @@ class VoiceConversations:
             return
         self.session_ready = asyncio.create_task(self.channel.begin_conversation(admitted=admission.is_open))
         self.transport = LaptopAudioTransport(ECHO_REMOVAL, on_stopped=self.failed_transport, admission=admission,
-                                             capture_enabled=capture_enabled)
+                                             capture_enabled=capture_enabled, on_capture_lost=self.capture_lost)
         self.transport.output().prepared_acknowledgements = self.prepared_acknowledgements
         # A typed-only conversation gets no status writer, so the manager alone keeps the indicator inactive.
         self.llm = HermesLLMService(self.channel, local_actions=self.local_actions, admission=admission, session_ready=self.session_ready,
@@ -1549,6 +1600,7 @@ class VoiceConversations:
         """
         typed = asyncio.get_running_loop().create_future()
         self.typed_answer = typed
+        self.answer_uses_capture = spoken
         capture = None
         try:
             if spoken:
@@ -1688,6 +1740,10 @@ class VoiceConversations:
             self.changed.set()
 
     def output_changed(self):
+        if self.output_watch.metadata_id is None and (
+                not self.wake_disabled or (self.transport is not None and self.transport.capture_enabled)):
+            self.capture_lost()
+            return
         if not self.closed and not self.failure:
             self.switching_output = True
             self.invalidate_wake()
@@ -1695,6 +1751,7 @@ class VoiceConversations:
 
     def output_watch_failed(self):
         if not self.closed:
+            logger.error(OUTPUT_WATCH_FAILURE)
             self.switching_output = True
             self.record_failure(OUTPUT_WATCH_FAILURE, 'trouble')
             self.changed.set()
@@ -1784,6 +1841,14 @@ class VoiceConversations:
                         await self.ingress[1].reset()
                         await fifo(self.ingress[1], ProposedUserStoppedSpeakingFrame())
                         await self.ingress[1].reset_audio()
+                if (self.capture_recovery.recovering and transport is not None and transport.capture_enabled
+                        and not interrupted()):
+                    # Dismissal has no task to cancel, so any notice ends this pause early; it holds no recorder.
+                    self.changed.clear()
+                    try:
+                        await asyncio.wait_for(self.changed.wait(), CAPTURE_RETRY_PAUSE)
+                    except TimeoutError:
+                        pass
                 while not interrupted():
                     await self.close_echo()
                     if self.echo_owner is not None:
@@ -1847,6 +1912,9 @@ class VoiceConversations:
                         # Playback can appear during graph I/O; verify that exact child too.
                         if transport is not None and transport.playback is not playback:
                             continue
+                        # A recorder that ended while the route was checked takes the bounded route again.
+                        if transport is not None and transport.capture_enabled and not transport.verified:
+                            raise RuntimeError(LAPTOP_CAPTURE_FAILURE)
                         self.switching_output = False
                         if self.llm is not None:
                             self.llm.refresh_indicator()
@@ -1856,7 +1924,11 @@ class VoiceConversations:
                         if self.capture_owner is not None:
                             self.status.retire_owner(self.capture_owner)
                             self.capture_owner = None
-        except Exception:
+        except Exception as error:
+            if self.capture_recovery.recovering and str(error) == LAPTOP_CAPTURE_FAILURE:
+                self.capture_lost()
+                return
+            logger.error(f'{OUTPUT_SWITCH_FAILURE} ({type(error).__name__})')
             self.record_failure(OUTPUT_SWITCH_FAILURE, 'trouble')
             self.desired_active = False
             self.fail_submission()
@@ -1905,6 +1977,13 @@ class VoiceConversations:
                     self.cleanup = None
                     await self.activate(capture_enabled=self.desired_active)
                 self.transitioning = False
+                if self.capture_recovery.recovering and not self.switching_output:
+                    reopened = any(t is not None and t.verified for t in (self.transport, self.waiting_transport))
+                    # A disabled wake phrase has nothing left to reopen, which is not the same as having reopened.
+                    if reopened or self.wake_disabled:
+                        self.capture_recovery.reopened()
+                    if reopened:
+                        logger.info('Microphone capture reopened.')
                 if self.handover is not None and self.ingress is not None and self.submission_task is None:
                     self.submission_task = asyncio.create_task(self.submit_pending())
                 if not self.desired_active:

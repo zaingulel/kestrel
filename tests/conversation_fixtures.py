@@ -125,7 +125,7 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
                            synthesis_chunks=None, through_service=False, channel=None, local_actions=None,
                            admitted=None, activate=True, native_audio=False, trace_root=None, memory_root=None, native_events=None,
                            production_turn_strategies=False, wake_wire=None, tts_model='voxcpm2', vad_factory=None,
-                           startup=None):
+                           startup=None, microphone_serial=None):
         if startup is None:
             # With neither brain nor wire the stub spawn below raises OSError, a generic engine failure.
             startup = 'trouble-engine' if brain is None and wire is None else 'inactive'
@@ -178,7 +178,7 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
         identity(os.getpid())
         identity(70001)
         echo_generations = []
-        output_watch = SimpleNamespace(revision=0, on_change=None, on_failed=None)
+        output_watch = SimpleNamespace(revision=0, metadata_id=32, on_change=None, on_failed=None)
 
         async def watch_start(on_change, on_failed):
             output_watch.on_change, output_watch.on_failed = on_change, on_failed
@@ -315,16 +315,17 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
             audio_children.append(process)
             return process
 
-        def new_transport(echo, *, on_stopped, admission, capture_enabled=True, capture_pcm=None):
+        def new_transport(echo, *, on_stopped, admission, capture_enabled=True, capture_pcm=None, **owners):
             def active():
                 return (admission is None or admission.is_open()) and (admitted_override is None or admitted_override())
 
             if native_audio or capture_pcm is not None:
                 transport = native_transport(echo, on_stopped=on_stopped, admission=admission,
-                                             capture_enabled=capture_enabled, capture_pcm=capture_pcm)
+                                             capture_enabled=capture_enabled, capture_pcm=capture_pcm, **owners)
 
                 async def spawn_audio(*argv, **kwargs):
                     process = child(capture='--record' in argv)
+                    process.argv = argv
                     process.wake_capture = capture_pcm is not None
                     return process
 
@@ -604,7 +605,7 @@ class WholeConversationCase(unittest.IsolatedAsyncioTestCase):
             patch.object(bot.ECHO_REMOVAL, 'start', side_effect=echo_start),
             patch.object(bot.ECHO_REMOVAL, 'close', side_effect=echo_close),
             patch.object(bot.ECHO_REMOVAL, 'process', Mock(pid=70001)),
-            patch.object(bot.ECHO_REMOVAL, 'microphone_serial', new=AsyncMock(return_value=900)),
+            patch.object(bot.ECHO_REMOVAL, 'microphone_serial', new=AsyncMock(return_value=900) if microphone_serial is None else microphone_serial),
             patch.object(bot.ECHO_REMOVAL, 'output_serial', new=AsyncMock(return_value=800)),
             patch.object(status_module, '_PROC_ROOT', proc_root),
             patch.object(bot.torch, 'set_num_threads'),

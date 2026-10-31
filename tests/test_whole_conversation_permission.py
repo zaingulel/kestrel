@@ -783,7 +783,7 @@ class WholeConversationTests(WholeConversationCase):
         broken = "I couldn't ask for permission, so I didn't do it."
         windows = self.watch_answer_windows()
 
-        with self.subTest('capture failure'):
+        with self.subTest('capture lost before the answer window opens'):
             notes = self.private_notes(memory=[kept, target])
             seeded = read_notes(notes)
             events = []
@@ -795,20 +795,102 @@ class WholeConversationTests(WholeConversationCase):
                 native_events=events,
             )
             service = transport.service
+            manager = service.manager
             recognised = self.fake_answer_recognizer(service, 'yes')
+            native_capture = bot.capture_answer
+            started, release = asyncio.Event(), asyncio.Event()
+
+            async def held_capture(*args, **kwargs):
+                started.set()
+                await release.wait()
+                return await native_capture(*args, **kwargs)
+
             try:
-                await asyncio.wait_for(asyncio.shield(service.manager.session_ready), 5)
-                await self.speak_request(transport, request)
-                await self.hear_exactly(spoken, deletion_question(target))
-                self.assertIsNotNone(await self.window_change(windows, transport))
-                transport.fail(speech.LAPTOP_CAPTURE_FAILURE)
-                await service.state('trouble-microphone')
-                self.assertIsNone(await self.window_change(windows, transport))
-                self.assertEqual(recognised, [])
+                with patch.object(bot, 'capture_answer', held_capture), patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                    await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                    await self.speak_request(transport, request)
+                    await self.hear_exactly(spoken, deletion_question(target))
+                    await asyncio.wait_for(started.wait(), 5)
+                    self.assertIsNone(transport.capture_pcm)
+                    lost = transport.capture
+                    lost.stdout.feed_eof()
+                    await wait_until(lambda: transport.capture is not lost and transport.verified and not manager.switching_output,
+                                     'Capture never reopened')
+                    release.set()
+                    await self.hear_exactly(spoken, broken)
+                    self.assertIsNone(manager.failure)
+                    self.assertIs(manager.transport, transport)
+                    self.assertIsNone(transport.capture_pcm)
+                    self.assertEqual(recognised, [])
             finally:
                 await close()
             self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
             self.assertEqual(read_notes(notes), seeded)
+
+        with self.subTest('capture lost with the answer window open'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            transport, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = transport.service
+            manager = service.manager
+            recognised = self.fake_answer_recognizer(service, 'yes')
+            try:
+                with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                    await asyncio.wait_for(asyncio.shield(manager.session_ready), 5)
+                    await self.speak_request(transport, request)
+                    await self.hear_exactly(spoken, deletion_question(target))
+                    self.assertIsNotNone(await self.window_change(windows, transport))
+                    self.assertIsNotNone(transport.capture_pcm)
+                    lost = transport.capture
+                    lost.stdout.feed_data(ANSWER_SPEECH * 10)
+                    await wait_until(lambda: not lost.stdout._buffer, 'The answer speech was never read')
+                    lost.stdout.feed_eof()
+                    await wait_until(lambda: transport.capture is not None and transport.capture is not lost
+                                     and transport.verified and not manager.switching_output, 'Capture never reopened')
+                    await self.hear_exactly(spoken, broken)
+                    self.assertIsNone(manager.failure)
+                    self.assertIs(manager.transport, transport)
+                    self.assertIsNone(transport.capture_pcm)
+                    self.assertIsNone(await self.window_change(windows, transport))
+                    self.assertEqual(recognised, [])
+            finally:
+                await close()
+            self.assertNotIn(APPROVAL, [event for kind, event in events if kind == 'write'])
+            self.assertEqual(read_notes(notes), seeded)
+
+        with self.subTest('a typed-only question survives a lost capture'):
+            notes = self.private_notes(memory=[kept, target])
+            seeded = read_notes(notes)
+            events = []
+            brain = ScriptedBrain(['[delivery:neutral] Prepared.', scripted_call('asked', 'delete_note', {'note': target}),
+                                   scripted_say('Unspoken remark.')])
+            self.addCleanup(brain.close)
+            handle, spoken, _, _, _, close = await self.open_session(
+                brain, through_service=True, native_audio=True, activate=False, vad_factory=answer_vad, memory_root=notes,
+                native_events=events,
+            )
+            service = handle.service
+            manager = service.manager
+            try:
+                self.assertEqual(await service.submit(request), 'accepted')
+                await asyncio.wait_for(service.started.get(), 5)
+                await self.hear_exactly(spoken, deletion_question(target))
+                await wait_until(lambda: manager.typed_answer is not None, 'The question opened no typed answer')
+                with patch.object(bot, 'CAPTURE_RETRY_PAUSE', 0):
+                    manager.capture_lost()
+                    self.assertFalse(manager.typed_answer.done(), 'A typed wait has no capture to lose')
+                    self.assertEqual(await service.submit('yes'), 'accepted')
+                    await self.hear_exactly(spoken, f'I removed the note: {target}.')
+            finally:
+                await close()
+            self.assertEqual(read_notes(notes), {'MEMORY.md': note_bytes(kept), 'USER.md': seeded['USER.md']})
 
         with self.subTest('a tool that cannot be read back, a local tool, or a question that never plays'):
             notes = self.private_notes(memory=[kept, target])
@@ -923,7 +1005,7 @@ class WholeConversationTests(WholeConversationCase):
                 self.assertEqual(read_notes(notes), seeded)
             finally:
                 await close()
-        self.assertTrue(windows.empty(), 'Only the capture-failure window opened')
+        self.assertTrue(windows.empty(), 'No step here opens an answer window')
 
     async def test_forbidden_tools_are_refused_without_asking_and_cannot_be_preapproved(self):
         target = 'Caller keeps the red notebook in the study'
