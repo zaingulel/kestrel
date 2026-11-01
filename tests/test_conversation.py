@@ -673,6 +673,35 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listener.getsockname(), path)
             connect(path)
 
+        with self.subTest('concurrent start'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            stale = socket.socket(socket.AF_UNIX)
+            stale.bind(path)
+            stale.close()
+            real, rival = socket.socket, []
+
+            class RacingSocket(real):
+                # The rival starts after this socket has bound but before it listens.
+                def listen(self, backlog):
+                    if not rival:
+                        rival.append(None)
+                        try:
+                            rival[0] = conversation.bound_listener(path)
+                        except BaseException as error:
+                            rival[0] = error
+                    super().listen(backlog)
+
+            with patch.object(conversation.socket, 'socket', RacingSocket):
+                listening(path)
+            if isinstance(rival[0], real):
+                rival[0].close()
+            self.assertIsInstance(rival[0], OSError, rival[0])
+            self.assertEqual(rival[0].errno, errno.EADDRINUSE)
+            self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+            connect(path)
+            self.assertEqual(listening(control.address()).getsockname(), control.address())
+
         for length in (107, 108):
             with self.subTest(length=length), private_runtime(length) as runtime:
                 path = f'{runtime}/kestrel/conversation.sock'

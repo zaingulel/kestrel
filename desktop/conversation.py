@@ -6,6 +6,7 @@ record containing exactly one of the two fixed advisories below. No text is pers
 
 import asyncio
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -39,32 +40,40 @@ def address() -> str:
 
 def bound_listener(path: str) -> socket.socket:
     # Binding here keeps asyncio from silently deleting a live owner's socket file.
-    os.close(_directory(Path(os.environ['XDG_RUNTIME_DIR']), create=True))
+    folder = _directory(Path(os.environ['XDG_RUNTIME_DIR']), create=True)
     try:
-        found = os.lstat(path)
-    except FileNotFoundError:
-        pass
-    else:
-        if not stat.S_ISSOCK(found.st_mode) or found.st_uid != os.getuid():
-            raise OSError(errno.EEXIST, 'Endpoint path is not a socket owned by this account', path)
-        with socket.socket(socket.AF_UNIX) as probe:
-            probe.settimeout(1)
-            try:
-                probe.connect(path)
-            except ConnectionRefusedError:
-                os.unlink(path)
-            except (TimeoutError, BlockingIOError):
-                raise OSError(errno.EADDRINUSE, 'Endpoint is busy', path) from None
-            else:
-                raise OSError(errno.EADDRINUSE, 'Endpoint is in use', path)
-    listener = socket.socket(socket.AF_UNIX)
-    try:
-        listener.bind(path)
-        listener.listen(1)
-    except BaseException:
-        listener.close()
-        raise
-    return listener
+        # The lock spans bind and listen: a bound socket that is not yet listening refuses connections.
+        try:
+            fcntl.flock(folder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OSError(errno.EADDRINUSE, 'Endpoint is busy', path) from None
+        try:
+            found = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISSOCK(found.st_mode) or found.st_uid != os.getuid():
+                raise OSError(errno.EEXIST, 'Endpoint path is not a socket owned by this account', path)
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(1)
+                try:
+                    probe.connect(path)
+                except ConnectionRefusedError:
+                    os.unlink(path)
+                except (TimeoutError, BlockingIOError):
+                    raise OSError(errno.EADDRINUSE, 'Endpoint is busy', path) from None
+                else:
+                    raise OSError(errno.EADDRINUSE, 'Endpoint is in use', path)
+        listener = socket.socket(socket.AF_UNIX)
+        try:
+            listener.bind(path)
+            listener.listen(1)
+        except BaseException:
+            listener.close()
+            raise
+        return listener
+    finally:
+        os.close(folder)
 
 
 def same_uid(peer) -> bool:
