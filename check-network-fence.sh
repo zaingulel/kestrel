@@ -14,7 +14,18 @@ if [[ -v MAINPID && "$MAINPID" =~ ^[1-9][0-9]*$ ]]; then
   if [[ -n "$identity" && "$identity" != "$(readlink -- /proc/self/ns/net)" && -d "$root/run" ]]; then
     # The walk reads file types and permissions only and connects to nothing. The trailing slash makes find enter
     # the process's root; the pruned trees hold no system sockets or are the runtime folder the services may use.
-    reachable="$(/usr/bin/find "$root/" \( -path "$root/proc" -o -path "$root/sys" -o -path "$root/usr" -o -path "$root/home" -o -path "$root/run/user" \) -prune -o -type s -writable -print -quit 2>/dev/null || true)"
+    # A folder the account can enter but not list can hide a socket from the walk, so it stops the start too.
+    # find exits 1 for the unreadable folders every healthy walk meets; a higher status means no finished walk.
+    status=0
+    reachable="$(/usr/bin/find "$root/" \( -path "$root/proc" -o -path "$root/sys" -o -path "$root/usr" -o -path "$root/home" -o -path "$root/run/user" \) -prune -o \( -type s -writable -o -type d -executable ! -readable \) -print -quit 2>/dev/null)" || status=$?
+    if (( status > 1 )); then
+      printf '%s\n' "Kestrel could not check its fence: /usr/bin/find ended with status $status. Check that find runs, then restart Kestrel." >&2
+      exit 1
+    fi
+    if [[ -d "$reachable" ]]; then
+      printf "Kestrel's fence leaves a folder it cannot check: %q. A socket file inside it would go unseen. Add that path to InaccessiblePaths= in the service's drop-in, then restart Kestrel.\n" "${reachable#"$root"}" >&2
+      exit 1
+    fi
     if [[ -n "$reachable" ]]; then
       printf "Kestrel's fence leaves a socket file reachable: %q. Add that path to InaccessiblePaths= in the service's drop-in, then restart Kestrel.\n" "${reachable#"$root"}" >&2
       exit 1

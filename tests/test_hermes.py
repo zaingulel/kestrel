@@ -3725,16 +3725,48 @@ def refusal(attempt, *arguments):
     return None
 
 
+def writable_paths():
+    """What this process could change, each writable folder counted whole. Sockets and pipes stay out: a read-only mount does not stop them."""
+    found = []
+    for folder, subfolders, files in os.walk('/'):
+        descend = []
+        for name in subfolders:
+            path = os.path.join(folder, name)
+            if path == '/proc' or os.path.islink(path):
+                continue
+            if os.access(path, os.W_OK):
+                found.append(path)
+            else:
+                descend.append(name)
+        subfolders[:] = descend
+        for name in files:
+            path = os.path.join(folder, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:  # The host changes its own folders during the walk.
+                continue
+            if not (stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISLNK(mode)) and os.access(path, os.W_OK):
+                found.append(path)
+    return found
+
+
 sockets = []
+unlistable = []
 for folder, subfolders, files in os.walk('/'):
     subfolders[:] = [name for name in subfolders if os.path.join(folder, name) not in
                      ('/proc', '/sys', '/usr', '/home', '/run/user')]
+    for name in subfolders:
+        path = os.path.join(folder, name)
+        if not os.path.islink(path) and os.access(path, os.X_OK) and not os.access(path, os.R_OK):
+            unlistable.append(path)
     for name in files:
         path = os.path.join(folder, name)
         if stat.S_ISSOCK(os.lstat(path).st_mode) and os.access(path, os.W_OK):
             sockets.append(path)
 with open('/proc/self/cgroup') as cgroup:
-    own_kill = '/sys/fs/cgroup' + cgroup.read().strip().split('::')[1] + '/cgroup.kill'
+    own_cgroup = '/sys/fs/cgroup' + cgroup.read().strip().split('::')[1]
+own_kill = own_cgroup + '/cgroup.kill'
+scratch = os.path.dirname(listener)
 print(json.dumps({
     'connect to listener': refusal(socket.socket(socket.AF_UNIX).connect, listener),
     'writable sockets': sorted(sockets),
@@ -3747,6 +3779,10 @@ print(json.dumps({
     'journal readable': os.access('/var/log/journal', os.R_OK),
     'AF_VSOCK': refusal(socket.socket, socket.AF_VSOCK),
     'AF_INET': refusal(socket.socket, socket.AF_INET),
+    'unlistable folders': sorted(unlistable),
+    'changeable': sorted(path.replace(own_cgroup, 'own cgroup').replace(scratch, 'scratch') for path in writable_paths()),
+    'read-only mounts': {path: bool(os.statvfs(path).f_flag & os.ST_RDONLY) for path in ('/', '/run', '/sys', '/proc/sys', '/sys/fs/cgroup')},
+    'new user namespace': refusal(os.unshare, os.CLONE_NEWUSER),
 }))
 '''
 
@@ -4114,7 +4150,8 @@ class BonsaiStartupTests(unittest.TestCase):
                        f'/usr/bin/bash {project}/check-network-fence.sh')
         masks = ('-/dev/shm', '-/dev/mqueue', '-/dev/pts', '-/dev/ptmx', '-/dev/hugepages', '-/var/log', '-/run/log',
                  '-/run/docker.sock', '-/run/dbus', '-/run/systemd', '-/run/udev', '-/run/tailscale', '-/run/cups',
-                 '-/run/avahi-daemon', '-/run/ssh-unix-local', '-/run/polkit')
+                 '-/run/avahi-daemon', '-/run/ssh-unix-local', '-/run/polkit', '-/run/containerd', '-/run/sudo',
+                 '-/run/sddm', '-/opt/containerd', '-/var/db/sudo')
         stores = tuple(f'{project}/.runtime/{folder}'
                        for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions', 'cache'))
         expected = {
@@ -4162,7 +4199,8 @@ class BonsaiStartupTests(unittest.TestCase):
             'ProtectSystem': 'strict', 'ProtectHome': 'tmpfs', 'PrivateNetwork': 'yes',
             'PrivateUsers': 'self', 'PrivateTmp': 'disconnected', 'PrivateDevices': 'yes',
             'NoNewPrivileges': 'yes', 'PrivateIPC': 'yes', 'ProtectControlGroups': 'yes',
-            'SystemCallArchitectures': 'native', 'JoinsNamespaceOf': None,
+            'SystemCallArchitectures': 'native', 'JoinsNamespaceOf': None, 'ReadOnlyPaths': '/run',
+            'ProtectKernelTunables': 'yes', 'RestrictNamespaces': 'yes',
             # TemporaryFileSystem stops every + line with 226/NAMESPACE, so it can never hide /run here.
             'TemporaryFileSystem': None,
         }
@@ -4181,10 +4219,17 @@ class BonsaiStartupTests(unittest.TestCase):
 
     def probe_unit_fence(self, name, runtime):
         """Runs the probe in a transient unit holding the real unit's fence lines, its private endpoints left out."""
-        not_fence = ('Exec', 'Runtime', 'Bind', 'Timeout', 'Standard', 'Type', 'WorkingDirectory', 'Environment',
+        not_fence = ('Exec', 'Runtime', 'Timeout', 'Standard', 'Type', 'WorkingDirectory', 'Environment',
                      'Restart', 'KillMode')
-        fence = [f'--property={key}={value.replace("%h", str(Path.home()))}'
-                 for key, value in self.read_unit(name)['Service'].items() if not key.startswith(not_fence)]
+        fence = []
+        for key, value in self.read_unit(name)['Service'].items():
+            if key.startswith(not_fence):
+                continue
+            value = value.replace('%h', str(Path.home())).replace('%t', runtime)
+            if key.startswith('Bind'):
+                # A store not yet created is left out rather than failing the unit with 226/NAMESPACE.
+                value = ' '.join(path if path.startswith('-') else f'-{path}' for path in value.split())
+            fence.append(f'--property={key}={value}')
         with tempfile.TemporaryDirectory(prefix='kestrel-probe-', dir=runtime) as scratch:
             listener = socket.socket(socket.AF_UNIX)
             self.addCleanup(listener.close)
@@ -4213,15 +4258,33 @@ class BonsaiStartupTests(unittest.TestCase):
             'own cgroup.kill writable': False,
             'journal readable': False,
             'AF_VSOCK': 'EAFNOSUPPORT',
+            'unlistable folders': [],
+            'read-only mounts': dict.fromkeys(('/', '/run', '/sys', '/proc/sys', '/sys/fs/cgroup'), True),
+            'new user namespace': 'EPERM',
         }
         expected = {
             'brain': {'connect to listener': 'EPERM', 'test process visible': False, 'AF_INET': 'EAFNOSUPPORT'},
             'voice': {'connect to listener': None, 'test process visible': True, 'AF_INET': None},
         }
+        home = str(Path.home())
+        kestrel = f'{home}/Projects/zaingulel/kestrel'
+        allowed = {
+            'both': {'/dev/full', '/dev/null', '/dev/random', '/dev/tty', '/dev/urandom', '/dev/zero', '/dev/nvidia0',
+                     '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset',
+                     'own cgroup/memory.pressure', '/tmp', '/var/tmp', 'scratch'},
+            'brain': {f'{kestrel}/.runtime/brain-compute-cache', f'{runtime}/kestrel-brain'},
+            'voice': {f'{kestrel}/.runtime/{folder}' for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions',
+                                                                    'cache')} | {
+                f'{home}/Pictures', f'{runtime}/kestrel', f'{runtime}/uwsm-app.lock'},
+        }
         self.maxDiff = None
         for name, routes in expected.items():
             with self.subTest(unit=name):
                 observed = self.probe_unit_fence(name, runtime)
+                changeable = set(observed.pop('changeable'))
+                allow_list = allowed['both'] | allowed[name]
+                self.assertLessEqual({'/tmp', '/var/tmp', 'scratch'}, changeable)
+                self.assertEqual(changeable - allow_list, set())
                 for kind in ('net', 'ipc'):
                     observed[f'{kind} namespace differs from host'] = (
                         observed.pop(f'{kind} namespace') != os.readlink(f'/proc/self/ns/{kind}'))
@@ -4231,7 +4294,7 @@ class BonsaiStartupTests(unittest.TestCase):
         script = ROOT / 'check-network-fence.sh'
         advice = "Kestrel's network fence did not apply. Check the service's systemd log, then restart Kestrel."
 
-        def check(mainpid):
+        def check(mainpid, script=script):
             environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
             if mainpid is not None:
                 environment['MAINPID'] = str(mainpid)
@@ -4263,7 +4326,7 @@ class BonsaiStartupTests(unittest.TestCase):
         def start_fenced(*planting):
             # Empty folders over the trees that hold host sockets leave the walk only what the child plants itself.
             child = start('/usr/bin/unshare', '-Urnm', '/usr/bin/bash', '-c', ' && '.join((
-                *(f'/usr/bin/mount -t tmpfs tmpfs {folder}' for folder in ('/run', '/tmp', '/var', '/dev')),
+                *(f'/usr/bin/mount -t tmpfs tmpfs {folder}' for folder in ('/run', '/tmp', '/var', '/dev', '/opt')),
                 *planting, '/usr/bin/touch /run/fixture-ready', 'exec /usr/bin/sleep 30')))
             deadline = time.monotonic() + 5
             while not os.path.exists(f'/proc/{child.pid}/root/run/fixture-ready'):
@@ -4282,6 +4345,28 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual((reached.returncode, reached.stdout, reached.stderr.strip()), (
             1, '', "Kestrel's fence leaves a socket file reachable: /run/planted.sock. Add that path to "
                    "InaccessiblePaths= in the service's drop-in, then restart Kestrel."))
+        hidden = start_fenced('/usr/bin/mkdir /run/hidden',
+                              '/usr/bin/python3 -I -S -c '
+                              '"import socket; socket.socket(socket.AF_UNIX).bind(\'/run/hidden/planted.sock\')"',
+                              '/usr/bin/chmod 0311 /run/hidden')
+        unseen = check(hidden.pid)
+        self.assertEqual((unseen.returncode, unseen.stdout, unseen.stderr.strip()), (
+            1, '', "Kestrel's fence leaves a folder it cannot check: /run/hidden. A socket file inside it would go "
+                   "unseen. Add that path to InaccessiblePaths= in the service's drop-in, then restart Kestrel."))
+        with tempfile.TemporaryDirectory(prefix='kestrel-walker-') as folder:
+            for status, body in ((127, None), (137, '#!/usr/bin/bash\nkill -KILL "$$"\n')):
+                walker = Path(folder) / f'walker-{status}'
+                if body is not None:
+                    walker.write_text(body)
+                    walker.chmod(0o755)
+                text = script.read_text().replace('/usr/bin/find', str(walker))
+                self.assertNotEqual(text, script.read_text())
+                unfinished = Path(folder) / f'check-{status}.sh'
+                unfinished.write_text(text)
+                result = check(fenced.pid, script=unfinished)
+                self.assertEqual((result.returncode, result.stdout, result.stderr.strip()), (
+                    1, '', f'Kestrel could not check its fence: {walker} ended with status {status}. '
+                           'Check that find runs, then restart Kestrel.'))
 
         def start_blind_chroot():
             # An empty root has no /run, so the walk has nothing to read and the script must refuse rather than pass.
