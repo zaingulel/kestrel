@@ -702,6 +702,13 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             connect(path)
             self.assertEqual(listening(control.address()).getsockname(), control.address())
 
+        with self.subTest('refusal releases the endpoint lock'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            Path(path).write_bytes(b'not a socket')
+            self.assertEqual(refusal(path).errno, errno.EEXIST)
+            self.assertEqual(listening(control.address()).getsockname(), control.address())
+
         for length in (107, 108):
             with self.subTest(length=length), private_runtime(length) as runtime:
                 path = f'{runtime}/kestrel/conversation.sock'
