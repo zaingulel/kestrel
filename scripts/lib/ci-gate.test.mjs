@@ -24,6 +24,12 @@ function job(name) {
   return m[1];
 }
 
+test('current Kestrel test jobs select Node 26.13.0', () => {
+  for (const name of ['quality', 'hooks_windows']) {
+    assert.match(job(name), /^      - uses: actions\/setup-node@[^\n]+\n        with:\n          node-version: '26\.13\.0'$/m);
+  }
+});
+
 test('the workflow runs on pull requests only, without label-driven admission events', () => {
   assert.match(WORKFLOW, /^on:\n  pull_request:\n    types: \[opened, synchronize, reopened, ready_for_review\]\n/m);
   assert.doesNotMatch(WORKFLOW, /labeled/);
