@@ -6,7 +6,7 @@ PartOf=graphical-session.target kestrel-voice.service
 Type=exec
 WorkingDirectory=%h/Projects/zaingulel/kestrel
 ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t /usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh
-ExecStartPre=+/usr/bin/install -d -m 0700 %h/Projects/zaingulel/kestrel/.runtime/brain-compute-cache
+ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/Projects/zaingulel/kestrel/.runtime/brain-compute-cache
 ExecStartPost=+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-network-fence.sh
 ExecStartPost=+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh
 TimeoutStartSec=130s
@@ -22,6 +22,14 @@ PrivateUsers=self
 PrivateTmp=disconnected
 PrivateDevices=yes
 NoNewPrivileges=yes
+PrivateIPC=yes
+PrivatePIDs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=~connect io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+InaccessiblePaths=-/dev/shm -/dev/mqueue -/dev/pts -/dev/ptmx -/dev/hugepages -/var/log -/run/log -/run/docker.sock -/run/dbus -/run/systemd -/run/udev -/run/tailscale -/run/cups -/run/avahi-daemon -/run/ssh-unix-local -/run/polkit
 RuntimeDirectory=kestrel-brain
 RuntimeDirectoryMode=0700
 BindPaths=/dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-modeset %t/kestrel-brain %h/Projects/zaingulel/kestrel/.runtime/brain-compute-cache

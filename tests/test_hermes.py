@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import selectors
 import shutil
+import socket
 import socketserver
 import sqlite3
 import stat
@@ -3707,6 +3708,48 @@ print('listening', flush=True)
 server.serve_forever()
 '''
 
+# Runs inside a transient unit carrying a service's fence. It connects to nothing but the test's own listener and
+# writes nothing but its planted socket in the unit's private /tmp, which shows the walk below is not blind.
+FENCE_PROBE = '''
+import errno, json, os, socket, stat, sys
+
+listener, test_pid = sys.argv[1:]
+socket.socket(socket.AF_UNIX).bind('/tmp/kestrel-probe.sock')
+
+
+def refusal(attempt, *arguments):
+    try:
+        attempt(*arguments)
+    except OSError as error:
+        return errno.errorcode[error.errno]
+    return None
+
+
+sockets = []
+for folder, subfolders, files in os.walk('/'):
+    subfolders[:] = [name for name in subfolders if os.path.join(folder, name) not in
+                     ('/proc', '/sys', '/usr', '/home', '/run/user')]
+    for name in files:
+        path = os.path.join(folder, name)
+        if stat.S_ISSOCK(os.lstat(path).st_mode) and os.access(path, os.W_OK):
+            sockets.append(path)
+with open('/proc/self/cgroup') as cgroup:
+    own_kill = '/sys/fs/cgroup' + cgroup.read().strip().split('::')[1] + '/cgroup.kill'
+print(json.dumps({
+    'connect to listener': refusal(socket.socket(socket.AF_UNIX).connect, listener),
+    'writable sockets': sorted(sockets),
+    'net namespace': os.readlink('/proc/self/ns/net'),
+    'ipc namespace': os.readlink('/proc/self/ns/ipc'),
+    'test process visible': os.path.exists('/proc/' + test_pid),
+    'writable': {path: os.access(path, os.W_OK) for path in ('/dev/shm', '/dev/mqueue', '/dev/pts')},
+    'own cgroup.kill present': os.path.exists(own_kill),
+    'own cgroup.kill writable': os.access(own_kill, os.W_OK),
+    'journal readable': os.access('/var/log/journal', os.R_OK),
+    'AF_VSOCK': refusal(socket.socket, socket.AF_VSOCK),
+    'AF_INET': refusal(socket.socket, socket.AF_INET),
+}))
+'''
+
 
 class BonsaiStartupTests(unittest.TestCase):
     def launcher_fixture(self):
@@ -4069,9 +4112,14 @@ class BonsaiStartupTests(unittest.TestCase):
         gpu = ('/dev/nvidia0', '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset')
         fence_check = ('+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
                        f'/usr/bin/bash {project}/check-network-fence.sh')
+        masks = ('-/dev/shm', '-/dev/mqueue', '-/dev/pts', '-/dev/ptmx', '-/dev/hugepages', '-/var/log', '-/run/log',
+                 '-/run/docker.sock', '-/run/dbus', '-/run/systemd', '-/run/udev', '-/run/tailscale', '-/run/cups',
+                 '-/run/avahi-daemon', '-/run/ssh-unix-local', '-/run/polkit')
+        stores = tuple(f'{project}/.runtime/{folder}'
+                       for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions', 'cache'))
         expected = {
             'brain': {
-                'ExecStartPre': f'+/usr/bin/install -d -m 0700 {project}/.runtime/brain-compute-cache',
+                'ExecStartPre': f'+/usr/bin/mkdir -p -m 0700 {project}/.runtime/brain-compute-cache',
                 'ExecStartPost': fence_check + '\n'
                                  '+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
                                  f'MAINPID=${{MAINPID}} /usr/bin/bash {project}/check-brain-ready.sh',
@@ -4083,32 +4131,45 @@ class BonsaiStartupTests(unittest.TestCase):
                     f'{project}/.runtime/models/bonsai-2-27b',
                     f'{project}/.runtime/tools/bonsai-prism-b10787-73bfe6c',
                     f'{project}/.runtime/tools/cudart-b11815-cuda-12.8')),
+                'InaccessiblePaths': ' '.join(masks),
+                'RestrictAddressFamilies': 'AF_UNIX',
+                'SystemCallFilter': '~connect io_uring_setup io_uring_enter io_uring_register',
+                'SystemCallErrorNumber': 'EPERM',
+                'PrivatePIDs': 'yes',
             },
             'voice': {
-                'ExecStartPre': '+/usr/bin/touch %t/uwsm-app.lock\n+/usr/bin/mkdir -p %h/Pictures',
+                'ExecStartPre': '+/usr/bin/touch %t/uwsm-app.lock\n+/usr/bin/mkdir -p %h/Pictures\n'
+                                f'+/usr/bin/mkdir -p -m 0700 {" ".join(stores)}',
                 'ExecStartPost': fence_check,
                 'RuntimeDirectory': 'kestrel',
                 'RuntimeDirectoryMode': '0700',
                 'RuntimeDirectoryPreserve': 'yes',
-                'BindPaths': ' '.join((*(f'-{device}' for device in gpu), f'{project}/.runtime',
+                'BindPaths': ' '.join((*(f'-{device}' for device in gpu), *stores,
                                        '%t/kestrel', '%t/uwsm-app.lock', '%h/Pictures')),
                 'BindReadOnlyPaths': ' '.join((
                     project, '%t', '-%h/.config/user-dirs.dirs', '-%h/.local/share/applications',
                     '-%h/.local/share/flatpak/exports/share', '-%h/.local/share/flatpak/app',
                     '-%h/.local/bin', '-%h/Applications')),
+                'InaccessiblePaths': ' '.join((*masks, f'-{project}/.git', f'-{project}/.claude')),
+                'RestrictAddressFamilies': 'AF_UNIX AF_NETLINK AF_INET AF_INET6',
+                # Voice reaches the desktop bus and PipeWire, and the panel reader needs to see other programs.
+                'SystemCallFilter': None,
+                'SystemCallErrorNumber': None,
+                'PrivatePIDs': None,
             },
         }
         sandbox = {
             'ProtectSystem': 'strict', 'ProtectHome': 'tmpfs', 'PrivateNetwork': 'yes',
             'PrivateUsers': 'self', 'PrivateTmp': 'disconnected', 'PrivateDevices': 'yes',
-            'NoNewPrivileges': 'yes',
+            'NoNewPrivileges': 'yes', 'PrivateIPC': 'yes', 'ProtectControlGroups': 'yes',
+            'SystemCallArchitectures': 'native', 'JoinsNamespaceOf': None,
+            # TemporaryFileSystem stops every + line with 226/NAMESPACE, so it can never hide /run here.
+            'TemporaryFileSystem': None,
         }
         for name, facts in expected.items():
             service = self.read_unit(name)['Service']
             for key, value in {**sandbox, **facts}.items():
                 self.assertEqual(service.get(key), value, f'{name} {key}')
-            for key in ('JoinsNamespaceOf', 'PrivatePIDs'):
-                self.assertNotIn(key, service, f'{name} {key}')
             for key in ('ExecStartPre', 'ExecStartPost'):
                 for line in service.get(key, '').split('\n'):
                     self.assertTrue(line.startswith('+'), f'{name} {key} {line}')
@@ -4117,6 +4178,54 @@ class BonsaiStartupTests(unittest.TestCase):
                     self.assertNotIn(':', path, f'{name} {key} {path}')
         self.assertNotIn('JoinsNamespaceOf', self.read_unit('brain')['Unit'])
         self.assertNotIn('JoinsNamespaceOf', self.read_unit('voice')['Unit'])
+
+    def probe_unit_fence(self, name, runtime):
+        """Runs the probe in a transient unit holding the real unit's fence lines, its private endpoints left out."""
+        not_fence = ('Exec', 'Runtime', 'Bind', 'Timeout', 'Standard', 'Type', 'WorkingDirectory', 'Environment',
+                     'Restart', 'KillMode')
+        fence = [f'--property={key}={value.replace("%h", str(Path.home()))}'
+                 for key, value in self.read_unit(name)['Service'].items() if not key.startswith(not_fence)]
+        with tempfile.TemporaryDirectory(prefix='kestrel-probe-', dir=runtime) as scratch:
+            listener = socket.socket(socket.AF_UNIX)
+            self.addCleanup(listener.close)
+            listener.bind(f'{scratch}/listener.sock')
+            listener.listen()
+            result = subprocess.run(
+                ['/usr/bin/systemd-run', '--user', '--wait', '--collect', '--pipe', '--quiet',
+                 f'--unit=kestrel-probe-{name}-{os.getpid()}', *fence, '--property=ExecStartPre=+/usr/bin/true',
+                 f'--property=BindPaths={scratch}', '--property=RuntimeMaxSec=20s',
+                 '/usr/bin/python3', '-I', '-S', '-c', FENCE_PROBE, f'{scratch}/listener.sock', str(os.getpid())],
+                env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'XDG_RUNTIME_DIR': runtime},
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f'{name}: {result.stderr}')
+        return json.loads(result.stdout)
+
+    def test_unit_fences_close_routes_line_text_cannot_show(self):
+        runtime = f'/run/user/{os.getuid()}'
+        if not Path(f'{runtime}/systemd/private').is_socket():
+            self.skipTest('no user service manager to run transient units')
+        routes_closed_in_both = {
+            'writable sockets': ['/tmp/kestrel-probe.sock'],
+            'net namespace differs from host': True,
+            'ipc namespace differs from host': True,
+            'writable': {'/dev/shm': False, '/dev/mqueue': False, '/dev/pts': False},
+            'own cgroup.kill present': True,
+            'own cgroup.kill writable': False,
+            'journal readable': False,
+            'AF_VSOCK': 'EAFNOSUPPORT',
+        }
+        expected = {
+            'brain': {'connect to listener': 'EPERM', 'test process visible': False, 'AF_INET': 'EAFNOSUPPORT'},
+            'voice': {'connect to listener': None, 'test process visible': True, 'AF_INET': None},
+        }
+        self.maxDiff = None
+        for name, routes in expected.items():
+            with self.subTest(unit=name):
+                observed = self.probe_unit_fence(name, runtime)
+                for kind in ('net', 'ipc'):
+                    observed[f'{kind} namespace differs from host'] = (
+                        observed.pop(f'{kind} namespace') != os.readlink(f'/proc/self/ns/{kind}'))
+                self.assertEqual(observed, {**routes_closed_in_both, **routes})
 
     def test_network_fence_refuses_shared_host_network(self):
         script = ROOT / 'check-network-fence.sh'
@@ -4148,15 +4257,46 @@ class BonsaiStartupTests(unittest.TestCase):
         gone = subprocess.Popen(['/usr/bin/true'])
         gone.wait()
         refuse(gone.pid)
-        if subprocess.run(['/usr/bin/unshare', '-Urn', '/usr/bin/true']).returncode != 0:
-            self.skipTest('unprivileged network namespaces are unavailable')
-        fenced = start('/usr/bin/unshare', '-Urn', '/usr/bin/sleep', '30')
-        host = os.readlink('/proc/self/ns/net')
-        deadline = time.monotonic() + 5
-        while os.readlink(f'/proc/{fenced.pid}/ns/net') == host:
-            self.assertIsNone(fenced.poll(), 'the fenced child ended before it left the host network')
-            self.assertLess(time.monotonic(), deadline, 'the fenced child never left the host network')
-            time.sleep(0.01)
+        if subprocess.run(['/usr/bin/unshare', '-Urnm', '/usr/bin/true']).returncode != 0:
+            self.skipTest('unprivileged network and mount namespaces are unavailable')
+
+        def start_fenced(*planting):
+            # Empty folders over the trees that hold host sockets leave the walk only what the child plants itself.
+            child = start('/usr/bin/unshare', '-Urnm', '/usr/bin/bash', '-c', ' && '.join((
+                *(f'/usr/bin/mount -t tmpfs tmpfs {folder}' for folder in ('/run', '/tmp', '/var', '/dev')),
+                *planting, '/usr/bin/touch /run/fixture-ready', 'exec /usr/bin/sleep 30')))
+            deadline = time.monotonic() + 5
+            while not os.path.exists(f'/proc/{child.pid}/root/run/fixture-ready'):
+                self.assertIsNone(child.poll(), 'the fenced child ended before it finished its private folders')
+                self.assertLess(time.monotonic(), deadline, 'the fenced child never finished its private folders')
+                time.sleep(0.01)
+            return child
+
+        fenced = start_fenced()
         passed = check(fenced.pid)
         self.assertEqual((passed.returncode, passed.stdout, passed.stderr), (0, '', ''))
         refuse(f'{fenced.pid}/../{fenced.pid}')
+        exposed = start_fenced('/usr/bin/python3 -I -S -c '
+                               '"import socket; socket.socket(socket.AF_UNIX).bind(\'/run/planted.sock\')"')
+        reached = check(exposed.pid)
+        self.assertEqual((reached.returncode, reached.stdout, reached.stderr.strip()), (
+            1, '', "Kestrel's fence leaves a socket file reachable: /run/planted.sock. Add that path to "
+                   "InaccessiblePaths= in the service's drop-in, then restart Kestrel."))
+
+        def start_blind_chroot():
+            # An empty root has no /run, so the walk has nothing to read and the script must refuse rather than pass.
+            root = tempfile.TemporaryDirectory(prefix='kestrel-blind-')
+            self.addCleanup(root.cleanup)
+            child = start('/usr/bin/unshare', '-Urn', '/usr/bin/python3', '-I', '-S', '-c',
+                          'import os, sys, time; os.chroot(sys.argv[1]); '
+                          'open("/ready", "w").close(); time.sleep(30)', root.name)
+            deadline = time.monotonic() + 5
+            # The marker is written inside the chroot, so its appearance proves the child has entered it.
+            while not os.path.exists(f'{root.name}/ready'):
+                self.assertIsNone(child.poll(), 'the blind child ended before it entered its chroot')
+                self.assertLess(time.monotonic(), deadline, 'the blind child never entered its chroot')
+                time.sleep(0.01)
+            return child
+
+        blind = check(start_blind_chroot().pid)
+        self.assertEqual((blind.returncode, blind.stdout, blind.stderr), (1, '', f'{advice}\n'))

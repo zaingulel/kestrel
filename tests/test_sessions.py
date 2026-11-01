@@ -915,6 +915,12 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unreached.failure_advisory, "I couldn't reach Kestrel's engine. Restart Kestrel and try again.")
         self.assertEqual(NATIVE_VOICE_CONVERSATIONS.inactive_state(SimpleNamespace(channel=unreached)), 'trouble-engine')
 
+    async def test_engine_home_lives_in_the_private_sessions_folder(self):
+        channel = await self.opened_channel({'ready': True})
+        folder = (bot.ROOT / '.runtime/hermes-sessions').resolve()
+        self.assertEqual(Path(channel.home.name).parent, folder)
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+
     async def test_engine_preparation_overlaps_local_models_and_is_closed_on_early_exit(self):
         preparing = asyncio.Event()
         loading = asyncio.Event()
