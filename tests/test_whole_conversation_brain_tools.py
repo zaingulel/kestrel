@@ -673,7 +673,7 @@ class WholeConversationTests(WholeConversationCase):
         path.write_bytes(b'PRIVATE screenshot content must never be opened')
         os.utime(path, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
         screenshot = (
-            '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet',
+            '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect',
             '--property=RuntimeMaxSec=2s', '--property=TimeoutStopSec=1s',
             '--setenv=PATH', '--setenv=LC_ALL', '--setenv=XDG_RUNTIME_DIR', '--setenv=HOME', '--setenv=OMARCHY_PATH',
             '--setenv=WAYLAND_DISPLAY', '--setenv=HYPRLAND_INSTANCE_SIGNATURE', '--setenv=OMARCHY_SCREENSHOT_DIR',

@@ -33,7 +33,7 @@ APP_RESOLUTION_BUDGET = 2 * (1024 + APP_NAME_BYTES) + 64
 # Native capture allocates its frame with shm_open in /dev/shm, which the voice fence masks, so this fixed command runs
 # outside it. The unit's own limit stops a capture that outlasts this process's wait.
 SCREENSHOT_COMMAND = (
-    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet',
+    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect',
     f'--property=RuntimeMaxSec={LOCAL_COMMAND_TIMEOUT}s', f'--property=TimeoutStopSec={LOCAL_COMMAND_CLEANUP_TIMEOUT}s',
     *(f'--setenv={key}' for key in ('PATH', 'LC_ALL', 'XDG_RUNTIME_DIR', 'HOME', 'OMARCHY_PATH', 'WAYLAND_DISPLAY',
                                     'HYPRLAND_INSTANCE_SIGNATURE', 'OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR')),

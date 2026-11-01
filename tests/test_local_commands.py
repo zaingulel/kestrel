@@ -31,7 +31,7 @@ import tool_actions
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain
 
 SCREENSHOT_ARGV = (
-    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet',
+    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect',
     '--property=RuntimeMaxSec=2s', '--property=TimeoutStopSec=1s',
     '--setenv=PATH', '--setenv=LC_ALL', '--setenv=XDG_RUNTIME_DIR', '--setenv=HOME', '--setenv=OMARCHY_PATH',
     '--setenv=WAYLAND_DISPLAY', '--setenv=HYPRLAND_INSTANCE_SIGNATURE', '--setenv=OMARCHY_SCREENSHOT_DIR',
@@ -444,10 +444,11 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             if not socket.is_socket():
                 self.skipTest(f'{socket} is not a socket: no user service manager to start a transient unit')
         unit = f'kestrel-test-screenshot-{os.getpid()}-{time.monotonic_ns()}'
+        env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime)}
 
         def state():
             return subprocess.run(['/usr/bin/systemctl', '--user', 'is-active', unit], capture_output=True,
-                                  text=True).stdout.strip()
+                                  text=True, timeout=5, env=env).stdout.strip()
 
         def wait_until(condition):
             deadline = time.monotonic() + 10
@@ -459,18 +460,18 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         waiter = subprocess.Popen(
             [SCREENSHOT_ARGV[0], f'--unit={unit}', *SCREENSHOT_ARGV[1:-5], '/usr/bin/sh', '-c',
              'trap "" TERM; /usr/bin/sleep 30'],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
 
         def clean_up():
             waiter.kill()
             waiter.wait()
             for verb in ('stop', 'reset-failed'):
-                subprocess.run(['/usr/bin/systemctl', '--user', verb, unit], capture_output=True)
+                subprocess.run(['/usr/bin/systemctl', '--user', verb, unit], capture_output=True, timeout=5, env=env)
 
         self.addCleanup(clean_up)
         wait_until(lambda: state() == 'active')
-        waiter.kill()
-        waiter.wait()
+        waiter.terminate()
+        waiter.wait(timeout=5)
         self.assertEqual(state(), 'active')
         wait_until(lambda: state() == 'inactive')
 
