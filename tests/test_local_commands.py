@@ -5,6 +5,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -419,16 +420,59 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         fixture = {'WAYLAND_DISPLAY': 'wayland-fixture', 'HYPRLAND_INSTANCE_SIGNATURE': 'fixture',
                    'XDG_PICTURES_DIR': '/pictures/white space'}
         script = ('printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\\n" "$PATH" "$LC_ALL" "$XDG_RUNTIME_DIR" "$HOME" "$OMARCHY_PATH" '
-                  '"$WAYLAND_DISPLAY" "$HYPRLAND_INSTANCE_SIGNATURE" "${OMARCHY_SCREENSHOT_DIR:-absent}" "$XDG_PICTURES_DIR"')
+                  '"$WAYLAND_DISPLAY" "$HYPRLAND_INSTANCE_SIGNATURE" "$${OMARCHY_SCREENSHOT_DIR-absent}" "$XDG_PICTURES_DIR"')
         home = tool_actions.pwd.getpwuid(os.getuid()).pw_dir
-        line = (f'/usr/bin:/bin|C.UTF-8|{runtime}|{home}|/usr/share/omarchy|wayland-fixture|fixture|absent|'
-                '/pictures/white space\n')
+        # An unset forwarded variable arrives set and empty, so the unset case reads as empty rather than absent.
+        # The service manager expands `${NAME}` itself and has no default syntax, so `$$` hands the shell its own.
+        for destination, arrived in (({'OMARCHY_SCREENSHOT_DIR': '/screens/white space'}, '/screens/white space'),
+                                     ({}, '')):
+            line = (f'/usr/bin:/bin|C.UTF-8|{runtime}|{home}|/usr/share/omarchy|wayland-fixture|fixture|{arrived}|'
+                    '/pictures/white space\n')
+            with self.subTest(destination=destination):
+                with patch.dict(os.environ, {**fixture, **destination}, clear=True):
+                    with patch.object(tool_actions, 'SCREENSHOT_COMMAND',
+                                      (*SCREENSHOT_ARGV[:-5], '/usr/bin/sh', '-c', script)):
+                        self.assertEqual(await tool_actions.run_local_command(tool_actions.SCREENSHOT_COMMAND), line)
         with patch.dict(os.environ, fixture, clear=True):
-            with patch.object(tool_actions, 'SCREENSHOT_COMMAND', (*SCREENSHOT_ARGV[:-5], '/usr/bin/sh', '-c', script)):
-                self.assertEqual(await tool_actions.run_local_command(tool_actions.SCREENSHOT_COMMAND), line)
             with patch.object(tool_actions, 'SCREENSHOT_COMMAND', (*SCREENSHOT_ARGV[:-5], '/usr/bin/sh', '-c', 'exit 7')):
                 with self.assertRaisesRegex(RuntimeError, '^command failed$'):
                     await tool_actions.run_local_command(tool_actions.SCREENSHOT_COMMAND)
+
+    def test_screenshot_unit_outlives_its_waiter_and_stops_at_its_limit(self):
+        runtime = Path(f'/run/user/{os.getuid()}')
+        for socket in (runtime / 'systemd' / 'private', runtime / 'bus'):
+            if not socket.is_socket():
+                self.skipTest(f'{socket} is not a socket: no user service manager to start a transient unit')
+        unit = f'kestrel-test-screenshot-{os.getpid()}-{time.monotonic_ns()}'
+
+        def state():
+            return subprocess.run(['/usr/bin/systemctl', '--user', 'is-active', unit], capture_output=True,
+                                  text=True).stdout.strip()
+
+        def wait_until(condition):
+            deadline = time.monotonic() + 10
+            while not condition():
+                self.assertLess(time.monotonic(), deadline, f'{unit} stayed {state()!r}')
+                time.sleep(0.05)
+
+        # Ignoring TERM makes stopping the unit need the forced kill that TimeoutStopSec schedules.
+        waiter = subprocess.Popen(
+            [SCREENSHOT_ARGV[0], f'--unit={unit}', *SCREENSHOT_ARGV[1:-5], '/usr/bin/sh', '-c',
+             'trap "" TERM; /usr/bin/sleep 30'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def clean_up():
+            waiter.kill()
+            waiter.wait()
+            for verb in ('stop', 'reset-failed'):
+                subprocess.run(['/usr/bin/systemctl', '--user', verb, unit], capture_output=True)
+
+        self.addCleanup(clean_up)
+        wait_until(lambda: state() == 'active')
+        waiter.kill()
+        waiter.wait()
+        self.assertEqual(state(), 'active')
+        wait_until(lambda: state() == 'inactive')
 
     async def test_media_actions_require_observed_state(self):
         for key, phrase, action in (('pause_media', 'pause music', 'pause'), ('next_track', 'next track', 'next')):
