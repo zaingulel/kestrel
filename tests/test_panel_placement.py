@@ -90,9 +90,9 @@ end
 '''
 
 
+@unittest.skipUnless(Path("/usr/bin/lua").is_file(), "/usr/bin/lua is required for the panel placement tests")
 class PanelPlacementTests(unittest.TestCase):
     def run_lua(self, scenario):
-        self.assertTrue(Path("/usr/bin/lua").is_file(), "/usr/bin/lua is required; native evidence cannot skip")
         chunks = payloads()
         definitions = "\n".join(f"local function {name}()\n{body}\nend" for name, body in chunks.items())
         result = subprocess.run(

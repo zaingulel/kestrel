@@ -161,16 +161,15 @@ Native integration and visual receipts are invalidated by changes to desktop QML
 
 ### Native panel placement evidence
 
-[tests/panel_placement_native.py](../tests/panel_placement_native.py) executes the production `Panel.qml` literal Lua payloads with `/usr/bin/lua`. It doubles only the native Hyprland boundary, invokes the registered open/close callbacks and observes dispatched actions and final window state. Coordinate-only movement deliberately preserves monitor ownership, matching the installed-host counterexample. Hand-worked monitor rectangles and expected points supply the geometry oracle. Every subcase uses a fresh, bounded Lua process; a missing interpreter fails explicitly.
+[tests/test_panel_placement.py](../tests/test_panel_placement.py) executes the production `Panel.qml` literal Lua payloads with `/usr/bin/lua`. It doubles only the native Hyprland boundary, invokes the registered open/close callbacks and observes dispatched actions and final window state. Coordinate-only movement deliberately preserves monitor ownership, matching the installed-host counterexample. Hand-worked monitor rectangles and expected points supply the geometry oracle. Every subcase uses a fresh, bounded Lua process. The module is part of `npm run test:speech`, and skips where `/usr/bin/lua` is absent, including the hosted check, so hosted green does not cover it; a local run without skips is the evidence.
 
-Run the exact method that supports a construction slice, or the complete placement class at convergence:
+Run the module with one focused command:
 
 ```sh
-node scripts/run-log.mjs panel placement-native -- env PYTHONPATH=tests /usr/bin/python3 -m unittest panel_placement_native.PanelPlacementTests.test_reopen_owns_saved_monitor -v
-node scripts/run-log.mjs panel placement-native -- env PYTHONPATH=tests /usr/bin/python3 -m unittest panel_placement_native.PanelPlacementTests -v
+node scripts/run-log.mjs panel placement -- env PYTHONPATH=tests /usr/bin/python3 -m unittest test_panel_placement -v
 ```
 
-Require every selected method to execute without skips. This native-only filename deliberately stays outside default `test_*` discovery and hosted continuous integration; hosted green does not cover these Lua checks. Keep the separate native Qt evidence above for rendering and interaction.
+Require every method in the module to execute without skips. Keep the separate native Qt evidence above for rendering and interaction.
 
 Boundary doubles cannot establish compositor mapping, monitor/workspace ownership or focus semantics. After a placement or platform change, retain installed-host reopen observations in both monitor directions: exact monitor, workspace, coordinates, size, settled active-window identity and conditional prior-focus restoration after close. Also verify wholly invisible recovery and preserved deliberate partial placement. Back up and restore only owned placement state, remove temporary probe state and require clean compositor configuration. These checks do not require conversation input or voice-service changes.
 
