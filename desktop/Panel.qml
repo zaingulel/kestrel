@@ -24,6 +24,7 @@ Item {
         local s=_kestrelConversationPlacement
         if s then
             assert(type(s)=="table", "Kestrel panel placement failed")
+            s.expected=nil; s.returnFocus=nil
             if s.openSub then s.openSub:remove(); s.openSub=nil end
             if s.closeSub then s.closeSub:remove(); s.closeSub=nil end
             if s.rule then s.rule:set_enabled(false) end
@@ -34,40 +35,53 @@ Item {
         if not _kestrelConversationPlacement then _kestrelConversationPlacement={} end
         local s=_kestrelConversationPlacement
         local function clean()
+            s.expected=nil; s.returnFocus=nil
             if s.openSub then s.openSub:remove(); s.openSub=nil end
             if s.closeSub then s.closeSub:remove(); s.closeSub=nil end
             if s.rule then s.rule:set_enabled(false) end
         end
         local ok=pcall(function()
-            local allowed={rule=true,saved=true,openSub=true,closeSub=true,opened=true,failed=true,workArea=true}
+            local allowed={rule=true,saved=true,openSub=true,closeSub=true,opened=true,failed=true,workArea=true,expected=true,returnFocus=true}
             for key,_ in pairs(s) do assert(allowed[key]) end
             local function integer(v,minimum)
                 assert(type(v)=="number" and v==v and v>=minimum and v<=2147483647 and v%1==0)
                 return v
             end
-            if not s.workArea then
-                s.workArea=function(m,gaps,border)
-                    assert(m and type(m.position)=="table" and type(m.size)=="table" and type(m.reserved)=="table" and type(gaps)=="table")
-                    local x,y=integer(m.position.x,-2147483647),integer(m.position.y,-2147483647)
-                    local width,height=integer(m.size.width,1),integer(m.size.height,1)
-                    local transform=integer(m.transform,0); assert(transform<=7)
-                    assert(type(m.scale)=="number" and m.scale==m.scale and m.scale>0 and m.scale<math.huge)
-                    if transform%2==1 then width,height=height,width end
-                    width,height=math.floor(width/m.scale+0.5),math.floor(height/m.scale+0.5)
-                    integer(width,1); integer(height,1); integer(border,0)
-                    for _,edge in ipairs({"top","right","bottom","left"}) do
-                        integer(m.reserved[edge],0); integer(gaps[edge],0)
-                    end
-                    local area={left=x+m.reserved.left+gaps.left+border,
-                        right=x+width-m.reserved.right-gaps.right-border,
-                        top=y+m.reserved.top+gaps.top+border,
-                        bottom=y+height-m.reserved.bottom-gaps.bottom-border}
-                    for _,v in pairs(area) do integer(v,-2147483647) end
-                    assert(area.right-area.left>=448 and area.bottom-area.top>=640)
-                    return area
-                end
+            local function identity(w)
+                assert(type(w.address)=="string" and #w.address<=18 and w.address:match("^0x%x+$"))
+                local id=w.stable_id
+                assert(type(id)=="number" and id==id and id>0 and id<=9007199254740991 and id%1==0)
+                return {address=w.address,stableId=id}
             end
-            assert(type(s.workArea)=="function")
+            local function monitorBounds(m)
+                assert(m and type(m.position)=="table" and type(m.size)=="table")
+                local x,y=integer(m.position.x,-2147483647),integer(m.position.y,-2147483647)
+                local width,height=integer(m.size.width,1),integer(m.size.height,1)
+                local transform=integer(m.transform,0); assert(transform<=7)
+                assert(type(m.scale)=="number" and m.scale==m.scale and m.scale>0 and m.scale<math.huge)
+                if transform%2==1 then width,height=height,width end
+                width,height=math.floor(width/m.scale+0.5),math.floor(height/m.scale+0.5)
+                integer(width,1); integer(height,1)
+                return {left=x,right=integer(x+width,-2147483647),
+                    top=y,bottom=integer(y+height,-2147483647)}
+            end
+            assert(s.workArea==nil or type(s.workArea)=="function")
+            s.workArea=nil
+            local function workArea(m,gaps,border)
+                local bounds=monitorBounds(m)
+                assert(type(m.reserved)=="table" and type(gaps)=="table")
+                integer(border,0)
+                for _,edge in ipairs({"top","right","bottom","left"}) do
+                    integer(m.reserved[edge],0); integer(gaps[edge],0)
+                end
+                local area={left=bounds.left+m.reserved.left+gaps.left+border,
+                    right=bounds.right-m.reserved.right-gaps.right-border,
+                    top=bounds.top+m.reserved.top+gaps.top+border,
+                    bottom=bounds.bottom-m.reserved.bottom-gaps.bottom-border}
+                for _,v in pairs(area) do integer(v,-2147483647) end
+                assert(area.right-area.left>=448 and area.bottom-area.top>=640)
+                return area
+            end
             if s.rule then assert(type(s.rule)=="userdata") end
             clean()
             if not s.rule then
@@ -79,8 +93,10 @@ Item {
                 local gaps,gapError=hl.get_config("general.gaps_out")
                 local border,borderError=hl.get_config("general.border_size")
                 assert(gapError==nil and borderError==nil)
-                return s.workArea(m,gaps,border)
+                return workArea(m,gaps,border)
             end
+            local prior=hl.get_active_window()
+            if prior then s.returnFocus=identity(prior) end
             local monitor,focused
             local monitors=hl.get_monitors(); assert(type(monitors)=="table")
             if s.saved then
@@ -102,12 +118,19 @@ Item {
                 local same=monitor.name==s.saved.monitor
                 for _,edge in ipairs({"left","right"}) do same=same and area[edge]-monitor.position.x==s.saved.area[edge] end
                 for _,edge in ipairs({"top","bottom"}) do same=same and area[edge]-monitor.position.y==s.saved.area[edge] end
-                if not same then
+                local visible=false
+                for _,m in ipairs(monitors) do
+                    local bounds=monitorBounds(m)
+                    visible=visible or (x<bounds.right and x+448>bounds.left
+                        and y<bounds.bottom and y+640>bounds.top)
+                end
+                if not same or not visible then
                     x=math.max(area.left,math.min(area.right-448,x))
                     y=math.max(area.top,math.min(area.bottom-640,y))
                 end
             end
             integer(x,-2147483647); integer(y,-2147483647)
+            s.expected={monitor=monitor.name,x=x,y=y}
             s.opened=false; s.failed=false; s.rule:set_enabled(true)
             s.closeSub=hl.on("window.close",function(w)
                 if w.initial_title~="Kestrel conversation" or w.initial_class~="org.quickshell" then return end
@@ -119,14 +142,25 @@ Item {
                         area={left=a.left-m.position.x,right=a.right-m.position.x,
                             top=a.top-m.position.y,bottom=a.bottom-m.position.y}}
                 end)
+                local restored=pcall(function()
+                    local a=hl.get_active_window()
+                    if s.returnFocus and a and a.address==w.address and a.stable_id==w.stable_id then
+                        for _,p in ipairs(hl.get_windows()) do
+                            if p.address==s.returnFocus.address and p.stable_id==s.returnFocus.stableId then
+                                hl.dispatch(hl.dsp.focus({window=p})); break
+                            end
+                        end
+                    end
+                end)
                 clean(); s.opened=false
-                if not captured then s.failed=true; error("Kestrel panel placement failed") end
+                if not captured or not restored then s.failed=true; error("Kestrel panel placement failed") end
             end)
             s.openSub=hl.on("window.open",function(w)
                 if w.initial_title~="Kestrel conversation" or w.initial_class~="org.quickshell" then return end
                 local moved=pcall(function()
+                    hl.dispatch(hl.dsp.window.move({window=w,monitor=monitor,follow=true}))
                     hl.dispatch(hl.dsp.window.move({window=w,x=x,y=y,relative=false}))
-                    assert(w.at.x==x and w.at.y==y and w.size.x==448 and w.size.y==640)
+                    assert(w.monitor.name==monitor.name and w.at.x==x and w.at.y==y and w.size.x==448 and w.size.y==640)
                     s.opened=true
                 end)
                 if s.openSub then s.openSub:remove(); s.openSub=nil end
@@ -140,6 +174,25 @@ Item {
         local s=_kestrelConversationPlacement
         assert(type(s)=="table" and s.opened==true and s.failed==false and s.openSub==nil,
             "Kestrel panel placement failed")
+        local e=s.expected
+        assert(type(e)=="table" and type(e.monitor)=="string" and #e.monitor>0,
+            "Kestrel panel placement failed")
+        for _,key in ipairs({"x","y"}) do
+            local v=e[key]
+            assert(type(v)=="number" and v==v and v>=-2147483647 and v<=2147483647 and v%1==0,
+                "Kestrel panel placement failed")
+        end
+        local windows=hl.get_windows()
+        assert(type(windows)=="table", "Kestrel panel placement failed")
+        local count=0
+        for _,w in ipairs(windows) do
+            if w.initial_title=="Kestrel conversation" and w.initial_class=="org.quickshell" then
+                count=count+1
+                assert(w.monitor.name==e.monitor and w.at.x==e.x and w.at.y==e.y
+                    and w.size.x==448 and w.size.y==640, "Kestrel panel placement failed")
+            end
+        end
+        assert(count==1, "Kestrel panel placement failed")
     `
     readonly property string verifyCloseLua: `
         local s=_kestrelConversationPlacement

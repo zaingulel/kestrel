@@ -159,6 +159,20 @@ Require all six selected functions to execute without skips; report Qt initializ
 
 Native integration and visual receipts are invalidated by changes to desktop QML or the manifest, Qt tests, or the installed Qt, Quickshell or Omarchy environment. Policy and geometry receipts rerun for their corresponding production or test changes. Runtime privacy and release claims also retain the Python lifecycle and reader evidence; native rendering alone cannot establish them.
 
+### Native panel placement evidence
+
+[tests/test_panel_placement.py](../tests/test_panel_placement.py) executes the production `Panel.qml` literal Lua payloads with `/usr/bin/lua`. It doubles only the native Hyprland boundary, invokes the registered open/close callbacks and observes dispatched actions and final window state. Coordinate-only movement deliberately preserves monitor ownership, matching the installed-host counterexample. Hand-worked monitor rectangles and expected points supply the geometry oracle. Every subcase uses a fresh, bounded Lua process. The module is part of `npm run test:speech`, and skips where `/usr/bin/lua` is absent, including the hosted check, so hosted green does not cover it; a local run without skips is the evidence.
+
+Run the module with one focused command:
+
+```sh
+node scripts/run-log.mjs panel placement -- env PYTHONPATH=tests /usr/bin/python3 -m unittest test_panel_placement -v
+```
+
+Require every method in the module to execute without skips. Keep the separate native Qt evidence above for rendering and interaction.
+
+Boundary doubles cannot establish compositor mapping, monitor/workspace ownership or focus semantics. After a placement or platform change, retain installed-host reopen observations in both monitor directions: exact monitor, workspace, coordinates, size, settled active-window identity and conditional prior-focus restoration after close. Also verify wholly invisible recovery and preserved deliberate partial placement. Back up and restore only owned placement state, remove temporary probe state and require clean compositor configuration. These checks do not require conversation input or voice-service changes.
+
 ## 3. Evidence classes stay distinct
 
 Functional green never substitutes for structural, lint, generated-artifact, documentation, accessibility,
