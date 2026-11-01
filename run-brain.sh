@@ -6,6 +6,8 @@ if (( $# )); then
   exit 2
 fi
 
+: "${XDG_RUNTIME_DIR:?The brain needs your desktop session runtime folder. Start it through kestrel-brain.service, or set this variable to that folder.}"
+
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PRISM="$ROOT/.runtime/tools/bonsai-prism-b10787-73bfe6c"
 CUDA="$ROOT/.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64"
@@ -25,13 +27,16 @@ if ! brain_key_is_safe; then
   exit 1
 fi
 
+mkdir -p -m 700 "$XDG_RUNTIME_DIR/kestrel-brain" "$ROOT/.runtime/brain-compute-cache"
+
 # llama-server loads ggml backend libraries from its working directory; keep it the checked folder.
 cd -- "$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c"
 exec /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 \
   LD_LIBRARY_PATH="$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c:$CUDA" \
+  CUDA_CACHE_PATH="$ROOT/.runtime/brain-compute-cache" \
   "$PRISM/cuda-12.8/llama-prism-b10787-73bfe6c/llama-server" \
   -m "$ROOT/.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf" \
-  --alias bonsai-2-27b --host 127.0.0.1 --port 8080 \
+  --alias bonsai-2-27b --host "$XDG_RUNTIME_DIR/kestrel-brain/brain.sock" \
   --api-key-file "$KEY" \
   --gpu-layers all -fa on -c 64000 -np 1 -b 256 -ub 128 --fit off \
   --kv-offload --cache-type-k f16 --cache-type-v f16 \

@@ -469,14 +469,27 @@ def kestrel_system_prompt(built, prompt: str) -> str:
 
 def child_environment(home):
     home = Path(home).resolve()
-    environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ')
+    environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG', 'LC_ALL', 'TZ', 'XDG_RUNTIME_DIR')
                    if key in os.environ}
     environment.update(HERMES_HOME=str(home), HERMES_MANAGED_DIR=str(home / 'managed'),
                        PYTHON_DOTENV_DISABLED='1')
     return environment
 
 
-def main(*, base_url=BONSAI_URL):
+def route_brain_over_socket(path: str) -> None:
+    # Hermes builds its HTTP clients internally and offers no setting for their transport.
+    import httpx
+
+    def routed(native):
+        def initialise(self, *args, **options):
+            native(self, *args, **{**options, 'uds': path})
+        return initialise
+
+    for transport in (httpx.HTTPTransport, httpx.AsyncHTTPTransport):
+        transport.__init__ = routed(transport.__init__)
+
+
+def main(*, base_url=BONSAI_URL, brain_socket=None):
     wire = sys.stdout
     status = 0
     terminal_failure_reported = False
@@ -547,6 +560,8 @@ def main(*, base_url=BONSAI_URL):
                 from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
                 from agent.turn_truncation import _continue_text as native_continue_text
                 import nemo_relay
+                if brain_socket is not None:
+                    route_brain_over_socket(brain_socket)
             except ImportError as error:
                 raise RuntimeError(ENGINE_LOAD_ERROR) from error
             # Hermes offers no hook for a reply that reaches its limit; its truncation handler looks this
@@ -1052,4 +1067,4 @@ def main(*, base_url=BONSAI_URL):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    raise SystemExit(main(brain_socket=str(Path(os.environ['XDG_RUNTIME_DIR']) / 'kestrel-brain/brain.sock')))
