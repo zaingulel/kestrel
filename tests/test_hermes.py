@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -4013,12 +4014,25 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(refused.stdout, '')
         self.assertEqual(requests, ['/health', '/health'])
 
+    def read_unit(self, name):
+        class RepeatedKeys(dict):
+            # systemd lets a unit repeat a key; configparser keeps only the last, so collect them.
+            def __setitem__(self, key, value):
+                if isinstance(value, list) and isinstance(self.get(key), list):
+                    self[key].extend(value)
+                else:
+                    super().__setitem__(key, value)
+
+        unit = configparser.ConfigParser(interpolation=None, strict=False, dict_type=RepeatedKeys)
+        unit.optionxform = str
+        with (ROOT / f'systemd/kestrel-{name}.service').open() as source:
+            unit.read_file(source)
+        return unit
+
     def test_user_units_pin_login_lifecycle(self):
         units = {}
         for name in ('brain', 'voice'):
-            unit = configparser.ConfigParser(interpolation=None)
-            with (ROOT / f'systemd/kestrel-{name}.service').open() as source:
-                unit.read_file(source)
+            unit = self.read_unit(name)
             units[name] = unit
             self.assertEqual(unit['Service']['Type'], 'exec')
             self.assertEqual(unit['Service']['Restart'], 'no')
@@ -4033,11 +4047,12 @@ class BonsaiStartupTests(unittest.TestCase):
                          {'graphical-session.target', 'kestrel-voice.service'})
         self.assertEqual(brain['Service']['KillMode'], 'control-group')
         self.assertEqual(brain['Service']['TimeoutStartSec'], '130s')
-        prefix = '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash '
-        self.assertEqual(brain['Service']['ExecStart'], prefix + '%h/Projects/zaingulel/kestrel/run-brain.sh')
-        self.assertEqual(brain['Service']['ExecStartPost'],
-                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
-                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
+        self.assertEqual(brain['Service']['ExecStart'],
+                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh')
+        self.assertEqual(brain['Service']['ExecStartPost'].split('\n')[1],
+                         '+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                         'MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
         self.assertNotIn('Install', brain)
         self.assertEqual(voice['Service']['ExecStart'], '%h/Projects/zaingulel/kestrel/run-voice.sh')
         self.assertEqual(voice['Service']['KillMode'], 'mixed')
@@ -4048,3 +4063,100 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(set(voice['Unit']['Wants'].split()), dependencies)
         self.assertEqual(set(voice['Unit']['After'].split()), dependencies | {'graphical-session.target'})
         self.assertFalse(voice['Unit'].get('Requires'))
+
+    def test_user_units_fence_both_services(self):
+        project = '%h/Projects/zaingulel/kestrel'
+        gpu = ('/dev/nvidia0', '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset')
+        fence_check = ('+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
+                       f'/usr/bin/bash {project}/check-network-fence.sh')
+        expected = {
+            'brain': {
+                'ExecStartPre': f'+/usr/bin/install -d -m 0700 {project}/.runtime/brain-compute-cache',
+                'ExecStartPost': fence_check + '\n'
+                                 '+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                                 f'MAINPID=${{MAINPID}} /usr/bin/bash {project}/check-brain-ready.sh',
+                'RuntimeDirectory': 'kestrel-brain',
+                'RuntimeDirectoryMode': '0700',
+                'BindPaths': ' '.join((*gpu, '%t/kestrel-brain', f'{project}/.runtime/brain-compute-cache')),
+                'BindReadOnlyPaths': ' '.join((
+                    f'{project}/run-brain.sh', f'{project}/.runtime/brain-api-key',
+                    f'{project}/.runtime/models/bonsai-2-27b',
+                    f'{project}/.runtime/tools/bonsai-prism-b10787-73bfe6c',
+                    f'{project}/.runtime/tools/cudart-b11815-cuda-12.8')),
+            },
+            'voice': {
+                'ExecStartPre': '+/usr/bin/touch %t/uwsm-app.lock\n+/usr/bin/mkdir -p %h/Pictures',
+                'ExecStartPost': fence_check,
+                'RuntimeDirectory': 'kestrel',
+                'RuntimeDirectoryMode': '0700',
+                'RuntimeDirectoryPreserve': 'yes',
+                'BindPaths': ' '.join((*(f'-{device}' for device in gpu), f'{project}/.runtime',
+                                       '%t/kestrel', '%t/uwsm-app.lock', '%h/Pictures')),
+                'BindReadOnlyPaths': ' '.join((
+                    project, '%t', '-%h/.config/user-dirs.dirs', '-%h/.local/share/applications',
+                    '-%h/.local/share/flatpak/exports/share', '-%h/.local/share/flatpak/app',
+                    '-%h/.local/bin', '-%h/Applications')),
+            },
+        }
+        sandbox = {
+            'ProtectSystem': 'strict', 'ProtectHome': 'tmpfs', 'PrivateNetwork': 'yes',
+            'PrivateUsers': 'self', 'PrivateTmp': 'disconnected', 'PrivateDevices': 'yes',
+            'NoNewPrivileges': 'yes',
+        }
+        for name, facts in expected.items():
+            service = self.read_unit(name)['Service']
+            for key, value in {**sandbox, **facts}.items():
+                self.assertEqual(service.get(key), value, f'{name} {key}')
+            for key in ('JoinsNamespaceOf', 'PrivatePIDs'):
+                self.assertNotIn(key, service, f'{name} {key}')
+            for key in ('ExecStartPre', 'ExecStartPost'):
+                for line in service.get(key, '').split('\n'):
+                    self.assertTrue(line.startswith('+'), f'{name} {key} {line}')
+            for key in ('BindPaths', 'BindReadOnlyPaths'):
+                for path in service[key].split():
+                    self.assertNotIn(':', path, f'{name} {key} {path}')
+        self.assertNotIn('JoinsNamespaceOf', self.read_unit('brain')['Unit'])
+        self.assertNotIn('JoinsNamespaceOf', self.read_unit('voice')['Unit'])
+
+    def test_network_fence_refuses_shared_host_network(self):
+        script = ROOT / 'check-network-fence.sh'
+        advice = "Kestrel's network fence did not apply. Check the service's systemd log, then restart Kestrel."
+
+        def check(mainpid):
+            environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
+            if mainpid is not None:
+                environment['MAINPID'] = str(mainpid)
+            return subprocess.run(['/usr/bin/bash', str(script)], env=environment, cwd='/',
+                                  capture_output=True, text=True, timeout=5)
+
+        def start(*command):
+            child = subprocess.Popen(command)
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            return child
+
+        def refuse(mainpid):
+            result = check(mainpid)
+            self.assertNotEqual(result.returncode, 0, f'{mainpid!r}: {result.stderr}')
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(result.stderr.strip(), advice, f'{mainpid!r}')
+
+        refuse(start('/usr/bin/sleep', '30').pid)
+        refuse(None)
+        refuse('../1')
+        refuse('not-a-pid')
+        gone = subprocess.Popen(['/usr/bin/true'])
+        gone.wait()
+        refuse(gone.pid)
+        if subprocess.run(['/usr/bin/unshare', '-Urn', '/usr/bin/true']).returncode != 0:
+            self.skipTest('unprivileged network namespaces are unavailable')
+        fenced = start('/usr/bin/unshare', '-Urn', '/usr/bin/sleep', '30')
+        host = os.readlink('/proc/self/ns/net')
+        deadline = time.monotonic() + 5
+        while os.readlink(f'/proc/{fenced.pid}/ns/net') == host:
+            self.assertIsNone(fenced.poll(), 'the fenced child ended before it left the host network')
+            self.assertLess(time.monotonic(), deadline, 'the fenced child never left the host network')
+            time.sleep(0.01)
+        passed = check(fenced.pid)
+        self.assertEqual((passed.returncode, passed.stdout, passed.stderr), (0, '', ''))
+        refuse(f'{fenced.pid}/../{fenced.pid}')

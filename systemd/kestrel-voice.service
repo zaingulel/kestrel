@@ -8,12 +8,27 @@ PartOf=graphical-session.target
 Type=exec
 WorkingDirectory=%h/Projects/zaingulel/kestrel
 Environment=KESTREL_VOICE=irish-female KESTREL_MANAGED_BRAIN=1
+ExecStartPre=+/usr/bin/touch %t/uwsm-app.lock
+ExecStartPre=+/usr/bin/mkdir -p %h/Pictures
 ExecStart=%h/Projects/zaingulel/kestrel/run-voice.sh
+ExecStartPost=+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-network-fence.sh
 TimeoutStopSec=15s
 Restart=no
 KillMode=mixed
 StandardOutput=append:%h/Projects/zaingulel/kestrel/.runtime/voice-server.log
 StandardError=inherit
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateNetwork=yes
+PrivateUsers=self
+PrivateTmp=disconnected
+PrivateDevices=yes
+NoNewPrivileges=yes
+RuntimeDirectory=kestrel
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+BindPaths=-/dev/nvidia0 -/dev/nvidiactl -/dev/nvidia-uvm -/dev/nvidia-uvm-tools -/dev/nvidia-modeset %h/Projects/zaingulel/kestrel/.runtime %t/kestrel %t/uwsm-app.lock %h/Pictures
+BindReadOnlyPaths=%h/Projects/zaingulel/kestrel %t -%h/.config/user-dirs.dirs -%h/.local/share/applications -%h/.local/share/flatpak/exports/share -%h/.local/share/flatpak/app -%h/.local/bin -%h/Applications
 
 [Install]
 WantedBy=graphical-session.target
