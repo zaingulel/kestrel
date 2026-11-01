@@ -1,6 +1,5 @@
 import asyncio
 import io
-import hashlib
 import json
 import struct
 import wave
@@ -647,7 +646,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.output_watch.reset_mock()
                 self.audio.close.side_effect = RuntimeError('transport cleanup failed') if failure == 'transport-close' else None
                 if failure == 'publication':
-                    (Path(runtime) / 'kestrel').symlink_to(self.voices, target_is_directory=True)
+                    folder = Path(runtime) / 'kestrel'
+                    folder.mkdir(mode=0o700)
+                    (folder / 'indicator.json').symlink_to(folder / 'missing')
                 entered, release = asyncio.Event(), asyncio.Event()
 
                 async def load(reference_pcm):
@@ -724,6 +725,59 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         if not task.done():
                             task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
+
+    async def test_voice_refuses_without_its_command_endpoint(self):
+        from desktop import control
+        cases = {'symlink': NotADirectoryError, 'open-folder': ValueError, 'occupied': OSError}
+        for failure, expected in cases.items():
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as runtime:
+                self.audio.reset_mock()
+                self.output_watch.reset_mock()
+                folder = Path(runtime) / 'kestrel'
+                if failure == 'symlink':
+                    folder.symlink_to(self.voices, target_is_directory=True)
+                    before = sorted(self.voices.iterdir())
+                elif failure == 'open-folder':
+                    folder.mkdir()
+                    folder.chmod(0o755)
+                stt = Mock(load=AsyncMock(), close=AsyncMock())
+                loop = asyncio.get_running_loop()
+                errors = io.StringIO()
+                held = control.ConversationControl(lambda: 'inactive')
+                with (
+                    patch.dict(os.environ, XDG_RUNTIME_DIR=runtime),
+                    patch.object(bot, 'NemotronSTT', return_value=stt),
+                    patch.object(bot, 'NemotronRecognizer', return_value=stt),
+                    patch.object(bot, 'run_conversation', AsyncMock()) as conversation,
+                    patch.object(bot.ECHO_REMOVAL, 'start') as echo_start,
+                    patch.object(bot.ECHO_REMOVAL, 'close'),
+                    patch.object(loop, 'add_signal_handler'),
+                    patch.object(loop, 'remove_signal_handler'),
+                    patch.object(bot.torch, 'set_num_threads'),
+                    patch('sys.stderr', errors),
+                ):
+                    try:
+                        if failure == 'occupied':
+                            await held.start()
+                        with self.assertRaisesRegex(
+                                expected, {'symlink': '', 'open-folder': 'Unsafe status directory',
+                                           'occupied': 'Endpoint is in use'}[failure]) as raised:
+                            await asyncio.wait_for(bot.run_voice_service(), 5)
+                        if failure != 'open-folder':
+                            self.assertIs(type(raised.exception), expected)
+                        if failure == 'symlink':
+                            self.assertEqual(sorted(self.voices.iterdir()), before)
+                        if failure == 'occupied':
+                            self.assertEqual(await control.toggle(), 'inactive')
+                        else:
+                            self.assertEqual(errors.getvalue().count('Microphone use unknown.'), 1)
+                    finally:
+                        await held.close()
+                    stt.load.assert_not_called()
+                    self.audio.open.assert_not_called()
+                    self.output_watch.start.assert_not_called()
+                    echo_start.assert_not_called()
+                    conversation.assert_not_called()
 
     async def prepared_channel(self, times, *, fail_open=False):
         channel = bot.HermesRequestChannel()
@@ -1556,9 +1610,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
                 def private_bind(peer, endpoint):
                     self.assertEqual(peer.family, socket.AF_UNIX, 'Voice must never bind a network listener')
-                    self.assertIn(endpoint, {'\0kestrel.' + namespace + '.' + str(os.getuid()) + '.' +
-                                     hashlib.sha256(os.environ['XDG_RUNTIME_DIR'].encode()).hexdigest()
-                                     for namespace in ('control', 'conversation')})
+                    self.assertIn(endpoint, {os.environ['XDG_RUNTIME_DIR'] + '/kestrel/' + name + '.sock'
+                                     for name in ('control', 'conversation')})
                     bound.append(endpoint)
                     return native_bind(peer, endpoint)
 
