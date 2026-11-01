@@ -30,7 +30,15 @@ LOCAL_COMMAND_CLEANUP_TIMEOUT = 1
 APP_NAME_BYTES = 9 * 1024
 # JSON escaping at most doubles each admitted field; 64 bytes cover the object syntax.
 APP_RESOLUTION_BUDGET = 2 * (1024 + APP_NAME_BYTES) + 64
-SCREENSHOT_COMMAND = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+# Native capture allocates its frame with shm_open in /dev/shm, which the voice fence masks, so this fixed command runs
+# outside it. The unit's own limit stops a capture that outlasts this process's wait.
+SCREENSHOT_COMMAND = (
+    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet',
+    f'--property=RuntimeMaxSec={LOCAL_COMMAND_TIMEOUT}s', f'--property=TimeoutStopSec={LOCAL_COMMAND_CLEANUP_TIMEOUT}s',
+    *(f'--setenv={key}' for key in ('PATH', 'LC_ALL', 'XDG_RUNTIME_DIR', 'HOME', 'OMARCHY_PATH', 'WAYLAND_DISPLAY',
+                                    'HYPRLAND_INSTANCE_SIGNATURE', 'OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR')),
+    '--', '/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save',
+)
 
 
 @dataclass(frozen=True)

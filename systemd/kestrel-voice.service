@@ -36,8 +36,8 @@ ReadOnlyPaths=/run
 RuntimeDirectory=kestrel
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-BindPaths=-/dev/nvidia0 -/dev/nvidiactl -/dev/nvidia-uvm -/dev/nvidia-uvm-tools -/dev/nvidia-modeset %h/Projects/zaingulel/kestrel/.runtime/hermes-memory %h/Projects/zaingulel/kestrel/.runtime/hermes-traces %h/Projects/zaingulel/kestrel/.runtime/hermes-sessions %h/Projects/zaingulel/kestrel/.runtime/cache %t/kestrel %t/uwsm-app.lock %h/Pictures
-BindReadOnlyPaths=%h/Projects/zaingulel/kestrel %t -%h/.config/user-dirs.dirs -%h/.local/share/applications -%h/.local/share/flatpak/exports/share -%h/.local/share/flatpak/app -%h/.local/bin -%h/Applications
+BindPaths=-/dev/nvidia0 -/dev/nvidiactl -/dev/nvidia-uvm -/dev/nvidia-uvm-tools -/dev/nvidia-modeset %h/Projects/zaingulel/kestrel/.runtime/hermes-memory %h/Projects/zaingulel/kestrel/.runtime/hermes-traces %h/Projects/zaingulel/kestrel/.runtime/hermes-sessions %h/Projects/zaingulel/kestrel/.runtime/cache %t/kestrel %t/uwsm-app.lock
+BindReadOnlyPaths=%h/Projects/zaingulel/kestrel %t %h/Pictures -%h/.local/share/applications -%h/.local/share/flatpak/exports/share -%h/.local/share/flatpak/app -%h/.local/bin -%h/Applications
 
 [Install]
 WantedBy=graphical-session.target

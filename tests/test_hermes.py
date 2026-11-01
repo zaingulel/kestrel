@@ -3709,9 +3709,9 @@ server.serve_forever()
 '''
 
 # Runs inside a transient unit carrying a service's fence. It connects to nothing but the test's own listener and
-# writes nothing but its planted socket in the unit's private /tmp, which shows the walk below is not blind.
+# the session bus, and writes nothing but its planted socket in the unit's private /tmp, which shows the walk below is not blind.
 FENCE_PROBE = '''
-import errno, json, os, socket, stat, sys
+import errno, json, os, socket, stat, subprocess, sys
 
 listener, test_pid = sys.argv[1:]
 socket.socket(socket.AF_UNIX).bind('/tmp/kestrel-probe.sock')
@@ -3723,6 +3723,15 @@ def refusal(attempt, *arguments):
     except OSError as error:
         return errno.errorcode[error.errno]
     return None
+
+
+def outside_network():
+    runtime = f'/run/user/{os.getuid()}'
+    result = subprocess.run(
+        ['/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet', '--', '/usr/bin/readlink', '/proc/self/ns/net'],
+        env={'PATH': '/usr/bin:/bin', 'XDG_RUNTIME_DIR': runtime, 'DBUS_SESSION_BUS_ADDRESS': f'unix:path={runtime}/bus'},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def writable_paths():
@@ -3771,6 +3780,7 @@ print(json.dumps({
     'connect to listener': refusal(socket.socket(socket.AF_UNIX).connect, listener),
     'writable sockets': sorted(sockets),
     'net namespace': os.readlink('/proc/self/ns/net'),
+    'network of a command started outside': outside_network(),
     'ipc namespace': os.readlink('/proc/self/ns/ipc'),
     'test process visible': os.path.exists('/proc/' + test_pid),
     'writable': {path: os.access(path, os.W_OK) for path in ('/dev/shm', '/dev/mqueue', '/dev/pts')},
@@ -4182,9 +4192,9 @@ class BonsaiStartupTests(unittest.TestCase):
                 'RuntimeDirectoryMode': '0700',
                 'RuntimeDirectoryPreserve': 'yes',
                 'BindPaths': ' '.join((*(f'-{device}' for device in gpu), *stores,
-                                       '%t/kestrel', '%t/uwsm-app.lock', '%h/Pictures')),
+                                       '%t/kestrel', '%t/uwsm-app.lock')),
                 'BindReadOnlyPaths': ' '.join((
-                    project, '%t', '-%h/.config/user-dirs.dirs', '-%h/.local/share/applications',
+                    project, '%t', '%h/Pictures', '-%h/.local/share/applications',
                     '-%h/.local/share/flatpak/exports/share', '-%h/.local/share/flatpak/app',
                     '-%h/.local/bin', '-%h/Applications')),
                 'InaccessiblePaths': ' '.join((*masks, f'-{project}/.git', f'-{project}/.claude')),
@@ -4263,8 +4273,10 @@ class BonsaiStartupTests(unittest.TestCase):
             'new user namespace': 'EPERM',
         }
         expected = {
-            'brain': {'connect to listener': 'EPERM', 'test process visible': False, 'AF_INET': 'EAFNOSUPPORT'},
-            'voice': {'connect to listener': None, 'test process visible': True, 'AF_INET': None},
+            'brain': {'connect to listener': 'EPERM', 'test process visible': False, 'AF_INET': 'EAFNOSUPPORT',
+                      'command starts outside the fence': False},
+            'voice': {'connect to listener': None, 'test process visible': True, 'AF_INET': None,
+                      'command starts outside the fence': True},
         }
         home = str(Path.home())
         kestrel = f'{home}/Projects/zaingulel/kestrel'
@@ -4275,7 +4287,7 @@ class BonsaiStartupTests(unittest.TestCase):
             'brain': {f'{kestrel}/.runtime/brain-compute-cache', f'{runtime}/kestrel-brain'},
             'voice': {f'{kestrel}/.runtime/{folder}' for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions',
                                                                     'cache')} | {
-                f'{home}/Pictures', f'{runtime}/kestrel', f'{runtime}/uwsm-app.lock'},
+                f'{runtime}/kestrel', f'{runtime}/uwsm-app.lock'},
         }
         self.maxDiff = None
         for name, routes in expected.items():
@@ -4288,6 +4300,8 @@ class BonsaiStartupTests(unittest.TestCase):
                 for kind in ('net', 'ipc'):
                     observed[f'{kind} namespace differs from host'] = (
                         observed.pop(f'{kind} namespace') != os.readlink(f'/proc/self/ns/{kind}'))
+                observed['command starts outside the fence'] = (
+                    observed.pop('network of a command started outside') == os.readlink('/proc/self/ns/net'))
                 self.assertEqual(observed, {**routes_closed_in_both, **routes})
 
     def test_network_fence_refuses_shared_host_network(self):
