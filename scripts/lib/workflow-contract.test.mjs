@@ -156,7 +156,7 @@ test('ANTI-REGRESSION: the sweep scope workflow retains its reviewed job gate an
   const workflow = readFileSync(resolve(ROOT, '.github/workflows/sweep-scope.yml'));
   assert.equal(
     createHash('sha256').update(workflow).digest('hex'),
-    '256e3ac07f68913623556f6303c63b052e6f16638ac1892cddbd769ed76d1967',
+    '3e4e41a6be832f5c8e61c0ef6f1a2ccb2463222c423a28028cc08a3efd76d2f1',
     'the sweep workflow changed: independently review its configuration before updating this fixed oracle',
   );
 });
@@ -506,6 +506,22 @@ test('ANTI-REGRESSION: the resume skill reads the settings file only from the fe
   for (const read of reads) assert.equal(read, 'git show origin/main:.agents/factory-settings.json');
 });
 
+// Recurring cost: one match over text this file already reads; update only after reviewing a launch change.
+test('ANTI-REGRESSION: a product manager run starts each card session only with the one pinned launch, which refuses push and merge', () => {
+  assert.deepEqual(RESUME.replace(/\\\n\s*/g, ' ').match(/\bclaude\b[^`\n]*\s(?:-p|--print)\b[^`\n]*|\bcodex exec\b[^`\n]*/g), [
+    'claude -p --permission-mode auto --disallowedTools "Bash(git push *)" "Bash(gh pr create *)" "Bash(gh pr ready *)" "Bash(gh pr merge *)" --output-format json "Continue the product manager run." > <scratch>/card-session-<n>.json',
+  ]);
+});
+
+// Recurring cost: one read of the resume skill.
+test('ANTI-REGRESSION: a suggested card carries its hold in the one call that creates it', () => {
+  const skill = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
+  const step = skill.slice(skill.indexOf('10. **Suggested cards.**'), skill.indexOf('11. **Splitting a card.**'));
+  const creates = step.match(/gh issue create[^`]*/g) ?? [];
+  assert.equal(creates.length, 1, 'step 10 must give exactly one create command');
+  assert.ok(creates[0].startsWith("gh issue create --title 'Proposed: "), `the create command must set the hold: ${creates[0]}`);
+});
+
 test('the refused-shape check catches each refused shape and passes quoted jq text', () => {
   const cases = [
     ['echo "$(git branch --show-current)"', ['command substitution']],
@@ -807,12 +823,12 @@ test("the Receipt reuse rule in the resume skill's deliver reference names each 
 
 // The owner decides on what a collapsed section leaves in view, so each slot is pinned to its section and to its
 // side of a collapse. Recurring cost: one read of a small file.
-test('the pull request template carries each section and slot once, in order, with the receipts and review findings collapsed', () => {
+test('the pull request template carries each section and slot once, in order, with the receipts, review findings and decision card collapsed', () => {
   const RECEIPT_TABLE = '| Claim | Construction mode | Focused test | Discrimination proof | Result |';
   const BEFORE = '- **Before:**';
   const AFTER = '  **After:**';
   const REVIEW_SLOT = 'Review: tier= rounds= raised= fixed= dismissed= deferred=';
-  const SLOTS = ['Closes #', 'Undo:', 'Reach:', BEFORE, AFTER, RECEIPT_TABLE, ...CARRIED_SLOTS, REVIEW_SLOT, '<details>', '</details>'];
+  const SLOTS = ['Closes #', 'Undo:', 'Reach:', BEFORE, AFTER, 'Passed:', 'Failed:', 'Untested:', RECEIPT_TABLE, ...CARRIED_SLOTS, REVIEW_SLOT, '<details>', '</details>'];
   const lines = readFileSync(resolve(ROOT, '.github/pull_request_template.md'), 'utf8')
     .split('\n')
     .map((line) => line.trimEnd());
@@ -822,8 +838,9 @@ test('the pull request template carries each section and slot once, in order, wi
       '## Summary', 'Closes #',
       '## Not done',
       '## Merge Danger', 'Undo:', 'Reach:',
-      '## Evidence', BEFORE, AFTER, '<details>', '<summary>Test receipts</summary>', RECEIPT_TABLE, ...CARRIED_SLOTS, '</details>',
+      '## Evidence', BEFORE, AFTER, 'Passed:', 'Failed:', 'Untested:', '<details>', '<summary>Test receipts</summary>', RECEIPT_TABLE, ...CARRIED_SLOTS, '</details>',
       '## Review', REVIEW_SLOT, '<details>', '<summary>Review findings</summary>', '</details>',
+      '<details>', '<summary>Decision card</summary>', '</details>',
     ],
     'the pull request template must carry exactly these sections, slots and collapsed sections, in this order',
   );
@@ -831,6 +848,11 @@ test('the pull request template carries each section and slot once, in order, wi
   for (const [at, line] of lines.entries()) {
     if (line.startsWith('<summary>')) assert.equal(lines[at + 1], '', `the template's ${line} line must be followed by a blank line`);
   }
+  // The retro finds a job's card by this exact line, so a rename would silently empty its card check.
+  assert.ok(
+    readFileSync(resolve(ROOT, 'docs/WEEKLY-RETRO.md'), 'utf8').includes('<summary>Decision card</summary>'),
+    'the weekly retro must find the card by the line the template carries',
+  );
 });
 
 test('every manifest entry matches the file on disk', () => {

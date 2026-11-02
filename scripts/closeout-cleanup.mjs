@@ -43,9 +43,10 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const run = dependencies.run ?? runCommand;
   const platform = dependencies.platform ?? process.platform;
   const pid = dependencies.pid ?? process.pid;
+  const home = dependencies.home ?? homedir();
   let result;
   if (request.check) {
-    result = checkPaths(request.check, { run, platform, pid });
+    result = checkPaths(request.check, { run, platform, pid, home });
   } else {
     const git = dependencies.git ?? resolveGit();
     if (!git) {
@@ -56,7 +57,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
       run,
       platform,
       cwd: dependencies.cwd ?? process.cwd(),
-      home: dependencies.home ?? homedir(),
+      home,
       codexHome: dependencies.codexHome ?? process.env.CODEX_HOME ?? '',
       tomlParserPath:
         dependencies.tomlParserPath ??

@@ -30,7 +30,7 @@ flowchart TD
     AP -.-> BD
     BD --> VR[Verify: visual work driven and shown, plus any gate the Surfaces table names]
     VR --> RV[Fresh review of the final tree, repair, one pass scoped to the repair]
-    RV --> PA[Push authorisation: card to Awaiting push, owner reads the PR body and screenshot]
+    RV --> PA[Push authorisation: card to Awaiting push, owner reads the decision card and screenshot]
     PA --> DR[Draft pull request, card to In review]
     PA -->|every changed path qualifies| FF[Fast-forward push to main, no pull request or CI]
     DR -->|document and code tiers, or the add-on off: no external review| RD[Marked ready: CI runs on the merge result]
@@ -48,7 +48,7 @@ In words: a card in Ready is picked by the owner, gets a worktree on its own bra
 is planned by an architect or by the session, with a plan review where the card requires one;
 [the `resume` skill](../.agents/skills/resume/SKILL.md) owns that rule under "4. Plan". Where the repository has turned plan approval on, the owner then approves the completed plan before anything is built. It is then built in
 bounded slices with recorded evidence, verified, and given a fresh review of the final tree with repairs. At push
-authorisation the card moves to Awaiting push and the owner reads the pull request body. On the owner's yes a
+authorisation the card moves to Awaiting push and the owner reads the decision card lifted from the pull request body. On the owner's yes a
 draft pull request opens and the card moves to In review; a change at the sign-off tier first settles an external
 review where the repository has turned that add-on on, and every draft is then marked ready so the checks run on the merge result. Once the required checks are green
 the platform merges, and closeout confirms the issue closed, moves the card to Done and removes cleanup targets
@@ -88,17 +88,31 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
   [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "4. Plan".
 - **Product manager run, where the repository turns it on.** The owner can hand the work-pick to the session instead of
-  choosing a row. The owner launches a session at the repository root on either runtime and says `Start a product
-  manager run.`; a run starts only where the git guard is shown running. On Claude Code the owner first turns on
+  choosing a row. On Claude Code the owner launches a session at the repository root and says `Start a product
+  manager run.`; on Codex the owner runs `node scripts/product-manager-run.mjs` in a terminal outside any session. A run
+  starts only where the git guard is shown running. On Claude Code the owner first turns on
   "Require trusted devices" in their Claude account and the "Push when Claude decides" and "Push when actions required"
   notifications; where "Require trusted devices" cannot be on, no Claude Code run starts, and the owner can run it on
-  Codex. On Codex the owner launches in the workspace-write sandbox, and Codex's Auto-review may answer the run's
-  approval requests. The session cannot check these settings. It reads the owner's direction page from the fetched
-  `main`, picks one card the page ranks highest among those it may take, names the pick and the reason in the table's
-  closing line, and takes that one card through the usual stages to `Awaiting push`. A card needing owner direction or
-  sign-off is never picked, and a card found not free stops the run. Push authorisation stays the owner's yes. At every
-  stop the session says why it stopped and what the owner does next, then ends its turn: on Claude Code that arrives as
-  a push to the owner's phone, and on Codex it is said in the session only, because Codex sends no push. A prompt or
+  Codex. On Codex the launcher starts every session in the workspace-write sandbox with on-request approvals, and
+  Codex's Auto-review may answer the run's approval requests. The session cannot check the Claude Code settings. The
+  run reads the owner's direction page from the fetched `main` and starts a fresh session for each card on either
+  runtime; each picks the card the page ranks highest among
+  those it may take, skipping any that touches a waiting job's files, names the pick and the reason in the table's
+  closing line, and takes it through the usual stages to `Awaiting push`. The run stops once 3 jobs wait or no pickable
+  card is left. On Codex the launcher runs outside any session because Codex's sandbox refuses a session started from
+  inside a session, and it ends the run when a session's runtime log does not show the git guard's refusal, or does not
+  show a publish refusal that only run sessions have. A Codex run session has nobody to answer a prompt, so a prompt
+  Auto-review cannot answer is refused and the run stops and says why. A Claude Code card session starts with flags that refuse pushing and publishing a pull request; this catches
+  mistakes rather than a deliberate workaround, and the session the owner reopens to deliver runs without them. A card needing owner direction or sign-off, or that cannot be built or decided without the owner's ears or hardware, is not built: the run
+  leaves a comment beginning `Needs owner:` on it and moves it to `Backlog`, where it is held until the owner returns it. A card with fixed criteria whose final proof alone needs listening is built and marked as needing the owner's ears. A question that
+  comes up mid-build parks the job the same way, with its commits kept on the local branch, and the run goes on to the next card. A parked job counts toward the 3 that wait; a held card with no job does not. A run may suggest new cards, at most 3 and fewer while earlier ones wait: each is filed at the end of the run with a title beginning `Proposed: `, which holds it until the owner says yes or no.
+  A card found not free stops the run. Push authorisation stays the owner's yes.
+  The owner can ask to see what is waiting and answer each job in turn: a yes delivers it, a no parks it with the
+  owner's reason, and each answer leaves a `Verdict:` comment on the card. A run's summary reports the three stage 2
+  measures from those comments, saying why where one cannot be computed yet.
+  When the run stops, the session the owner launched, on Codex a final end session, says once why and what the
+  owner does next, then gives a summary of what it built, parked, needs from the owner and suggested, and any change it wants to the direction page: on Claude Code the reason arrives as a
+  push to the owner's phone, and on Codex it is printed in the terminal the launcher was started from, because Codex sends no push. A prompt or
   approval from the runtime waits for the owner's own answer. The mode is off unless the settings file on `main` turns
   it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
   [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2. Work-pick".
@@ -143,8 +157,11 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   with a reason. The only exception to ordinary not-fully-merged branch refusal is the verified merged-head deletion described by the
   [closeout skill](../.agents/skills/closeout/SKILL.md).
   Docker bind paths require the local filesystem proof the `closeout` skill describes.
-  The session keeps the judgment of what is its own scratch and stops any server the
-  command finds serving the worktree. A leftover the session finds, another job's artifact or one it cannot prove it
+  The session keeps the judgment of what is its own scratch and stops a server the
+  command finds serving the worktree only once it is shown to be the session's own. A hold cleanup can wait out,
+  such as the owner's terminal or a running container bound to a parent folder, is reported in one line and left
+  for a later session. The owner is asked only about a file whose owner cannot be established, about unmerged
+  work, or about a permission only the owner can grant. A leftover the session finds, another job's artifact or one it cannot prove it
   created, is investigated to a conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete
   one, and its limits, under "Owner gates"; the `closeout` skill owns what a leftover is and what each outcome allows
   under "Leftover rule", and the steps. Rulings the owner made during the session go to the issue or the document that
@@ -203,7 +220,7 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
 - `.agents/skills/resume/SKILL.md` and `.agents/skills/closeout/SKILL.md`: the steps.
 - The external review add-on's skill and reviewer configuration, in a repository that has turned
   [the add-on](AI-WORKFLOW.md#the-external-review-add-on) on.
-- `.github/pull_request_template.md`: the pull request body the owner reads.
+- `.github/pull_request_template.md`: the pull request body the owner's decision card is lifted from.
 - `scripts/run-log.mjs`: the logger every check runs through.
 - `scripts/merge-watch.mjs`: the one waiting command after the merge is queued.
 - `scripts/closeout-cleanup.mjs`: the one cleanup command closeout runs after the merge.

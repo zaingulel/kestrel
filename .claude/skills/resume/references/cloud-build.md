@@ -224,8 +224,11 @@ authorisation answers no permission prompt or safety check from the runtime: eac
    naming each correction to the owner beside the body. It changes no receipt line the cloud session quoted and nothing
    the cloud session recorded about its reviews, its `Reviewed commit:` line included, beyond what "8. Deliver" adds for
    the external review; a receipt or review record it believes wrong stays as it stands, with the session's note beside
-   it, and goes to the owner. A corrected body needs no further review, since it changes no commit and the owner
-   approves it whole. In "8. Deliver" step 1 the push is `git push --force-with-lease origin job/<issue>`. After that
+   it, and goes to the owner. A corrected body needs no further review, since it changes no commit. Before showing it,
+   the session fills its Decision card block again from the finished body and saves the review folder at the kept head,
+   as "7. Push authorisation" says under Saved write-up; each correction it named and each note it set beside a record
+   is shown in chat under that card's block 3 and never saved into the block or the body, so the owner approves them
+   with the card and no pull request carries them. In "8. Deliver" step 1 the push is `git push --force-with-lease origin job/<issue>`. After that
    step's rebase the job's base is `origin/main` itself, equal to `git merge-base HEAD origin/main`, and the eligibility
    check uses it as `<origin-main>`. Where that check would choose the direct route, stop and tell the owner, as the
    opening of this section says; otherwise the draft already exists, so `gh pr create` is skipped,

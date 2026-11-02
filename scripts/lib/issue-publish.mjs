@@ -6,7 +6,9 @@
 // board-config.mjs configures a routing field (Workstream here), a real routing
 // value; a board with no routing field is checked for Status only. Every named
 // issue must also carry exactly one of the kind labels board-config.mjs records:
-// none leaves its kind unstated and two state it twice. A closed card archived on the board is
+// none leaves its kind unstated and two state it twice. Where board-config.mjs exports KIND_TYPES,
+// the kind is the issue's native type instead: it must carry exactly one type KIND_TYPES names and
+// no kind label. A closed card archived on the board is
 // read from its own board item and judged the same way; an open archived card fails. Given an
 // Epic plus child numbers, its native children must be exactly that set — a count alone passes
 // when a forgotten child is offset by a stray one. Given a single number, the count is reported
@@ -19,7 +21,7 @@ import { BOARD_OWNER, BOARD_REPOSITORY, KIND_LABELS, ROUTING_FIELD, TERMINAL_STA
 import { allNodes, linearTeamKey, readLinearBoard } from './board-linear.mjs';
 import { CARDS_DIR } from './board-markdown.mjs';
 import { lookupIssueBoardItem } from './board-move.mjs';
-import { isContentUnresolved, normalizeItem, parseNode } from './board.mjs';
+import { KIND_TYPES, isContentUnresolved, normalizeItem, parseNode } from './board.mjs';
 import { isClosedState } from './linear-card.mjs';
 import { readJiraChildren, readJiraIssue, readJiraProject } from './board-jira.mjs';
 import { readAzureChildren, readAzureIssue, readAzureProject, azureTags } from './board-azure.mjs';
@@ -163,7 +165,8 @@ function archivedClosedCard(number, item) {
 }
 
 // A requested card's fields: a routing value where the board has a routing field, a Status, and exactly one
-// kind label. Shared by every tracker's path; cardRef prints a GitHub number as #<number>.
+// kind label, or, where KIND_TYPES chooses native issue types, one named type and no kind label. Shared by
+// every tracker's path; cardRef prints a GitHub number as #<number>.
 function checkCardFields(number, card) {
   if (ROUTING_FIELD && (typeof card.routing !== 'string' || card.routing.trim() === '')) {
     throw new Error(`requested issue ${cardRef(number)} has no non-empty ${ROUTING_FIELD}`);
@@ -173,6 +176,21 @@ function checkCardFields(number, card) {
   }
   if (card.labels.some((label) => typeof label !== 'string')) {
     throw new Error(`requested issue ${cardRef(number)} has a label whose name is not text`);
+  }
+  if (KIND_TYPES) {
+    const typeNames = Object.values(KIND_TYPES);
+    if (card.issueType === null) {
+      throw new Error(`requested issue ${cardRef(number)} has no native issue type; set one of ${typeNames.join(', ')} with gh issue edit ${number} --type <type>`);
+    }
+    if (!typeNames.includes(card.issueType)) {
+      throw new Error(`requested issue ${cardRef(number)} has native issue type ${card.issueType}, which KIND_TYPES does not name (${typeNames.join(', ')})`);
+    }
+    const kindLabels = card.labels.filter((label) => KIND_LABEL_NAMES.includes(label));
+    if (kindLabels.length > 0) {
+      const many = kindLabels.length > 1;
+      throw new Error(`requested issue ${cardRef(number)} has native issue type ${card.issueType} and also carries kind label${many ? 's' : ''} ${kindLabels.join(', ')}; remove ${many ? 'them' : 'it'} with gh issue edit ${number} --remove-label <label>`);
+    }
+    return;
   }
   const kindLabelCount = card.labels.filter((label) => KIND_LABEL_NAMES.includes(label)).length;
   if (kindLabelCount !== 1) {
@@ -247,7 +265,9 @@ function boardVerifiedLines(requestedNumbers) {
   return [
     `issue-publish: board presence verified for ${requested}.`,
     `issue-publish: ${FIELDS_VERIFIED} verified for ${requested}.`,
-    `issue-publish: exactly one kind label verified for ${requested}.`,
+    KIND_TYPES
+      ? `issue-publish: native issue type verified for ${requested}.`
+      : `issue-publish: exactly one kind label verified for ${requested}.`,
   ];
 }
 

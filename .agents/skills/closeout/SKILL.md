@@ -6,7 +6,7 @@ description: "Reconcile a merged pull request for work in this repository: board
 # closeout
 
 Runs in the same session the moment the merge lands, under the push authorisation that covered the merge;
-no further ask. Everything here is observable from git, GitHub, Docker's container records and the machine's
+no further ask. Everything here is observable from git, GitHub, Docker's container and volume records and the machine's
 process list; nothing is inferred from chat.
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
@@ -73,6 +73,18 @@ throughout this skill, including complete native-comment review before claiming.
    that this session started the reporting run, that it has stopped, and that its output reports neither a
    retained process group nor unconfirmed termination; either report retains the artifact. A target whose
    creation evidence fails is a leftover and follows the Leftovers paragraph below.
+   **Ignored entries.** Before the first cleanup run, read
+   `git -C <path> status --porcelain --untracked-files=normal --ignored=matching` and settle each `!!` entry.
+   Evidence of what wrote it decides, never its name.
+
+   | Entry | What the session does |
+   |---|---|
+   | A directory a known command regenerates, such as `node_modules`, `test-results`, `.ruff_cache` or `__pycache__` | Names it with `--regenerated`, once per listed directory |
+   | An exact file a known command wrote, such as `tsconfig.tsbuildinfo` | Names it with `--scratch`; `--regenerated` takes directories only |
+   | This job's verified scratch | Names it with `--scratch`, as above |
+   | No job command wrote it and it could be the owner's: `.env` and its variants, a runtime's `settings.local.json`, `.runtime` and its contents, other configuration, credentials, runtime memory or traces | Keeps it, which retains the worktree and branch; reports one line and records it under Deferred cleanup; asks nothing |
+   | Its origin is still not established after the Leftover rule's investigation | Keeps it and asks the owner once about that exact path, as the Leftover rule's Unsettled outcome says |
+
    **Cleanup command.** Run the selected current verifier's copy, never the job worktree's or a stale root's.
    Only when that verifier is the current trusted root, use `node scripts/closeout-cleanup.mjs` with arguments
    `<issue> [--pr <canonical HTTPS GitHub PR URL>] --scratch <path> --regenerated <entry>`. For a current verified
@@ -111,12 +123,46 @@ throughout this skill, including complete native-comment review before claiming.
    protected checkout paths again, and compares device, inode, link text and resolved target. A changed observation
    retains the worktree. These bounded observations do not lock concurrent filesystem changes or worktree
    registration. Only the worktree path goes to ordinary `git worktree remove`; no mutation follows or changes a
-   link target. Other ignored real entries remain held apart from verified regenerated directories.
-   Bind paths require proof that the selected Linux dockerd shares the caller's filesystem view.
+   link target. Other ignored real entries remain held, apart from verified regenerated directories and a real
+   directory holding no file, which is no hold: it goes only with the worktree, the command reads it again after
+   the final checks, and a change retains the worktree. On Linux a directory with a mount at or beneath it, read
+   from the mount table, stays held, and a table that cannot be read retains the worktree; macOS has no such read.
+   No parent of a named scratch target is removed; an empty one outside the worktree stalls nothing, and the
+   session names it only when wholly verified.
+   On Linux, bind paths require proof that the selected dockerd shares the caller's filesystem view.
    Supported listener ownership is dockerd alone or dockerd sharing the listener with PID-1 systemd. Every
    owner's socket descriptor and executable must verify, and its mount namespace and root must match the
    unprivileged caller's observations. Remote endpoints, proxy executables, other ownership and differing
    namespaces or roots, including isolated rootless daemons, retain the targets.
+   On macOS the selected endpoint must be exactly `~/.docker/run/docker.sock`, a socket the calling user owns in real
+   directories that user owns, and `docker version` must name the server Docker Desktop. Docker Desktop runs containers
+   in a virtual machine, so this identifies the endpoint and compares no namespaces: a process of the same user that
+   replaced that socket with a forward to another Docker Desktop would pass. Every other endpoint, `/var/run/docker.sock`
+   included, retains the targets.
+   A bind source is compared as its host path, with Docker Desktop's `/host_mnt` prefix removed, links followed, letter
+   case read from the disk and a folder's `/System/Volumes/Data` spelling read as its ordinary path; a mount field
+   holding the worktree's exact path under any other prefix retains it, and that catch reads no other spelling. A daemon
+   that does not answer retains every target, because a stopped container's binds cannot be read without it.
+   A bind source includes each mounted volume's bind device: the command reads the volume's options with
+   `docker volume inspect`, and a `local` driver volume whose `o` list holds `bind` or `rbind` counts as binding its
+   `device`, under these same rules, the mount-field catch included. Another driver's bind options, a volume whose name
+   or options cannot be read, or a device that is not a normalized absolute path retains every target with that reason,
+   and `--check` gives the same finding. A volume driver's own option naming a host path is not read.
+   The session then reads `ps -axo comm=`: a list with no `com.docker.backend` records Docker Desktop as stopped, and
+   anything else records nothing, since `docker desktop status` cannot tell stopped from broken. It runs
+   `docker desktop start`, records `docker ps -q` with each listed container's restart policy from
+   `docker inspect --format '{{.HostConfig.RestartPolicy.Name}}'`, and runs the command again. Only where it
+   recorded Docker Desktop as stopped, every recorded policy is `always` or `unless-stopped`, which Docker starts
+   by itself, and `docker ps -q` lists no container outside its record does it stop Docker Desktop with
+   `docker desktop stop`, so such a container runs only for that rerun; otherwise it leaves Docker Desktop
+   running and says so. If it will not start, the target stays pending under Sandboxed observation.
+   Docker Desktop's virtual machine keeps a folder open after a container that ran on it is removed, so the worktree is
+   retained with `com.apple.Virtualization` named as using it until Docker Desktop restarts. The process cannot be told
+   apart from another tool's virtual machine, so the command never excuses it. Only under those same three conditions,
+   which show nothing but Docker Desktop's own start has anything running, does the session run
+   `docker desktop restart`, record the list and its policies again, run the command again and stop Docker Desktop
+   as above; this is the one exception to Process holds. Any other hold, or one that survives the restart, stays pending
+   under Deferred cleanup, and the report says a Docker Desktop restart releases it if the holder is Docker Desktop's.
    A valid ownerless initial listener triggers noninteractive observation using existing matching passwordless
    sudo permissions. Each metadata command ignores cached credentials without invalidating or updating the
    owner's cache. Installing or broadening those permissions requires explicit owner approval outside cleanup.
@@ -137,11 +183,13 @@ throughout this skill, including complete native-comment review before claiming.
    comparison. An incomplete command or unsupported observation does not establish permission denial;
    retain the target and report that evidence limit.
 
-   **Sandboxed observation.** A sandbox caller can have a different filesystem view from the host Docker service; a namespace mismatch alone does not establish permission denial or its cause. Before reporting observation exhausted, when the runtime offers native host execution, submit the selected current verifier's non-destructive `--check <path>` there as the same user through ordinary runtime review. Compare its result with the sandbox result for the same exact target. If the host check succeeds, complete the existing ownership, disposability and immediate safety checks, then run eligible cleanup in that same context with the unchanged verifier. An `unused` result alone grants no deletion authority. An unavailable or denied host route leaves the target retained with that evidence limit; a target-protecting refusal remains binding. This route grants no permission change or safeguard exception.
+   **Sandboxed observation.** Any retained reason beginning `docker failed:` takes this route, sandboxed or not. A sandbox caller can have a different filesystem view from the host Docker service; a namespace mismatch alone does not establish permission denial or its cause. Before reporting observation exhausted, when the runtime offers native host execution, submit the selected current verifier's non-destructive `--check <path>` there as the same user through ordinary runtime review. Compare its result with the sandbox result for the same exact target. If the host check succeeds, complete the existing ownership, disposability and immediate safety checks, then run eligible cleanup in that same context with the unchanged verifier. An `unused` result alone grants no deletion authority. An unavailable or denied host route leaves the target retained with that evidence limit; a target-protecting refusal remains binding. This route grants no permission change or safeguard exception. A successful host check asks the owner nothing. Only when the route is unavailable, denied or also fails may the report carry one question, and only where a decision that is the owner's could settle it, such as the passwordless permission above; otherwise the target stays pending, and an unchanged hold is not asked about again.
 
    If Docker is not installed, the command skips containers and still checks the local targets. It stops and
-   removes each verified-local container whose recorded bind source lies in that worktree, then removes each
-   named scratch target, the worktree, and the branch with an ordinary `git branch -d`, checking each target
+   removes each verified-local container whose recorded bind source lies in that worktree. A running container
+   bound to a parent folder of the worktree is never stopped: it retains the worktree, any named scratch inside it
+   and the branch, including when it is also bound inside, and is waited out as a process hold below. A stopped
+   one bound there holds nothing. The command then removes each named scratch target, the worktree, and the branch with an ordinary `git branch -d`, checking each target
    first. It keeps images and volumes; only the verified job-branch exception below permits forced branch deletion.
    After removing a worktree whose parent folder sits directly inside Codex's worktree root, it also removes that outer folder when the folder holds only Codex's empty `.codex-worktree-name` file, passes the same in-use and Docker checks, and, read again after them, is still the folder it read before removing the worktree with the same empty file alone in it: that file, then the empty folder, nothing else inside it and nothing above it. Codex's worktree root is the `git-worktree-root` value in the `[desktop]` table of `$CODEX_HOME/config.toml`, trimmed as Codex trims it, or `$CODEX_HOME/worktrees` when nothing is at that path or the file names no root or a blank one; `~/.codex` stands in for an unset or empty `CODEX_HOME`. Only that user file is read, never Codex's other configuration layers, so a root set elsewhere is not seen and that job's outer folder stays. A settings file it cannot read or parse, a `[desktop]` that is not a table, a value that is not a string, not a normalized absolute path or cannot be resolved, a `CODEX_HOME`, or the home folder standing in for an empty one, that is not a normalized absolute path, or a parser it cannot load names no root, so a marked outer folder is retained with that reason wherever it sits, the default root included. It judges the outer folder before the branch. Anything else in the folder, a marker that is not an empty file, a use or a failed check, or a folder or marker it cannot read or that changed retains the outer folder with its reason; a later run no longer sees it, so it stays and the final report names it. The last read and the removal are not one atomic step: a swap in that moment can cost at most the file then named `.codex-worktree-name` at that path, whatever it holds and wherever a link there leads, and one empty folder.
    Whatever any other check or refusal holds back is retained, and a retained worktree keeps its branch.
@@ -150,13 +198,27 @@ throughout this skill, including complete native-comment review before claiming.
    nothing to remove, 4 when it retained something, 1 when it could not read the worktree list or failed, and 2 on
    a bad argument. Report each line directly in the session, without creating approval-only files. A retained
    target stays retained unless the Branch exceptions below apply: otherwise settle what held it, then run the
-   command again, which repeats only what is left. Stop a server the command reports serving the worktree as
-   the session's own background task when the session holds one, otherwise by the process ID the command names.
+   command again, which repeats only what is left. Stop a server the command reports serving the worktree only
+   on positive evidence that it is this session's own: as the session's own background task when it holds one,
+   otherwise by the process ID the command names once that process's parent chain reaches this session. Any other
+   server is a process hold.
    Stop a process it reports using a scratch
    target only when it is confirmed as this session's own, and verify it stopped; otherwise the target stays and
    is reported. If the session could not leave the job worktree in step 3, run the verifier checkout's copy by its
-   path from where the session is: the command then retains the worktree and the branch, and the final report
-   tells the owner that removing the worktree the session sits in ends the session's shell. If ownership is
+   path from where the session is: the command then retains the worktree and the branch. Deleting a folder does
+   not end a shell in it, but anything run there that needs that folder then fails, so this too is a process hold.
+
+   **Process holds.** A process using a target is waited out. Unless it is confirmed as this session's own, never
+   type into, stop or kill it, and never ask the owner to `cd` away or close anything. Report the hold in one line,
+   record it under Deferred cleanup and ask the owner nothing: the target is safe while it waits and no decision is
+   pending. A use check that could not finish is treated the same. Call the holder the owner's terminal only on
+   evidence: a runtime tool that lists terminal tabs, such as the desktop app's `list_terminal_tabs`, shows an
+   owner-opened tab with that process, or `ps -o pid=,ppid=,tty=,args= -p <pid>` shows an interactive shell on a
+   terminal whose parent chain does not reach this session. Otherwise the line names the process ID and command and
+   says its owner is unknown; a process the session cannot identify is no owner question either. A later session
+   removes the target once the hold has gone.
+
+   If ownership is
    uncertain, do not run the command: retain the worktree, report why, record the retention under
    [Deferred cleanup](#deferred-cleanup), then continue to step 6 and the final report. In the final report, name any other container or image confirmed as job-created by recorded build
    output or Docker metadata, and leave its cleanup to the owner; do not infer ownership from a name.
@@ -313,7 +375,8 @@ no-other-retention branch exception. Orphan scratch in an admitted worklog/sessi
 the whole Leftover investigation and exact-target removal route. Recheck absence after removal; an absent
 target is a resolved observation, not proof this run deleted it. All helper and ordinary Git refusals bind.
 
-Known runtime use stays pending until a later entry observes otherwise. Do not poll, kill its holder, reset
+Known runtime use, an owner terminal or a running container bound to a parent folder included, stays pending until
+a later entry observes otherwise. Do not poll, type into or kill its holder, reset
 bindings, unload a runtime or change permission settings to make retry pass. Existing cleanup authorization
 persists; runtime review may still prompt or refuse. New ownership/disposability uncertainty follows the
 Leftover rule's unsettled-owner-decision route after available investigation. A pending record overrides no
@@ -369,7 +432,8 @@ An owner file or a tracked deliverable is never a leftover.
    same check on its path. `git worktree remove` deletes ignored files without refusing, so investigate each
    `!!` entry as a file or folder leftover of its own, apart from a dependency or build directory a command
    regenerates, such as `node_modules`. The worktree is dead only when each of those entries is dead; an entry
-   that is not a leftover, such as a hand-placed environment or settings file, makes the worktree unsettled. For
+   that is not a leftover, such as a hand-placed environment or settings file, is kept and keeps the worktree,
+   reported with no owner question. For
    a branch, check `git merge-base --is-ancestor <tip> origin/main` and read
    `gh pr list --head <branch> --state all --json number,state,headRefOid` for the pull request's state; when
    the ancestry check fails, check the tip against a merged pull request's head with

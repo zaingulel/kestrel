@@ -26,7 +26,13 @@ import {
 } from './board-config.mjs';
 import { rejectUnknownArgs } from './cli-flags.mjs';
 import { GhOutputTooLargeError } from './gh-exec.mjs';
-import { cardRef, compareCardIds } from './tracker.mjs';
+import { cardRef, compareCardIds, kindTypesOf } from './tracker.mjs';
+// A namespace import, because board-config.mjs is the adopter's file and an update never touches
+// it: a named import of KIND_TYPES would stop every board tool at link time where it is absent.
+import * as boardConfig from './board-config.mjs';
+
+// The map from each kind to its native issue type where the configuration chooses types, else null.
+export const KIND_TYPES = kindTypesOf(boardConfig);
 
 // The one command's arguments, parsed before any gh call. A typo'd flag would otherwise
 // be discarded into the DEFAULT read — a metered board read answering a question the
@@ -90,12 +96,14 @@ const STATUS_FIELD = 'Status';
 
 // One board item's card fields: the board read asks for them on every listed item, and the
 // issue-side probe on an archived item the read cannot list, so both parse through parseNode.
-export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
+// The issue type is asked for only where the configuration chooses native types, so a labels
+// repository's requests are the same bytes as before.
+export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } ${KIND_TYPES ? 'issueType { name } ' : ''}labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
 
 // The one fused board query: the project's identity and field schema, then its items
 // 100 per page, each carrying every fact the board rules judge a card on — Status and
-// the routing field off fieldValues, and state, labels, assignees, native blockers,
-// closing pull requests and the sub-issue summary off the Issue content.
+// the routing field off fieldValues, and state, labels, the issue type where chosen, assignees,
+// native blockers, closing pull requests and the sub-issue summary off the Issue content.
 //
 // It declares the `$endCursor` variable and one `pageInfo { hasNextPage endCursor }`
 // because that pair is what lets `gh api graphql --paginate` walk every page inside ONE
@@ -192,6 +200,7 @@ export function parseNode(node) {
     routing: ROUTING_FIELD ? fieldValue(fieldValues, ROUTING_FIELD, node.id) : null,
     ...(PARKED_LANE ? { lane: fieldValue(fieldValues, PARKED_LANE.field, node.id) } : {}),
     labels: connectionNodes(issue?.labels).map((l) => l.name),
+    ...(KIND_TYPES ? { issueType: issue?.issueType?.name ?? null } : {}),
     assignees: connectionNodes(issue?.assignees).map((a) => a.login),
     blockers: connectionNodes(issue?.blockedBy).map((b) => ({ number: b.number, state: b.state })),
     closingPullRequests: connectionNodes(issue?.closedByPullRequestsReferences)
@@ -225,6 +234,11 @@ function assertIssueContent(issue, cardId) {
   const { total, completed } = issue.subIssuesSummary ?? {};
   if (!Number.isInteger(total) || !Number.isInteger(completed) || total < 0 || completed < 0 || completed > total) {
     throw new Error(`${card} carried no usable sub-issue summary — expected whole total and completed counts; ${RERUN}`);
+  }
+  // A card with no type is legitimate (null) and is reported downstream; a type that is not a
+  // named one is a malformed read, and a missing key is too, since null is what GitHub sends.
+  if (KIND_TYPES && issue.issueType !== null && (typeof issue.issueType?.name !== 'string' || issue.issueType.name.trim() === '')) {
+    throw new Error(`${card} carried no usable issue type — expected null or a named type; ${RERUN}`);
   }
   const repository = issue.repository?.nameWithOwner ?? 'no repository';
   if (repository !== BOARD_NAME_WITH_OWNER) {
@@ -819,6 +833,7 @@ export function normalizeItem(i) {
     routing: i.routing ?? null,
     parked: isParked(i),
     labels: list(i.labels),
+    ...(KIND_TYPES ? { issueType: i.issueType ?? null } : {}),
     state: i.content?.state ?? null,
     assignees: list(i.assignees),
     openBlockers: list(i.blockers).filter((b) => b.state === 'OPEN').map((b) => b.number),
@@ -840,11 +855,13 @@ export function sortForDisplay(items) {
   return [...items].sort((a, b) => rank(a.status) - rank(b.status) || compareCardIds(num(a), num(b)));
 }
 
-// One item → the two-line routing view (`#N [Status] Title` + its labels).
+// One item → the two-line routing view (`#N [Status] Title` + its labels, led by its issue type
+// where the configuration chooses native types).
 export function formatRow(i) {
   const n = normalizeItem(i);
   const num = n.number == null ? '#?' : cardRef(n.number);
-  const labels = n.labels.length ? n.labels.join(', ') : '—';
+  const shown = KIND_TYPES ? [n.issueType ?? 'no issue type', ...n.labels] : n.labels;
+  const labels = shown.length ? shown.join(', ') : '—';
   return `${oneLine(`${num} [${n.status}] ${n.title}`)}\n    ${oneLine(labels)}`;
 }
 

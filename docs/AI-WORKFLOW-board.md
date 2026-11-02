@@ -146,8 +146,8 @@ board's own automation, so no agent moves a card for these cases:
 The weekly retro, in a repository that runs it, reaches the board the same way: it files proposal cards, the board's own
 auto-add lands each in Backlog, and the next local session fills its routing value. It proposes and never edits, because
 the fix for a recurring problem is a decision: the owner picks the card or closes it.
-[`docs/WEEKLY-RETRO.md`](WEEKLY-RETRO.md) owns what the retro reads, how many proposals it may file and how each is
-titled.
+[`docs/WEEKLY-RETRO.md`](WEEKLY-RETRO.md) owns what the retro reads, how many proposals it may file, how each is
+titled and its card check.
 
 ## Where the rules live
 

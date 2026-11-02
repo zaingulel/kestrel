@@ -4,9 +4,10 @@
 // tool call), so your escape hatch survives. It is not a security boundary: the head of
 // scripts/lib/unsafe-git.mjs says what does and does not limit a push. The rule logic itself
 // is pure and unit-tested — see blockReason() in scripts/lib/unsafe-git.mjs; this file is just
-// the stdin/stderr/exit-code shell, plus the one fact only a shell can supply: whether the
+// the stdin/stderr/exit-code shell, plus the two facts only a shell can supply: whether the
 // call's working directory is the root checkout (scripts/lib/checkout-context.mjs asks git),
-// which the integration-checkout rule needs.
+// which the integration-checkout rule needs, and whether the launcher marked this session as a
+// product manager run's, which the publishing rule needs.
 import { blockReason } from "../../scripts/lib/unsafe-git.mjs";
 import { checkoutContext } from "../../scripts/lib/checkout-context.mjs";
 import { codexCommandForGuard, codexCwdForGuard } from "../../scripts/lib/codex-hook-adapters.mjs";
@@ -33,7 +34,7 @@ process.stdin.on("end", () => {
   if (unresolved) {
     console.error(`block-unsafe-git: ${unresolved} — the integration-checkout rule is NOT applied to this call.`);
   }
-  const reason = blockReason(codexCommandForGuard(payload?.tool_input), checkout);
+  const reason = blockReason(codexCommandForGuard(payload?.tool_input), checkout, { runSession: process.env.PRODUCT_MANAGER_RUN_SESSION === "1" });
   if (reason) {
     console.error(`Blocked: ${reason}. Guards Codex's tool calls only; run it in your own terminal if you truly need it.`);
     process.exit(2);

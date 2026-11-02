@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LINEAR_IDENTIFIER, cardRef, compareCardIds, isAzureIdentifier, trackerOf } from './tracker.mjs';
+import { LINEAR_IDENTIFIER, cardRef, compareCardIds, isAzureIdentifier, kindTypesOf, trackerOf } from './tracker.mjs';
 
 test('trackerOf reads a configuration without TRACKER as github and accepts github, markdown and linear', () => {
   assert.equal(trackerOf({}), 'github');
@@ -74,4 +74,48 @@ test('cardRef prints a Linear identifier as it is and anything else, a sentinel 
   assert.equal(cardRef('(summary)'), '#(summary)');
   assert.equal(cardRef('?'), '#?');
   assert.equal(cardRef('eng-1'), '#eng-1');
+});
+
+const KIND_TYPES = { epic: 'Epic', feature: 'Feature', task: 'Task', bug: 'Bug', docs: 'Documentation' };
+const KIND_LABELS = { epic: 'epic', feature: 'enhancement', task: 'task', bug: 'bug', docs: 'documentation' };
+
+test('kindTypesOf reads a configuration without KIND_TYPES as labels on every tracker and owner', () => {
+  for (const TRACKER of [undefined, 'github', 'markdown', 'linear', 'jira', 'azure', 'jra']) {
+    for (const BOARD_OWNER_TYPE of ['user', 'organization']) {
+      assert.equal(kindTypesOf({ TRACKER, BOARD_OWNER_TYPE, KIND_LABELS }), null, `${TRACKER} ${BOARD_OWNER_TYPE}`);
+    }
+  }
+  assert.equal(kindTypesOf({ KIND_LABELS }), null);
+});
+
+test('kindTypesOf returns the map of a configuration owned by an organisation', () => {
+  assert.deepEqual(kindTypesOf({ BOARD_OWNER_TYPE: 'organization', KIND_LABELS, KIND_TYPES }), KIND_TYPES);
+  assert.deepEqual(kindTypesOf({ TRACKER: 'github', BOARD_OWNER_TYPE: 'organization', KIND_TYPES }), KIND_TYPES);
+});
+
+test('kindTypesOf refuses another tracker, a personal account and a malformed map', () => {
+  const trackerRefusal = (tracker) => `scripts/lib/board-config.mjs: KIND_TYPES chooses GitHub native issue types, which apply only to the GitHub tracker, but TRACKER is "${tracker}"; remove KIND_TYPES`;
+  for (const TRACKER of ['markdown', 'linear', 'jira', 'azure']) {
+    assert.throws(() => kindTypesOf({ TRACKER, BOARD_OWNER_TYPE: 'organization', KIND_TYPES }), { message: trackerRefusal(TRACKER) });
+  }
+  assert.throws(() => kindTypesOf({ TRACKER: 'jira', BOARD_OWNER_TYPE: 'user', KIND_TYPES: null }), { message: trackerRefusal('jira') });
+
+  assert.throws(
+    () => kindTypesOf({ BOARD_OWNER_TYPE: 'user', KIND_TYPES }),
+    { message: 'scripts/lib/board-config.mjs: KIND_TYPES chooses GitHub native issue types, which only an organisation\'s repositories have, but BOARD_OWNER_TYPE is "user"; remove KIND_TYPES' },
+  );
+  assert.throws(() => kindTypesOf({ BOARD_OWNER_TYPE: 'user', KIND_TYPES: null }), { message: /but BOARD_OWNER_TYPE is "user"/ });
+
+  const missingKey = { ...KIND_TYPES };
+  delete missingKey.docs;
+  const malformed = [null, [], ['Epic', 'Feature', 'Task', 'Bug', 'Documentation'], 'Epic', missingKey, { ...KIND_TYPES, story: 'Story' }, {},
+    { ...KIND_TYPES, task: '' }, { ...KIND_TYPES, task: ' Task' }, { ...KIND_TYPES, task: 'Task ' }, { ...KIND_TYPES, task: 7 },
+    { ...KIND_TYPES, task: 'Epic' }];
+  for (const types of malformed) {
+    assert.throws(
+      () => kindTypesOf({ BOARD_OWNER_TYPE: 'organization', KIND_TYPES: types }),
+      { message: 'scripts/lib/board-config.mjs: KIND_TYPES must map exactly the kinds epic, feature, task, bug, docs to unique non-empty type names' },
+      JSON.stringify(types),
+    );
+  }
 });

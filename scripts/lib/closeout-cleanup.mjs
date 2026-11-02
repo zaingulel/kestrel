@@ -32,7 +32,24 @@ const LSOF_INCOMPLETE = '      Output information may be incomplete.';
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const WORKTREE_ATTRIBUTES = new Set(['HEAD', 'branch', 'detached', 'bare', 'locked', 'prunable']);
 const NON_BIND_MOUNT_TYPES = new Set(['volume', 'tmpfs', 'npipe', 'cluster', 'image']);
+// Only a name this plain reaches the command line; any other, whatever Docker would accept, is refused as unreadable.
+const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const DATA_VOLUME = '/System/Volumes/Data';
+const ABOVE_FIRMLINKS = new Set([DATA_VOLUME, '/System/Volumes', '/System']);
+const realpath = process.platform === 'darwin' ? macRealpath : realpathSync;
+
+// macOS's own call returns the on-disk letter case and Unicode form, which Node's JS version keeps as given. The Data
+// volume's spelling of a firmlinked folder is that same folder, and a bind at that volume or above it holds every one.
+function macRealpath(path) {
+  const resolved = realpathSync.native(path);
+  if (ABOVE_FIRMLINKS.has(resolved)) return '/';
+  if (!resolved.startsWith(`${DATA_VOLUME}/`)) return resolved;
+  const plain = resolved.slice(DATA_VOLUME.length);
+  const plainStat = statSync(plain, { bigint: true, throwIfNoEntry: false });
+  const resolvedStat = statSync(resolved, { bigint: true });
+  return plainStat?.dev === resolvedStat.dev && plainStat?.ino === resolvedStat.ino ? plain : resolved;
+}
 
 function parsePr(value) {
   try {
@@ -388,8 +405,11 @@ function checkPath(path, seams, snapshot) {
 }
 
 // Every container's whole record: { absent: true } when docker is not installed, { failure } when docker failed or
-// printed anything unrecognised, else { records, command, verify } with pinned local filesystem authority.
-function dockerSnapshot({ run, platform }) {
+// printed anything unrecognised, else { records, command, verify, sources, volumeDevices, readsBindNames } with pinned
+// local filesystem authority, sources(record) being the canonical host paths that record binds, each mounted volume's
+// bind device included, and volumeDevices(record) the devices as the volumes print them. readsBindNames holds on Docker
+// Desktop, where a mount field may spell a host path in a form sources cannot read.
+function dockerSnapshot({ run, platform, home }) {
   const inspectionEnv = { ...process.env };
   const metadata = run('docker', ['context', 'inspect', '--format', '{{json .Endpoints.docker}}'], { env: inspectionEnv });
   if (metadata.absent) return { absent: true, verify: () => null };
@@ -406,15 +426,29 @@ function dockerSnapshot({ run, platform }) {
   const env = { ...inspectionEnv };
   delete env.DOCKER_CONTEXT;
   delete env.DOCKER_HOST;
-  const proof = proveDockerFilesystem(endpoint.Host, run, platform, env);
+  const proof = proveDockerFilesystem(endpoint.Host, run, platform, env, home);
   if (proof.failure) return proof;
   const command = (...args) => run('docker', ['--host', proof.host, ...args], { env });
-  const snapshot = { verify: proof.verify, command };
+  const finish = (records) => {
+    const volumes = new Map(unique(records.flatMap(volumeNames)).map((name) => [name, readVolume(name, command)]));
+    const read = (record) => volumeNames(record).map((name) => volumes.get(name)).filter(Boolean);
+    return {
+      records,
+      verify: proof.verify,
+      command,
+      readsBindNames: proof.readsBindNames,
+      sources: (record) => [
+        ...bindSources(record).map((source) => canonicalPath(proof.hostPath(source))),
+        ...read(record).map((volume) => volume.unresolved ? volume : canonicalPath(proof.hostPath(volume.device))),
+      ],
+      volumeDevices: (record) => read(record).map(({ device }) => device).filter((device) => typeof device === 'string'),
+    };
+  };
   const list = command('container', 'ls', '--all', '--quiet', '--no-trunc');
   if (list.status !== 0) return { failure: describe(list) };
   const ids = list.stdout.split('\n').filter(Boolean);
   if (ids.some((id) => !CONTAINER_ID.test(id))) return { failure: 'docker listed an unrecognised container ID' };
-  if (!ids.length) return { ...snapshot, records: [] };
+  if (!ids.length) return finish([]);
   const inspect = command('inspect', '--type', 'container', '--format', '{{json .}}', ...ids);
   if (inspect.status === undefined) return { failure: describe(inspect) };
   let gone = [];
@@ -440,10 +474,17 @@ function dockerSnapshot({ run, platform }) {
   if (records.length !== expected.length) {
     return { failure: `docker inspect printed ${records.length} records for ${expected.length} containers` };
   }
-  return { ...snapshot, records };
+  return finish(records);
 }
 
 const dockerUnverifiable = (stage) => `Docker filesystem relationship is unverifiable: ${stage}`;
+const fail = (stage) => ({ failure: dockerUnverifiable(stage) });
+const nativeEnvironment = (env) => ({ ...(env.PATH === undefined ? {} : { PATH: env.PATH }), LC_ALL: 'C' });
+// Docker Desktop reports a host path under its virtual machine's mount of the host.
+const desktopHostPath = (source) => {
+  if (source === '/host_mnt') return '/';
+  return typeof source === 'string' && source.startsWith('/host_mnt/') ? source.slice('/host_mnt'.length) : source;
+};
 const completeCommand = (result) => result.status === 0 && result.stderr === '';
 const completeLine = (text) => typeof text === 'string' && text.endsWith('\n') && !text.slice(0, -1).includes('\n') ? text.slice(0, -1) : null;
 const isCleanPosixAbsolute = (path) =>
@@ -521,12 +562,84 @@ function dockerIdentity(stdout, listener, role) {
   return { identity: rows.map(({ numbers, type }) => `${numbers.join(':')}:${type}`).join('\n') };
 }
 
-// A local Linux proof and a latched verifier. Native observation never inherits redirection variables.
-function proveDockerFilesystem(host, run, platform, env) {
-  const fail = (stage) => ({ failure: dockerUnverifiable(stage) });
+// A verifier that re-observes until the first failure or change, and from then on repeats that reason.
+function latchedVerify(observe, identity) {
+  let failure = null;
+  return () => {
+    if (!failure) {
+      const current = observe();
+      if (current.failure) failure = dockerUnverifiable(`native identity changed or became unreadable: ${current.failure}`);
+      else if (current.identity !== identity) failure = dockerUnverifiable('native identity changed since initial observation');
+    }
+    return failure;
+  };
+}
+
+// BSD stat's `<type>:<owner>:<device>:<inode>` rows as { type, owner }, or null unless exactly `count` complete rows.
+function desktopStatRows(stdout, count) {
+  if (!stdout.endsWith('\n')) return null;
+  const rows = stdout.slice(0, -1).split('\n').map((line) => /^([A-Za-z ]+):([0-9]+):[0-9]+:[0-9]+$/.exec(line));
+  return rows.length === count && rows.every(Boolean) ? rows.map(([, type, owner]) => ({ type, owner })) : null;
+}
+
+// The server name `docker version` printed as its one JSON string line, or null.
+function desktopDaemonName(result) {
+  if (!completeCommand(result)) return null;
+  try {
+    const name = JSON.parse(completeLine(result.stdout));
+    return typeof name === 'string' ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+// A local Docker Desktop proof and a latched verifier. Desktop's daemon runs in a virtual machine, so this identifies
+// the endpoint and compares no namespaces: the exact socket of this home, in real directories, all this user's, whose
+// daemon names itself Docker Desktop. A daemon that does not answer is reported, never classified as stopped, because
+// its containers' binds cannot be read without it.
+function proveDesktopFilesystem(host, run, env, home) {
+  const directory = join(home, '.docker');
+  const socket = join(directory, 'run', 'docker.sock');
+  if (host !== `unix://${socket}`) return fail('unsupported endpoint');
+  const nativeEnv = nativeEnvironment(env);
+  const caller = run('/usr/bin/id', ['-u'], { env: nativeEnv });
+  const owner = completeCommand(caller) ? completeLine(caller.stdout) : null;
+  if (!owner || !/^[0-9]+$/.test(owner)) return fail('caller identity observation did not complete cleanly');
+  const socketMalformed = { failure: 'Docker Desktop socket observation is unsupported or malformed' };
+  const observe = () => {
+    const stat = run('/usr/bin/stat', ['-f', '%HT:%u:%d:%i', '--', directory, join(directory, 'run'), socket], { env: nativeEnv });
+    const clean = completeCommand(stat);
+    // A stat that fails on one path still prints the rows of the others. Desktop removes its socket on a clean stop.
+    if (!clean && !(stat.status > 0 && stat.stdout)) return { failure: 'Docker Desktop socket observation did not complete cleanly' };
+    const socketMissing = !clean && stat.stderr === `stat: ${socket}: stat: No such file or directory\n`;
+    if (!clean && !socketMissing) return socketMalformed;
+    const rows = desktopStatRows(stat.stdout, socketMissing ? 2 : 3);
+    if (!rows) return socketMalformed;
+    if (rows.some((row, index) => row.owner !== owner || row.type !== ['Directory', 'Directory', 'Socket'][index])) {
+      return { failure: 'Docker Desktop socket is not a socket this user owns in real directories' };
+    }
+    const version = run('docker', ['--host', host, 'version', '--format', '{{json .Server.Platform.Name}}'], { env });
+    if (version.status !== 0) {
+      return { failure: `Docker Desktop daemon did not answer: ${describe(version)}; no stopped container's binds can be read without it, so run this again once it answers` };
+    }
+    if (socketMissing) return socketMalformed;
+    const name = desktopDaemonName(version);
+    if (name === null) return { failure: 'daemon identity observation is unsupported or malformed' };
+    if (!name.startsWith('Docker Desktop ')) return { failure: 'daemon does not report itself as Docker Desktop' };
+    return { identity: `${stat.stdout}${name}` };
+  };
+  const initial = observe();
+  if (initial.failure) return fail(initial.failure);
+  return { host, hostPath: desktopHostPath, readsBindNames: true, verify: latchedVerify(observe, initial.identity) };
+}
+
+// A local filesystem proof and a latched verifier: Linux below, Docker Desktop on macOS, every other platform refused.
+// Native observation never inherits redirection variables.
+function proveDockerFilesystem(host, run, platform, env, home) {
+  if (platform === 'darwin') return proveDesktopFilesystem(host, run, env, home);
   const original = host.slice(7);
   if (platform !== 'linux' || !host.startsWith('unix://') || !safeSocketPath(original)) return fail('unsupported endpoint');
-  const nativeEnv = { ...(env.PATH === undefined ? {} : { PATH: env.PATH }), LC_ALL: 'C' };
+  const nativeEnv = nativeEnvironment(env);
   const native = (command, args) => run(command, args, { env: nativeEnv });
   const link = native('readlink', ['-e', '--', original]);
   if (!completeCommand(link)) return fail('socket path observation command did not complete cleanly');
@@ -605,17 +718,10 @@ function proveDockerFilesystem(host, run, platform, env) {
     initial = observe(mode);
   }
   if (initial.failure) return fail(initial.failure);
-  let failure = null;
   return {
     host: `unix://${socket}`,
-    verify() {
-      if (!failure) {
-        const current = observe(mode);
-        if (current.failure) failure = dockerUnverifiable(`native identity changed or became unreadable: ${current.failure}`);
-        else if (current.identity !== initial.identity) failure = dockerUnverifiable('native identity changed since initial observation');
-      }
-      return failure;
-    },
+    hostPath: (source) => source,
+    verify: latchedVerify(() => observe(mode), initial.identity),
   };
 }
 
@@ -647,6 +753,44 @@ export function bindSources(record) {
   return sources;
 }
 
+// The volume names a container record mounts: Mounts and HostConfig.Mounts of type volume, and each HostConfig.Binds
+// entry whose host part is not a path. An anonymous HostConfig.Mounts volume has no Source and is read by its Name in
+// Mounts. A missing or malformed name stays in the list, to be refused as unreadable.
+function volumeNames(record) {
+  const list = (value) => Array.isArray(value) ? value : [];
+  return [
+    ...list(record.Mounts).filter((mount) => isObject(mount) && mount.Type === 'volume').map(({ Name }) => Name),
+    ...list(record.HostConfig?.Mounts)
+      .filter((mount) => isObject(mount) && mount.Type === 'volume' && mount.Source !== undefined && mount.Source !== '')
+      .map(({ Source }) => Source),
+    ...list(record.HostConfig?.Binds)
+      .filter((bind) => typeof bind === 'string' && !bind.startsWith('/'))
+      .map((bind) => bind.split(':', 1)[0]),
+  ];
+}
+
+// What `docker volume inspect` says of one mounted volume: null when its options bind no device, { device } when the
+// local driver's `o` list holds bind or rbind, or { unresolved } with the reason the volume cannot be trusted.
+function readVolume(name, command) {
+  if (typeof name !== 'string' || !VOLUME_NAME.test(name)) return { unresolved: 'a volume name is unreadable' };
+  const unreadable = (why) => ({ unresolved: `volume ${name} options could not be read: ${why}` });
+  const result = command('volume', 'inspect', '--format', '{{json .}}', name);
+  if (result.status !== 0) return unreadable(describe(result));
+  let volume;
+  try {
+    volume = JSON.parse(result.stdout);
+  } catch {
+    return unreadable('docker printed no readable record');
+  }
+  const readable = isObject(volume) && volume.Name === name && typeof volume.Driver === 'string' && volume.Driver.trim() &&
+    (volume.Options === null || (isObject(volume.Options) && (volume.Options.o === undefined || typeof volume.Options.o === 'string')));
+  if (!readable) return unreadable('docker printed no readable record');
+  const { Driver: driver, Options: options } = volume;
+  if (!options?.o?.split(',').some((flag) => flag === 'bind' || flag === 'rbind')) return null;
+  if (driver !== 'local') return { unresolved: `volume ${name} uses driver ${driver}, whose bind options cannot be trusted` };
+  return { device: options.device };
+}
+
 // A path's canonical form, its longest existing prefix resolved plus the missing suffix: { path }, or { unresolved }
 // with the error code when a link, a permission or a malformed path prevents it.
 function canonicalPath(path) {
@@ -656,7 +800,7 @@ function canonicalPath(path) {
   const missing = [];
   for (let prefix = path; ; prefix = dirname(prefix)) {
     try {
-      return { path: join(realpathSync(prefix), ...missing) };
+      return { path: join(realpath(prefix), ...missing) };
     } catch (error) {
       if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return { unresolved: error.code ?? error.message };
       missing.unshift(basename(prefix));
@@ -822,6 +966,9 @@ export function pathRelation(path, other) {
 const atOrBelow = (path, other) => ['equal', 'below'].includes(pathRelation(path, other));
 const relates = (paths, others, relations) =>
   paths.some((path) => others.some((other) => relations.includes(pathRelation(path, other))));
+// A container whose process can still reach a parent folder of the target: only a record reading stopped has none.
+const holdsFromAbove = (record, sources, forms) => record.State?.Running !== false &&
+  relates(sources.map(({ path }) => path).filter(Boolean), forms, ['above']);
 
 // The processes and names of lsof's field output (-F with p, c, f and n); null on any other line.
 export function parseLsof(stdout) {
@@ -894,13 +1041,18 @@ function listenerRetention(run, targets) {
   return null;
 }
 
-// Stops and removes each container bound at or below the worktree; an unresolved source or a failed removal
-// retains the worktree. "No such container" naming the container's own ID means it is already gone. Returns
-// { gone, clean }: the IDs no longer present, and whether every container was settled with no unresolved source or
-// failed removal.
+const unresolvedSource = (short, { unresolved }) => `container ${short} has a bind source that could not be resolved: ${unresolved}`;
+
+// Stops and removes each container bound at or below the worktree, except a live one that is also bound above it,
+// which is left running for containerRetention to hold; an unresolved source, which stops the container from being
+// touched at all, a failed removal or, on Docker Desktop, a mount field naming the worktree where no source lies at or
+// below it retains the worktree. "No such container" naming the container's own ID means it is already gone. Returns
+// { gone, clean, unresolved }: the IDs no longer present, whether every container was settled with no such retention,
+// and the first unresolved source's reason, undefined when none.
 function removeWorktreeContainers(docker, worktree, report, retainWorktree) {
   const gone = new Set();
   let clean = true;
+  let unresolvedReason;
   const retainUnverified = (short) => {
     const unverified = docker.verify();
     if (!unverified) return false;
@@ -918,13 +1070,26 @@ function removeWorktreeContainers(docker, worktree, report, retainWorktree) {
       break;
     }
     const short = record.Id.slice(0, 12);
-    const sources = bindSources(record).map(canonicalPath);
-    if (!sources.some(({ path }) => path && atOrBelow(path, worktree.canonical))) {
-      const unresolved = sources.find(({ unresolved }) => unresolved);
-      if (unresolved) {
+    const sources = docker.sources(record);
+    const unresolved = sources.find(({ unresolved }) => unresolved);
+    if (unresolved) {
+      clean = false;
+      report.retained('container', short, `a bind source could not be resolved: ${unresolved.unresolved}`);
+      const reason = unresolvedSource(short, unresolved);
+      unresolvedReason ??= reason;
+      retainWorktree(reason);
+      continue;
+    }
+    const boundBelow = sources.some(({ path }) => path && atOrBelow(path, worktree.canonical));
+    if (!boundBelow || holdsFromAbove(record, sources, [worktree.canonical])) {
+      if (!boundBelow && docker.readsBindNames && recordNames(
+        [record.Mounts, record.HostConfig?.Binds, record.HostConfig?.Mounts, docker.volumeDevices(record)],
+        [worktree.path, worktree.canonical],
+      )) {
+        const reason = `container ${short} names it in a mount field no host path matched`;
         clean = false;
-        report.retained('container', short, `a bind source could not be resolved: ${unresolved.unresolved}`);
-        retainWorktree(`container ${short} has a bind source that could not be resolved`);
+        report.retained('container', short, reason);
+        retainWorktree(reason);
       }
       continue;
     }
@@ -948,7 +1113,7 @@ function removeWorktreeContainers(docker, worktree, report, retainWorktree) {
       break;
     }
   }
-  return { gone, clean };
+  return { gone, clean, unresolved: unresolvedReason };
 }
 
 // The entries of `git status --porcelain -z`, each { code, path }, a rename's or copy's source dropped; null when
@@ -980,14 +1145,14 @@ function readIgnoredLink(relative, worktree, records) {
   try {
     const linkText = readlinkSync(path);
     const destination = resolve(dirname(path), linkText);
-    const resolved = realpathSync(path);
+    const resolved = realpath(path);
     if (relates([destination, resolved], [worktree.path, worktree.canonical], ['equal', 'below'])) {
       return retained('points inside its worktree');
     }
     for (const { path: other } of records.slice(1).filter(({ path }) => path !== worktree.path)) {
       let canonical;
       try {
-        canonical = realpathSync(other);
+        canonical = realpath(other);
       } catch (error) {
         return retained(`could not resolve another linked worktree ${other}: ${error.code ?? error.message}`);
       }
@@ -1001,8 +1166,50 @@ function readIgnoredLink(relative, worktree, records) {
   }
 }
 
+// Whether a directory holds nothing but real directories, read without following a link.
+const holdsNoFile = (path) => readdirSync(path, { withFileTypes: true })
+  .every((entry) => entry.isDirectory() && holdsNoFile(join(path, entry.name)));
+
+const UNREADABLE_MOUNT_TABLE = 'could not read the mount table';
+
+// The mount points of this process's mount table, or null when it cannot be read whole. Platforms other than Linux
+// have no such table to read.
+function readMountPoints({ run, platform }) {
+  if (platform !== 'linux') return [];
+  const table = run('cat', ['/proc/self/mountinfo'], { env: nativeEnvironment(process.env) });
+  if (!completeCommand(table)) return null;
+  const lines = table.stdout.split('\n');
+  if (lines.pop() !== '') return null;
+  const points = [];
+  for (const line of lines) {
+    const fields = line.split(' ');
+    const separator = fields.indexOf('-');
+    if (separator < 5 || fields.length - separator - 1 < 3) return null;
+    points.push(fields[4].replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8))));
+  }
+  return points;
+}
+
+// An ignored row naming a real directory in the worktree that holds no file: its lstat, null to leave the row held,
+// or UNREADABLE_MOUNT_TABLE when the mount table could not be read. It protects nothing, as an empty directory git
+// does not ignore, which status never lists. A mount at or beneath it holds the row, because git worktree remove
+// would otherwise delete empty folders in the mount's source; platforms other than Linux have no table to read.
+function readFilelessIgnoredDirectory(relative, worktree, seams) {
+  const path = join(worktree.path, relative);
+  let before;
+  try {
+    before = lstatSync(path);
+    if (!before.isDirectory() || realpath(path) !== join(worktree.canonical, relative) || !holdsNoFile(path)) return null;
+  } catch {
+    return null;
+  }
+  const mounts = readMountPoints(seams);
+  if (!mounts) return UNREADABLE_MOUNT_TABLE;
+  return mounts.some((mount) => atOrBelow(mount, join(worktree.canonical, relative))) ? null : before;
+}
+
 // Ordinary removal deletes ignored entries and edits hidden by index flags without refusing, so verify both.
-function removeWorktree({ git, worktree, records }, regenerated, retainWorktree, verify) {
+function removeWorktree({ git, worktree, records, seams }, regenerated, retainWorktree, verify) {
   const status = git('-C', worktree.path, 'status', '--porcelain', '-z', '--untracked-files=normal', '--ignored=matching');
   if (status.status !== 0) return retainWorktree(`git status failed: ${describe(status)}`);
   const entries = parseStatusEntries(status.stdout);
@@ -1012,7 +1219,7 @@ function removeWorktree({ git, worktree, records }, regenerated, retainWorktree,
     entries.some(({ code, path }) => code === '!!' && path.startsWith(directory + '/')))) {
     try {
       const path = join(worktree.path, directory);
-      if (!lstatSync(path).isDirectory() || realpathSync(path) !== join(worktree.canonical, directory)) {
+      if (!lstatSync(path).isDirectory() || realpath(path) !== join(worktree.canonical, directory)) {
         return retainWorktree(`regenerated path ${directory} is not a real directory within the worktree`);
       }
     } catch (error) {
@@ -1021,11 +1228,20 @@ function removeWorktree({ git, worktree, records }, regenerated, retainWorktree,
     directories.push(directory);
   }
   const links = [];
+  const fileless = [];
   const held = [];
   for (const { code, path } of entries) {
     const relative = path.endsWith('/') ? path.slice(0, -1) : path;
     if (code === '!!' && !relative.endsWith('/') && isCleanRelative(relative) &&
       directories.some((directory) => path.startsWith(directory + '/'))) continue;
+    if (code === '!!' && path.endsWith('/') && isCleanRelative(relative)) {
+      const before = readFilelessIgnoredDirectory(relative, worktree, seams);
+      if (before === UNREADABLE_MOUNT_TABLE) return retainWorktree(before);
+      if (before) {
+        fileless.push({ relative, before });
+        continue;
+      }
+    }
     if (code === '!!' && !path.endsWith('/') && isCleanRelative(path)) {
       const link = readIgnoredLink(path, worktree, records);
       if (link.retained) return retainWorktree(link.retained);
@@ -1055,6 +1271,11 @@ function removeWorktree({ git, worktree, records }, regenerated, retainWorktree,
       after.linkText !== link.linkText || after.target !== link.target) {
       return retainWorktree(`ignored link ${link.relative}: changed during the checks`);
     }
+  }
+  for (const { relative, before } of fileless) {
+    const after = readFilelessIgnoredDirectory(relative, worktree, seams);
+    if (after === UNREADABLE_MOUNT_TABLE) return retainWorktree(after);
+    if (!after || !sameEntry(before, after)) return retainWorktree(`ignored directory ${relative}: changed during the checks`);
   }
   const removal = git('worktree', 'remove', worktree.path);
   if (removal.status !== 0) return retainWorktree(describe(removal));
@@ -1089,7 +1310,8 @@ function readTarget(path) {
   }
   let canonical;
   try {
-    canonical = join(realpathSync(dirname(path)), basename(path));
+    // A link stays named as itself, since removing it removes the link; anything else takes its on-disk spelling whole.
+    canonical = before.isSymbolicLink() ? join(realpath(dirname(path)), basename(path)) : realpath(path);
   } catch (error) {
     return { retained: `could not be resolved: ${error.code ?? error.message}`, forms: [path] };
   }
@@ -1139,19 +1361,25 @@ function placeRetention(forms, { seams, git, records }) {
 }
 
 // The hold a container puts on the target, or null. Inside the job worktree step 5 already removed every
-// container bound there unless it met a problem; outside it, every container still present is read whole.
+// container bound there unless it met a problem, so of the containers left only a live one bound above holds the
+// target; outside it, every container still present is read whole.
 function containerRetention(forms, inside, { docker, containers }) {
   if (docker.absent) return null;
   if (docker.failure) return unverifiable(`docker failed: ${docker.failure}`);
   const unverified = docker.verify();
   if (unverified) return unverifiable(unverified);
-  if (inside) return containers.clean ? null : unverifiable('a container bound in the job worktree was not removed');
+  if (inside && !containers.clean) return unverifiable(containers.unresolved ?? 'a container bound in the job worktree was not removed');
   for (const record of docker.records.filter(({ Id }) => !containers.gone.has(Id))) {
     const short = record.Id.slice(0, 12);
-    const sources = bindSources(record).map(canonicalPath);
+    const sources = docker.sources(record);
+    if (inside) {
+      if (holdsFromAbove(record, sources, forms)) return found(`container ${short} binds a parent folder of it`);
+      continue;
+    }
+    const unresolved = sources.find(({ unresolved }) => unresolved);
+    if (unresolved) return unverifiable(unresolvedSource(short, unresolved));
     if (relates(sources.map(({ path }) => path).filter(Boolean), forms, ['equal', 'below', 'above'])) return found(`container ${short} binds it`);
-    if (sources.some(({ unresolved }) => unresolved)) return unverifiable(`container ${short} has a bind source that could not be resolved`);
-    if (recordNames(record, forms)) return found(`container ${short} names it`);
+    if (recordNames([record, docker.volumeDevices(record)], forms)) return found(`container ${short} names it`);
   }
   return null;
 }

@@ -1,8 +1,13 @@
 // codex-hook-adapters.test.mjs — the Codex payload adapters both Codex hooks depend on,
-// including the fail-open decision for an encrypted dispatch body.
+// including the fail-open decision for an encrypted dispatch body, and the real Codex guard's
+// reading of the run session mark. Recurring cost of the guard case: two Node starts.
 
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { gitEnvironment } from './factory-sync.mjs';
 import { codexCommandForGuard, codexCwdForGuard, codexHandoffForGuard, isOpaqueDispatchMessage } from './codex-hook-adapters.mjs';
 
 test('codexCommandForGuard prefers cmd, falls back to command, else empty', () => {
@@ -35,4 +40,23 @@ test('isOpaqueDispatchMessage accepts only a full Fernet-shaped token', () => {
   assert.equal(isOpaqueDispatchMessage('Slice: cycle time card\nClaim: renders unavailable copy\n'), false);
   assert.equal(isOpaqueDispatchMessage(42), false);
   assert.equal(isOpaqueDispatchMessage(undefined), false);
+});
+
+test('ANTI-REGRESSION: the Codex guard refuses git push with the run session mark and passes it without', () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const input = JSON.stringify({ cwd: root, tool_input: { command: 'git push origin job/1' } });
+  // An undefined value leaves the mark out even when the suite itself runs inside a run session.
+  const guard = (mark) => spawnSync(process.execPath, [resolve(root, '.codex/hooks/block-unsafe-git.mjs')], {
+    input,
+    encoding: 'utf8',
+    env: { ...gitEnvironment(), PRODUCT_MANAGER_RUN_SESSION: mark },
+  });
+
+  const marked = guard('1');
+  assert.equal(marked.status, 2, marked.stderr);
+  assert.ok(marked.stderr.includes('Blocked: a product manager run session'), marked.stderr);
+
+  const unmarked = guard(undefined);
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.equal(unmarked.stderr, '');
 });

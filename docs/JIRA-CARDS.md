@@ -200,11 +200,13 @@ remain in their authoritative skills. This table also replaces Linear-specific a
 | Free-card and claim reads | `jira-card.mjs view <KEY>` and `view <KEY> --board`, with completeness and identity checks above |
 | Assign, claim or withdraw | The account-ID operations in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs <KEY> "Awaiting push"` before requesting push authorization |
+| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `jira-card.mjs comment <KEY> --body "<line>"`. Read with `node scripts/board.mjs --all`, then `jira-card.mjs text <KEY>` for each card it lists, one call per card, taking `comment` rows whose body starts `Verdict:`. Compare each row's account with the `viewer` line of `jira-card.mjs view <KEY>`. An approved push is a card in Done on that listing. A failed read leaves the first two measures not measurable, naming the card. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json` and the same `text` calls, applying the same title and body tests, and gives those counts as the cards it could read, with the share itself `not measurable: a card a board read leaves out is not counted`; a failed read leaves no counts, naming the card |
 | Closing line and branch | Standalone `Closes <KEY>` and `job/<KEY>`; always the pull request route |
 | Draft opened | Leave the card at its explicit current column; opening a draft does not move it to In review |
 | Pull request marked ready | Explicitly run `board-move.mjs <KEY> "In review"` after marking ready, not on draft opening |
 | Handoff | `board-move.mjs <KEY> Ready` under handoff's existing publication and parking steps |
 | File, edit, parent or block | Use the corresponding `jira-card.mjs` command; blocker read-back is the complete `blockedBy` row from `text` |
+| Suggested card (`resume`, "2. Work-pick") | File with `jira-card.mjs create --title 'Proposed: <title>' --body-file <file> --status Backlog --kind <kind>`. A yes is `jira-card.mjs edit <KEY> --title '<the title without it>'`. A no is `board-move.mjs <KEY> Done`, keeping the title |
 | Verify publication | `node scripts/verify-issue-publish.mjs <KEY> [<child KEY> ...]`; validates kind, mapped type/status, parent and the exact supplied set of all visible direct children. Missing, extra, duplicate or foreign child evidence refuses success |
 | Completion or review comments | `jira-card.mjs comment <KEY> --body-file <file>`; edit only one's own comment with its issue key and native comment ID |
 | Backlog or other explicit move | `board-move.mjs <KEY> "<column>"`, not a GitHub issue close or Linear automation check |

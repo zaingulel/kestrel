@@ -2,7 +2,11 @@
 // plus cleanup-specific permission for the Claude root hook. The hooks supply checkout facts;
 // direct unit tests cover the policy and subprocess tests cover its wiring.
 //
-// Thirteen plain rules, judged on the actual command segments of an agent's shell call:
+// Fourteen plain rules, judged on the actual command segments of an agent's shell call:
+//   git push / gh pr create / ready / merge in a product manager run session
+//                            -> a run session does not publish, whatever the form; judged only when
+//                                the hook passes `{ runSession: true }`, which only the Codex hook
+//                                does, for a session the launcher marked
 //   git commit --no-verify   -> skips the pre-commit gates
 //   git push --no-verify     -> skips the lint pre-push hook
 //   git -c core.hooksPath=… / git --config-env core.hooksPath=… /
@@ -213,8 +217,9 @@ import { posix, win32 } from 'node:path';
 // Returns a reason string when `cmd` should be blocked, or "" when it's allowed. `checkout` is the
 // hook's working-directory context, `{ cwd, isRootCheckout(dir), platform }`, whose platform picks the
 // path rules the walk resolves with; without it the root-checkout rule is not judged, and every other
-// rule is unchanged.
-export function blockReason(cmd, checkout) {
+// rule is unchanged. `runSession` says the session is a product manager run's; without it the
+// publishing rule is not judged.
+export function blockReason(cmd, checkout, { runSession = false } = {}) {
   cmd = cmd ?? "";
   // Widen each letter of a name to its own class rather than using a regex `i` flag, which would
   // also loosen every option match in the same expression (`-F` for `-f`, `-D` for `-d`).
@@ -536,6 +541,9 @@ export function blockReason(cmd, checkout) {
     return [...reasons, ...passedOver].find(Boolean) ?? '';
   };
   const ruleReason = (s, raw) => {
+    if (runSession && (GIT_PUSH.test(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(s) || GH_PR_READY.test(s))) {
+      return "a product manager run session does not publish: a built job waits for the owner's yes to push";
+    }
     if (GIT_COMMIT.test(s) && NO_VERIFY.test(s)) {
       return "git commit --no-verify skips the pre-commit gates";
     }

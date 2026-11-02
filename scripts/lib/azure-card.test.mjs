@@ -177,7 +177,7 @@ test('Azure mutations preserve ownership revision and confirmed outcomes', async
     const commenting = native({ returned: posted, commentAfter: posted, patch: { text: SOURCE } });
     const args = operation === 'comment' ? [operation, 'AB-299', '--body-file', body] : [operation, 'AB-299', '71', '--body-file', body];
     const rows = invoke(commenting, ...args);
-    assert.ok(JSON.stringify(rows).includes('71'));
+    assert.deepEqual(rows[0], [operation === 'comment' ? 'comment' : 'edited-comment', 'AB-299', 71, `https://dev.azure.com/example-org/${PROJECT}/_workitems/edit/299?discussionId=71`]);
     assert.deepEqual(commenting.writes()[0].query, { 'api-version': '7.1-preview.4', format: 'markdown' });
     assert.equal(commenting.calls.filter(({ path }) => path === '/_apis/projects/' + PROJECT).length, 1);
     assert.equal(commenting.calls.filter(({ path }) => path === ROOT + '/workitems/299').length, 1);
