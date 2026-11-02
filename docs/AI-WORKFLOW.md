@@ -21,7 +21,7 @@ or a command another document owns, and where a page and its owner disagree, the
 
 ## The map
 
-The owner reads pull request descriptions and screenshots, not diffs. The workflow therefore puts two
+The owner reads short decision cards and screenshots, with the pull request description one step away, not diffs. The workflow therefore puts two
 decisions in front of the owner, and a third only where the repository has turned plan approval on, and phrases each in plain language.
 
 ```mermaid
@@ -32,7 +32,7 @@ flowchart TB
         O3["Work-pick: pick one card"]
         O6["Plan approval: one yes to the completed plan, only where the repository turns it on"]
         O4["Decide, only if the outcome or a trade-off changed"]
-        O5["Push authorisation: one yes to the pull request body and its screenshot"]
+        O5["Push authorisation: one yes to the decision card and its screenshot"]
     end
     subgraph Agents["The agents"]
         A1["Interview, write the spec, propose cards"]
@@ -68,8 +68,8 @@ only when the approved outcome or a trade-off changes during the build.
 In words: the owner brings an idea. The agents interview the owner, write the spec and propose cards, and the owner
 agrees the breakdown into cards. The agents report which cards are startable and the owner picks one: that pick is
 work-pick, the first of the two decisions. The agents then plan, build in bounded slices, verify and review, and write
-the pull request body. The owner reads that body, with a screenshot where the change is visual, and says yes: that is
-push authorisation, the second decision. The agents deliver and close out without asking again. In between, a question goes
+the pull request body. The owner reads a short decision card lifted from that body, with a screenshot where the change is visual, can ask to see the whole body, and says yes: that is
+push authorisation, the second decision. A material limit missing from the card has not been accepted. The agents deliver and close out without asking again. In between, a question goes
 back to the owner in two cases only: where the repository has turned plan approval on, the agents present the completed
 plan and build nothing until the owner says yes; and where the approved outcome or a trade-off changes during the build. A change the
 repository's own gate admits whole goes straight to `main` on the same yes, with no pull request.
@@ -267,16 +267,16 @@ add-on](#the-external-review-add-on) says below, and no other repository writes 
 or HTML comments are not review lines, and a body carrying more than one valid line is invalid.
 
 The line sits in the Review section of a body with five sections, which the session writes with the vendored `pr`
-skill. The body leads with what the owner decides on, and two collapsed sections keep the complete supporting
+skill. The body leads with what the owner decides on, and three collapsed sections keep the complete supporting
 evidence in the same body. Summary states the outcome in a few plain sentences, with a picture, a diagram, a tree
 or a diff sketch, only where it shows something the sentences cannot. Not done names anything skipped, deferred or
 uncertain. Merge Danger carries the two answers the tier was chosen from, each with its reason; for a change whose
 parts answer the two questions differently they are the answers of the part that set the tier, named in each
 reason, with one sentence on what the other parts take. Evidence shows a before and an after, the screenshots of
-a visual change among them, then, collapsed, the receipts a script wrote and any record of a carried receipt.
+a visual change among them, the plain Passed, Failed and Untested lines, then, collapsed, the receipts a script wrote and any record of a carried receipt.
 Review carries the line and any declaration of how a review ran, then, collapsed, the fresh reviewer's verdict,
 every finding with its disposition, and one usage line for each reviewer pass the Usage view cannot show, as the
-`cross-review` skill specifies; raw usage blocks stay out of the body. The skill carries a template of its own,
+`cross-review` skill specifies; raw usage blocks stay out of the body. A third collapse in Review keeps the decision card the owner answered, which the weekly retro's card check reads. The skill carries a template of its own,
 and where it differs from `.github/pull_request_template.md` the repository's template wins;
 [the `resume` skill](../.agents/skills/resume/SKILL.md) owns that rule under "7. Push authorisation".
 

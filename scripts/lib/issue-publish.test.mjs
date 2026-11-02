@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { installFakeGh } from './fake-gh.mjs';
-import { GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { GITHUB_KIND_TYPES_TEST_CONFIG, GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
@@ -25,6 +25,14 @@ const linearToolkit = copyToolkit(LINEAR_TEST_CONFIG);
 after(() => linearToolkit.cleanup());
 const { main: linearMain } = await linearToolkit.load('verify-issue-publish.mjs');
 const { verifyLinearPublication } = await linearToolkit.load('lib/issue-publish.mjs');
+
+const typesToolkit = copyToolkit(GITHUB_KIND_TYPES_TEST_CONFIG);
+after(() => typesToolkit.cleanup());
+const { BOARD_OWNER: TYPES_OWNER, BOARD_PROJECT_NUMBER: TYPES_PROJECT_NUMBER } = await typesToolkit.load('lib/board-config.mjs');
+const { fetchBoard: typesFetchBoard } = await typesToolkit.load('lib/board.mjs');
+const { leanBoardPage: typesLeanBoardPage, leanNode: typesLeanNode, issueItemReply: typesIssueItemReply } = await typesToolkit.load('lib/board-fixtures.mjs');
+const { verifyIssuePublication: typesVerifyIssuePublication } = await typesToolkit.load('lib/issue-publish.mjs');
+const { main: typesMain } = await typesToolkit.load('verify-issue-publish.mjs');
 
 const BOARD = [
   { content: { number: 475 }, status: 'Ready', routing: 'Platform', labels: [KIND_LABELS.epic, 'area:board'] },
@@ -647,6 +655,92 @@ test('issue-publish: passes an issue with exactly one kind label among other lab
   });
 
   assert.equal(report[2], 'issue-publish: exactly one kind label verified for #475.');
+});
+
+// Bound to the native types copy: `boardRead` and `verify` above are bound to the labels copy, whose
+// board read never asks for an issue type.
+function typesBoardRead(nodes, { probeResponse } = {}) {
+  const ghExec = (command) => {
+    const query = command.find((arg) => arg.startsWith('query='));
+    if (query.includes('projectV2')) return JSON.stringify([typesLeanBoardPage(nodes)]);
+    if (query.includes('projectItems')) return probeResponse ?? graphProbe();
+    return graphChildren([]);
+  };
+  return { fetchBoard: typesFetchBoard, ghExec };
+}
+
+function typesVerify(number, issueType, labels) {
+  return typesVerifyIssuePublication([String(number)], {
+    fetchBoard: () => [{ content: { number }, status: 'Ready', routing: 'Product', labels, issueType }],
+    ghExec: () => graphChildren([]),
+  });
+}
+
+function typedNode(number, issueType, labels, extra = {}) {
+  return typesLeanNode({
+    id: `PVTI_typed_${number}`,
+    content: { __typename: 'Issue', number, title: 'Typed card', issueType, labels, ...extra },
+    status: 'Ready',
+    routing: 'Product',
+  });
+}
+
+const TYPE_NAMES = 'Epic, Feature, Task, Bug, Documentation';
+const noTypeMessage = (number) => `requested issue #${number} has no native issue type; set one of ${TYPE_NAMES} with gh issue edit ${number} --type <type>`;
+
+test('issue-publish native types: fails an issue with no native issue type', () => {
+  assert.throws(() => typesVerify(476, null, ['task']), { message: noTypeMessage(476) });
+  assert.throws(() => typesVerify(476, null, []), { message: noTypeMessage(476) });
+});
+
+test('issue-publish native types: fails an issue that also carries a kind label', () => {
+  assert.throws(
+    () => typesVerify(476, 'Task', ['task', 'area:board']),
+    { message: 'requested issue #476 has native issue type Task and also carries kind label task; remove it with gh issue edit 476 --remove-label <label>' },
+  );
+  assert.throws(
+    () => typesVerify(476, 'Task', ['task', 'area:board', 'bug']),
+    { message: 'requested issue #476 has native issue type Task and also carries kind labels task, bug; remove them with gh issue edit 476 --remove-label <label>' },
+  );
+});
+
+test('issue-publish native types: fails a type KIND_TYPES does not name', () => {
+  assert.throws(
+    () => typesVerify(476, 'Story', ['area:board']),
+    { message: `requested issue #476 has native issue type Story, which KIND_TYPES does not name (${TYPE_NAMES})` },
+  );
+});
+
+test('issue-publish native types: passes a named type with no kind label through the board read and the command', () => {
+  const lines = [];
+  const errors = [];
+  const output = { log: (line) => lines.push(line), error: (line) => errors.push(line) };
+
+  const status = typesMain(['480'], { ...typesBoardRead([typedNode(480, { name: 'Task' }, ['area:board'])]), output });
+  assert.equal(status, 0);
+  assert.deepEqual(errors, []);
+  assert.ok(lines.includes('issue-publish: native issue type verified for #480.'), lines.join('\n'));
+  assert.equal(lines.filter((line) => line.includes('kind label')).length, 0);
+
+  // The same route refuses an untyped issue, whatever labels it carries.
+  const refused = [];
+  const refusedStatus = typesMain(['480'], {
+    ...typesBoardRead([typedNode(480, null, ['task'])]),
+    output: { log: () => { throw new Error('no success line may be printed'); }, error: (line) => refused.push(line) },
+  });
+  assert.equal(refusedStatus, 1);
+  assert.deepEqual(refused, [`issue-publish: ${noTypeMessage(480)}`]);
+});
+
+test('issue-publish native types: judges a closed archived card by its type', () => {
+  const archived = {
+    ...typedNode(999, null, ['task'], { state: 'CLOSED' }),
+    isArchived: true,
+    project: { number: TYPES_PROJECT_NUMBER, owner: { login: TYPES_OWNER } },
+  };
+  const dependencies = typesBoardRead([typedNode(475, { name: 'Task' }, [])], { probeResponse: JSON.stringify(typesIssueItemReply([archived])) });
+
+  assert.throws(() => typesVerifyIssuePublication(['999'], dependencies), { message: noTypeMessage(999) });
 });
 
 test('issue-publish: fails loud when duplicate board cards share a requested issue number', () => {

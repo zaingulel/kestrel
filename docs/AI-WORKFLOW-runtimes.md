@@ -223,8 +223,12 @@ in the settings file stands apart from push authorisation too.
   including a person's own settings. Codex and the operating system each ask on their own rules.
 - **Cleanup retains a target despite its allowance.** Configuration approval does not establish ownership or remove a
   safety check. When the merged-head exception is needed, missing credentials or unavailable merge proof keep the
-  branch; unsupported platforms, unverifiable process use or failed Docker filesystem proof retain affected targets.
-  An untrusted checkout or inactive hooks still needs the
+  branch; unsupported platforms, unverifiable process use, a running container bound to a parent folder of the job
+  folder or failed Docker filesystem proof retain affected targets. On a Mac, a Docker Desktop that is not running is
+  such a failure; the session starts it, runs the command again and stops it again unless something else has started
+  using it. A folder Docker Desktop's virtual machine still holds after its container is gone waits for a Docker Desktop
+  restart, which the session runs only on a Docker Desktop it started itself. A failed Docker check tries the host check
+  first, and the owner is asked nothing unless that fails too. An untrusted checkout or inactive hooks still needs the
   runtime trust and hook checks above. A retained target or runtime refusal is reported with its reason; the allowance
   makes no promise that every platform or target can complete cleanup without intervention.
 - **A board script fails in a cloud session.** The proxy refuses GraphQL; a cloud session never runs them, and a local
@@ -289,3 +293,5 @@ in the settings file stands apart from push authorisation too.
 - `scripts/lib/codex-hooks-windows.test.mjs`: the proof of the Windows registrations.
 - `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out.
 - `scripts/merge-watch.mjs`: with `--draft`, the local session's wait for a cloud build's draft.
+- `scripts/product-manager-run.mjs` and `scripts/lib/product-manager-run.mjs`: the Codex product manager run's launcher,
+  which starts each card session and the end session in turn.

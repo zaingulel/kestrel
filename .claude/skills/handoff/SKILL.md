@@ -22,9 +22,9 @@ throughout this skill, including complete native-comment review before claiming.
    `.github/pull_request_template.md`, as the `resume` skill says under "7. Push authorisation"; its Which
    template wins rule applies here too. Write the **Not done** section for a reader with no memory of this
    session: what is finished, what is not, the next concrete step, and any decision the owner still owes.
-3. **Get publication authorization.** Present the prepared body as the `resume` skill's "7. Push authorisation"
-   Chat presentation rule says, and name the proposed push and draft
-   pull-request creation or update. A bare `handoff` or `park` request authorizes only local preparation and the
+3. **Get publication authorization.** Save the prepared body as the `resume` skill's "7. Push authorisation" Saved
+   write-up rule says, and present its decision card as that section's Chat presentation rule says, with a question
+   naming only the proposed push and draft pull-request creation or update. A bare `handoff` or `park` request authorizes only local preparation and the
    commit. Do not push the branch or create or update a draft pull request until the owner explicitly authorizes
    those outward actions. An invocation that explicitly names both push and draft pull-request publication
    satisfies this gate.

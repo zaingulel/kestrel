@@ -1,8 +1,9 @@
 // unsafe-git.test.mjs — mutation-proof unit tests for the PreToolUse(Bash) guard rules.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
-// Every blocked fixture asserts the exact rule reason, never a bare truthy, so a rule that fires for
-// the wrong reason reddens a test instead of hiding behind another rule's verdict.
+// Every blocked fixture asserts the exact rule reason, or for the run session rule the opening words
+// the launcher's witness reads, never a bare truthy, so a rule that fires for the wrong reason reddens
+// a test instead of hiding behind another rule's verdict.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -1345,5 +1346,30 @@ test('cleanup permission grants only the plain trusted-root command', () => {
   ]) {
     assert.equal(cleanupPermission(command, true), undefined, String(command));
     assert.equal(cleanupPermission(command, false), undefined, String(command));
+  }
+});
+
+// ── product manager run session ──────────────────────────────────────────────
+
+// The four commands `resume` step 8 refuses a run, and the run session's own publish check.
+test('ANTI-REGRESSION: a run session refuses git push and gh pr create, ready and merge, and without the mark nothing changes', () => {
+  const RUN_SESSION = { runSession: true };
+  const REFUSED = /^a product manager run session does not publish/;
+  const publishing = [
+    'git push origin job/1',
+    'git push --dry-run ./.product-manager-run-no-remote HEAD',
+    'gh pr create --draft --title x',
+    'gh pr ready 406',
+    'gh pr merge --auto --squash --delete-branch 406',
+  ];
+  assert.deepEqual(publishing.filter((command) => !REFUSED.test(blockReason(command, undefined, RUN_SESSION))), []);
+  // The mark takes nothing else: the hook check still gets its own refusal, and an ordinary command or a mention passes.
+  assert.equal(blockReason('git commit --no-verify --dry-run', undefined, RUN_SESSION), REASON_COMMIT_NO_VERIFY);
+  assert.equal(blockReason('git status', undefined, RUN_SESSION), '');
+  assert.equal(blockReason('echo "git push"', undefined, RUN_SESSION), '');
+  for (const options of [undefined, { runSession: false }]) {
+    for (const command of publishing) assert.equal(blockReason(command, undefined, options), '', command);
+    assert.equal(blockReason('git push --force origin job/1', undefined, options), REASON_PUSH_FORCE);
+    assert.equal(blockReason('gh pr create --title x', undefined, options), REASON_CREATE);
   }
 });

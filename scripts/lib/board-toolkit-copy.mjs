@@ -79,6 +79,15 @@ export const BOARD_PROJECT_NUMBER = 2;
 export const BOARD_REPOSITORY = 'example-repo';
 ${CONFIG_TAIL}`;
 
+// The configuration of an organisation-owned GitHub install that chooses native issue types: the
+// same vocabulary, and the KIND_TYPES map that makes a card's kind its issue type.
+export const GITHUB_KIND_TYPES_TEST_CONFIG = `export const BOARD_OWNER = 'acme-org';
+export const BOARD_OWNER_TYPE = 'organization';
+export const BOARD_PROJECT_NUMBER = 7;
+export const BOARD_REPOSITORY = 'widgets';
+${CONFIG_TAIL}export const KIND_TYPES = { epic: 'Epic', feature: 'Feature', task: 'Task', bug: 'Bug', docs: 'Documentation' };
+`;
+
 // The configuration of a markdown-tracked install: the same repository and vocabulary, no project
 // (a markdown install has none) and the tracker switch the GitHub configurations leave out.
 export const MARKDOWN_TEST_CONFIG = `export const BOARD_OWNER = 'example-owner';

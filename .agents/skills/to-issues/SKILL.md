@@ -21,7 +21,7 @@ proposal: create or update NOTHING on the board until the owner approves. Except
 `/to-issues`: a follow-up card, in `Backlog`, for work an approved job surfaces and genuinely cannot finish,
 filed under the "Owner gates" rule in `AGENTS.md`; where the documentation routines are active and the settings file
 does not hold `"docSweep": false`, an issue the day-after sweep triage filed under its own manual
-(`docs/SWEEP-TRIAGE.md`), which the `resume` intake cards in `Backlog`; and any further exception
+(`docs/SWEEP-TRIAGE.md`), which the `resume` intake cards in `Backlog`; a suggested card or split child a product manager run files under steps 10 and 11 of the `resume` skill's "2. Work-pick"; and any further exception
 `docs/ISSUE-TRACKER.md` records. An exception skips the step 4 approval gate, not the links rule: an
 issue created with gh still records blockers and parents as built-in links (step 6), never as body text. The sweep
 triage, which has no gh, carries its manual's `Blocked by:` line instead.
@@ -93,7 +93,7 @@ board intake, the card read in the `resume` skill's "3. Start the job", and its 
 pull-request inventory in "1. Find where things stand". Use those reads for state, assignee and claim evidence;
 the resume Free check confirms snapshot consistency, not unstarted eligibility. An assignment, any claim, job
 branch/worktree, pull request or known prior work-pick excludes a card even if its Status returned to Backlog or
-Ready. Unresolved assignment or start state also excludes it.
+Ready. Unresolved assignment or start state also excludes it. A card whose title begins `Proposed: ` is excluded too, because the owner has not answered it.
 
 Require overlap in both the affected files and specific tests established by Step 2 that verify the proposed
 work; a shared area or broad suite is insufficient. Offer no fold for unmatched cards or cards whose file/test
@@ -151,13 +151,19 @@ gh issue create \
   --body "..."
 ```
 
-Every issue carries exactly one kind label, the one `KIND_LABELS` in `scripts/lib/board-config.mjs` records for the
-issue's kind, chosen by what the issue is: epic for a parent whose work is its native child issues; bug for
+Unless `scripts/lib/board-config.mjs` exports `KIND_TYPES`, every issue carries exactly one kind label, the one
+`KIND_LABELS` in `scripts/lib/board-config.mjs` records for the issue's kind, chosen by what the issue is: epic for a
+parent whose work is its native child issues; bug for
 behaviour that contradicts what the code, a test or a document says it does; feature for a new or changed
 capability for the people using the product; docs for a change to documents or prose alone; task for any other
 bounded work, such as tooling, a refactor, research or a recorded decision. When two fit, the first in that order
 wins. Step 8's verifier fails an issue with none or more than one. The other labels are those the repository's
 `docs/ISSUE-TRACKER.md` names.
+
+Where `scripts/lib/board-config.mjs` exports `KIND_TYPES`, an issue's kind is a native issue type and never a label:
+pass `--type "<kind type>"`, the name `KIND_TYPES` records for the kind chosen by the same rule, and give `--label` only
+the other labels, leaving it out when there are none. Step 8's verifier fails an issue with no native type, with a type
+`KIND_TYPES` does not name, or with any label `KIND_LABELS` records.
 
 `--blocked-by` takes each owner-approved blocker and needs gh 2.94 or later; omit it when the slice has none. A
 blocker and a parent live only in GitHub's built-in links, never in the body. The link is a second call after
@@ -177,9 +183,10 @@ Use `board-move.mjs` only to move an existing card, never to create one.
 
 **A card for another repository** is filed from a checkout of that repository, never from this one:
 `board-add.mjs` and the step 8 verifier act on the board of the checkout they run in. Run steps a, b and 8 there,
-with labels from that repository's own set and the Workstream by its convention, so the card arrives with its
-labels, column and Workstream together. With no checkout of that repository, create the issue with
-`gh issue create --repo <owner>/<repo>` and that repository's labels, then tell the owner the card still needs its
+with labels from that repository's own set, the type its `KIND_TYPES` records where it exports one, and the Workstream
+by its convention, so the card arrives with its kind, labels, column and Workstream together. With no checkout of that
+repository, create the issue with `gh issue create --repo <owner>/<repo>` and that repository's labels, or `--type`
+where its configuration exports `KIND_TYPES`, then tell the owner the card still needs its
 Workstream, set by running step b in that repository; never report it as filed complete.
 
 **c. Link each child to its parent Epic as a native sub-issue** (a markdown checklist is NOT a sub-issue):
@@ -255,13 +262,17 @@ node scripts/verify-issue-publish.mjs <EPIC_N> <CHILD_N...>
 Verify each reused fold target outside that native child set in its own single-number run of the same verifier;
 a standalone new issue also takes one number. Preserve native parents; never reparent a target for verification.
 
-Report its results: board presence, Statuses and Workstreams, the one kind label, native child count, and any
-closed card it read from its archived board item, which passes and stays archived. On failure, read WHICH failure:
+Report its results: board presence, Statuses and Workstreams, the one kind label or native issue type, native child
+count, and any closed card it read from its archived board item, which passes and stays archived. On failure, read
+WHICH failure:
 `absent from the board` means the publication genuinely failed — fix before reporting ready;
 `needs exactly one kind label` means correct that issue's labels with `gh issue edit <N> --add-label` or
-`--remove-label`, then re-run; `is archived on the board while still open` means unarchive that open card, never
-add a second; `is on the board but not in this board read` and `is not on this board read` mean the read lagged —
-re-run the verifier, never add again; `could not confirm whether` and `could not be read` mean fix the named cause.
+`--remove-label`, then re-run; `has no native issue type` or `does not name` means set it with
+`gh issue edit <N> --type <type>`, and `also carries kind label` means remove it with
+`gh issue edit <N> --remove-label <label>`, then re-run; `is archived on the board while still open` means unarchive
+that open card, never add a second; `is on the board but not in this board read` and `is not on this board read` mean
+the read lagged — re-run the verifier, never add again; `could not confirm whether` and `could not be read` mean fix
+the named cause.
 A silent skip here is the exact failure this skill already made once.
 
 Read each folded target's updated title and body back and compare them with the owner-approved combined changes

@@ -63,8 +63,8 @@ links one page per topic; every topic page carries a summary, a mental model, ho
 failure modes and key files, and none of them owns a rule.
 
 Start every owner-facing decision in plain language before any workflow vocabulary: what happened, what the owner
-must decide, the options. The owner reads pull request descriptions and screenshots, not diffs; write for that
-reader. `resume` starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
+must decide, the options. The owner reads decision cards and screenshots, not diffs; write for that reader. `resume`
+starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
 Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
 for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
 In owner-facing progress, approval and completion messages, summarize evidence concisely as Passed, Failed and
@@ -83,6 +83,7 @@ Every rule this file does not hold in full has one home:
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
 | Which builder seat a slice goes to; the machinery admissions, the friction route and how machinery leaves; what a plan carries for a change to how the interface looks, and who decides where the `frontend-design` skill and the design system disagree; and the steps of plan approval where a repository has turned it on: how the setting is read, how the plan is presented and revised, and what a resumed session does | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
+| The decision card and saved write-up; how a run's waiting jobs are reviewed in a batch, how each verdict is recorded and how the stage 2 measures are read | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
 | The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, its same-family form in a cloud build, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
 | Every other rule of the external review, in a repository that has turned that add-on on: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
 | How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; how a repository turns the external review add-on on or off; how a repository turns the documentation sweep off and what that leaves out; and what a repository needs before it runs the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
@@ -98,14 +99,18 @@ Every rule this file does not hold in full has one home:
 1. **Work-pick** is the owner's pick of one row of the `resume` candidate table, which approves that card's
    outcome and acceptance criteria as written and starts the job, unless the `resume` skill's checks under
    "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked.
-   With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume`
-   says under "2. Work-pick"; no run picks a card needing owner direction or sign-off. Owner-directed
+   With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume` says
+   under "2. Work-pick": one instruction hands over each pick until the run stops, on Codex the owner running
+   `node scripts/product-manager-run.mjs`, and the start message of a session that run starts carries that hand-off, the
+   one earlier-session message that does, and no other approval. No run picks a card needing owner
+   direction or sign-off, or a suggested card the owner has not answered. Owner-directed
    surfaces are the Surfaces table's `owner-directed` row and need owner direction plus canon or domain
    validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named anti-regression
    test.
-2. **Push authorisation** is one yes to the filled pull request body and its screenshot, and any owner
-   instruction to push is that yes. It covers the whole deliver sequence in the `resume` skill, push to
-   auto-squash merge, with no fresh yes inside it. `closeout` follows the merge unasked.
+2. **Push authorisation** is one yes to the decision card and its screenshot, and any owner instruction to push is
+   that yes. It approves the card and covers the whole deliver sequence in the `resume` skill, push to auto-squash
+   merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. `closeout`
+   follows the merge unasked.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`; no file,
    no key or `false` sends a plan to build with no owner step. Where it is on, it is one yes to the completed plan as
    presented, given before anything is built, and any owner instruction to build that plan is that yes; silence and
@@ -117,13 +122,17 @@ Every rule this file does not hold in full has one home:
 authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
 workflow, including moving the card to `Awaiting push` before requesting push authorisation. The workflow's
 eligibility, ownership and evidence checks and all owner gates still apply. This authorises board bookkeeping only,
-with no permission to publish code.
+with no permission to publish code. In a product manager run it also covers the `Needs owner` comment and move to
+`Backlog` that `resume` prescribes, and filing the suggested cards and split children it prescribes. It also covers
+the `Verdict:` comment `resume` prescribes when the owner answers a run's job, and the `Needs owner` comment and move
+to `Backlog` a no prescribes. A session the owner starts or reopens may rewrite that comment to `Returned:`, only on
+the owner's own message; a run never does.
 
 A material change to the approved outcome, product meaning, or a trade-off goes back to the owner as a
 plain-language decision before it is built; a parser, state machine, or framework the outcome did not name is
 such a change. Anything short of that which the job surfaces and can sensibly finish in the same job, in the
 same files under the same tests, rides along and is named in the pull request body; a follow-up card is filed,
-without asking, only for work that genuinely cannot.
+without asking, only for work that genuinely cannot; in a product manager run it is a suggested card, as `resume` says.
 
 **Disposable job cleanup.** The session must remove verified disposable, inactive files and folders it created
 for its own approved job, inside or outside the job worktree, without further approval and whether or not a
@@ -147,7 +156,7 @@ This grants no general deletion or publication authority; other destructive acti
 
 An approval covers only the question it answered. After a context compaction, reread the owner's latest messages
 before acting on one; an approval whose question is no longer in view is asked again. A memory, summary or earlier
-session never grants approval.
+session never grants approval, except the start message gate one names.
 
 ## Compact instructions
 

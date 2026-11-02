@@ -25,7 +25,7 @@ On the direct route: settle the convergence checks exactly as step 1 names on `<
 that receipt ran on, and those receipts replace any the approved body quoted for an earlier head; fill that body's
 `Carried from:`, `Changed paths:` and `Carried receipts:` lines as that rule says, and nothing else in that body
 changes. Then squash the job with `git reset --soft <origin-main>` and `git commit` into one commit whose
-message is the pull-request title, a blank line, the same filled body the owner approved with its review line and
+message is the pull-request title, a blank line, the same approved body with its review line and
 receipts so replaced, a blank line, `Closes #<issue>`, and the attribution lines. Before pushing, confirm `git
 rev-parse HEAD^{tree}` equals `git rev-parse <head>^{tree}`, so the pushed commit carries exactly the content the
 receipts checked; a mismatch stops the route and the checks are settled again. Then push with `git push origin
@@ -74,21 +74,30 @@ installed again: that check runs again.
   `range-diff` compares no merge commit, `git rev-list --merges <old-base>..<receipt-head>` and
   `git rev-list --merges <new-base>..HEAD` both succeed and print nothing. The incoming changes do not overlap the
   job's: `git diff --name-only --no-renames <old-base> <new-base>` and
-  `git diff --name-only --no-renames <new-base> HEAD` both succeed and no path appears in both lists. A missing
-  commit, a failed command, any `!`, `<` or `>` row, a merge commit in either range, or a shared path requires the
-  rerun. The comparison is always against the receipt's own head, however many times `main` moved since, so a receipt
-  carried across a commit on top is not reused after a later rebase: the added commit shows as a `>` row and the
-  check runs again. The hosted required check on the rebased head is then the proof for that head.
+  `git diff --name-only --no-renames <new-base> HEAD` both succeed and no path appears in both lists, apart from a
+  generated file left out as the next sentences say. A shared path is left out only when the repository's testing
+  strategy, as it stands on `<new-base>` so that a job cannot name a file for itself, lists it with the command that
+  rebuilds it in a table under a heading `Generated files`, and running that command through `node scripts/run-log.mjs`
+  on the clean current head exits 0 and `git status --porcelain --untracked-files=normal` then still prints nothing. A
+  rebuild that fails or produces any difference requires the rerun, and a difference means the job's copy was stale, so
+  the rebuilt file is committed with the job before the rerun. The file's sources stay in the comparison, so a real
+  overlap in what it is built from still requires the rerun. A repository whose strategy names no generated file leaves
+  nothing out. A missing commit, a failed command, any `!`, `<` or `>` row, a merge commit in either range, or a shared
+  path not left out requires the rerun. The comparison is always against the receipt's own head, however many times
+  `main` moved since, so a receipt carried across a commit on top is not reused after a later rebase: the added commit
+  shows as a `>` row and the check runs again. The hosted required check on the rebased head is then the proof for
+  that head.
 
 The pull request body records every receipt that counts for a head other than the one it ran on, on the three lines
 the template carries under its evidence table, once for each head such receipts ran on. `Carried from:` names, in
 this order, the head the receipts ran on, the rebased head where a rebase reuse came before a commit on top, and the
 current head they are settled on. `Changed paths:` lists the paths the commit-on-top command printed and, beside each
 path the testing strategy does not cover, what the session found it affects; for the rebase case it names both
-comparisons, and for a rebase reuse followed by a commit on top it gives both stages in order. `Carried receipts:`
-names each carried check's command. When every receipt ran on the current head, `Carried from:` reads `none` and the
-other two lines are removed, except that `Changed paths:` stays, naming the commit the paths were listed from and
-what the session found, whenever a path the testing strategy does not cover was investigated.
+comparisons and each generated file left out of the overlap check with its rebuild command, and for a rebase reuse
+followed by a commit on top it gives both stages in order. `Carried receipts:` names each carried check's command.
+When every receipt ran on the current head, `Carried from:` reads `none` and the other two lines are removed, except
+that `Changed paths:` stays, naming the commit the paths were listed from and what the session found,
+whenever a path the testing strategy does not cover was investigated.
 
 1. Rebase onto `origin/main`, then settle each convergence check the testing strategy names under the Receipt reuse
    rule above. The pre-push hook still runs its own gates on every push. Then push;

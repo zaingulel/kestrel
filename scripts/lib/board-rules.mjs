@@ -8,7 +8,7 @@
 // about the card at all, including whether it drifted (#600), so it never carries a
 // repair instruction and never lets the scan claim it covered the board.
 
-import { INTAKE_EXIT, isContentUnresolved, normalizeItem, pickable, sortForDisplay } from './board.mjs';
+import { INTAKE_EXIT, KIND_TYPES, isContentUnresolved, normalizeItem, pickable, sortForDisplay } from './board.mjs';
 import { configuredTracker } from './board-markdown.mjs';
 import { cardRef, compareCardIds } from './tracker.mjs';
 import {
@@ -33,9 +33,11 @@ export function isInFlight(status) {
   return Boolean(status) && !PICKABLE_STATUSES.includes(status) && !TERMINAL_STATUSES.includes(status);
 }
 
-// Board labels arrive as bare names; an epic carries the configured epic kind label.
+// Board labels arrive as bare names; an epic carries the configured epic kind label. Where the
+// configuration chooses native issue types an epic is the card of the epic type, and a kind label
+// is ignored.
 export function isEpic(card) {
-  return card.labels.includes(KIND_LABELS.epic);
+  return KIND_TYPES ? card.issueType === KIND_TYPES.epic : card.labels.includes(KIND_LABELS.epic);
 }
 
 // A card missing its Status still reaches the rules below that quote its column. The

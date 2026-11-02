@@ -244,11 +244,13 @@ publication and cleanup gate.
 | Intake and card context | `board.mjs --intake`, then `azure-card.mjs text <AB-ID>`; review complete native comments |
 | Free-card, assignment, claim or withdrawal | The complete reads and native-UUID protocol in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs <AB-ID> "Awaiting push"` before requesting push authorization |
+| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `azure-card.mjs comment <AB-ID> --body-file <file>`. Read with `node scripts/board.mjs --all`, then `azure-card.mjs text <AB-ID>` for each card it lists, one call per card, reviewing complete native comments. Compare authorship with the viewer evidence of `azure-card.mjs view <AB-ID>`. A comment whose native text wraps `Verdict:` counts as not matching the form. An approved push is a card in Done on that listing. A failed read leaves the first two measures not measurable, naming the card. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json` and the same `text` calls, applying the same title test and finding the line contained in the description, and gives those counts as the cards it could read, with the share itself `not measurable: a card a board read leaves out is not counted`; a failed read leaves no counts, naming the card |
 | Closing line and branch | `job/<AB-ID>` and both standalone body lines below; always the pull request route |
 | Draft opened | Keep the card's current explicit column; draft creation does not move it to In review |
 | Pull request marked ready | Explicitly run `board-move.mjs <AB-ID> "In review"` after marking ready |
 | Handoff | `board-move.mjs <AB-ID> Ready` after handoff's existing publication steps |
 | File or fold approved work | `azure-card.mjs create` or `edit`; preserve metadata and native relationships on a fold |
+| Suggested card (`resume`, "2. Work-pick") | File with `azure-card.mjs create --title 'Proposed: <title>' --body-file <file> --status Backlog --kind <kind>`. A yes is `azure-card.mjs edit <AB-ID> --title '<the title without it>'`. A no is `board-move.mjs <AB-ID> Done`, keeping the title |
 | Parent or blocker | `azure-card.mjs parent` or `block`; reread `parent` and the complete `blockedBy` row through `text`, including closed blockers |
 | Verify filing | `node scripts/verify-issue-publish.mjs <AB-ID> [<child AB-ID> ...]`; exact kind/type/status, parent and supplied complete direct-child set |
 | Completion or review comment | `azure-card.mjs comment <AB-ID> --body-file <file>`; edit only the viewer's own comment |

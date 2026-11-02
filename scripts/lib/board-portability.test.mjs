@@ -26,7 +26,7 @@ import { pathToFileURL } from 'node:url';
 import { installFakeGh, installFakeTransport } from './fake-gh.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { CARDS_DIR } from './board-markdown.mjs';
-import { CONFIG_TAIL, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { CONFIG_TAIL, GITHUB_KIND_TYPES_TEST_CONFIG, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const ORGANISATION_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
@@ -377,11 +377,11 @@ after(() => fakeGh.cleanup());
 
 // Spawned by its real path: the CLI runs main() only when argv[1] resolves to its own
 // module URL, and the temp directory can sit behind a symlink (macOS /var → /private/var).
-function runCopiedBoard(root, page, args = []) {
+function runCopiedBoard(root, page, args = [], env = {}) {
   return spawnSync(process.execPath, [realpathSync(join(root, 'scripts', 'board.mjs')), ...args], {
     encoding: 'utf8',
     timeout: 30_000,
-    env: fakeGh.env({ FAKE_BOARD: JSON.stringify([page]) }),
+    env: fakeGh.env({ FAKE_BOARD: JSON.stringify([page]), ...env }),
   });
 }
 
@@ -1405,5 +1405,105 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
     ['issueUpdate', { id: 'id-ENG-13', stateId: 's-awaiting' }],
     ['commentCreate', { issueId: 'id-ENG-13', body: 'Cleanup pending: job/ENG-13' }],
     ['commentUpdate', { id: PENDING_ID, body: 'Cleanup done: job/ENG-13' }],
+  ]);
+});
+
+test('native types: a malformed issue type stops the board read', async (t) => {
+  const root = adoptToolkit(t, GITHUB_KIND_TYPES_TEST_CONFIG);
+  const { parseBoardPage } = await load(root, 'lib/board.mjs');
+  const { leanBoardPage, leanNode } = await load(root, 'lib/board-fixtures.mjs');
+  const pageWith = (issueType) => {
+    const content = { ...issue(11), labels: ['task'] };
+    if (issueType !== undefined) content.issueType = issueType;
+    return leanBoardPage([leanNode({ id: 'PVTI_11', content, status: 'Ready' })]);
+  };
+
+  assert.equal('issueType' in pageWith(undefined).data.organization.projectV2.items.nodes[0].content, false);
+  for (const issueType of [{ name: 7 }, {}, undefined]) {
+    assert.throws(() => parseBoardPage(pageWith(issueType)), /carried no usable issue type/);
+  }
+  assert.doesNotThrow(() => parseBoardPage(pageWith(null)));
+});
+
+// A board card of the types configuration, spelling its issue type as the query returns it.
+const typedCard = (number, issueType, { labels = [], status = 'Ready', content = {} } = {}) => ({
+  id: `PVTI_${number}`,
+  content: { ...issue(number), issueType: issueType === null ? null : { name: issueType }, labels, ...content },
+  status,
+  routing: 'Product',
+});
+
+test('native types: the board read asks for the type and recognises an epic by it alone', async (t) => {
+  const root = adoptToolkit(t, GITHUB_KIND_TYPES_TEST_CONFIG);
+  const { fetchBoard, normalizeItem } = await load(root, 'lib/board.mjs');
+  const { isEpic, scanBoard } = await load(root, 'lib/board-rules.mjs');
+  const { leanBoardPage, leanNode } = await load(root, 'lib/board-fixtures.mjs');
+  const finished = { content: { subIssuesSummary: { total: 2, completed: 2 } } };
+  const claimed = { status: 'In progress', content: { assignees: ['acme-dev'] } };
+  const page = leanBoardPage([
+    typedCard(11, 'Epic', { labels: ['area:ui'], ...finished }),
+    typedCard(12, 'Task', { labels: ['epic'], ...finished }),
+    typedCard(13, null, { labels: ['epic'] }),
+    typedCard(14, 'Epic', claimed),
+    typedCard(15, 'Task', { labels: ['epic'], ...claimed }),
+  ].map((card) => leanNode(card)));
+  const { exec, sent } = recordingGh('organization', page);
+
+  const items = fetchBoard(exec);
+
+  assert.ok(sent[0].find((arg) => arg.startsWith('query=')).includes('issueType { name }'), sent[0].join(' '));
+  assert.deepEqual(items.map((i) => [i.content.number, i.issueType]), [[11, 'Epic'], [12, 'Task'], [13, null], [14, 'Epic'], [15, 'Task']]);
+  assert.deepEqual(items.map((i) => [i.content.number, isEpic(normalizeItem(i))]), [[11, true], [12, false], [13, false], [14, true], [15, false]]);
+  assert.deepEqual(scanBoard(items).drifted.map((row) => [row.number, row.reason]), [
+    [11, 'epic open but all 2 child issues closed — close it and move to Done'],
+    [14, 'claimed in "In progress" but has no sub-issues — if no session is actively decomposing it, decompose it or return it to Ready'],
+    [15, 'claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready'],
+  ]);
+});
+
+test('native types: the copied board CLI shows the type and judges the epic by it', async (t) => {
+  const root = adoptToolkit(t, GITHUB_KIND_TYPES_TEST_CONFIG);
+  const { leanBoardPage, leanNode } = await load(root, 'lib/board-fixtures.mjs');
+  const page = leanBoardPage([
+    typedCard(11, 'Epic', { labels: ['area:ui'], content: { subIssuesSummary: { total: 2, completed: 2 } } }),
+    typedCard(12, null),
+  ].map((card) => leanNode(card)));
+  const callsFile = fakeGh.newCallsFile();
+
+  const json = runCopiedBoard(root, page, ['--all', '--json'], { FAKE_GH_CALLS: callsFile });
+  const listing = runCopiedBoard(root, page, ['--all']);
+
+  assert.deepEqual(JSON.parse(json.stdout).map((i) => [i.number, i.issueType]), [[11, 'Epic'], [12, null]]);
+  const queries = readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line).find((arg) => arg.startsWith('query=')));
+  assert.equal(queries.length, 1);
+  assert.ok(queries[0].includes('issueType { name }'), queries[0]);
+  assert.ok((json.stdout + json.stderr).includes('epic open but all 2 child issues closed — close it and move to Done'), json.stdout + json.stderr);
+  const lines = listing.stdout.split('\n');
+  assert.ok(lines.includes('    Epic, area:ui'), listing.stdout);
+  assert.ok(lines.includes('    no issue type'), listing.stdout);
+});
+
+test('native types: the copied board CLI refuses a personal account before any gh call', async (t) => {
+  const root = adoptToolkit(t, `${USER_CONFIG}export const KIND_TYPES = { epic: 'Epic', feature: 'Feature', task: 'Task', bug: 'Bug', docs: 'Documentation' };\n`);
+  const { leanBoardPage } = await load(root, 'lib/board-fixtures.mjs');
+  const callsFile = fakeGh.newCallsFile();
+
+  const run = runCopiedBoard(root, leanBoardPage([]), ['--all'], { FAKE_GH_CALLS: callsFile });
+
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.ok(run.stderr.includes("which only an organisation's repositories have"), run.stderr);
+  assert.equal(existsSync(callsFile), false);
+});
+
+test('kept labels: no request asks for an issue type and no card publishes one', async (t) => {
+  const root = adoptToolkit(t, ORGANISATION_CONFIG);
+  const { boardQuery, fetchBoard, normalizeItem } = await load(root, 'lib/board.mjs');
+  const { issueItemQuery } = await load(root, 'lib/board-move.mjs');
+
+  assert.equal(boardQuery().includes('issueType'), false);
+  assert.equal(issueItemQuery(1, { card: true }).includes('issueType'), false);
+  const items = fetchBoard(recordingGh('organization', await boardPageFor(root)).exec);
+  assert.deepEqual(Object.keys(normalizeItem(items[0])).sort(), [
+    'assignees', 'closingPullRequests', 'labels', 'number', 'openBlockers', 'parked', 'routing', 'state', 'status', 'subIssues', 'title',
   ]);
 });
