@@ -6,7 +6,9 @@ PartOf=graphical-session.target kestrel-voice.service
 Type=exec
 WorkingDirectory=%h/Projects/zaingulel/kestrel
 ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t /usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh
-ExecStartPre=+/usr/bin/nvidia-modprobe -c 0 -u -m
+ExecStartPre=+/usr/bin/nvidia-modprobe -c 0
+ExecStartPre=+/usr/bin/nvidia-modprobe -u -c 0
+ExecStartPre=+/usr/bin/nvidia-modprobe -m
 ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/Projects/zaingulel/kestrel/.runtime/brain-compute-cache
 ExecStartPost=+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-network-fence.sh
 ExecStartPost=+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh
