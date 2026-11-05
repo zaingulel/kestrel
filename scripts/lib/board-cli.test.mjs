@@ -22,6 +22,7 @@ after(() => toolkit.cleanup());
 
 const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
 const { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
+const { BOARD_HELP } = await toolkit.load('lib/board.mjs');
 const { main: boardMain } = await toolkit.load('board.mjs');
 
 const SCRIPT = toolkit.script('board.mjs');
@@ -134,6 +135,20 @@ test('board CLI: an unrecognised argument fails loud in the script idiom before 
   assert.match(run.stderr, /usage: node scripts\/board\.mjs/);
   assert.equal(/node:internal|at parseBoardArgs|\n\s+at /.test(run.stderr), false, run.stderr);
   assert.equal(run.stdout, '');
+  assert.deepEqual(run.calls, []);
+});
+
+test('board CLI: --help prints the modes on stdout and exits 0 before any tracker or GitHub read', () => {
+  const inProcess = runBoardInProcess(['--help'], UNREADABLE_PAGE);
+  assert.equal(inProcess.status, 0);
+  assert.equal(inProcess.stdout, `${BOARD_HELP}\n`);
+  assert.equal(inProcess.stderr, '');
+  assert.deepEqual(inProcess.calls, []);
+
+  const run = runBoard(['--help'], UNREADABLE_PAGE);
+  assert.equal(run.status, 0);
+  assert.equal(run.stdout, `${BOARD_HELP}\n`);
+  assert.equal(run.stderr, '');
   assert.deepEqual(run.calls, []);
 });
 

@@ -3,15 +3,15 @@
 // The log line is what a pull request body quotes as machine-written evidence, so the three
 // outcomes must be distinguishable: a real exit code, a signal, and a command that never started.
 // Mutation: collapse the spawn-failure branch back to `exit 1` and the third case goes red.
-// Each receipt also records the commit and working-tree state; an unknown state never reads as clean.
+// Each receipt also records the commit, the working-tree state and a fingerprint of the uncommitted changes (diff=); an unknown state never reads as clean.
 // Resolution of bare npm/npx runs with the platform set to win32, so removing it turns the npm/npx subtest red on every platform.
 // As the shim does, a CLI under the global prefix npm-prefix.js prints wins; always use the CLI beside the shim and the prefix subtest goes red.
-// Most subtests call `main` in-process and start no process; the command-line subtests keep Git off PATH; only the clean and hidden-untracked subtests start real Git, because only real Git shows what its status flags report.
+// Most subtests call `main` in-process and start no process; the command-line subtests keep Git off PATH; only the subtests of the clean tree, the untracked file and the diff fingerprint start real Git, because only real Git shows what its status flags and file contents report.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -147,6 +147,37 @@ function head(repo) {
   return spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).stdout.trim();
 }
 
+function git(repo, ...args) {
+  const r = spawnSync('git', [...IDENTITY, ...args], { cwd: repo, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+}
+
+// A commit holding one tracked file, and a .gitignore for .claude/ so the receipts the runs write are not part of the tree, as in the real repository.
+function seed(repo) {
+  writeFileSync(join(repo, '.gitignore'), '.claude/\n');
+  writeFileSync(join(repo, 'tracked.txt'), 'committed\n');
+  git(repo, 'add', '.gitignore', 'tracked.txt');
+  git(repo, 'commit', '-q', '-m', 'seed');
+}
+
+// One more run of a passing command against the repository's real Git; returns the receipt line it appended. `child` runs in place of the command.
+function runReal(repo, label, child) {
+  const r = runMain(repo, [label, '--', process.execPath, '-e', 'process.exit(0)'], {
+    spawnSync: fakeSpawn({ git: spawnSync, child }).spawnSync,
+  });
+  assert.equal(r.exitCode, 0, r.stderr);
+  return logLines(repo).at(-1);
+}
+
+const HEX16 = /^[0-9a-f]{16}$/;
+
+// The fingerprint a receipt line ends with.
+function diffOf(line) {
+  const match = line.match(/ tree=\w+ diff=(\S+)$/);
+  assert.ok(match, `the receipt must end with a diff= field: ${line}`);
+  return match[1];
+}
+
 function logLines(repo, file = 'job_42.md') {
   const lines = readFileSync(join(repo, '.claude', 'worklog', file), 'utf8').trim().split('\n');
   lines.forEach(receiptFields);
@@ -275,10 +306,10 @@ test('command receipt contract', async (t) => {
       assert.equal(lines.length, 2);
       assert.equal(ok.stdout.trimEnd(), lines[0], 'the command line prints the receipt it wrote');
       assert.equal(red.stdout.trimEnd(), lines[1], 'the command line prints the receipt it wrote');
-      const passing = lines[0].match(/^- \d{4}-\d{2}-\d{2}T[^ ]+ \| focused test \| `([^`]*)` \| exit 0 \| .* \| head=unknown tree=unknown$/);
+      const passing = lines[0].match(/^- \d{4}-\d{2}-\d{2}T[^ ]+ \| focused test \| `([^`]*)` \| exit 0 \| .* \| head=unknown tree=unknown diff=unknown$/);
       assert.ok(passing, 'the passing receipt must retain its timestamp, label, command field, and exit code');
       assert.deepEqual(JSON.parse(passing[1]), [process.execPath, '-e', 'process.exit(0)']);
-      assert.match(lines[1], /\| mutation red \| .* \| exit 3 \| .* \| head=unknown tree=unknown$/);
+      assert.match(lines[1], /\| mutation red \| .* \| exit 3 \| .* \| head=unknown tree=unknown diff=unknown$/);
     });
   });
 
@@ -293,7 +324,7 @@ test('command receipt contract', async (t) => {
           const receipt = detachedReceipt(dir);
           assert.deepEqual(receipt.command, command);
           assert.equal(receipt.outcome, 'exit 7');
-          assert.equal(receipt.state, 'head=unknown tree=unknown');
+          assert.equal(receipt.state, 'head=unknown tree=unknown diff=unknown');
         }
         const { spawnSync: spawn, calls } = fakeSpawn({ child: () => ({ status: 7 }) });
         const r = runMain(dir, ['package manager', '--', 'npm', 'run', 'lint'], { spawnSync: spawn, env: envWithPath(npmDir), platform: 'linux' });
@@ -405,7 +436,7 @@ test('command receipt contract', async (t) => {
       const r = run(dir, ['typo', '--', 'definitely-not-a-command-xyz', '--flag'], { env: envWithPath(dir) });
       assert.equal(r.status, 127);
       const [line] = logLines(dir, 'detached.md');
-      const failed = line.match(/\| typo \| `([^`]*)` \| spawn failed \(ENOENT\) \| .* \| head=unknown tree=unknown$/);
+      const failed = line.match(/\| typo \| `([^`]*)` \| spawn failed \(ENOENT\) \| .* \| head=unknown tree=unknown diff=unknown$/);
       assert.ok(failed, 'the receipt must retain its label, command field, and ENOENT outcome');
       assert.deepEqual(JSON.parse(failed[1]), ['definitely-not-a-command-xyz', '--flag']);
       assert.doesNotMatch(line, /exit 1/);
@@ -441,7 +472,7 @@ test('command receipt contract', async (t) => {
       ], { cwd: dir, encoding: 'utf8', env: envWithPath(dir) });
       assert.equal(result.status, 137, result.stderr);
       const [line] = logLines(dir, 'detached.md');
-      assert.match(line, /\| signal \| .* \| killed by SIGKILL \| .* \| head=unknown tree=unknown$/);
+      assert.match(line, /\| signal \| .* \| killed by SIGKILL \| .* \| head=unknown tree=unknown diff=unknown$/);
     });
   });
 
@@ -457,7 +488,7 @@ test('command receipt contract', async (t) => {
       ], { cwd: dir, encoding: 'utf8', env: envWithPath(dir) });
       assert.equal(result.status, 141, result.stderr);
       const [line] = logLines(dir, 'detached.md');
-      assert.match(line, /\| signal \| .* \| killed by SIGPIPE \| .* \| head=unknown tree=unknown$/);
+      assert.match(line, /\| signal \| .* \| killed by SIGPIPE \| .* \| head=unknown tree=unknown diff=unknown$/);
     });
   });
 
@@ -481,7 +512,7 @@ test('command receipt contract', async (t) => {
       const receipt = readFileSync(join(dir, '.claude', 'worklog', 'detached.md'), 'utf8').trimEnd();
       assert.equal(receipt.split('\n').length, 1, 'the receipt must remain on one Markdown line');
       assert.equal([...receipt.matchAll(/`/g)].length, 4, 'the command and reason fields must have only their delimiters');
-      const field = receipt.match(/\| receipt safety \| `([^`]*)` \| exit 0 \| .* \| head=unknown tree=unknown$/);
+      const field = receipt.match(/\| receipt safety \| `([^`]*)` \| exit 0 \| .* \| head=unknown tree=unknown diff=unknown$/);
       assert.ok(field, 'the receipt must contain one inline-code command field');
       assert.doesNotMatch(field[1], /[|<>&\u007f-\u009f\u2028\u2029]/);
       assert.deepEqual(JSON.parse(field[1]), command, 'the receipt must preserve the exact argument vector');
@@ -542,7 +573,7 @@ test('command receipt contract', async (t) => {
     });
   });
 
-  await t.test('a clean committed tree is recorded with its commit and tree=clean', () => {
+  await t.test('a clean committed tree is recorded with its commit, tree=clean and diff=none', () => {
     withRepo((repo) => {
       commit(repo);
       const r = runMain(repo, ['clean', '--', process.execPath, '-e', 'process.exit(0)'], {
@@ -550,7 +581,7 @@ test('command receipt contract', async (t) => {
       });
       assert.equal(r.exitCode, 0, r.stderr);
       const [line] = logLines(repo);
-      const state = line.match(/\| exit 0 \| .* \| head=([0-9a-f]{40}) tree=clean$/);
+      const state = line.match(/\| exit 0 \| .* \| head=([0-9a-f]{40}) tree=clean diff=none$/);
       assert.ok(state, line);
       assert.equal(state[1], head(repo));
     });
@@ -567,7 +598,7 @@ test('command receipt contract', async (t) => {
       assert.equal(r.exitCode, 0, r.stderr);
       const [line] = logLines(repo);
       assert.equal(receiptFields(line).outcome, 'exit 0');
-      assert.ok(line.endsWith(`| head=${head(repo)} tree=dirty`), line);
+      assert.match(line, new RegExp(`\\| head=${head(repo)} tree=dirty diff=[0-9a-f]{16}$`));
     });
   });
 
@@ -579,28 +610,25 @@ test('command receipt contract', async (t) => {
       assert.equal(r.exitCode, 0, r.stderr);
       const [line] = logLines(dir);
       assert.equal(receiptFields(line).outcome, 'exit 0');
-      assert.ok(line.endsWith('| head=unknown tree=unknown'), line);
+      assert.ok(line.endsWith('| head=unknown tree=unknown diff=unknown'), line);
       assert.ok(!line.includes('tree=clean'), line);
     });
   });
 
-  await t.test('a commit and a new file made during the run are recorded as a head change and a dirty tree', () => {
-    withDir((dir) => {
-      const before = 'a'.repeat(40);
-      const after = 'b'.repeat(40);
-      let state = { head: before, status: '' };
-      const { spawnSync: spawn } = fakeSpawn({
-        git: fakeGit(() => state),
-        child: () => {
-          state = { head: after, status: '?? made.txt\n' };
-          return { status: 0 };
-        },
+  await t.test('a commit and a new file made during the run are recorded as a head change, a dirty tree and a diff change', () => {
+    withRepo((repo) => {
+      seed(repo);
+      writeFileSync(join(repo, 'tracked.txt'), 'edited before the run\n');
+      const before = head(repo);
+      const line = runReal(repo, 'changed', () => {
+        writeFileSync(join(repo, 'made.txt'), 'made during the run\n');
+        git(repo, 'commit', '-q', '--allow-empty', '-m', 'during the run');
+        return { status: 0 };
       });
-      const r = runMain(dir, ['changed', '--', process.execPath, '-e', 'process.exit(0)'], { spawnSync: spawn });
-      assert.equal(r.exitCode, 0, r.stderr);
-      const [line] = logLines(dir);
+      const after = head(repo);
+      assert.notEqual(after, before);
       assert.equal(receiptFields(line).outcome, 'exit 0');
-      assert.ok(line.endsWith(`| head=${before}->${after} tree=dirty`), line);
+      assert.match(line, new RegExp(`\\| head=${before}->${after} tree=dirty diff=[0-9a-f]{16}->[0-9a-f]{16}$`));
     });
   });
 
@@ -611,7 +639,157 @@ test('command receipt contract', async (t) => {
       assert.equal(r.stderr, '');
       const receipt = readFileSync(join(dir, '.claude', 'worklog', 'detached.md'), 'utf8').trimEnd();
       assert.equal(receiptFields(receipt).outcome, 'exit 0');
-      assert.ok(receipt.endsWith('| head=unknown tree=unknown'), receipt);
+      assert.ok(receipt.endsWith('| head=unknown tree=unknown diff=unknown'), receipt);
     });
+  });
+
+  await t.test('two runs over the same uncommitted change record the same diff, 16 hex characters', () => {
+    withRepo((repo) => {
+      seed(repo);
+      writeFileSync(join(repo, 'tracked.txt'), 'edited\n');
+      const first = diffOf(runReal(repo, 'first'));
+      const second = diffOf(runReal(repo, 'second'));
+      assert.match(first, HEX16);
+      assert.equal(second, first);
+    });
+  });
+
+  await t.test('a further edit changes the diff, a dirty tree differs from a clean one, and restoring the file reads none again', () => {
+    withRepo((repo) => {
+      seed(repo);
+      const clean = diffOf(runReal(repo, 'clean'));
+      writeFileSync(join(repo, 'tracked.txt'), 'edited once\n');
+      const once = diffOf(runReal(repo, 'once'));
+      writeFileSync(join(repo, 'tracked.txt'), 'edited twice\n');
+      const twice = diffOf(runReal(repo, 'twice'));
+      writeFileSync(join(repo, 'tracked.txt'), 'committed\n');
+      const restored = diffOf(runReal(repo, 'restored'));
+      assert.equal(clean, 'none');
+      assert.match(once, HEX16);
+      assert.match(twice, HEX16);
+      assert.notEqual(once, twice, 'a different edit must give a different diff');
+      assert.notEqual(once, clean, 'a dirty tree must not fingerprint like a clean one');
+      assert.equal(restored, 'none', 'content equal to HEAD leaves nothing uncommitted');
+    });
+  });
+
+  await t.test('an untracked file counts by its content, not its modification time, even when git hides untracked files', () => {
+    for (const hidden of [false, true]) {
+      withRepo((repo) => {
+        seed(repo);
+        if (hidden) git(repo, 'config', 'status.showUntrackedFiles', 'no');
+        const file = join(repo, 'scratch.txt');
+        const clean = diffOf(runReal(repo, 'before the file'));
+        writeFileSync(file, 'one\n');
+        const added = diffOf(runReal(repo, 'added'));
+        writeFileSync(file, 'two\n');
+        const changed = diffOf(runReal(repo, 'changed'));
+        writeFileSync(file, 'two\n');
+        utimesSync(file, new Date('2001-01-01T00:00:00Z'), new Date('2001-01-01T00:00:00Z'));
+        const touched = diffOf(runReal(repo, 'touched'));
+        assert.equal(clean, 'none');
+        assert.match(added, HEX16, `hidden=${hidden}`);
+        assert.match(changed, HEX16, `hidden=${hidden}`);
+        assert.notEqual(added, changed, `a new content must give a new diff (hidden=${hidden})`);
+        assert.equal(touched, changed, `only the modification time changed (hidden=${hidden})`);
+      });
+    }
+  });
+
+  await t.test('staging a change leaves the diff as it was', () => {
+    withRepo((repo) => {
+      seed(repo);
+      writeFileSync(join(repo, 'tracked.txt'), 'edited\n');
+      const unstaged = diffOf(runReal(repo, 'unstaged'));
+      git(repo, 'add', 'tracked.txt');
+      const staged = diffOf(runReal(repo, 'staged'));
+      assert.match(unstaged, HEX16);
+      assert.equal(staged, unstaged);
+    });
+  });
+
+  await t.test('staging a new file leaves the diff as it was', () => {
+    withRepo((repo) => {
+      seed(repo);
+      writeFileSync(join(repo, 'scratch.txt'), 'new\n');
+      const untracked = diffOf(runReal(repo, 'untracked'));
+      git(repo, 'add', 'scratch.txt');
+      const staged = diffOf(runReal(repo, 'staged'));
+      assert.match(untracked, HEX16);
+      assert.match(staged, HEX16);
+      assert.equal(staged, untracked);
+    });
+  });
+
+  // File names with quote characters or a newline are not valid on Windows.
+  await t.test('an untracked file whose name holds quote characters or a newline counts by its own content', { skip: process.platform === 'win32' && 'file names with quotes or newlines are not valid on Windows' }, () => {
+    withRepo((repo) => {
+      seed(repo);
+      const quoted = join(repo, '"tracked.txt"');
+      writeFileSync(quoted, 'one\n');
+      const quotedOne = diffOf(runReal(repo, 'quoted one'));
+      writeFileSync(quoted, 'two\n');
+      const quotedTwo = diffOf(runReal(repo, 'quoted two'));
+      assert.match(quotedOne, HEX16);
+      assert.match(quotedTwo, HEX16);
+      assert.notEqual(quotedOne, quotedTwo, 'a name that looks quoted must still be hashed by its own content');
+      rmSync(quoted);
+
+      const broken = join(repo, 'a\nb.txt');
+      writeFileSync(broken, 'one\n');
+      const brokenOne = diffOf(runReal(repo, 'newline one'));
+      writeFileSync(broken, 'two\n');
+      const brokenTwo = diffOf(runReal(repo, 'newline two'));
+      assert.match(brokenOne, HEX16);
+      assert.match(brokenTwo, HEX16);
+      assert.notEqual(brokenOne, brokenTwo, 'a name holding a newline must still be hashed by its own content');
+    });
+  });
+
+  await t.test('a command that edits a tracked file is recorded as a diff change', () => {
+    withRepo((repo) => {
+      seed(repo);
+      writeFileSync(join(repo, 'tracked.txt'), 'edited before the run\n');
+      const line = runReal(repo, 'edits', () => {
+        writeFileSync(join(repo, 'tracked.txt'), 'edited during the run\n');
+        return { status: 0 };
+      });
+      assert.match(line, / tree=dirty diff=[0-9a-f]{16}->[0-9a-f]{16}$/);
+      const [first, second] = diffOf(line).split('->');
+      assert.notEqual(first, second);
+    });
+  });
+
+  await t.test('an edit that changes only line endings changes the diff even when git normalizes them', () => {
+    const settings = {
+      'a committed .gitattributes': (repo) => {
+        writeFileSync(join(repo, '.gitattributes'), '* text=auto eol=lf\n');
+        git(repo, 'add', '.gitattributes');
+        git(repo, 'commit', '-q', '-m', 'normalize line endings');
+      },
+      'core.autocrlf true': (repo) => git(repo, 'config', 'core.autocrlf', 'true'),
+    };
+    for (const [setting, configure] of Object.entries(settings)) {
+      withRepo((repo) => {
+        seed(repo);
+        configure(repo);
+        writeFileSync(join(repo, 'scratch.txt'), 'one\n');
+        const lf = diffOf(runReal(repo, 'untracked lf'));
+        writeFileSync(join(repo, 'scratch.txt'), 'one\r\n');
+        const crlf = diffOf(runReal(repo, 'untracked crlf'));
+        assert.match(lf, HEX16, setting);
+        assert.match(crlf, HEX16, setting);
+        assert.notEqual(lf, crlf, `${setting}: an untracked file changed only in its line endings must change the diff`);
+        if (setting === 'a committed .gitattributes') {
+          writeFileSync(join(repo, 'tracked.txt'), 'edited\n');
+          const trackedLf = diffOf(runReal(repo, 'tracked lf'));
+          writeFileSync(join(repo, 'tracked.txt'), 'edited\r\n');
+          const trackedCrlf = diffOf(runReal(repo, 'tracked crlf'));
+          assert.match(trackedLf, HEX16, setting);
+          assert.match(trackedCrlf, HEX16, setting);
+          assert.notEqual(trackedLf, trackedCrlf, `${setting}: a tracked file changed only in its line endings must change the diff`);
+        }
+      });
+    }
   });
 });

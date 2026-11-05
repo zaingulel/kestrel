@@ -55,7 +55,8 @@ Lenses:
    staged coordinator validation under `resume`'s "5. Build", including honest chronology-gap recovery under
    "6. Verify and review"; later mutations cannot repair history. Derive base behaviour from the job base, not
    implementation earlier in the same job. A test that accepts the claimed wrong behaviour,
-   or asserts wall-clock timing instead of the behaviour, is a finding.
+   or asserts wall-clock timing instead of the behaviour, is a finding. Check each mutation receipt's `diff=`
+   against the passing run's as `docs/TESTING-STRATEGY.md` says; a match is an unexecuted mutation, a finding.
 7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Where
    `scripts/lib/board-config.mjs` exports `TRACKER = "jira"`, first read `docs/JIRA-CARDS.md` and use its
    "Review snapshots" card-text substitution instead of the GitHub issue read below. Where it exports

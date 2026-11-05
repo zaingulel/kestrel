@@ -1,9 +1,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { installFakeGh } from './fake-gh.mjs';
-import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
@@ -16,7 +17,7 @@ const {
   moveCards,
   moveLanes,
 } = await toolkit.load('lib/board-move.mjs');
-const { main: boardMoveMain } = await toolkit.load('board-move.mjs');
+const { main: boardMoveMain, BOARD_MOVE_HELP } = await toolkit.load('board-move.mjs');
 const { BOARD_OWNER, BOARD_REPOSITORY, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } = await toolkit.load('lib/board-config.mjs');
 const { issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
 
@@ -368,8 +369,17 @@ test('board-move --batch moves every pair, prints one line each on stdout and re
 const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
   '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
   '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
+  '       node scripts/board-move.mjs --help   prints the modes, with no board read\n' +
   '       on a Linear or Jira board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready\n' +
   '       on an Azure board use AB-<positive int32>   e.g. board-move.mjs AB-299 Ready';
+
+// Literal, like USAGE_TEXT: the printed help is the oracle for what an agent reads.
+const HELP_TEXT = `${USAGE_TEXT}
+
+  <issue#> <Status>                 move one card; a several-word Status may be unquoted
+  --batch <issue#>:<Status>...      move each card to its Status
+  --lane <issue#>:<option|none>...  put each card in a parked-lane option; none clears it
+  --help                            this text, with no board read`;
 
 test('board-move rejects bad arguments before any gh call: usage problems return 2 and a malformed batch pair returns 1', () => {
   for (const args of [[], ['abc', 'Done'], ['453'], ['--batch']]) {
@@ -386,6 +396,64 @@ test('board-move rejects bad arguments before any gh call: usage problems return
   assert.equal(sink.stdout, '');
   assert.equal(sink.stderr, 'board-move: malformed batch pair "nonsense" — expected "<issue#>:<Status>"\n');
   assert.deepEqual(calls, []);
+});
+
+test('board-move --help prints every mode on stdout and returns 0 before any tracker or gh call', () => {
+  const { exec, calls } = recordingExec({});
+  const sink = outputSink();
+  assert.equal(boardMoveMain(['--help'], { ghExec: exec, output: sink }), 0);
+  assert.equal(sink.stdout, `${HELP_TEXT}\n`);
+  assert.equal(sink.stderr, '');
+  assert.deepEqual(calls, []);
+  for (const args of [['--help', '453'], ['453', 'Done', '--help'], ['--batch', '--help']]) {
+    const refused = outputSink();
+    assert.equal(boardMoveMain(args, { ghExec: exec, output: refused }), 2, JSON.stringify(args));
+    assert.equal(refused.stdout, '');
+    assert.equal(refused.stderr, `${USAGE_TEXT}\n`, JSON.stringify(args));
+  }
+  assert.deepEqual(calls, []);
+});
+
+// The help is the one place an agent learns the modes, so it must name exactly what the command
+// accepts. The flags are read from the real source through a parser, so a mode added without a help
+// line differs here.
+test('BOARD_MOVE_HELP names exactly the modes and arguments board-move accepts', NEEDS_PARSER, () => {
+  const accepted = flagLiterals(fileURLToPath(new URL('../board-move.mjs', import.meta.url)));
+  assert.deepEqual([...new Set(BOARD_MOVE_HELP.match(/--[a-z][a-z-]*=?/g))].sort(), accepted);
+});
+
+// Each help line's form is driven through main, so a mode the command stops accepting, or a form that
+// no longer needs its last argument, fails. Every form but --help must succeed against gh; the --lane
+// form on this toolkit, which has no parked lane, must instead refuse with that reason and no other.
+test('each BOARD_MOVE_HELP mode line runs as written and is a usage error without its last argument', () => {
+  const modeLines = BOARD_MOVE_HELP.split('\n\n')[1].split('\n').filter((line) => line.startsWith('  '));
+  assert.ok(modeLines.length > 0, 'the help has no mode lines');
+  for (const line of modeLines) {
+    const form = line.trim().split(/ {2,}/)[0];
+    const args = form
+      .replace('<issue#>:<Status>...', '453:Done')
+      .replace('<issue#>:<option|none>...', '453:none')
+      .replace('<issue#>', '453')
+      .replace('<Status>', 'Done')
+      .split(' ');
+    const { exec, calls } = recordingExec({ 453: 'item-453' });
+    const sink = outputSink();
+    const code = boardMoveMain(args, { ghExec: exec, output: sink });
+    if (args[0] === '--lane') {
+      assert.equal(code, 1, form);
+      assert.equal(sink.stderr, `board-move: ${NO_PARKED_LANE}\n`, form);
+    } else {
+      assert.equal(code, 0, `${form}: ${sink.stderr}`);
+      assert.equal(sink.stderr, '', form);
+      if (args[0] !== '--help') assert.ok(calls.length > 0, `${form} never reached gh`);
+    }
+
+    const short = recordingExec({ 453: 'item-453' });
+    const shortSink = outputSink();
+    assert.equal(boardMoveMain(args.slice(0, -1), { ghExec: short.exec, output: shortSink }), 2, `${form} without its last argument`);
+    assert.equal(shortSink.stderr, `${USAGE_TEXT}\n`);
+    assert.deepEqual(short.calls, []);
+  }
 });
 
 test('board-move selects only the configured Project among historical memberships', () => {

@@ -7,6 +7,8 @@ const TAIL_HEADINGS = ['Product', 'Hard constraints', 'Architecture seams', 'Sur
 const SURFACE_ROWS = ['plan-first', 'owner-directed', 'sign-off', 'security review', 'hard to undo', 'wide reach'];
 const PROFILE_HEADINGS = ['Product', 'Architecture seams', 'Grounding', 'Conventions'];
 const PROFILE_ROWS = ['generated artifacts', 'visual verification', 'fixtures', 'documentation routines'];
+// Delivery reads an absent before ready row as none, so a profile written without it still passes after a release update.
+const OPTIONAL_PROFILE_ROW = 'before ready';
 
 const headingsOf = (text) => [...text.matchAll(/^## (.*)$/gm)].map((match) => match[1]);
 const sectionOf = (text, heading) =>
@@ -43,8 +45,9 @@ export function profileShapeProblem(profile) {
     return 'The Conventions heading must end its line with a line feed and stand above its table: the installed test reads neither carriage-return line endings nor a heading that ends the file.';
   }
   const rows = tableRowNames(conventions);
-  if (rows.join('\n') !== PROFILE_ROWS.join('\n')) {
-    return `The Conventions table must hold exactly the rows ${PROFILE_ROWS.join(', ')}, in that order; it holds ${rows.join(', ') || 'none'}.`;
+  const requiredRows = rows.at(-1) === OPTIONAL_PROFILE_ROW ? rows.slice(0, -1) : rows;
+  if (requiredRows.join('\n') !== PROFILE_ROWS.join('\n')) {
+    return `The Conventions table must hold exactly the rows ${PROFILE_ROWS.join(', ')}, in that order, and may end with the row ${OPTIONAL_PROFILE_ROW}; it holds ${rows.join(', ') || 'none'}.`;
   }
   return undefined;
 }

@@ -18,7 +18,7 @@ import { gitEnvironment } from './factory-sync.mjs';
 import { CARD_PROMPT, END_PROMPT_PREFIX, GUARD_WITNESS, sessionArgv } from './product-manager-run.mjs';
 import { main } from '../product-manager-run.mjs';
 
-const USAGE = 'usage: node scripts/product-manager-run.mjs';
+const USAGE = 'usage: node scripts/product-manager-run.mjs [--pre-approved]';
 const END_MESSAGE = 'End of run summary.';
 const END_REPLY = { message: END_MESSAGE };
 // The runtime's own refusal line, as the guard probe showed it on the session's stderr (spelled out here, not imported).
@@ -368,10 +368,90 @@ test('a session with the publish refusal but no guard refusal ends the run', asy
   assert.match(end.printed[0], /guard refusal/);
 });
 
+// The pre-approved kind: its prompts and refusal line are spelled out here, not imported.
+const PRE_APPROVED_CARD_PROMPT = 'Continue the pre-approved run.';
+const PRE_APPROVED_END_PREFIX = 'End the pre-approved run: ';
+const PRE_APPROVED_REFUSAL = 'Command blocked by PreToolUse hook: Blocked: a pre-approved run session';
+const preApprovedShown = (reply) => ({ ...reply, stderr: `${STDERR_FIRST_WITNESS}${PRE_APPROVED_REFUSAL} does not publish\n` });
+
 // Recurring cost: one read of the resume skill.
-test('the resume skill names the launcher command and the prompts the launcher sends', () => {
+test('the resume skill names both launcher commands, the prompts and probes the launcher sends, and leaves recorded cards out of a product manager pick', () => {
   const resume = readFileSync(new URL('../../.agents/skills/resume/SKILL.md', import.meta.url), 'utf8');
-  for (const text of ['node scripts/product-manager-run.mjs', CARD_PROMPT, END_PROMPT_PREFIX,'git push --dry-run ./.product-manager-run-no-remote HEAD']) {
+  for (const text of [
+    'node scripts/product-manager-run.mjs', CARD_PROMPT, END_PROMPT_PREFIX, 'git push --dry-run ./.product-manager-run-no-remote HEAD',
+    'node scripts/product-manager-run.mjs --pre-approved', PRE_APPROVED_CARD_PROMPT, PRE_APPROVED_END_PREFIX, 'git push --dry-run ./.pre-approved-run-no-remote HEAD',
+  ]) {
     assert.ok(resume.includes(text), `the resume skill does not hold ${text}`);
   }
+  const pick = resume.slice(resume.indexOf('5. **The pick** is the card session'), resume.indexOf('6. **The job.**'));
+  assert.ok(pick.includes('node scripts/board.mjs --approval check <card>...'), 'the product manager pick does not run the advance approval check');
+});
+
+test('a pre-approved run sends its own prompts, needs both witnesses, continues on merged, and any other argument exits 2 with usage', async () => {
+  const run = await runWith([
+    preApprovedShown({ message: 'Run result: merged 7' }),
+    preApprovedShown({ message: 'Run result: stop none: nothing is free' }),
+    preApprovedShown(END_REPLY),
+  ], ['--pre-approved']);
+  assert.deepEqual(run.sessions.calls.map((call) => call.prompt), [PRE_APPROVED_CARD_PROMPT, PRE_APPROVED_CARD_PROMPT, PRE_APPROVED_END_PREFIX + run.folder]);
+  assert.equal(run.code, 0);
+  assert.deepEqual(run.logged, ['Card session 1 finished: merged; the guard refusal was shown', END_MESSAGE]);
+
+  // A session missing either witness stops the run, and the product manager's publish refusal is not the pre-approved one.
+  const stop = preApprovedShown({ message: 'Run result: stop none: nothing is free' });
+  const noPreApproved = await runWith([shown({ message: 'Run result: merged 7' }), stop, preApprovedShown(END_REPLY)], ['--pre-approved']);
+  const noGuard = await runWith([{ message: 'Run result: merged 7', stderr: `${PRE_APPROVED_REFUSAL}\n` }, stop, preApprovedShown(END_REPLY)], ['--pre-approved']);
+  for (const [label, missing] of [['the pre-approved refusal', noPreApproved], ['the guard refusal', noGuard]]) {
+    assert.equal(missing.sessions.calls.length, 1, label);
+    assert.equal(missing.code, 1, label);
+    assert.equal(missing.printed.length, 1, label);
+    assert.match(missing.printed[0], /Before intake/, label);
+  }
+
+  // The product manager kind is unchanged: a merged line is no result there and ends the run.
+  const productManager = await runWith([shown({ message: 'Run result: merged 7' }), shown(END_REPLY)]);
+  assert.equal(productManager.sessions.calls.length, 2);
+  assert.equal(productManager.runEnd, 'Card session 1 ended without a Run result line\n');
+
+  for (const args of [['--bogus'], ['--pre-approved', '--bogus'], ['--pre-approved', '--pre-approved']]) {
+    const refused = await runWith([], args);
+    assert.equal(refused.code, 2, args.join(' '));
+    assert.deepEqual(refused.errors, [USAGE], args.join(' '));
+    assert.deepEqual(refused.logged, [], args.join(' '));
+    assert.equal(refused.sessions.calls.length, 0, args.join(' '));
+  }
+});
+
+// Stand-in for `codex` that shows both refusals and logs, as JSON, the two run session marks it was started with.
+const PRE_APPROVED_STAND_IN = `
+import { writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
+const argv = process.argv.slice(2);
+const prompt = argv.at(-1);
+const file = argv[argv.indexOf('--output-last-message') + 1];
+console.log(JSON.stringify({ preApproved: process.env.PRE_APPROVED_RUN_SESSION ?? 'no mark', productManager: process.env.PRODUCT_MANAGER_RUN_SESSION ?? 'no mark' }));
+console.error(${JSON.stringify(GUARD_REFUSAL)});
+console.error(${JSON.stringify(PRE_APPROVED_REFUSAL)});
+if (prompt.startsWith(${JSON.stringify(PRE_APPROVED_END_PREFIX)})) writeFileSync(file, prompt);
+else writeFileSync(file, basename(file) === 'card-1.txt' ? 'Run result: merged 1' : 'Run result: stop none: done');
+`;
+
+test('the real child wire: a pre-approved run marks every session with one run start and no product manager mark', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'product-manager-run-test-'));
+  let marks;
+  try {
+    const script = join(home, 'stand-in.mjs');
+    writeFileSync(script, PRE_APPROVED_STAND_IN);
+    const logged = [];
+    const code = await main(['--pre-approved'], { command: [process.execPath, script], output: { log: (text) => logged.push(text), error: assert.fail } });
+    assert.equal(code, 0);
+    const folder = logged.at(-1).slice(PRE_APPROVED_END_PREFIX.length);
+    marks = ['card-1', 'card-2', 'end'].map((name) => JSON.parse(readFileSync(join(folder, `${name}.jsonl`), 'utf8')));
+    rmSync(folder, { recursive: true, force: true });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  assert.match(marks[0].preApproved, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  assert.deepEqual(marks.map((mark) => mark.preApproved), [marks[0].preApproved, marks[0].preApproved, marks[0].preApproved]);
+  assert.deepEqual(marks.map((mark) => mark.productManager), ['no mark', 'no mark', 'no mark']);
 });

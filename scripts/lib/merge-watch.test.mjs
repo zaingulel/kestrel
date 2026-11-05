@@ -1,7 +1,8 @@
 // merge-watch.test.mjs: the merge watch's exit contract and required-check rules, and the draft wait's exit contract,
 // through the fake-gh seam.
 //
-// Polling scenarios run `main` with an in-memory ghExec and a recording sleep that returns at once. The pull-request
+// Polling scenarios run `main` with an in-memory ghExec, a fake clock and a recording sleep that advances it by the
+// requested milliseconds and returns at once. The pull-request
 // form's argument contract and terminal success/failure cases run the real command as a subprocess with the same fake
 // replies. The draft wait also has one positive and one negative process case in fresh Git repositories, isolated from
 // the machine's and the environment's Git configuration. The cloud draft case also runs under an injected URL rewrite.
@@ -23,8 +24,8 @@ import { main } from '../merge-watch.mjs';
 const CLI = fileURLToPath(new URL('../merge-watch.mjs', import.meta.url));
 const USAGE = 'usage: node scripts/merge-watch.mjs <pull-request-number> | --draft job/<issue>';
 
-// Each state-view call advances the scenario; checks use that step and the last step repeats. A reply is
-// [exit code, body]. Rules preserve gh's pagination/slurp behavior, and both paths refuse missing arguments.
+// Each state-view call advances the scenario; checks, workflow runs and jobs use that step and the last step repeats.
+// A reply is [exit code, body]. Rules preserve gh's pagination/slurp behavior, and both paths refuse missing arguments.
 function scenarioReply(args, scenario) {
   const refuse = (why) => [99, 'fake gh: ' + why + ': ' + args.join(' ')];
   const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
@@ -41,7 +42,7 @@ function scenarioReply(args, scenario) {
   if (args[0] === 'pr') {
     if (!args.includes('7')) return refuse('<pr> was not passed');
     if (args[1] === 'view' && flag('--json') === 'baseRefName') return scenario.base;
-    if (args[1] === 'view' && flag('--json') === 'state,mergeStateStatus') {
+    if (args[1] === 'view' && flag('--json') === 'state,mergeStateStatus,headRefOid') {
       scenario.n += 1;
       return step(scenario.n).view;
     }
@@ -61,6 +62,14 @@ function scenarioReply(args, scenario) {
       if (!args.includes('--paginate')) return [0, JSON.stringify(pages[0])];
       return [0, args.includes('--slurp') ? JSON.stringify(pages) : pages.map((page) => JSON.stringify(page)).join('')];
     }
+    // The stall reads: the pull request's timeline, the head commit's workflow runs and a run's jobs, each paged.
+    const paged = args.includes('--paginate') && args.includes('--slurp');
+    const stallRead = (reply) => (paged ? reply : refuse('a stall read was not paginated and slurped'));
+    if (path === 'repos/{owner}/{repo}/issues/7/timeline?per_page=100') return stallRead(scenario.timeline);
+    if (/^repos\/\{owner\}\/\{repo\}\/actions\/runs\?head_sha=[0-9a-f]{40}&per_page=100$/.test(path)) {
+      return stallRead(step(scenario.n).runs);
+    }
+    if (/^repos\/\{owner\}\/\{repo\}\/actions\/runs\/\d+\/jobs\?per_page=100$/.test(path)) return stallRead(step(scenario.n).jobs);
     if (path.startsWith('repos/{owner}/{repo}/actions/')) {
       return scenario.actions[path.slice('repos/{owner}/{repo}/actions/'.length)] ?? refuse('unknown actions path');
     }
@@ -85,20 +94,41 @@ process.exit(code);
 `);
 after(() => fakeGh.cleanup());
 
-const view = (state, mergeStateStatus) => [0, JSON.stringify({ state, mergeStateStatus })];
+const HEAD = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+const OTHER_HEAD = 'b2c3d4e5f60718293a4b5c6d7e8f9012345678a1';
+
+const view = (state, mergeStateStatus, headRefOid = HEAD) => [0, JSON.stringify({ state, mergeStateStatus, headRefOid })];
 const checks = (byName) => [0, JSON.stringify(Object.entries(byName).map(([name, bucket]) => ({ name, bucket })))];
 
 const OPEN_BLOCKED = view('OPEN', 'BLOCKED');
 const MERGED = { view: view('MERGED', 'CLEAN'), checks: checks({ test: 'pass', 'sweep-scope': 'pass' }) };
 
+// The stall reads' replies: GitHub's `--paginate --slurp` pages of the head's workflow runs and a run's jobs.
+const RUN_CREATED = '2026-01-01T10:01:00Z';
+const runsReply = (...items) => [0, JSON.stringify([{ workflow_runs: items }])];
+const workflowRun = (id, status, created_at = RUN_CREATED) => ({ id, status, created_at });
+const jobsReply = (...items) => [0, JSON.stringify([{ jobs: items }])];
+const testJob = (overrides = {}) => ({ id: 901, name: 'test (linux)', status: 'queued', runner_name: null, labels: ['self-hosted', 'linux'], ...overrides });
+
+// A pass with required checks pending, so the watch sleeps; `runs` and `jobs` default to a finished run on the head,
+// whose jobs nobody reads. A pass with no required check reported is the one the no-run clock runs on.
+const PENDING = checks({ test: 'pending', 'sweep-scope': 'pending' });
+const UNREPORTED = [1, "no required checks reported on the 'job/7' branch"];
+const NO_RUNS = runsReply();
+const NO_RUN_PASS = { view: OPEN_BLOCKED, checks: UNREPORTED, runs: NO_RUNS };
+const passes = (count, step) => Array.from({ length: count }, () => step);
+
 // The base branch requires `classic` through classic protection and `ruled` through a ruleset; the default union is
 // split across the two sources so dropping either read shows. The rules come as two pages, the ruleset's checks on
 // page two so reading page one alone shows; `extraRules` joins page two. `branch` or `rules` replaces that read's
-// reply, and `base` the base-branch read's. `actions` maps a path under `actions/` to its reply.
-function createScenario(steps, { classic = ['test'], ruled = ['sweep-scope'], extraRules = [], base, branch, rules, actions = {}, draft } = {}) {
+// reply, and `base` the base-branch read's. `actions` maps a path under `actions/` to its reply. A step's `runs` and
+// `jobs` replace that pass's workflow run and job replies. `timeline` replaces the pull request timeline's reply, which
+// defaults to one page with no event, a pull request that was never a draft.
+function createScenario(steps, { classic = ['test'], ruled = ['sweep-scope'], extraRules = [], base, branch, rules, actions = {}, draft, timeline } = {}) {
   return {
-    steps,
+    steps: steps.map((step) => ({ runs: runsReply(workflowRun(501, 'completed')), jobs: jobsReply(), ...step })),
     draft,
+    timeline: timeline ?? [0, JSON.stringify([[]])],
     n: 0,
     actions,
     base: base ?? [0, JSON.stringify({ baseRefName: 'trunk' })],
@@ -129,6 +159,10 @@ function callKind([group, command, ...rest]) {
   if (group === 'pr' && command === 'view') return rest.includes('baseRefName') ? 'base' : 'view';
   if (group === 'pr' && command === 'checks') return 'checks';
   if (group === 'api' && command === 'rate_limit') return 'rate_limit';
+  const apiPath = group === 'api' ? [command, ...rest].find((arg) => arg.startsWith('repos/')) ?? '' : '';
+  if (apiPath.endsWith('/timeline?per_page=100')) return 'timeline';
+  if (apiPath.includes('/actions/runs?head_sha=')) return 'runs';
+  if (apiPath.endsWith('/jobs?per_page=100')) return 'jobs';
   if (group === 'api' && [command, ...rest].some((arg) => arg.startsWith('repos/{owner}/{repo}/actions/'))) return 'actions';
   if (group === 'api') return [command, ...rest].some((arg) => arg.includes('/rules/branches/')) ? 'rules' : 'branch';
   return 'other';
@@ -146,7 +180,8 @@ function assertReadOnly(calls) {
   }
 }
 
-// Runs the command in-process against the scenario; a sleep past the twentieth means the watch never stopped.
+// Runs the command in-process against the scenario; a sleep past the hundredth means the watch never stopped. The fake
+// clock starts at an arbitrary moment and moves only by the milliseconds the watch sleeps.
 async function watch(steps, options) {
   const scenario = createScenario(steps, options);
   const calls = [];
@@ -159,11 +194,13 @@ async function watch(steps, options) {
   const lines = [];
   const sleeps = [];
   const output = { log: (line) => lines.push(line), error: (line) => lines.push(line) };
+  let clock = 1_700_000_000_000;
   const sleep = async (ms) => {
     sleeps.push(ms);
-    if (sleeps.length > 20) throw new Error('the watch did not stop');
+    clock += ms;
+    if (sleeps.length > 100) throw new Error('the watch did not stop');
   };
-  const status = await main(['7'], { ghExec, output, sleep });
+  const status = await main(['7'], { ghExec, output, sleep, now: () => clock });
   assertReadOnly(calls);
   return { status, lines, last: lines.at(-1), sleeps, calls, reads: calls.filter((call) => callKind(call) === 'view').length };
 }
@@ -335,7 +372,6 @@ test('the watch keeps waiting through BLOCKED while a required check from either
 });
 
 test('the watch keeps waiting on a failed required check while a newer unfinished run of the same workflow on the same head will report it again', async () => {
-  const head = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
   const staleFailure = [0, JSON.stringify([
     { name: 'test', bucket: 'fail', link: 'https://github.com/owner/repo/actions/runs/41/job/77' },
     { name: 'sweep-scope', bucket: 'pass', link: 'https://github.com/owner/repo/actions/runs/52/job/78' },
@@ -349,8 +385,8 @@ test('the watch keeps waiting on a failed required check while a newer unfinishe
       ],
       {
         actions: {
-          'runs/41': [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: head })],
-          [`workflows/9/runs?head_sha=${head}`]: [0, JSON.stringify({
+          'runs/41': [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: HEAD })],
+          [`workflows/9/runs?head_sha=${HEAD}`]: [0, JSON.stringify({
             workflow_runs: [{ run_number: 5, status }, { run_number: 4, status: 'completed' }],
           })],
         },
@@ -361,14 +397,13 @@ test('the watch keeps waiting on a failed required check while a newer unfinishe
     assert.deepEqual(superseded.sleeps, [30_000, 30_000]);
     assert.deepEqual(
       superseded.calls.filter((call) => callKind(call) === 'actions'),
-      [['api', 'repos/{owner}/{repo}/actions/runs/41'], ['api', `repos/{owner}/{repo}/actions/workflows/9/runs?head_sha=${head}`]],
+      [['api', 'repos/{owner}/{repo}/actions/runs/41'], ['api', `repos/{owner}/{repo}/actions/workflows/9/runs?head_sha=${HEAD}`]],
       'the failed check must be judged by its own run, then by its workflow\'s runs on that head',
     );
   }
 });
 
 test('a failed required check still stops the watch when no newer unfinished run of its own workflow exists', async () => {
-  const head = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
   const testLink = 'https://github.com/owner/repo/actions/runs/41/job/77';
   const sweepLink = 'https://github.com/owner/repo/actions/runs/52/job/78';
   const failedTest = (link) => [
@@ -377,12 +412,12 @@ test('a failed required check still stops the watch when no newer unfinished run
   ];
   // The failed `test` check's own run is run number 4 of workflow 9; `runs` is that workflow's list on the head.
   const testRuns = (runs) => ({
-    'runs/41': [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: head })],
-    [`workflows/9/runs?head_sha=${head}`]: [0, JSON.stringify({ workflow_runs: runs })],
+    'runs/41': [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: HEAD })],
+    [`workflows/9/runs?head_sha=${HEAD}`]: [0, JSON.stringify({ workflow_runs: runs })],
   });
   const sweepRuns = {
-    'runs/52': [0, JSON.stringify({ workflow_id: 12, run_number: 8, head_sha: head })],
-    [`workflows/12/runs?head_sha=${head}`]: [0, JSON.stringify({ workflow_runs: [{ run_number: 8, status: 'completed' }] })],
+    'runs/52': [0, JSON.stringify({ workflow_id: 12, run_number: 8, head_sha: HEAD })],
+    [`workflows/12/runs?head_sha=${HEAD}`]: [0, JSON.stringify({ workflow_runs: [{ run_number: 8, status: 'completed' }] })],
   };
   for (const [label, rows, actions, reason] of [
     ['only its own run, completed', failedTest(testLink), testRuns([{ run_number: 4, status: 'completed' }]), 'a required check failed: fail pass'],
@@ -410,19 +445,18 @@ test('a failed required check still stops the watch when no newer unfinished run
 });
 
 test('the watch exits 1 on its first pass when a workflow run reply it needs cannot be read', async () => {
-  const head = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
   const failedTest = [0, JSON.stringify([
     { name: 'test', bucket: 'fail', link: 'https://github.com/owner/repo/actions/runs/41/job/77' },
     { name: 'sweep-scope', bucket: 'pass', link: 'https://github.com/owner/repo/actions/runs/52/job/78' },
   ])];
   const runRead = ['api', 'repos/{owner}/{repo}/actions/runs/41'];
-  const listRead = ['api', `repos/{owner}/{repo}/actions/workflows/9/runs?head_sha=${head}`];
-  const readableRun = [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: head })];
+  const listRead = ['api', `repos/{owner}/{repo}/actions/workflows/9/runs?head_sha=${HEAD}`];
+  const readableRun = [0, JSON.stringify({ workflow_id: 9, run_number: 4, head_sha: HEAD })];
   const badGateway = [1, 'HTTP 502: Bad Gateway (https://api.github.com/repos/owner/repo/actions/runs/41)'];
   // A run list the watch must refuse, given as the JSON GitHub would send so the reason quotes it back exactly.
   const unreadableList = (label, runs) => [
     label,
-    { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${head}`]: [0, `{"workflow_runs":${runs}}`] },
+    { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${HEAD}`]: [0, `{"workflow_runs":${runs}}`] },
     `unreadable workflow runs: ${runs}`,
     [runRead, listRead],
   ];
@@ -436,13 +470,13 @@ test('the watch exits 1 on its first pass when a workflow run reply it needs can
     ],
     [
       'a run list reply without its list',
-      { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${head}`]: [0, '{}'] },
+      { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${HEAD}`]: [0, '{}'] },
       'unreadable workflow runs: null',
       [runRead, listRead],
     ],
     [
       'a run list that is not a list',
-      { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${head}`]: [0, JSON.stringify({ workflow_runs: {} })] },
+      { 'runs/41': readableRun, [`workflows/9/runs?head_sha=${HEAD}`]: [0, JSON.stringify({ workflow_runs: {} })] },
       'unreadable workflow runs: {}',
       [runRead, listRead],
     ],
@@ -520,7 +554,7 @@ test('the watch exits 1 on its first pass when a successful reply carries a pull
     assert.equal(unreadable.status, 1, `${state} ${mergeStateStatus} must stop the wait`);
     assert.equal(unreadable.reads, 1);
     assert.equal(unreadable.sleeps.length, 0, `${state} ${mergeStateStatus} must not wait and read again`);
-    assert.equal(unreadable.last, `unreadable pull request state: ${JSON.stringify({ state, mergeStateStatus })}`);
+    assert.equal(unreadable.last, `unreadable pull request state: ${JSON.stringify({ state, mergeStateStatus, headRefOid: HEAD })}`);
   }
 });
 
@@ -564,9 +598,260 @@ test('the watch exits 0 only on MERGED', async () => {
 test('the watch only ever reads GitHub state', async () => {
   const run = await watch([{ view: OPEN_BLOCKED, checks: checks({ test: 'pending', 'sweep-scope': 'pending' }) }, MERGED]);
   assert.equal(run.status, 0);
-  assert.deepEqual(run.calls.map(callKind), ['base', 'branch', 'rules', 'view', 'checks', 'view']);
+  assert.deepEqual(run.calls.map(callKind), ['base', 'branch', 'rules', 'view', 'checks', 'timeline', 'runs', 'view']);
   for (const write of [['pr', 'merge', '7'], ['pr', 'ready', '7'], ['pr', 'comment', '7'], ['issue', 'edit', '7'], ['api', '-X', 'PATCH', 'repos/{owner}/{repo}/pulls/7'], ['api', 'repos/{owner}/{repo}/issues/7/comments', '-f', 'body=x']]) {
     assert.throws(() => assertReadOnly([write]), /must only read/, `the read-only check must refuse gh ${write.join(' ')}`);
+  }
+});
+
+const NO_RUN_REASON = `no test run has started for ${HEAD} within 10 minutes: mark the pull request as a draft, mark it ready again, then queue the auto-merge again, since returning to draft cancels the queued merge`;
+const runPath = (head) => `repos/{owner}/{repo}/actions/runs?head_sha=${head}&per_page=100`;
+const countOf = (run, kind) => run.calls.filter((call) => callKind(call) === kind).length;
+const RUNNING = { view: OPEN_BLOCKED, checks: UNREPORTED, runs: runsReply(workflowRun(501, 'in_progress')) };
+
+test('no-run stop: the watch stops 10 minutes after a required check was first unreported with no unfinished run, naming the head and the fix', async () => {
+  const stalled = await watch([NO_RUN_PASS]);
+  assert.equal(stalled.status, 1);
+  assert.equal(stalled.last, NO_RUN_REASON);
+  assert.equal(stalled.sleeps.length, 20, 'the pass at 9.5 minutes keeps waiting and the pass at 10 minutes stops');
+  assert.equal(stalled.reads, 21);
+  assert.deepEqual(stalled.calls.filter((call) => callKind(call) === 'runs').at(0), ['api', '--paginate', '--slurp', runPath(HEAD)]);
+  assert.equal(countOf(stalled, 'jobs'), 0, 'no unfinished run means no job read');
+});
+
+test('no-run stop: a completed unrelated run on the head commit does not disable the stop', async () => {
+  const completed = { ...NO_RUN_PASS, runs: runsReply(workflowRun(500, 'completed', '2026-01-01T09:45:00Z')) };
+  const stalled = await watch([completed]);
+  assert.equal(stalled.status, 1);
+  assert.equal(stalled.last, NO_RUN_REASON);
+  assert.equal(stalled.sleeps.length, 20);
+  assert.equal(countOf(stalled, 'jobs'), 0, 'a finished run\'s jobs are not read');
+
+  const afterRun = await watch([...passes(3, RUNNING), ...passes(3, completed)]);
+  assert.equal(afterRun.last, NO_RUN_REASON, 'a run that finished earlier does not hold the clock either');
+});
+
+test('no-run stop: an unfinished run on the head commit keeps the wait going past 10 minutes', async () => {
+  const waited = await watch([...passes(19, NO_RUN_PASS), ...passes(30, RUNNING), MERGED]);
+  assert.equal(waited.status, 0);
+  assert.equal(waited.last, 'merged');
+  assert.equal(waited.sleeps.length, 49);
+  assert.equal(countOf(waited, 'jobs'), 30, 'an unfinished run has its jobs read on every pass');
+});
+
+test('no-run stop: the clock resets when a run becomes unfinished and starts over afterwards', async () => {
+  const waited = await watch([...passes(19, NO_RUN_PASS), RUNNING, ...passes(19, NO_RUN_PASS), MERGED]);
+  assert.equal(waited.status, 0, 'two stretches of 9.5 minutes with a run between them never reach 10 minutes');
+
+  const stalled = await watch([...passes(19, NO_RUN_PASS), RUNNING, NO_RUN_PASS]);
+  assert.equal(stalled.last, NO_RUN_REASON);
+  assert.equal(stalled.sleeps.length, 40, 'the limit counts from the first pass after the run, not from the first pass of the watch');
+});
+
+test('no-run stop: the clock runs only while a required check is unreported, so it never runs on pending checks or an empty required set', async () => {
+  const pending = { ...NO_RUN_PASS, checks: PENDING };
+  const waiting = await watch([...passes(40, pending), MERGED]);
+  assert.equal(waiting.status, 0, 'pending checks with no run start no clock');
+
+  const reset = await watch([...passes(19, NO_RUN_PASS), pending, ...passes(19, NO_RUN_PASS), MERGED]);
+  assert.equal(reset.status, 0, 'a pass with every required check reported restarts the clock');
+
+  const nothingRequired = { view: view('OPEN', 'CLEAN'), checks: UNREPORTED, runs: NO_RUNS };
+  const empty = await watch([...passes(40, nothingRequired), MERGED], { classic: [], ruled: [] });
+  assert.equal(empty.status, 0, 'an empty required set has no unreported check, so no run is awaited');
+});
+
+test('no-run stop: a draft pass makes no stall read and starts the clock over', async () => {
+  const draft = { view: view('OPEN', 'DRAFT'), checks: UNREPORTED, runs: NO_RUNS };
+  const waited = await watch([...passes(15, NO_RUN_PASS), ...passes(2, draft), ...passes(19, NO_RUN_PASS), MERGED]);
+  assert.equal(waited.status, 0, 'the draft pass restarts the 10 minutes');
+  assert.equal(countOf(waited, 'runs'), 34, 'only the non-draft passes read runs');
+
+  const stalled = await watch([...passes(2, draft), NO_RUN_PASS]);
+  assert.equal(stalled.sleeps.length, 22, 'the limit counts from the first non-draft pass');
+  assert.equal(stalled.last, NO_RUN_REASON);
+});
+
+test('no-run stop: a new head commit starts the clock over for that head', async () => {
+  const pushed = { view: view('OPEN', 'BLOCKED', OTHER_HEAD), checks: UNREPORTED, runs: NO_RUNS };
+  const waited = await watch([...passes(15, NO_RUN_PASS), ...passes(19, pushed), MERGED]);
+  assert.equal(waited.status, 0);
+  assert.deepEqual(waited.calls.filter((call) => callKind(call) === 'runs').at(-1), ['api', '--paginate', '--slurp', runPath(OTHER_HEAD)]);
+
+  const stalled = await watch([...passes(15, NO_RUN_PASS), pushed]);
+  assert.equal(stalled.last, NO_RUN_REASON.replaceAll(HEAD, OTHER_HEAD), 'the reason names the head commit the limit ran out on');
+  assert.equal(stalled.sleeps.length, 35);
+});
+
+const READY_AT = '2026-01-01T10:00:00Z';
+const readyEvent = (created_at) => ({ event: 'ready_for_review', created_at });
+// Two pages: an earlier ready event, then a return to draft and the latest ready event.
+const markedReady = [0, JSON.stringify([[readyEvent('2026-01-01T09:00:00Z'), { event: 'convert_to_draft', created_at: '2026-01-01T09:10:00Z' }], [readyEvent(READY_AT)]])];
+
+test('no-run stop: a run created before the pull request was marked ready, still queued, does not hold the clock or trigger the queued stop', async () => {
+  const draftTimeRun = {
+    view: OPEN_BLOCKED,
+    checks: UNREPORTED,
+    runs: runsReply(workflowRun(501, 'queued', '2026-01-01T09:30:00Z')),
+    jobs: jobsReply(testJob()),
+  };
+  const stalled = await watch([draftTimeRun], { timeline: markedReady });
+  assert.equal(stalled.status, 1);
+  assert.equal(stalled.last, NO_RUN_REASON, 'the latest ready time, not an earlier one, decides which runs count');
+  assert.equal(stalled.sleeps.length, 20, 'the stop comes at 10 minutes, not at the 15 of the queued stop');
+  assert.equal(countOf(stalled, 'jobs'), 0, 'a run from before the ready time has its jobs left unread');
+});
+
+test('no-run stop: a run created exactly when the pull request was marked ready counts, and the timeline is read once per head commit', async () => {
+  const atReady = { view: OPEN_BLOCKED, checks: UNREPORTED, runs: runsReply(workflowRun(501, 'in_progress', READY_AT)), jobs: jobsReply() };
+  const waited = await watch([...passes(30, atReady), MERGED], { timeline: markedReady });
+  assert.equal(waited.status, 0, 'a counted unfinished run keeps the wait going past 10 minutes');
+  assert.equal(countOf(waited, 'jobs'), 30);
+  assert.equal(countOf(waited, 'timeline'), 1);
+  assert.deepEqual(waited.calls.find((call) => callKind(call) === 'timeline'), ['api', '--paginate', '--slurp', 'repos/{owner}/{repo}/issues/7/timeline?per_page=100']);
+
+  const pushed = { ...atReady, view: view('OPEN', 'BLOCKED', OTHER_HEAD) };
+  const twoHeads = await watch([...passes(3, atReady), ...passes(3, pushed), MERGED], { timeline: markedReady });
+  assert.equal(countOf(twoHeads, 'timeline'), 2, 'a new head commit reads the timeline again');
+});
+
+test('queued stop: the watch stops when a job of an unfinished run has waited 15 minutes with no runner, naming the machine it needs', async () => {
+  const waiting = { view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'queued')), jobs: jobsReply(testJob()) };
+  const stalled = await watch([waiting]);
+  assert.equal(stalled.status, 1);
+  assert.equal(stalled.last, 'a test job has waited 15 minutes for a machine: test (linux) waits for a runner labelled self-hosted, linux');
+  assert.equal(stalled.sleeps.length, 30, 'the pass at 14.5 minutes keeps waiting and the pass at 15 minutes stops');
+  assert.deepEqual(stalled.calls.filter((call) => callKind(call) === 'jobs').at(0), ['api', '--paginate', '--slurp', 'repos/{owner}/{repo}/actions/runs/501/jobs?per_page=100']);
+
+  const finishedRun = { ...waiting, runs: runsReply(workflowRun(501, 'completed')) };
+  const ignored = await watch([...passes(35, finishedRun), MERGED]);
+  assert.equal(ignored.status, 0, 'a finished run\'s jobs are not read');
+  assert.equal(countOf(ignored, 'jobs'), 0);
+});
+
+test('queued stop: a queued job whose runner name is an empty string counts as unassigned', async () => {
+  const emptyRunner = { view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'queued')), jobs: jobsReply(testJob({ runner_name: '' })) };
+  const stalled = await watch([emptyRunner]);
+  assert.equal(stalled.status, 1);
+  assert.equal(stalled.last, 'a test job has waited 15 minutes for a machine: test (linux) waits for a runner labelled self-hosted, linux');
+  assert.equal(stalled.sleeps.length, 30);
+});
+
+test('queued stop: a job picked up before 15 minutes keeps the wait going, and a job that stops waiting starts its limit over', async () => {
+  const jobsStep = (...items) => ({ view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'in_progress')), jobs: jobsReply(...items) });
+  const queued = jobsStep(testJob());
+  const pickedUp = jobsStep(testJob({ status: 'in_progress', runner_name: 'runner-1' }));
+  const resumed = await watch([...passes(29, queued), pickedUp, ...passes(29, queued), MERGED]);
+  assert.equal(resumed.status, 0, 'a job queued 14.5 minutes, picked up, then queued again waits afresh');
+  assert.equal(resumed.sleeps.length, 59);
+
+  for (const [label, job] of [
+    ['queued with a runner named', testJob({ runner_name: 'runner-1' })],
+    ['in progress with no runner named', testJob({ status: 'in_progress' })],
+    ['completed', testJob({ status: 'completed' })],
+  ]) {
+    const notWaiting = await watch([...passes(35, jobsStep(job)), MERGED]);
+    assert.equal(notWaiting.status, 0, `a job ${label} is not waiting for a machine`);
+  }
+
+  const two = jobsStep(
+    testJob({ id: 902, name: 'sweep-scope', labels: ['ubuntu-latest'] }),
+    testJob({ id: 901, status: 'in_progress', runner_name: 'runner-1' }),
+  );
+  const other = await watch([two]);
+  assert.equal(other.last, 'a test job has waited 15 minutes for a machine: sweep-scope waits for a runner labelled ubuntu-latest');
+});
+
+test('labels: a stalled job with no labels, or only blank ones, gets a reason that never shows a blank machine', async () => {
+  const noLabels = 'a test job has waited 15 minutes for a machine: test (linux) waits for a runner, but GitHub reported no runner labels';
+  for (const labels of [[], [''], ['', '  ']]) {
+    const waiting = { view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'queued')), jobs: jobsReply(testJob({ labels })) };
+    const stalled = await watch([waiting]);
+    assert.equal(stalled.status, 1);
+    assert.equal(stalled.last, noLabels, `labels ${JSON.stringify(labels)} must give the no-labels reason`);
+  }
+
+  const mixed = { view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'queued')), jobs: jobsReply(testJob({ labels: ['', 'linux'] })) };
+  const named = await watch([mixed]);
+  assert.equal(named.last, 'a test job has waited 15 minutes for a machine: test (linux) waits for a runner labelled linux', 'blank labels are left out of the list');
+});
+
+test('status validation: a workflow run or job status GitHub does not document stops the watch as unreadable', async () => {
+  const unfinished = (item) => ({ view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(item), jobs: jobsReply() });
+  for (const status of ['unknown', 'COMPLETED', 'in-progress', '']) {
+    const run = workflowRun(501, status);
+    const unreadable = await watch([unfinished(run), MERGED]);
+    assert.equal(unreadable.status, 1, `run status ${JSON.stringify(status)} must stop the wait`);
+    assert.equal(unreadable.last, `unreadable workflow run on ${HEAD}: ${JSON.stringify(run)}`);
+    assert.equal(unreadable.reads, 1);
+    assert.deepEqual(unreadable.sleeps, []);
+    assert.equal(callKind(unreadable.calls.at(-1)), 'runs', 'nothing may be read after the unreadable run');
+  }
+  for (const status of ['unknown', 'cancelled', 'Queued', '']) {
+    const job = testJob({ status });
+    const unreadable = await watch([{ ...unfinished(workflowRun(501, 'queued')), jobs: jobsReply(job) }, MERGED]);
+    assert.equal(unreadable.status, 1, `job status ${JSON.stringify(status)} must stop the wait`);
+    assert.equal(unreadable.last, `unreadable job of workflow run 501: ${JSON.stringify(job)}`);
+    assert.equal(unreadable.reads, 1);
+    assert.deepEqual(unreadable.sleeps, []);
+    assert.equal(callKind(unreadable.calls.at(-1)), 'jobs', 'nothing may be read after the unreadable job');
+  }
+
+  for (const status of ['requested', 'queued', 'pending', 'waiting', 'in_progress', 'completed', 'action_required', 'cancelled', 'failure', 'neutral', 'skipped', 'stale', 'success', 'timed_out']) {
+    const known = await watch([unfinished(workflowRun(501, status)), MERGED]);
+    assert.equal(known.status, 0, `run status ${status} is a documented one`);
+  }
+  for (const status of ['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending']) {
+    const known = await watch([{ ...unfinished(workflowRun(501, 'queued')), jobs: jobsReply(testJob({ status, runner_name: 'runner-1' })) }, MERGED]);
+    assert.equal(known.status, 0, `job status ${status} is a documented one`);
+  }
+});
+
+test('the watch exits 1 on the pass whose workflow run, job or head commit reply it cannot read, reading nothing after it', async () => {
+  const badGateway = [1, 'HTTP 502: Bad Gateway (https://api.github.com/repos/owner/repo)'];
+  const running = { view: OPEN_BLOCKED, checks: PENDING, runs: runsReply(workflowRun(501, 'queued')) };
+  const badRun = (item) => ['runs', `unreadable workflow run on ${HEAD}: ${JSON.stringify(item)}`, { ...running, runs: runsReply(item) }, {}];
+  const badJob = (item) => ['jobs', `unreadable job of workflow run 501: ${JSON.stringify(item)}`, { ...running, jobs: jobsReply(item) }, {}];
+  const badHead = (headRefOid) => [
+    'view',
+    `unreadable pull request state: ${JSON.stringify({ state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid })}`,
+    { ...running, view: [0, JSON.stringify({ state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid })] },
+    {},
+  ];
+  for (const [kind, reason, step, options] of [
+    ['runs', `unreadable workflow runs on ${HEAD}: {}`, { ...running, runs: [0, '{}'] }, {}],
+    ['runs', `unreadable workflow runs on ${HEAD}: [{}]`, { ...running, runs: [0, '[{}]'] }, {}],
+    badRun({ status: 'queued', created_at: RUN_CREATED }),
+    badRun({ id: '501', status: 'queued', created_at: RUN_CREATED }),
+    badRun({ id: 501, created_at: RUN_CREATED }),
+    badRun({ id: 501, status: 'queued' }),
+    badRun({ id: 501, status: 'queued', created_at: 'soon' }),
+    ['runs', badGateway[1], { ...running, runs: badGateway }, {}],
+    ['jobs', 'unreadable jobs of workflow run 501: {}', { ...running, jobs: [0, '{}'] }, {}],
+    badJob({ name: 'test', status: 'queued', runner_name: null, labels: [] }),
+    badJob(testJob({ id: '901' })),
+    badJob(testJob({ name: 7 })),
+    badJob(testJob({ status: null })),
+    badJob(testJob({ labels: 'linux' })),
+    badJob(testJob({ labels: ['linux', 7] })),
+    badJob(testJob({ runner_name: 7 })),
+    badJob(testJob({ runner_name: undefined })),
+    ['jobs', badGateway[1], { ...running, jobs: badGateway }, {}],
+    ['timeline', 'unreadable pull request timeline: {}', running, { timeline: [0, '{}'] }],
+    ['timeline', 'unreadable pull request timeline: [{"event":"ready_for_review","created_at":"2026-01-01T10:00:00Z"}]', running, { timeline: [0, JSON.stringify([readyEvent(READY_AT)])] }],
+    ['timeline', 'unreadable pull request timeline: [[{"event":"ready_for_review"}]]', running, { timeline: [0, '[[{"event":"ready_for_review"}]]'] }],
+    ['timeline', 'unreadable pull request timeline: [[{"event":"ready_for_review","created_at":"soon"}]]', running, { timeline: [0, '[[{"event":"ready_for_review","created_at":"soon"}]]'] }],
+    ['timeline', badGateway[1], running, { timeline: badGateway }],
+    ...[undefined, null, 'main', HEAD.toUpperCase(), HEAD.slice(1), `${HEAD}0`].map(badHead),
+  ]) {
+    const unreadable = await watch([step, MERGED], options);
+    const label = `${kind} reply ${reason}`;
+    assert.equal(unreadable.status, 1, `${label} must stop the wait`);
+    assert.equal(unreadable.last, reason, `${label} must print its reason last`);
+    assert.equal(unreadable.reads, 1, `${label} must stop on the first pass`);
+    assert.deepEqual(unreadable.sleeps, [], `${label} must not wait and read again`);
+    assert.equal(callKind(unreadable.calls.at(-1)), kind, `nothing may be read after ${label}`);
+    assert.equal(countOf(unreadable, kind), 1, `${label} must be read once`);
   }
 });
 

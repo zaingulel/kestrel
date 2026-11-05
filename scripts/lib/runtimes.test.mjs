@@ -108,7 +108,7 @@ test('the settings file names the runtimes present: no file means both, and an u
     ['[]', 'file: must hold one JSON object; found []'],
     ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
   ];
   for (const [text, message] of refused) {
     assert.throws(() => presentRuntimes(tree(t, text)), { message: `.agents/factory-settings.json: ${message}` }, text);
@@ -124,7 +124,7 @@ test('planApproval: true or false is admitted, no key is valid, and any other va
     assert.throws(() => header({ planApproval: value }), { message: `settings.json: planApproval: must be true or false; found ${found}` });
   }
   for (const key of ['PlanApproval', 'plan_approval', 'planApprovals']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -137,7 +137,7 @@ test('greptile: true or false is admitted, no key is valid, and any other value 
     assert.throws(() => header({ greptile: value }), { message: `settings.json: greptile: must be true or false; found ${found}` });
   }
   for (const key of ['Greptile', 'greptile_review', 'greptiles']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -150,12 +150,12 @@ test('docSweep: true or false is admitted, no key means on, and any other value 
     assert.throws(() => header({ docSweep: value }), { message: `settings.json: docSweep: must be true or false; found ${found}` });
   }
   for (const key of ['DocSweep', 'doc_sweep', 'docsweep', 'sweep']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
   }
 });
 
 test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both runtimes run, and any other value, a file naming one runtime and a near spelling are still refused by name', () => {
-  const keyList = 'version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager';
+  const keyList = 'version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun';
   assert.equal(header({}).crossFamilyReview, false);
   assert.equal(header({ crossFamilyReview: true }).crossFamilyReview, true);
   assert.equal(header({ crossFamilyReview: true, runtimes: ['claude', 'codex'] }).crossFamilyReview, true);
@@ -180,7 +180,21 @@ test('ANTI-REGRESSION: productManager is admitted as true or false whichever run
     assert.throws(() => header({ productManager: value }), { message: `settings.json: productManager: must be true or false; found ${found}` });
   }
   for (const key of ['ProductManager', 'product_manager', 'productManagers', 'productmanager']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+  }
+});
+
+test('ANTI-REGRESSION: preApprovedRun is admitted as true or false whichever runtimes run, no key means off, and any other value or a near spelling is still refused by name', () => {
+  for (const extra of [{ preApprovedRun: true }, { preApprovedRun: false }, {}]) {
+    assert.deepEqual(header(extra).runtimes, ['claude', 'codex'], JSON.stringify(extra));
+  }
+  assert.deepEqual(header({ preApprovedRun: true, runtimes: ['claude'] }).runtimes, ['claude']);
+  assert.deepEqual(header({ preApprovedRun: true, runtimes: ['codex'] }).runtimes, ['codex']);
+  for (const [value, found] of [['true', '"true"'], [1, '1'], [0, '0'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
+    assert.throws(() => header({ preApprovedRun: value }), { message: `settings.json: preApprovedRun: must be true or false; found ${found}` });
+  }
+  for (const key of ['PreApprovedRun', 'pre_approved_run', 'preApprovedRuns', 'preapprovedrun']) {
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
   }
 });
 

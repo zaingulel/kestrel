@@ -209,14 +209,22 @@ throughout this skill, including complete native-comment review before claiming.
    not end a shell in it, but anything run there that needs that folder then fails, so this too is a process hold.
 
    **Process holds.** A process using a target is waited out. Unless it is confirmed as this session's own, never
-   type into, stop or kill it, and never ask the owner to `cd` away or close anything. Report the hold in one line,
-   record it under Deferred cleanup and ask the owner nothing: the target is safe while it waits and no decision is
-   pending. A use check that could not finish is treated the same. Call the holder the owner's terminal only on
-   evidence: a runtime tool that lists terminal tabs, such as the desktop app's `list_terminal_tabs`, shows an
-   owner-opened tab with that process, or `ps -o pid=,ppid=,tty=,args= -p <pid>` shows an interactive shell on a
-   terminal whose parent chain does not reach this session. Otherwise the line names the process ID and command and
-   says its owner is unknown; a process the session cannot identify is no owner question either. A later session
-   removes the target once the hold has gone.
+   type into, stop or kill it, and never ask the owner to `cd` away or close anything. One terminal tab is confirmed
+   as this session's own: where the runtime lists this session's terminal tabs and closes the ones it opened, as the
+   desktop app's `list_terminal_tabs` and `stop_terminal_tab` do, a tab that started in the target or a folder inside
+   it, that `list_terminal_tabs` reports with nothing running, and that this session opened. Close it with
+   `stop_terminal_tab` and `close: true`, then run the command again; a hold that remains is still waited out.
+   Idleness is read from the runtime, never assumed: a tab whose running state is unknown or that runs anything, such
+   as a dev server, a long command or an editor, stays a hold, and so does a tab the tool will not close, since it
+   never closes one the owner opened or typed in. Report each hold in one line that says whether the holder is idle
+   at its prompt or running something, or that this is unknown, record it under Deferred cleanup and ask the owner
+   nothing: the target is safe while it waits and no decision is pending. A use check that could not finish is
+   treated the same. Call the holder the owner's terminal only on evidence: a runtime tool that lists terminal tabs
+   shows an owner-opened tab with that process, or `ps -o pid=,ppid=,tty=,args= -p <pid>` shows an interactive shell
+   on a terminal whose parent chain does not reach this session, and the line then gives its idleness as unknown
+   unless such a tool reports it. Otherwise the line names the process ID and command and says its
+   owner is unknown; a process the session cannot identify is no owner question either. A later session removes the
+   target once the hold has gone.
 
    If ownership is
    uncertain, do not run the command: retain the worktree, report why, record the retention under

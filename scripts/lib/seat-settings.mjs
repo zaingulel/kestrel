@@ -14,7 +14,7 @@
 //   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
-//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep`, `crossFamilyReview` and `productManager`.
+//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep`, `crossFamilyReview`, `productManager` and `preApprovedRun`.
 //     `version` is exactly 1; any other version is refused as unsupported by this copy, with the recovery. Another
 //     key is refused with the recovery.
 //  2. `seats` is an object whose only keys are `claude` and `codex`, each an object from seat name to an object of
@@ -34,6 +34,8 @@
 //     on the rendered bytes, and any problem reported for the rendered bytes and not for the shared bytes is a
 //     refusal that quotes it and ends with this sentence:
 //       a value only a newer copy of the shared workflow admits can be named after the release update that installs it
+//     For the oracle and security-reviewer seats the seat policy run on the rendered bytes also takes the shared bytes'
+//     own turn limit as a cap, so an override may only lower it.
 //  8. A manifest never lists the settings path. The comparison is the folded one the manifest already uses for its
 //     own entries. A seatDefaults record obeys rules 2 to 5 and names only seat files the same manifest lists.
 //  9. `runtimes`, when present, is a non-empty array naming `claude`, `codex` or both, each once; with no key both
@@ -53,8 +55,11 @@
 // 14. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
 //     Anything else is refused. No update or check acts on the value; the session reads it on the fetched `main`, as
 //     the `resume` skill says under "2. Work-pick".
+// 15. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off.
+//     Anything else is refused. No script acts on the value; the session reads it on the fetched `main`, as the
+//     `resume` skill says under "2. Work-pick".
 //
-// The JSON half of rule 1, the list half of rule 9 and rules 10 to 14 are readSettingsHeader (runtimes.mjs), which
+// The JSON half of rule 1, the list half of rule 9 and rules 10 to 15 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is
 // substituteSeatSettings; 7 is overrideProblems. The file half of rule 1 belongs to readSettingsFile (runtimes.mjs); rules 3 and 8 belong to factory-sync.mjs.
 
@@ -196,10 +201,10 @@ export function substituteSeatSettings(path, data, values) {
 export function overrideProblems(path, shared, rendered) {
   const file = path.slice(path.lastIndexOf('/') + 1);
   const check = path.endsWith('.toml') ? checkCodexAgentSource : checkAgentSource;
-  const problemsOf = (data) => {
+  const problemsOf = (data, sharedSource) => {
     const source = data.toString('utf8');
-    return [...check(file, source), ...checkSeatPolicy(file, source)];
+    return [...check(file, source), ...checkSeatPolicy(file, source, sharedSource)];
   };
   const already = new Set(problemsOf(shared));
-  return problemsOf(rendered).filter((problem) => !already.has(problem));
+  return problemsOf(rendered, shared.toString('utf8')).filter((problem) => !already.has(problem));
 }

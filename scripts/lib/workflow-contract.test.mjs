@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix, resolve } from 'node:path';
+import { delimiter, dirname, join, posix, resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,7 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
   for (const path of [
     '.claude/hooks/block-unsafe-git.mjs',
     'scripts/lib/unsafe-git.mjs',
+    'scripts/lib/advance-approval.mjs',
     'scripts/lib/checkout-context.mjs',
     'scripts/lib/posix-shell.mjs',
     'scripts/closeout-cleanup.mjs',
@@ -146,6 +147,194 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
   assert.equal(gitRead.status, 0, gitRead.stderr);
   assert.equal(gitRead.stdout, '');
   assert.equal(readFileSync(sentinel, 'utf8'), 'retained', 'hook subprocesses did not execute the editable helper');
+});
+
+// The independent oracle is the plan's run marks: PRE_APPROVED_RUN_SESSION and PRODUCT_MANAGER_RUN_SESSION.
+// Each case starts the real hook, installed in a throwaway repository with the modules it loads, and
+// observes only its exit code, its stderr and the calls a stand-in gh recorded.
+// Recurring cost: one disposable Git fixture and one to three hook starts per case, no network.
+// Remove if the pre-approved run session is retired.
+const GUARDS = {
+  claude: { hook: '.claude/hooks/block-unsafe-git.mjs', modules: [], payload: (cwd, command) => ({ cwd, tool_input: { command } }) },
+  codex: { hook: '.codex/hooks/block-unsafe-git.mjs', modules: ['scripts/lib/codex-hook-adapters.mjs'], payload: (cwd, command) => ({ cwd, tool_input: { cmd: command } }) },
+};
+const GUARD_MODULES = [
+  'scripts/lib/unsafe-git.mjs',
+  'scripts/lib/checkout-context.mjs',
+  'scripts/lib/posix-shell.mjs',
+  'scripts/lib/advance-approval.mjs',
+];
+// An undefined value leaves a variable out of the hook's environment, whatever session runs the suite.
+const MARKS_OFF = { GH_REPO: undefined, GH_HOST: undefined, PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined, CLAUDE_CODE_ENTRYPOINT: undefined };
+const RUN_START = '2026-11-04T12:00:00Z';
+const withoutStandInGh = process.platform === 'win32' && 'a stand-in gh.exe cannot be a script';
+
+function guardFixture(t, runtime, branch) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'workflow-guard-marks-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const root = join(dir, 'repo');
+  const env = { ...gitEnvironment(), GIT_CONFIG_GLOBAL: join(dir, 'no-global-config'), GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (...args) => {
+    const run = spawnSync('git', args, { cwd: root, env, encoding: 'utf8' });
+    assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
+  };
+  mkdirSync(root);
+  git('init', '-q', '-b', branch);
+  const guard = GUARDS[runtime];
+  for (const path of [guard.hook, ...guard.modules, ...GUARD_MODULES]) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    cpSync(join(ROOT, path), join(root, path));
+  }
+  // The hooks read only TRACKER, and these tests pin GitHub whatever tracker the install names.
+  writeFileSync(join(root, 'scripts/lib/board-config.mjs'), "export const TRACKER = 'github';\n");
+  const hookRaw = (input, marks) => spawnSync(process.execPath, [join(root, guard.hook)], {
+    cwd: root, env: { ...env, ...MARKS_OFF, ...marks }, input, encoding: 'utf8',
+  });
+  const hook = (command, marks) => hookRaw(JSON.stringify(guard.payload(root, command)), marks);
+  return { dir, git, hook, hookRaw };
+}
+
+// A gh that answers the three reads of a delivery push for card 7 of o/fixture, whose card holds one valid
+// record by the viewer made long before RUN_START, and appends each call's argument list to a log.
+function standInGh(dir) {
+  const bin = join(dir, 'bin');
+  const log = join(dir, 'gh-calls.log');
+  const repository = { id: 'R_1', nameWithOwner: 'o/fixture', defaultBranchRef: { name: 'main' } };
+  const record = {
+    author: { login: 'o' }, createdAt: '2020-01-01T00:00:00Z', lastEditedAt: null,
+    url: 'https://github.com/o/fixture/issues/7#issuecomment-1', body: 'Approved: card=7 edited=none',
+  };
+  const graphql = {
+    data: {
+      viewer: { login: 'o' },
+      repository: {
+        id: 'R_1',
+        issue: {
+          state: 'OPEN', title: 'Card', lastEditedAt: null,
+          timelineItems: { nodes: [] }, comments: { pageInfo: { hasNextPage: false }, nodes: [record] },
+        },
+      },
+    },
+  };
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'repo' && args[1] === 'view') {
+  console.log(JSON.stringify(args.includes('id,nameWithOwner,defaultBranchRef') ? ${JSON.stringify(repository)} : { id: ${JSON.stringify(repository.id)} }));
+} else if (args[0] === 'api' && args[1] === 'graphql') {
+  console.log(${JSON.stringify(JSON.stringify(graphql))});
+} else {
+  console.error('stand-in gh: unexpected call ' + args.join(' '));
+  process.exit(1);
+}
+`);
+  chmodSync(join(bin, 'gh'), 0o755);
+  return { bin, calls: () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []) };
+}
+
+test('ANTI-REGRESSION: the Claude guard refuses git push in a pre-approved run session off a job branch, refuses it under the product manager mark, and passes it unmarked', { skip: without('claude') }, (t) => {
+  const { hook } = guardFixture(t, 'claude', 'main');
+  const command = 'git push origin job/1';
+
+  const preApproved = hook(command, { PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(preApproved.status, 2, preApproved.stderr);
+  assert.ok(preApproved.stderr.includes('a pre-approved run session publishes only from a job branch, and HEAD is "main"'), preApproved.stderr);
+
+  const productManager = hook(command, { PRODUCT_MANAGER_RUN_SESSION: '1' });
+  assert.equal(productManager.status, 2, productManager.stderr);
+  assert.ok(productManager.stderr.includes('a product manager run session does not publish'), productManager.stderr);
+
+  const unmarked = hook(command, {});
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.equal(unmarked.stderr, '');
+});
+
+// A `claude -p` card session a desktop app run session starts inherits the app's entrypoint, so every case here runs
+// under it, and the test above runs the same marks with none, which MARKS_OFF clears. The marks reach the guard only
+// through the environment: an unmarked session passes whatever its transcript holds, and whether or not it can be read.
+// Recurring cost: one disposable Git fixture, one small transcript file and four hook starts, no network.
+test('ANTI-REGRESSION: the Claude guard knows a run session by its environment marks alone, refusing them under the desktop app entrypoint and reading no transcript', { skip: without('claude') }, (t) => {
+  const { dir, hookRaw } = guardFixture(t, 'claude', 'main');
+  const cwd = join(dir, 'repo');
+  const markLine = join(dir, 'mark-line.jsonl');
+  writeFileSync(markLine, `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'Continue the product manager run.\nPRODUCT_MANAGER_RUN_SESSION=1' } })}\n`);
+  const missing = join(dir, 'missing.jsonl');
+  const REFUSALS = ['a product manager run session does not publish', 'a pre-approved run session publishes only from a job branch, and HEAD is "main"'];
+  const push = (transcriptPath, marks) => {
+    const run = hookRaw(JSON.stringify({ cwd, transcript_path: transcriptPath, tool_input: { command: 'git push origin job/1' } }), { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', ...marks });
+    return [run.status, REFUSALS.find((reason) => run.stderr.includes(reason)) ?? run.stderr];
+  };
+
+  assert.deepEqual({
+    productManager: push(missing, { PRODUCT_MANAGER_RUN_SESSION: '1' }),
+    preApproved: push(missing, { PRE_APPROVED_RUN_SESSION: RUN_START }),
+    unmarkedWithMarkLine: push(markLine, {}),
+    unmarkedUnreadable: push(missing, {}),
+  }, {
+    productManager: [2, REFUSALS[0]],
+    preApproved: [2, REFUSALS[1]],
+    unmarkedWithMarkLine: [0, ''],
+    unmarkedUnreadable: [0, ''],
+  });
+});
+
+function assertAdmitsMarkedDeliveryPush(t, runtime) {
+  const { dir, git, hook } = guardFixture(t, runtime, 'job/7');
+  git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
+  const gh = standInGh(dir);
+
+  const run = hook('git push -u origin job/7', { PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stderr, '');
+  assert.ok(gh.calls().some(([api, graphql]) => api === 'api' && graphql === 'graphql'), 'the hook must read the advance approval through gh');
+}
+
+test('ANTI-REGRESSION: the Codex guard refuses publishing with a malformed pre-approved mark', { skip: without('codex') }, (t) => {
+  const { hook } = guardFixture(t, 'codex', 'job/7');
+
+  const malformed = hook('git push -u origin job/7', { PRE_APPROVED_RUN_SESSION: 'not-a-run-start' });
+  assert.equal(malformed.status, 2, malformed.stderr);
+  assert.ok(malformed.stderr.includes('a pre-approved run session publishes nothing: its mark "not-a-run-start" is not a run start'), malformed.stderr);
+});
+
+test('ANTI-REGRESSION: both guards refuse an unparseable payload or one holding no string command under the pre-approved mark, and pass it unmarked (Claude)', { skip: without('claude') }, (t) => {
+  const { dir, hookRaw } = guardFixture(t, 'claude', 'job/7');
+  const noCommand = JSON.stringify({ cwd: join(dir, 'repo'), tool_input: {} });
+
+  const unparseable = hookRaw('this is not json', { PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(unparseable.status, 2, unparseable.stderr);
+  assert.ok(unparseable.stderr.includes('a pre-approved run session is refused a call whose hook payload is unparseable'), unparseable.stderr);
+  const unparseableUnmarked = hookRaw('this is not json', {});
+  assert.equal(unparseableUnmarked.status, 0, unparseableUnmarked.stderr);
+  assert.match(unparseableUnmarked.stderr, /unparseable hook payload; rules NOT applied/);
+
+  const refused = hookRaw(noCommand, { PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.ok(refused.stderr.includes('a pre-approved run session is refused a call whose hook payload holds no string command'), refused.stderr);
+  const unmarked = hookRaw(noCommand, {});
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.match(unmarked.stderr, /no string command in hook payload; rules NOT applied/);
+});
+
+test('ANTI-REGRESSION: both guards refuse an unparseable payload or one holding no string command under the pre-approved mark, and pass it unmarked (Codex)', { skip: without('codex') }, (t) => {
+  const { dir, hookRaw } = guardFixture(t, 'codex', 'job/7');
+  const noCommand = JSON.stringify({ cwd: join(dir, 'repo'), tool_input: {} });
+
+  const refused = hookRaw(noCommand, { PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(refused.status, 2, refused.stderr);
+  assert.ok(refused.stderr.includes('a pre-approved run session is refused a call whose hook payload holds no string command'), refused.stderr);
+  const unmarked = hookRaw(noCommand, {});
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.equal(unmarked.stderr, '');
+});
+
+test('ANTI-REGRESSION: the real Claude hook admits a marked delivery push for its own card with a valid advance approval', { skip: without('claude') || withoutStandInGh }, (t) => {
+  assertAdmitsMarkedDeliveryPush(t, 'claude');
+});
+
+test('ANTI-REGRESSION: the real Codex hook admits a marked delivery push for its own card with a valid advance approval', { skip: without('codex') || withoutStandInGh }, (t) => {
+  assertAdmitsMarkedDeliveryPush(t, 'codex');
 });
 
 // Pins the independently reviewed workflow, including its job-level branch condition.
@@ -506,10 +695,22 @@ test('ANTI-REGRESSION: the resume skill reads the settings file only from the fe
   for (const read of reads) assert.equal(read, 'git show origin/main:.agents/factory-settings.json');
 });
 
+// Both runs judge a waiting job's overlap by this one listing, the pre-approved run through the product manager run's
+// step 5. The manifest is left out because each entry changes only with the shared file it fingerprints, which the
+// listing keeps. Recurring cost: one scan of text this file already reads.
+test('both runs list the files of a waiting job with one command that leaves out only the manifest', () => {
+  const listings = inlineSpans(splitMarkdown(RESUME).prose)
+    .map((span) => span.body.replace(/\s+/g, ' '))
+    .filter((body) => body.includes('origin/main...job/'));
+  assert.deepEqual(listings, [`git diff --name-only --no-renames origin/main...job/<card> -- ':(top,exclude)${MANIFEST_PATH}'`]);
+});
+
+// A leading environment assignment is captured, so a launch that loses its run mark fails here.
 // Recurring cost: one match over text this file already reads; update only after reviewing a launch change.
-test('ANTI-REGRESSION: a product manager run starts each card session only with the one pinned launch, which refuses push and merge', () => {
-  assert.deepEqual(RESUME.replace(/\\\n\s*/g, ' ').match(/\bclaude\b[^`\n]*\s(?:-p|--print)\b[^`\n]*|\bcodex exec\b[^`\n]*/g), [
-    'claude -p --permission-mode auto --disallowedTools "Bash(git push *)" "Bash(gh pr create *)" "Bash(gh pr ready *)" "Bash(gh pr merge *)" --output-format json "Continue the product manager run." > <scratch>/card-session-<n>.json',
+test('ANTI-REGRESSION: each run starts its Claude card sessions only with its one pinned launch: a product manager run marked and refusing push and merge, a pre-approved run marked with its run start', () => {
+  assert.deepEqual(RESUME.replace(/\\\n\s*/g, ' ').match(/(?:\b[A-Z_]+=\S+ )?\bclaude\b[^`\n]*\s(?:-p|--print)\b[^`\n]*|\bcodex exec\b[^`\n]*/g), [
+    'PRODUCT_MANAGER_RUN_SESSION=1 claude -p --permission-mode auto --disallowedTools "Bash(git push *)" "Bash(gh pr create *)" "Bash(gh pr ready *)" "Bash(gh pr merge *)" --output-format json "Continue the product manager run." > <scratch>/card-session-<n>.json',
+    'PRE_APPROVED_RUN_SESSION=<run-start> claude -p --permission-mode auto --output-format json "Continue the pre-approved run." > <scratch>/card-session-<n>.json',
   ]);
 });
 
@@ -818,6 +1019,15 @@ test("the Receipt reuse rule in the resume skill's deliver reference names each 
   const spans = new Set(inlineSpans(splitMarkdown(readFileSync(resolve(ROOT, '.agents/skills/resume/references/deliver.md'), 'utf8')).prose).map((span) => span.body.replace(/\s+/g, ' ')));
   for (const literal of [...CARRIED_SLOTS, ...COMMANDS]) {
     assert.ok(spans.has(literal), `the resume skill's Receipt reuse rule must name \`${literal}\` as one code span`);
+  }
+});
+
+// After a waiting card merges, a card built beside it is rebased; the rebase runs no commit gate, so its fingerprints
+// are re-recorded by the canonical recovery. Recurring cost: one scan of the deliver reference.
+test('the deliver step re-records every fingerprint with the canonical recovery after a rebase', () => {
+  const spans = new Set(inlineSpans(splitMarkdown(readFileSync(resolve(ROOT, '.agents/skills/resume/references/deliver.md'), 'utf8')).prose).map((span) => span.body.replace(/\s+/g, ' ')));
+  for (const literal of [MANIFEST_PATH, 'node scripts/factory-sync.mjs --write']) {
+    assert.ok(spans.has(literal), `the deliver reference must name \`${literal}\` as one code span`);
   }
 });
 

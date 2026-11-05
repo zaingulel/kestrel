@@ -19,9 +19,13 @@ body records; a mismatch or downgrade is a blocking finding and is never rewritt
 
 Output contract: the same parseable JSON envelope as `reviewer` — `findings` ranked most-severe first with
 `verdict` `CONFIRMED`|`PLAUSIBLE` and `lens: "trust"`, and every refuted candidate in `dismissed`. A clean review
-uses `"findings": []`. When the prompt gives an OUTPUT FILE path, write the envelope there and return only the
-path plus a one-line verdict; if you near the turn cap, write what you have and say so — never stop silently
-mid-report.
+uses `"findings": []`. Write the envelope to the result file the dispatch names as soon as the first guarantee is
+judged, then rewrite the file whole each time another is judged, listing the guarantees not yet judged in an `open`
+array that is empty once all are; you cannot see your turn count, so never hold the envelope back for the end. If
+the file cannot be written, say so and return the envelope in the reply; otherwise the reply is only the file's path
+and a one-line verdict. If the dispatch names no result file, return in one turn saying so and review nothing. Every
+complete review ends with the literal line `security review delivered in full`; a reply without it is a capped
+security reviewer, which the coordinating session handles as the `resume` skill says under "4. Plan".
 
 Use `WebSearch`/`WebFetch` to check a vendor's CURRENT security model when the perimeter change depends on it (an
 OAuth scope's real blast radius, a known CVE in a bumped lib, an auth flow leaking by design). Official primary

@@ -7,14 +7,34 @@
 // the stdin/stderr/exit-code shell, plus the two facts only a shell can supply: whether the
 // call's working directory is the root checkout (scripts/lib/checkout-context.mjs asks git),
 // which the integration-checkout rule needs, and whether the launcher marked this session as a
-// product manager run's, which the publishing rule needs.
+// product manager run's, which the publishing rule needs. The launcher's other mark,
+// PRE_APPROVED_RUN_SESSION=<run start>, admits only a delivery push the owner's advance approval
+// covers, so under that mark an unreadable call is refused, not passed.
 import { blockReason } from "../../scripts/lib/unsafe-git.mjs";
 import { checkoutContext } from "../../scripts/lib/checkout-context.mjs";
 import { codexCommandForGuard, codexCwdForGuard } from "../../scripts/lib/codex-hook-adapters.mjs";
 
+const preApprovedStart = process.env.PRE_APPROVED_RUN_SESSION;
+
+function refusePreApproved(why) {
+  console.error(`Blocked: a pre-approved run session ${why}.`);
+  process.exit(2);
+}
+
+// Only a pre-approved session needs the tracker, so only it loads the board configuration.
+async function preApprovedOptions() {
+  if (preApprovedStart === undefined) return null;
+  try {
+    const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
+    return { start: preApprovedStart, tracker: TRACKER ?? "github" };
+  } catch {
+    return refusePreApproved("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
+  }
+}
+
 let raw = "";
 process.stdin.on("data", (d) => (raw += d));
-process.stdin.on("end", () => {
+process.stdin.on("end", async () => {
   let payload;
   // Unparseable stdin = the harness payload shape changed, NOT a command trying to sneak past:
   // there is no command to inspect. Failing CLOSED here would block every Bash call in the
@@ -25,6 +45,7 @@ process.stdin.on("end", () => {
   try {
     payload = JSON.parse(raw);
   } catch {
+    if (preApprovedStart !== undefined) refusePreApproved("is refused a call whose hook payload is unparseable");
     console.error("block-unsafe-git: unparseable hook payload — rules NOT applied to this call.");
     process.exit(0);
   }
@@ -34,7 +55,12 @@ process.stdin.on("end", () => {
   if (unresolved) {
     console.error(`block-unsafe-git: ${unresolved} — the integration-checkout rule is NOT applied to this call.`);
   }
-  const reason = blockReason(codexCommandForGuard(payload?.tool_input), checkout, { runSession: process.env.PRODUCT_MANAGER_RUN_SESSION === "1" });
+  const cmd = codexCommandForGuard(payload?.tool_input);
+  if (cmd === "" && preApprovedStart !== undefined) refusePreApproved("is refused a call whose hook payload holds no string command");
+  const reason = blockReason(cmd, checkout, {
+    runSession: process.env.PRODUCT_MANAGER_RUN_SESSION === "1",
+    preApproved: await preApprovedOptions(),
+  });
   if (reason) {
     console.error(`Blocked: ${reason}. Guards Codex's tool calls only; run it in your own terminal if you truly need it.`);
     process.exit(2);

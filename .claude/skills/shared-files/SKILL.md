@@ -1,6 +1,6 @@
 ---
 name: shared-files
-description: The reference for how shared workflow files are kept, recorded and overridden: fingerprints, canonical recording, seat overrides, the runtimes, the external review add-on and the documentation sweep a repository's settings choose, and what a repository needs before it runs the workflow.
+description: The reference for how shared workflow files are kept, recorded and overridden: fingerprints, canonical recording, seat overrides, the runtimes, the external review add-on and the documentation sweep a repository's settings choose, the settings file's other keys, and what a repository needs before it runs the workflow.
 ---
 
 # shared-files
@@ -17,7 +17,9 @@ adopter's manifest. A shared file edited without its manifest hash following fai
 are real files, never symlinks, since a symlink reaches a Windows checkout as plain text: a skill lives in
 `.agents/skills/` and is copied whole to `.claude/skills/`, and each hook directory carries its own `.gitattributes` so hooks keep LF endings wherever
 line endings are converted; the contract test fails on a symlink, a copy that differs from its source, or a missing
-rule. A git hook's run permission is its committed file mode.
+rule. A git hook's run permission is its committed file mode. The skills vendored from upstream repositories, each
+repository's kept with its licence in its own folder under `.agents/upstream/`, are verbatim copies: they are never
+edited in place, and an update replaces the vendored source and every copy of it whole.
 
 ## Canonical recording
 
@@ -65,12 +67,12 @@ The settings file, the seat files and the manifest are committed together; the c
 differs from the shared file anywhere but in a named value. An override changes a value the seat already carries. It
 may raise or lower any seat's effort, put a cheaper model on a seat or lower a turn limit. It may never put the
 costliest Claude or Codex model on a seat other than the ones `AGENTS.md` names for it under "Runtime notes", raise the
-turn limit of the `oracle` or `security-reviewer` seat above 90, or leave a seat's model to the session with `inherit`;
-a release update and `--render` refuse such a settings file before they write anything. Both judge only the values the
-settings file names: a release update judges them with the validator of the Fabraik distribution that invokes it, and
-`--render` with the copy of the workflow the repository has installed, so a value only a newer copy admits can be named
-after the release update that installs it. Where a skill, a guide page or a seat's own description names a
-seat's model or effort, it names the canonical default.
+turn limit of the `oracle` seat above 90 or of the `security-reviewer` seat above 150, or leave a seat's model to the
+session with `inherit`; a release update and `--render` refuse such a settings file before they write anything. Both
+judge only the values the settings file names: a release update judges them with the validator of the Fabraik
+distribution that invokes it, and `--render` with the copy of the workflow the repository has installed, so a value only
+a newer copy admits can be named after the release update that installs it. Where a skill, a guide page or a seat's own
+description names a seat's model or effort, it names the canonical default.
 
 **How a repository names its runtimes.** The same settings file may carry `runtimes`, a list naming `claude`, `codex` or
 both; without it the repository runs both. Everything shared under `.claude/`, and `CLAUDE.md`, belongs to Claude Code;
@@ -92,7 +94,8 @@ drops, under the same proof as any other write or removal.
 which the `resume` skill requests under "6. Verify and review". Its own files are the `greptile` skill, that skill's
 `.claude/skills/` copy and the reviewer's configuration; `scripts/lib/runtimes.mjs` names their paths. An install and
 a release update write them only where the add-on is on and keep every entry in the manifest, and the contract test
-requires each of their paths to hold nothing where it is off and refuses anything found there. The add-on is chosen at
+requires each of their paths to hold nothing where it is off and refuses anything found there; a consumer that turns
+the add-on on is held to every one of its files. The add-on is chosen at
 install, after the owner connects the repository to the review service in that service's own dashboard, which no
 install does; it is changed later the same way as the runtimes: the update writes or removes the add-on's files to match, and the
 owner connects or disconnects the repository in the service's dashboard, which no update does.
@@ -103,14 +106,23 @@ the `sweep-scope` check, which are its workflow, its command and that command's 
 documentation standard, `docs/DOCUMENTATION-STANDARD.md`; `scripts/lib/runtimes.mjs` names their paths. An
 install and a release update write them unless the sweep is off and keep every entry in the manifest, and where it is
 off the contract test requires each of their paths to hold nothing, refuses anything found there, and no longer
-requires `docs/DOC-SWEEP.md` and `docs/SWEEP-TRIAGE.md`. A repository that turns the sweep off runs neither the sweep
-nor its triage, because nothing there holds a routine's branch to the scope table, and no instruction treats either
-routine as active there, whatever its Conventions table says: each instruction that reads that table's documentation
+requires `docs/DOC-SWEEP.md` and `docs/SWEEP-TRIAGE.md`; any other consumer is held to all of them. A repository that
+turns the sweep off runs neither the sweep nor its triage, because nothing there holds a routine's branch to the scope
+table, so a routine's pull request in such a repository is a finding. No instruction treats either routine as active
+there, whatever its Conventions table says: each instruction that reads that table's documentation
 routines row also reads this key. The repository still keeps that row truthful, as its own record of what is
 scheduled. The sweep is chosen at install, by the `docSweep` answer of
 `fabraik init`, off unless answered `true`, and changed later the same way as the runtimes; the update writes or removes
 the sweep's shared files to match, while the two manuals and the format pages are the repository's own files, which no
 update writes or removes.
+
+**What else the settings file may hold.** A consumer's settings file may hold `planApproval`, `true` or `false`,
+which the settings check then admits: no script acts on the value, so it changes no byte an update writes, no seat
+and no runtime a repository runs. It may hold `productManager` and `preApprovedRun` on the same terms. A consumer's
+settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
+other value and a file naming one runtime still refused: no update, check or hook acts on the value, so it changes no
+byte an update writes, no seat and no runtime; `fabraik init` writes it only on a yes to its cross-family disclosure,
+and a session reads it on `main` as the owner's standing authorization for the reviews the tiers call cross-family.
 
 **What a repository needs.** The supported profiles are Claude Code alone, Codex alone, or both with cross-family
 review. It needs a private repository whose default branch is `main`, the two branch rulesets with the administrator

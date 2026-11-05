@@ -11,6 +11,8 @@
 //   node scripts/board.mjs --json          # the normalized selection on stdout, scan on stderr
 //   node scripts/board.mjs --closeout      # the strict proof gate: the scan alone
 //   node scripts/board.mjs --intake        # the intake document on stdout, the outcome on stderr
+//   node scripts/board.mjs --approval check <card>...   # each card's advance approval line, no board read
+//   node scripts/board.mjs --help          # these modes on stdout, exit 0, no board read
 //
 // Fail-loud: a provider error or malformed data exits non-zero. On GitHub a zero-item
 // read also exits non-zero — a broken board read never prints an empty "nothing to pick"
@@ -29,6 +31,11 @@
 // were not fully read. 5: both 3 and 4. A card whose details were not read is marked
 // UNAVAILABLE in the document, never shown empty.
 //
+// --approval check reads no board: it prints one line per card from approvalReport
+// (scripts/lib/advance-approval.mjs) on stdout, leaving out the text to post under either run
+// mark. Exit 0: every card was read, approved or not.
+// 1: a rejected argument. 2: the tracker or a card was not read.
+//
 // #461: reads the board via the lean GraphQL page query (scripts/lib/board.mjs), not
 // `gh project item-list` (a measured 203 GraphQL points per read). #1155: the whole
 // walk runs inside one `gh api graphql --paginate --slurp` process, and every rule in
@@ -41,6 +48,7 @@
 
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { approvalReport } from './lib/advance-approval.mjs';
 import { ghExec } from './lib/gh-exec.mjs';
 import { linearExec } from './lib/linear-api.mjs';
 import { jiraExec } from './lib/jira-api.mjs';
@@ -51,6 +59,7 @@ import { azureCardDetails, readAzureBoard } from './lib/board-azure.mjs';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PICKABLE_STATUSES } from './lib/board-config.mjs';
 import { CARDS_DIR, configuredTracker, markdownCardDetails, readMarkdownBoard } from './lib/board-markdown.mjs';
 import {
+  BOARD_HELP,
   INTAKE_EXIT,
   fetchBoard,
   fetchCardDetails,
@@ -116,14 +125,27 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     return 1;
   }
 
-  // 2 under --intake, which tells a failed read from a rejected argument (1); every other mode keeps 1.
-  const readFailed = parsed.intake ? INTAKE_EXIT.readFailed : 1;
+  if (parsed.help) {
+    output.log(BOARD_HELP);
+    return 0;
+  }
+
+  // 2 under --intake and --approval, which tell a failed read from a rejected argument (1); every other mode keeps 1.
+  const readFailed = parsed.intake || parsed.approval ? INTAKE_EXIT.readFailed : 1;
   let tracker;
   try {
     tracker = configuredTracker();
   } catch (err) {
     output.error(`board: ${err.message}`);
     return readFailed;
+  }
+  if (parsed.approval) {
+    // Under either run mark, read as the guard hooks read them, no line hands the run a record to post.
+    const env = dependencies.env ?? process.env;
+    const run = env.PRE_APPROVED_RUN_SESSION !== undefined || env.PRODUCT_MANAGER_RUN_SESSION === '1';
+    const { lines, exitCode } = approvalReport(parsed.approval, { ...dependencies.approval, run, tracker });
+    for (const line of lines) output.log(line);
+    return exitCode;
   }
   // A markdown install's cards and claims, read alongside its items; null on GitHub.
   let markdown = null;

@@ -2,7 +2,7 @@
 
 ## Summary
 
-<!-- Open with a few plain sentences saying what changes for the owner, naming anything the job carried along beyond its card; they are the card's first block. Then the problem, the cause and the fix, only where the opening has not already said them. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. When a product manager run picked the card, the Summary ends with one line beginning `Picked:` that gives the run's reason, as the resume skill says under "2. Work-pick". -->
+<!-- Open with a few plain sentences saying what changes for the owner, naming anything the job carried along beyond its card; they are the card's first block. Then the problem, the cause and the fix, only where the opening has not already said them. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. When a product manager run picked the card, the Summary ends with one line beginning `Picked:` that gives the run's reason, as the resume skill says under "2. Work-pick". When the owner approved the card in advance, it ends instead with the line `Approved in advance: <record url>`, as the resume skill says under "7. Push authorisation". -->
 
 Closes #
 

@@ -179,22 +179,28 @@ test('a seat the costliest model may sit on may hold it or a cheaper known model
   }
 });
 
-// Mutation: drop the comparison with 90, check only `oracle`, or take the first of two lines, and this goes red.
-test('ANTI-REGRESSION: oracle and security-reviewer are refused a turn limit above 90 or one that is missing or malformed', () => {
+// The seats and their caps are written out here from AGENTS.md and the owner's decision, never imported, so a change
+// to the module's table cannot move them.
+// Mutation: put the security-reviewer cap back to 90, raise the oracle cap above 90, cap every Claude seat, drop the
+// comparison, check only `oracle`, or take the first of two lines, and this goes red.
+test('ANTI-REGRESSION: the oracle is refused a turn limit above 90, the security-reviewer one above 150, and either one that is missing or malformed', () => {
   const seatWith = (seat, limitLines) => `---\nname: ${seat}\nmodel: opus\n${limitLines}---\nBody.\n`;
-  const refused = ['maxTurns: 91\n', 'maxTurns: 150\n', `maxTurns: ${'9'.repeat(400)}\n`, 'maxTurns: 0\n', 'maxTurns: 090\n', '',
-    'maxTurns: "90"\n', 'maxTurns:  90\n', 'maxTurns: 90 # cap\n', 'maxTurns: 60\nmaxTurns: 120\n'];
-  for (const seat of ['oracle', 'security-reviewer']) {
+  for (const [seat, cap, above] of [['oracle', 90, ['maxTurns: 91\n', 'maxTurns: 150\n']], ['security-reviewer', 150, ['maxTurns: 151\n', 'maxTurns: 200\n']]]) {
+    const refused = [...above,
+      `maxTurns: ${'9'.repeat(400)}\n`, 'maxTurns: 0\n', `maxTurns: 0${cap}\n`, '',
+      `maxTurns: "${cap}"\n`, `maxTurns:  ${cap}\n`, `maxTurns: ${cap} # cap\n`, 'maxTurns: 60\nmaxTurns: 120\n'];
     for (const limitLines of refused) {
       const problems = checkSeatPolicy(`${seat}.md`, seatWith(seat, limitLines));
       assert.equal(problems.length, 1, `${seat} ${JSON.stringify(limitLines)}`);
-      assert.match(problems[0], new RegExp(`^${seat}\\.md: the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to 90; found `));
+      assert.match(problems[0], new RegExp(`^${seat}\\.md: the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to ${cap}; found `));
     }
-    for (const limit of [90, 40, 1]) {
+    for (const limit of [cap, 40, 1]) {
       assert.deepEqual(checkSeatPolicy(`${seat}.md`, seatWith(seat, `maxTurns: ${limit}\n`)), [], `${seat} ${limit}`);
     }
   }
-  assert.deepEqual(checkSeatPolicy('builder.md', seatWith('builder', 'maxTurns: 150\n')), []);
+  for (const seat of ['builder', 'reviewer']) {
+    assert.deepEqual(checkSeatPolicy(`${seat}.md`, seatWith(seat, 'maxTurns: 151\n')), [], seat);
+  }
   assert.deepEqual(checkSeatPolicy('oracle.toml', 'name = "oracle"\nmodel = "gpt-6-astra"\n'), []);
 });
 

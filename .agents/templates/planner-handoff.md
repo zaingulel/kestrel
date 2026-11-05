@@ -4,10 +4,8 @@ architect dispatches. Fill every {{SLOT}} before dispatch; the prompt-side hando
 checker rejects an incomplete contract. Discovery supplies completed findings so the
 architect spends its turn on judgment rather than repeating code discovery.
 
-After one bounded non-delivery, the orchestrator narrows once or finishes the plan inline, except that an
-architect's finding that the card holds more than one independently demonstrable outcome goes to the owner as a
-split proposal under the `resume` skill's Plan section and is never narrowed or finished inline.
-Never escalate to oracle merely because the architect did not deliver.
+The `Deliverable:` line names the plan file; the `resume` skill under "4. Plan" says which file that is and what
+the coordinating session does with an architect reply that lacks `plan delivered in full`.
 -->
 ---8<---
 Decision: {{DECISION}}

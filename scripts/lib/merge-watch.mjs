@@ -1,6 +1,6 @@
 // merge-watch.mjs — watches one pull request until it merges or can no longer merge unattended, or waits for one to open on a branch.
 //
-// Read-only: every `gh` call reads repository identity, pull request state, branch protection, rulesets, checks or workflow runs.
+// Read-only: every `gh` call reads repository identity, pull request state or timeline, branch protection, rulesets, checks, workflow runs or their jobs.
 // `gh pr checks --required` lists a check only once GitHub has created its run, so the full
 // required set is read first, from the base branch's classic protection and every page of its
 // rules; a required name the checks have not listed yet counts as `unreported`. So does a failed
@@ -8,9 +8,14 @@
 // because that run will report the check again. The first `gh`
 // failure stops the watch with no retry and no further read, and so does a successful reply it cannot read: a
 // required-check list that is not a list of names, a pull request state or merge state it does not know,
-// a required check without a known bucket, or a workflow run or run list without the fields the
-// watch compares. There is no wall-clock cap: the caller's runtime waits on the process itself.
-// The draft wait binds its branch and repository provenance to origin, at the same interval, with the same stops.
+// a required check without a known bucket, a timeline that is not pages of events or has a ready event without a time,
+// or a workflow run, run list or job without the fields the watch compares or with a status GitHub does not document.
+// The only time limits are two stall stops: no workflow run created since the pull request was last marked ready has
+// been unfinished on the head commit while a required check has not reported, for 10 minutes, and a job of such an
+// unfinished run queued with no runner for 15 minutes. A pull request that was never a draft counts every run. Both
+// clocks run on the watch's own clock from its first observation of the stall, so GitHub's clock and this machine's
+// never meet; the caller's runtime otherwise waits on the process itself.
+// The draft wait binds its branch and repository provenance to origin, at the same interval, with the same gh-failure and unreadable-reply stops.
 
 export const WATCH_INTERVAL_MS = 30_000;
 
@@ -64,6 +69,13 @@ const ACTIONS_RUN_LINK = /\/actions\/runs\/(\d+)(?:\/|$)/;
 // The workflow run statuses GitHub reports before a run completes.
 const UNFINISHED_RUN_STATUSES = new Set(['requested', 'queued', 'pending', 'waiting', 'in_progress']);
 
+// Every workflow run status and job status GitHub documents; any other string is an unreadable reply.
+const RUN_STATUSES = new Set([
+  ...UNFINISHED_RUN_STATUSES,
+  'completed', 'action_required', 'cancelled', 'failure', 'neutral', 'skipped', 'stale', 'success', 'timed_out',
+]);
+const JOB_STATUSES = new Set(['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending']);
+
 // True when a newer run of the failed check's own workflow on the same head commit has not finished,
 // so the check will be reported again. `run_number` rises with each new run of one workflow.
 function supersededByNewerRun(link, ghExec) {
@@ -109,8 +121,110 @@ function readRequiredBuckets(pr, required, ghExec) {
   return [...unreported, ...buckets];
 }
 
+// A run or job time as milliseconds; NaN unless GitHub sent a parseable string.
+const timeOf = (value) => (typeof value === 'string' ? Date.parse(value) : NaN);
+
+const NO_RUN_LIMIT_MS = 10 * 60_000;
+const QUEUED_JOB_LIMIT_MS = 15 * 60_000;
+
+// The items under `key` of every page of a `--paginate --slurp` reply.
+function flattenPages(pages, key, what) {
+  if (!Array.isArray(pages) || !pages.every((page) => Array.isArray(page?.[key]))) {
+    throw new Error(`unreadable ${what}: ${JSON.stringify(pages)}`);
+  }
+  return pages.flatMap((page) => page[key]);
+}
+
+// The latest time the pull request was marked ready for review, as milliseconds, or null when it never was a draft.
+function readReadyTime(pr, ghExec) {
+  const pages = JSON.parse(ghExec(['api', '--paginate', '--slurp', `repos/{owner}/{repo}/issues/${pr}/timeline?per_page=100`]));
+  if (!Array.isArray(pages) || !pages.every(Array.isArray)) {
+    throw new Error(`unreadable pull request timeline: ${JSON.stringify(pages)}`);
+  }
+  const ready = pages.flat().filter((event) => event?.event === 'ready_for_review');
+  if (ready.some((event) => Number.isNaN(timeOf(event.created_at)))) {
+    throw new Error(`unreadable pull request timeline: ${JSON.stringify(pages)}`);
+  }
+  return ready.length === 0 ? null : Math.max(...ready.map((event) => timeOf(event.created_at)));
+}
+
+function readRuns(head, ghExec) {
+  const pages = JSON.parse(ghExec(['api', '--paginate', '--slurp', `repos/{owner}/{repo}/actions/runs?head_sha=${head}&per_page=100`]));
+  const runs = flattenPages(pages, 'workflow_runs', `workflow runs on ${head}`);
+  for (const run of runs) {
+    if (!Number.isInteger(run?.id) || !RUN_STATUSES.has(run.status) || Number.isNaN(timeOf(run.created_at))) {
+      throw new Error(`unreadable workflow run on ${head}: ${JSON.stringify(run)}`);
+    }
+  }
+  return runs;
+}
+
+function readJobs(runId, ghExec) {
+  const pages = JSON.parse(ghExec(['api', '--paginate', '--slurp', `repos/{owner}/{repo}/actions/runs/${runId}/jobs?per_page=100`]));
+  const jobs = flattenPages(pages, 'jobs', `jobs of workflow run ${runId}`);
+  for (const job of jobs) {
+    if (
+      !Number.isInteger(job?.id) || typeof job.name !== 'string' || !JOB_STATUSES.has(job.status)
+      || !Array.isArray(job.labels) || !job.labels.every((label) => typeof label === 'string')
+      || !(job.runner_name === null || typeof job.runner_name === 'string')
+    ) {
+      throw new Error(`unreadable job of workflow run ${runId}: ${JSON.stringify(job)}`);
+    }
+  }
+  return jobs;
+}
+
+// The two stall clocks of one watch. `check` runs on a pass of an open, non-draft pull request that is about to
+// sleep, with that pass's required-check buckets, and returns the reason to stop, or undefined while neither limit has
+// run out. Only runs created since the pull request was last marked ready count, which the timeline gives once per
+// head commit. The no-run clock runs only while a required check is unreported and no counted run on the head commit
+// is unfinished. A new head commit starts both clocks over, and so does `clear`, which a draft pass calls.
+function createStallWatch(pr, ghExec, now) {
+  let head;
+  let readyAt;
+  let noRunSince;
+  let queuedSince;
+  const start = (nextHead) => {
+    head = nextHead;
+    readyAt = undefined;
+    noRunSince = undefined;
+    queuedSince = new Map();
+  };
+  start(undefined);
+  return {
+    clear: () => start(undefined),
+    check(currentHead, buckets) {
+      const time = now();
+      if (currentHead !== head) start(currentHead);
+      if (readyAt === undefined) readyAt = readReadyTime(pr, ghExec);
+      const unfinished = readRuns(head, ghExec)
+        .filter((run) => readyAt === null || timeOf(run.created_at) >= readyAt)
+        .filter((run) => UNFINISHED_RUN_STATUSES.has(run.status));
+      if (buckets.includes('unreported') && unfinished.length === 0) {
+        noRunSince ??= time;
+        if (time - noRunSince >= NO_RUN_LIMIT_MS) {
+          return `no test run has started for ${head} within 10 minutes: mark the pull request as a draft, mark it ready again, then queue the auto-merge again, since returning to draft cancels the queued merge`;
+        }
+      } else {
+        noRunSince = undefined;
+      }
+      const waiting = unfinished
+        .flatMap((run) => readJobs(run.id, ghExec))
+        .filter((job) => job.status === 'queued' && (job.runner_name === null || job.runner_name === ''));
+      queuedSince = new Map(waiting.map((job) => [job.id, queuedSince.get(job.id) ?? time]));
+      const stalled = waiting.find((job) => time - queuedSince.get(job.id) >= QUEUED_JOB_LIMIT_MS);
+      if (stalled) {
+        const labels = stalled.labels.filter((label) => label.trim() !== '');
+        const needs = labels.length === 0 ? 'waits for a runner, but GitHub reported no runner labels' : `waits for a runner labelled ${labels.join(', ')}`;
+        return `a test job has waited 15 minutes for a machine: ${stalled.name} ${needs}`;
+      }
+      return undefined;
+    },
+  };
+}
+
 // Resolves to { exitCode, reason }: 0 only when the pull request merged, 1 for every other stop.
-export async function watchMerge({ pr, ghExec, sleep }) {
+export async function watchMerge({ pr, ghExec, sleep, now }) {
   try {
     const { classic, ruled } = readRequiredSet(pr, ghExec);
     if (ruled.some((entry) => typeof entry !== 'string')) {
@@ -120,10 +234,11 @@ export async function watchMerge({ pr, ghExec, sleep }) {
       };
     }
     const required = new Set([...classic, ...ruled]);
+    const stall = createStallWatch(pr, ghExec, now);
     for (;;) {
-      const { state, mergeStateStatus } = JSON.parse(ghExec(['pr', 'view', pr, '--json', 'state,mergeStateStatus']));
-      if (!PR_STATES.has(state) || !MERGE_STATES.has(mergeStateStatus)) {
-        return { exitCode: 1, reason: `unreadable pull request state: ${JSON.stringify({ state, mergeStateStatus })}` };
+      const { state, mergeStateStatus, headRefOid } = JSON.parse(ghExec(['pr', 'view', pr, '--json', 'state,mergeStateStatus,headRefOid']));
+      if (!PR_STATES.has(state) || !MERGE_STATES.has(mergeStateStatus) || !/^[0-9a-f]{40}$/.test(headRefOid)) {
+        return { exitCode: 1, reason: `unreadable pull request state: ${JSON.stringify({ state, mergeStateStatus, headRefOid })}` };
       }
       if (state === 'MERGED') return { exitCode: 0, reason: 'merged' };
       if (state === 'CLOSED') return { exitCode: 1, reason: 'closed without merging' };
@@ -135,6 +250,12 @@ export async function watchMerge({ pr, ghExec, sleep }) {
       }
       if (mergeStateStatus === 'BLOCKED' && !buckets.some((bucket) => bucket === 'pending' || bucket === 'unreported')) {
         return { exitCode: 1, reason: `merge blocked with every required check finished: ${view} ${buckets.join(' ')}`.trimEnd() };
+      }
+      if (mergeStateStatus === 'DRAFT') {
+        stall.clear();
+      } else {
+        const stalled = stall.check(headRefOid, buckets);
+        if (stalled !== undefined) return { exitCode: 1, reason: stalled };
       }
       await sleep(WATCH_INTERVAL_MS);
     }

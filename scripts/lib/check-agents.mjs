@@ -290,19 +290,32 @@ export function checkAgentsDir(dir) {
   return problems;
 }
 
-// The seat policy: the costliest models sit only on their named seats, and the oracle and security-reviewer
-// seats take at most 90 turns. Every other model, effort or limit is free, so a cheaper model or a lower limit
-// passes. Each line pattern is tested against every line of the file, so no spelling the agent check accepts
-// slips past (trailing space, quotes, a form feed, a no-break or ideographic space).
+// The seat policy: the costliest models sit only on their named seats, the oracle seat takes at most 90 turns and the
+// security-reviewer seat at most 150, and an override judged against the shared file it renders may not raise either
+// seat above that file's own limit. Every other model, effort or limit is free, so a cheaper model or a lower limit
+// passes. Each line pattern is tested against every line of the file, so no spelling the agent check accepts slips past
+// (trailing space, quotes, a form feed, a no-break or ideographic space).
 const FABLE_LINE = /^model:[^\S\n]*["']?fable["']?[^\S\n]*$/m;
 const ASTRA_LINE = /^model[^\S\n]*=[^\S\n]*["']gpt-6-astra["'][^\S\n]*$/m;
 const FABLE_SEATS = ['oracle'];
 const ASTRA_SEATS = ['architect', 'oracle', 'security-reviewer'];
-const TURN_LIMITED_SEATS = ['oracle', 'security-reviewer'];
-const TURN_LIMIT_LINE = /^maxTurns: (?:[1-9]|[1-8]\d|90)$/;
+const TURN_LIMITS = new Map([['oracle', 90], ['security-reviewer', 150]]);
+// A number too long to read exactly still reads far above any cap.
+const TURN_LIMIT_LINE = /^maxTurns: ([1-9]\d*)$/;
 
-/** Check one seat file against the seat policy. Returns [] when clean; a name that is no seat file is clean. */
-export function checkSeatPolicy(filename, source) {
+// The maxTurns lines of a Claude seat's frontmatter, and the limit when exactly one of them is canonical.
+function turnLimitOf(lines) {
+  const closing = lines[0] === '---' ? lines.indexOf('---', 1) : -1;
+  const limits = closing === -1 ? [] : lines.slice(1, closing).filter((line) => line.startsWith('maxTurns:'));
+  const match = limits.length === 1 ? TURN_LIMIT_LINE.exec(limits[0]) : null;
+  return { limits, number: match ? Number(match[1]) : undefined };
+}
+
+/**
+ * Check one seat file against the seat policy. Returns [] when clean; a name that is no seat file is clean. The
+ * optional `shared` is the shared seat file's text, whose own turn limit also caps a capped seat.
+ */
+export function checkSeatPolicy(filename, source, shared) {
   const file = basename(filename);
   const isClaude = file.endsWith('.md');
   if (!isClaude && !file.endsWith('.toml')) return [];
@@ -318,11 +331,13 @@ export function checkSeatPolicy(filename, source) {
     problems.push(`${filename}: the costliest ${runtime} model may sit only on the ${seatList}; found ${JSON.stringify(found)}`);
   }
 
-  if (isClaude && TURN_LIMITED_SEATS.includes(seat)) {
-    const closing = lines[0] === '---' ? lines.indexOf('---', 1) : -1;
-    const limits = closing === -1 ? [] : lines.slice(1, closing).filter((line) => line.startsWith('maxTurns:'));
-    if (limits.length !== 1 || !TURN_LIMIT_LINE.test(limits[0])) {
-      problems.push(`${filename}: the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to 90; found ${JSON.stringify(limits)}`);
+  const policyCap = isClaude ? TURN_LIMITS.get(seat) : undefined;
+  if (policyCap !== undefined) {
+    const sharedLimit = shared === undefined ? undefined : turnLimitOf(shared.split('\n')).number;
+    const cap = sharedLimit === undefined ? policyCap : Math.min(policyCap, sharedLimit);
+    const { limits, number } = turnLimitOf(lines);
+    if (number === undefined || number > cap) {
+      problems.push(`${filename}: the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to ${cap}; found ${JSON.stringify(limits)}`);
     }
   }
   return problems;

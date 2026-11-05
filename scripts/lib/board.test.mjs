@@ -10,7 +10,11 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { installFakeGh } from './fake-gh.mjs';
-import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
@@ -29,7 +33,10 @@ const {
   STATUS_OPTIONS,
 } = await toolkit.load('lib/board-config.mjs');
 const board = await toolkit.load('lib/board.mjs');
+// The command itself, for the approval-mode test at the end of the file.
+const { main: boardMain } = await toolkit.load('board.mjs');
 const {
+  BOARD_HELP,
   DETAIL_BATCH_SIZE,
   cardDetailsQuery,
   fetchBoard,
@@ -123,6 +130,52 @@ test('parseBoardArgs: --intake takes no other argument', () => {
     assert.throws(() => parseBoardArgs([other, '--intake']), /--intake takes no other argument/, other);
   }
   assert.equal(parseBoardArgs(['--intake']).intake, true);
+});
+
+test('parseBoardArgs: --help takes no other argument', () => {
+  assert.deepEqual(parseBoardArgs(['--help']), { help: true });
+  for (const other of ['--all', '--status=Ready', '--json', '--closeout', '--intake']) {
+    assert.throws(() => parseBoardArgs(['--help', other]), /--help takes no other argument/, other);
+    assert.throws(() => parseBoardArgs([other, '--help']), /--help takes no other argument/, other);
+  }
+  assert.throws(() => parseBoardArgs(['--approval', 'check', '1', '--help']), /--help takes no other argument/);
+});
+
+// The help is the one place an agent learns the modes, so it must name exactly the flags the
+// command accepts. The accepted set is read from the real source through a parser, not from
+// BOARD_FLAGS: a flag the command handles outside BOARD_FLAGS, in parseBoardArgs or in
+// scripts/board.mjs, is in the set too, so a flag added without the help, or dropped from the help,
+// differs here. A flag the parser stops accepting fails the parse half.
+test('BOARD_HELP names exactly the flags the parser accepts, and each one parses', NEEDS_PARSER, () => {
+  const accepted = [...new Set([
+    ...flagLiterals(fileURLToPath(new URL('../board.mjs', import.meta.url))),
+    ...flagLiterals(fileURLToPath(new URL('./board.mjs', import.meta.url)), ['parseBoardArgs', 'BOARD_FLAGS']),
+  ])].sort();
+  const helped = new Set(BOARD_HELP.match(/--[a-z][a-z-]*=?/g));
+  assert.deepEqual([...helped].sort(), accepted);
+  const validForm = {
+    '--status=': ['--status=Ready'],
+    '--approval': ['--approval', 'check', '1'],
+  };
+  for (const flag of accepted) {
+    assert.doesNotThrow(() => parseBoardArgs(validForm[flag] ?? [flag]), flag);
+  }
+});
+
+// A pattern that accepts more than the flag it spells (`--all-items` through a group and a suffix)
+// would hide an accepted flag from the help check, so the scan throws instead of reading it.
+test('flagLiterals: reads a flag from `--name=` or `--name$` in a regular expression, and throws when a suffix could follow', NEEDS_PARSER, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'flag-literals-'));
+  try {
+    const grouped = join(dir, 'grouped.mjs');
+    const readable = join(dir, 'readable.mjs');
+    writeFileSync(grouped, 'export const accepts = (arg) => /^(--all|--json)(?:-items)?$/.test(arg);\n');
+    writeFileSync(readable, 'export const accepts = (arg) => /^--status=.+$/.test(arg) || /^--all$/.test(arg);\n');
+    assert.throws(() => flagLiterals(grouped), /cannot read the flags .* accepts from the regular expression .*spell each flag as a string literal/);
+    assert.deepEqual(flagLiterals(readable), ['--all', '--status=']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // STATUS_OPTIONS is the board's whole column vocabulary, so a value outside it selects
@@ -1388,4 +1441,97 @@ test('intakeDocument: a complete card prints its fields, latest claim, body and 
     '',
     `board intake: end of document, ${30 + routingLine('Product').length} line(s).`,
   ]);
+});
+
+// ── approval mode ────────────────────────────────────────────────────────────
+// `--approval check <card>...` reads advance approvals through two injected runners and no board:
+// the board ghExec throws, so a case that reads the board fails loud. The runners answer GitHub's
+// own GraphQL field names for acme/widgets, and the expected lines are written by hand from the
+// plan's line forms and decision 16's exit codes. Each run is given its environment, so a run mark
+// in the environment running the suite cannot change a line.
+
+const APPROVAL_REPOSITORY = { id: 'R_kgDOwidgets', nameWithOwner: 'acme/widgets' };
+const APPROVAL_RECORD_URL = 'https://github.com/acme/widgets/issues/7#issuecomment-1';
+const APPROVAL_USAGE = '--approval check <card>...';
+
+function approvalRun(args, env = {}) {
+  const calls = [];
+  let stdout = '';
+  let stderr = '';
+  const exec = (callArgs) => {
+    calls.push(`gh ${callArgs.join(' ')}`);
+    const card = Number(callArgs[callArgs.indexOf('-F') + 1].replace('number=', ''));
+    if (card === 9) throw new Error('gh: HTTP 502');
+    const comments = card === 7
+      ? [{ author: { login: 'zain' }, createdAt: '2026-11-03T09:00:00Z', lastEditedAt: null, url: APPROVAL_RECORD_URL, body: 'Approved: card=7 edited=none' }]
+      : [];
+    return JSON.stringify({
+      data: {
+        viewer: { login: 'zain' },
+        repository: {
+          id: APPROVAL_REPOSITORY.id,
+          issue: {
+            state: 'OPEN',
+            title: 'Show the logo',
+            lastEditedAt: null,
+            timelineItems: { nodes: [] },
+            comments: { pageInfo: { hasNextPage: false }, nodes: comments },
+          },
+        },
+      },
+    });
+  };
+  const git = (callArgs) => {
+    calls.push(`git ${callArgs.join(' ')}`);
+    throw new Error('the approval mode must not read git when the repository is given');
+  };
+  const boardRead = (callArgs) => {
+    throw new Error(`the approval mode must not read the board: ${callArgs.join(' ')}`);
+  };
+  const output = {
+    log: (line) => { stdout += `${line}\n`; },
+    error: (line) => { stderr += `${line}\n`; },
+  };
+  const status = boardMain(args, { ghExec: boardRead, output, env, approval: { exec, git, repository: APPROVAL_REPOSITORY } });
+  return { status, stdout, stderr, calls };
+}
+
+test("ANTI-REGRESSION: board --approval check prints each card's advance approval line and exits 0 only when every card was read, 2 when one was not, and 1 with usage for any other approval argument", () => {
+  const read = approvalRun(['--approval', 'check', '7', '8']);
+  assert.equal(read.status, 0, read.stderr);
+  assert.equal(
+    read.stdout,
+    `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record; post: Approved: card=8 edited=none\n`,
+  );
+  assert.equal(read.stderr, '');
+
+  const unread = approvalRun(['--approval', 'check', '8', '9']);
+  assert.equal(unread.status, 2, unread.stderr);
+  assert.equal(unread.stdout, 'not approved 8: no record; post: Approved: card=8 edited=none\nunavailable 9: gh: HTTP 502\n');
+
+  for (const args of [
+    ['--approval'],
+    ['--approval', 'check'],
+    ['--approval', 'check', '0'],
+    ['--approval', 'check', 'x'],
+    ['--approval', 'line', '7'],
+    ['--approval', 'check', '7', '--json'],
+  ]) {
+    const refused = approvalRun(args);
+    const label = args.join(' ');
+    assert.equal(refused.status, 1, label);
+    assert.match(refused.stderr, /^board: /, label);
+    assert.ok(refused.stderr.includes(APPROVAL_USAGE), `${label}: ${refused.stderr}`);
+    assert.equal(refused.stdout, '', label);
+    assert.deepEqual(refused.calls, [], label);
+  }
+});
+
+test('ANTI-REGRESSION: board --approval check leaves out the post text under either run mark', () => {
+  for (const mark of [{ PRE_APPROVED_RUN_SESSION: '2026-11-04T12:00:00Z' }, { PRODUCT_MANAGER_RUN_SESSION: '1' }]) {
+    const read = approvalRun(['--approval', 'check', '7', '8'], mark);
+    const label = JSON.stringify(mark);
+    assert.equal(read.status, 0, `${label}: ${read.stderr}`);
+    assert.equal(read.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record\n`, label);
+  }
 });

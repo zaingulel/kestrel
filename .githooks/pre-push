@@ -183,7 +183,23 @@ else
 fi
 
 echo "pre-push: node --test scripts/lib/…"
-node --test --test-concurrency=2 "scripts/lib/*.test.mjs"
+# The suite's output is held until it ends, in a variable so an interrupted push leaves no file behind. A pass
+# shows only node's own summary counts, since its per-test lines cost each push hundreds of kilobytes; a failure,
+# or a pass whose counts are not found (another reporter, FORCE_COLOR), shows the whole output, both streams in
+# the order written. This repeats the test-output filter's rule because that filter is installed only with Claude
+# Code. The counts are the spec reporter's `ℹ` lines, or the TAP reporter's `# ` lines Node 20 and 22 write to a pipe.
+if suite_output=$(node --test --test-concurrency=2 "scripts/lib/*.test.mjs" 2>&1); then
+  suite_status=0
+else
+  suite_status=$?
+fi
+if [ "$suite_status" -eq 0 ] && suite_summary=$(printf '%s\n' "$suite_output" | LC_ALL=C grep -E '^(ℹ|#) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) '); then
+  echo "pre-push: the script suite passed; showing only node's summary."
+  printf '%s\n' "$suite_summary"
+elif [ -n "$suite_output" ]; then
+  printf '%s\n' "$suite_output"
+fi
+[ "$suite_status" -eq 0 ] || exit "$suite_status"
 
 if [ "${RUN_TESTS:-0}" = "1" ]; then
   echo "pre-push: RUN_TESTS=1 → npm test…"
