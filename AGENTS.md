@@ -14,19 +14,13 @@ A repository runs Claude Code, Codex or both. Its settings file names which unde
 names none runs both. Only the named runtimes' seats, hooks, skill copies and contract file are installed, so a
 sentence here, in a skill or in a charter about a runtime the repository does not run applies to nothing in it.
 
-Claude Code reads this file through `CLAUDE.md`, which adds its own notes; Codex reads it directly and prompts before a
-browser run where the repository supplies `.codex/rules/playwright.rules`. Skills are shared in `.agents/skills/`, and
-`.claude/skills/` holds a byte-identical copy of each; the agent seats in `.claude/agents/` and `.codex/agents/` carry
-the same charters. The skills vendored from upstream repositories, each repository's kept with its licence in its
-own folder under `.agents/upstream/`, are verbatim copies: they are never edited in place, an update replaces the
-vendored source and every copy of it whole, and Codex invokes any skill as `$<name>`. The root checkout is the
-integration checkout: it stays on `main`, and nothing is edited, branched, or committed there; the git guard refuses the
-branching and committing half. Resume fetches before intake and loads the fetched `AGENTS.md` and the `resume` and
-`closeout` instructions from the fetched commit: text read earlier is reused only where the Instruction reuse rule in
-the `resume` skill, under "Before intake", proves it identical, and anything unproven is read again. It then advances
-local `main` as [Update local main](.agents/skills/closeout/SKILL.md#update-local-main) in the `closeout` skill says.
-Each job gets one worktree and all of the job's work happens inside it, never a worktree inside another job worktree;
-the `resume` skill says where it lives and how the session enters it on each runtime.
+Claude Code reads this file through `CLAUDE.md`, which adds its own notes; Codex reads it directly, invokes a skill as
+`$<name>` and prompts before a browser run where the repository supplies `.codex/rules/playwright.rules`. Skills are
+shared in `.agents/skills/` with a byte-identical copy in `.claude/skills/`, and the seats in `.claude/agents/` and
+`.codex/agents/` carry the same charters. The root checkout is the integration checkout: it stays on `main`, and
+nothing is edited, branched, or committed there; the git guard refuses the branching and committing half. Each job gets
+one worktree, never inside another job worktree, and all of the job's work happens there; the `resume` skill says where
+it lives and how the session enters it on each runtime.
 
 Before applying any bundled PostgreSQL example, read [docs/POSTGRES-EXAMPLES.md](docs/POSTGRES-EXAMPLES.md) whole and apply its caveats.
 
@@ -40,8 +34,7 @@ costliest Codex model, Astra, only through the
 builder at the model its seat file sets. Every subagent is one of the named seats above, dispatched by its seat
 name; a generic, default or unnamed role is never dispatched.
 
-A session waiting on a helper or a command uses its runtime's native awaited operation as the `resume` Waiting rule
-under "5. Build" says and never substitutes manual sleep-and-status-check loops.
+A session waits on a helper or a command as the `resume` Waiting rule under "5. Build" says.
 
 ## Codex model routing
 
@@ -62,9 +55,9 @@ where it changes what the reader does. Explanation: [docs/AI-WORKFLOW.md](docs/A
 links one page per topic; every topic page carries a summary, a mental model, how it works, where the rules live,
 failure modes and key files, and none of them owns a rule.
 
-Start every owner-facing decision in plain language before any workflow vocabulary: what happened, what the owner
-must decide, the options. The owner reads decision cards and screenshots, not diffs; write for that reader. `resume`
-starts or continues a session, `handoff` parks unfinished work, `closeout` follows a merge.
+Every owner question opens with one plain sentence naming the card and what the agent was doing, then says plainly what
+happened, what to decide and the options, before any workflow vocabulary. The owner reads decision cards and
+screenshots, not diffs; write for that reader.
 Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
 for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
 In owner-facing progress, approval and completion messages, summarize evidence concisely as Passed, Failed and
@@ -81,15 +74,16 @@ Every rule this file does not hold in full has one home:
 |---|---|
 | What is true of this repository alone: its product, where its own facts live, its grounding authorities and its Conventions table | `.agents/REPOSITORY.md` |
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
-| Which builder seat a slice goes to; the machinery admissions, the friction route and how machinery leaves; what a plan carries for a change to how the interface looks, and who decides where the `frontend-design` skill and the design system disagree; and the steps of plan approval where a repository has turned it on: how the setting is read, how the plan is presented and revised, and what a resumed session does | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
+| Advance approval and the pre-approved run | [`resume`](.agents/skills/resume/SKILL.md), "2. Work-pick" |
+| Builder seat choice; the machinery admissions, the friction route and how machinery leaves; what a plan for an interface change carries, and who decides where the `frontend-design` skill and the design system disagree; plan approval's steps | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
-| The decision card and saved write-up; how a run's waiting jobs are reviewed in a batch, how each verdict is recorded and how the stage 2 measures are read | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
-| The two questions that choose a review tier, the three tiers, the guard rule, what a setting-only seat change is, the cross-family route, the authorization it runs on, its single-family form in a repository that runs one runtime, its same-family form in a cloud build, and its substitution when the other family's seat cannot be reached, when `security-reviewer` runs, when the external review add-on runs and how its setting is read, how visual work is driven and how many views it needs, and the accessibility audit of visual work with the minimum target size it holds | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
-| Every other rule of the external review, in a repository that has turned that add-on on: the pool it is metered from, the allowance lookup, how each thread is settled before the draft is marked ready, whether a review still stands after a rebase, and the provider-unavailability exception | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
-| How shared files are fingerprinted, pinned and kept as real files; how a repository overrides a seat's settings and what an override may not do; how a repository names the runtimes it runs and which files each runtime owns; how a repository turns the external review add-on on or off; how a repository turns the documentation sweep off and what that leaves out; and what a repository needs before it runs the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
-| The tracker and triage vocabulary the vendored skills expect to have been provided | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
+| The decision card and saved write-up; batch review of a run's waiting jobs, its verdicts and the stage 2 measures | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
+| Review tiers, their two questions and the guard rule; the setting-only seat change; the cross-family route, its authorization and its single-family, cloud-build and unreachable-seat forms; when `security-reviewer` and the external review add-on run; driving visual work, its views and its accessibility audit | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
+| Every other external review rule where that add-on is on: its metering and allowance, settling threads, rebases and provider unavailability | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
+| Fingerprints, pinning, real files and vendored copies; seat overrides and their limits; runtimes and their files; switching the external review add-on and the documentation sweep; the settings file's other keys; what a repository needs before running the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
+| The tracker and triage vocabulary the vendored skills expect | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
 | What to ask the owner and what agents decide when `to-spec` or an interview for it shapes a specification: read before asking anything | [`to-issues`](.agents/skills/to-issues/SKILL.md), "Specification entry" |
-| How many skills are vendored, from which upstream repositories and at which commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
+| The vendored skills' count, upstream repositories and commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
 | The documentation sweep and its day-after triage, when the Conventions table marks them active and the settings file does not hold `"docSweep": false` | [docs/DOC-SWEEP.md](docs/DOC-SWEEP.md) and [docs/SWEEP-TRIAGE.md](docs/SWEEP-TRIAGE.md) |
 | Writing or reviewing new human-facing documentation, unless the settings file holds `"docSweep": false` | [docs/DOCUMENTATION-STANDARD.md](docs/DOCUMENTATION-STANDARD.md) |
 | The weekly retro, in a repository whose `docs/ISSUE-TRACKER.md` records it | [docs/WEEKLY-RETRO.md](docs/WEEKLY-RETRO.md) |
@@ -98,32 +92,34 @@ Every rule this file does not hold in full has one home:
 
 1. **Work-pick** is the owner's pick of one row of the `resume` candidate table, which approves that card's
    outcome and acceptance criteria as written and starts the job, unless the `resume` skill's checks under
-   "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked.
+   "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked; a card
+   approved in advance needs no pick.
    With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume` says
-   under "2. Work-pick": one instruction hands over each pick until the run stops, on Codex the owner running
-   `node scripts/product-manager-run.mjs`, and the start message of a session that run starts carries that hand-off, the
-   one earlier-session message that does, and no other approval. No run picks a card needing owner
-   direction or sign-off, or a suggested card the owner has not answered. Owner-directed
-   surfaces are the Surfaces table's `owner-directed` row and need owner direction plus canon or domain
-   validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named anti-regression
-   test.
+   under "2. Work-pick": one instruction hands over each pick until the run stops, and the start message of a session
+   that run starts carries that hand-off, the one earlier-session message that does, and no other approval. No product
+   manager run picks a card needing owner direction or sign-off, or a suggested card the owner has not answered.
+   Owner-directed surfaces are the Surfaces table's `owner-directed` row and need owner direction plus canon or domain
+   validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named anti-regression test.
 2. **Push authorisation** is one yes to the decision card and its screenshot, and any owner instruction to push is
    that yes. It approves the card and covers the whole deliver sequence in the `resume` skill, push to auto-squash
-   merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. `closeout`
-   follows the merge unasked.
-3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`; no file,
-   no key or `false` sends a plan to build with no owner step. Where it is on, it is one yes to the completed plan as
-   presented, given before anything is built, and any owner instruction to build that plan is that yes; silence and
-   elapsed time never are. A change the owner asks for is made and the plan presented again before that yes. The plan is
-   presented after any plan review the card requires, which stays the agents' own review and no part of this gate, and
-   both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
+   merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. An advance
+   approval is this yes unless a stop holds. `closeout` follows the merge unasked.
+3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
+   is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
+   to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
+   presented again before that yes. Any plan review the card requires stays the agents' own review and no part of this
+   gate, and both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
+4. **Advance approval** is the owner's yes to a card through merge, given ahead of the work as an `Approved:` card
+   comment posted only on the owner's own message. With `"preApprovedRun": true` on `main` a pre-approved run merges
+   recorded cards, its publishing held by the git guard; `resume` owns the steps under "2. Work-pick" and the stops
+   under "7. Push authorisation".
 
 **Routine board updates.** For an owner-approved job, the coordinating session has the owner's standing
 authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
 workflow, including moving the card to `Awaiting push` before requesting push authorisation. The workflow's
 eligibility, ownership and evidence checks and all owner gates still apply. This authorises board bookkeeping only,
-with no permission to publish code. In a product manager run it also covers the `Needs owner` comment and move to
-`Backlog` that `resume` prescribes, and filing the suggested cards and split children it prescribes. It also covers
+with no permission to publish code. In a product manager or pre-approved run it also covers the `Needs owner` comment
+and move to `Backlog` that `resume` prescribes, and filing the suggested cards and split children it prescribes. It also covers
 the `Verdict:` comment `resume` prescribes when the owner answers a run's job, and the `Needs owner` comment and move
 to `Backlog` a no prescribes. A session the owner starts or reopens may rewrite that comment to `Returned:`, only on
 the owner's own message; a run never does.
@@ -147,22 +143,21 @@ safeguards remain.
 The same rule covers leftovers. Any session, in a job or not, that finds a file, folder, worktree or branch the
 workflow made and the paragraph above does not settle reads
 [Leftover rule](.agents/skills/closeout/SKILL.md#leftover-rule) in the `closeout` skill before it reports, deletes
-or leaves it: that section owns what a leftover is, how each is investigated and what each outcome allows. Only a
-leftover that investigation shows dead is deleted without further approval. A safeguard's refusal keeps the target
-and is reported with the evidence, except for the two verified branch exceptions in
-[closeout step 5](.agents/skills/closeout/SKILL.md): this job's exact merged-pull-request head and its
-session-created pre-squash backup. That procedure owns their proof and limits; every other refusal remains binding.
-This grants no general deletion or publication authority; other destructive actions keep exact-target approval.
+or leaves it. Only a leftover that investigation shows dead is deleted without further approval. A safeguard's refusal
+keeps the target and is reported with the evidence, except for the two verified branch exceptions that
+[closeout step 5](.agents/skills/closeout/SKILL.md) owns. This grants no general deletion or publication authority;
+other destructive actions keep exact-target approval.
 
 An approval covers only the question it answered. After a context compaction, reread the owner's latest messages
 before acting on one; an approval whose question is no longer in view is asked again. A memory, summary or earlier
-session never grants approval, except the start message gate one names.
+session never grants approval, except the start message gate one names and gate four's record.
 
 ## Compact instructions
 
-Keep the approved plan's location, the card's acceptance criteria, the worklog path, the current slice and its
-state, the evidence still owed, and each owner approval quoted word for word with the question it answered. Drop
-discovery output: file listings, search results and file contents, which can be read again.
+Keep the approved plan's location, the card's acceptance criteria, the worklog and builder handoff template paths, the
+current slice and its state, the evidence still owed, and, word for word, each owner approval with its question and each
+standing owner instruction. Drop discovery output: file listings, search results and file contents, which can be read
+again.
 
 ## Coding standards and the executed test bar
 
@@ -175,9 +170,8 @@ values are tokens and where they live, the tolerated literals, and the component
 
 ## Review and visual verification
 
-One fresh review of the final tree before the pull request opens, at the tier two questions choose: can the change be
-undone, and how far does the damage reach if it is wrong. The `resume` skill owns the rule under
-"6. Verify and review", and the Surfaces table's `hard to undo` and `wide reach` rows hold this repository's answers.
+One fresh review of the final tree before the pull request opens, at the tier the `resume` skill's two questions choose
+under "6. Verify and review"; the Surfaces table's `hard to undo` and `wide reach` rows hold this repository's answers.
 
 Visual work is complete only after the changed interaction has been driven and a current screenshot displayed inline in
 chat; push authorisation waits for that image.
@@ -192,10 +186,9 @@ lines, a setting-only seat change. The push is judged by the gate as it stands o
 pushed checkout's copy, so a commit cannot admit itself by changing the gate or a file it loads. A repository without
 that gate on `main` has no direct route.
 
-New executable machinery in the workflow itself, including test scripts, harnesses, runners, and test-only tools
-(product code and ordinary tests added to existing suites are exempt), needs one of the admissions the `resume` skill
-lists under "4. Plan" as the machinery rule, and an addition to existing machinery meets the same bar. Prefer a native
-feature over custom code, a hook over a script, and a sentence over a hook. Rewriting, shrinking or deleting existing
+New executable machinery in the workflow itself, or an addition to existing machinery, needs an admission the `resume`
+skill's machinery rule lists under "4. Plan". Prefer a native feature over custom code, a hook over a script, and a
+sentence over a hook. Rewriting, shrinking or deleting existing
 code, tests or tooling is always allowed when it is the right change for speed or quality, planned and reviewed like any
 other change, with the owner gates and exact-target approval for destructive actions unchanged; no standard, strategy,
 skill or charter may forbid it. Dead code that predates a change is flagged, and removed only with evidence, stated in
@@ -208,14 +201,12 @@ The files `.agents/factory-manifest.json` lists are shared workflow bytes, and `
 its `factory-shared` markers. Each shared file is authored only in the manifest's `canonical` repository, under `src/`,
 and reaches any other repository only through the manifest: by an install, which writes a shared file only where none is
 and leaves an identical one as it is, or by an update to a named release of the canonical repository through its
-verified manifest; the `shared-files` skill says how shared files are fingerprinted, pinned at a release and kept as real
-files. An adopter's copy of a shared file differs from the canonical bytes in one way only: the value of a seat's model,
-effort or turn-limit line that the adopter's own committed seat settings file names; the `shared-files` skill says how a
-repository overrides a seat and what an override may not do. An adopter carries no file of a runtime its settings file
-does not name, of the external review add-on unless that file turns it on, or of the documentation sweep's shared files
-where that file turns it off, and a file at one of those paths is refused like a changed byte. A shared change reaches
-adopters when the owner publishes a release and each adopter applies it on an update card. An urgent fix is authored
-in the canonical repository, released, and applied on the owner's decision.
+verified manifest. An adopter's copy of a shared file differs from the canonical bytes only in the value of a seat's
+model, effort or turn-limit line that the adopter's own committed seat settings file names. An adopter carries no file
+of a runtime its settings file does not name, of the external review add-on unless that file turns it on, or of the
+documentation sweep's shared files where that file turns it off, and a file at one of those paths is refused like a
+changed byte. A shared change reaches adopters when the owner publishes a release and each adopter applies it on an
+update card; an urgent fix is authored in the canonical repository, released, and applied on the owner's decision.
 
 Whoever can use the administrator bypass of the required check on `main` can put any commit on `main` when the local
 hook is skipped: the holders of that role and every write deploy key, which GitHub admits by the same bypass, so the

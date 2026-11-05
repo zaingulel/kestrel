@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { fileURLToPath } from 'node:url';
+import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
@@ -8,7 +9,7 @@ after(() => toolkit.cleanup());
 const { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } = await toolkit.load('lib/board-config.mjs');
 const { addIssueToBoard } = await toolkit.load('lib/board-add.mjs');
 const { issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
-const { main: boardAddMain } = await toolkit.load('board-add.mjs');
+const { main: boardAddMain, BOARD_ADD_HELP } = await toolkit.load('board-add.mjs');
 
 // Shapes mirror the real `gh api graphql` payloads for project 2. Expected ids are
 // independent literals, never re-derived from the production code.
@@ -40,15 +41,22 @@ function projectItemFieldsJson(status, workstream) {
 }
 
 // Records every exec() call so the exact call sequence can be asserted. `failOn` is
-// a substring of the query that should blow up (simulating a gh failure mid-run);
-// `nodeIdJson` / `addJson` override the two fail-loud parse points, and
-// `itemFieldsJson` supplies the post-failure field re-read.
-function recordingExec({ itemId = 'PVTI_item543', failOn = null, nodeIdJson, addJson, itemFieldsJson } = {}) {
+// a substring of the query that should blow up (simulating a gh failure mid-run) and
+// `failMessage` the message it throws; `nodeIdJson` / `addJson` override the two
+// fail-loud parse points, and `itemFieldsJson` supplies the post-failure field re-read.
+function recordingExec({
+  itemId = 'PVTI_item543',
+  failOn = null,
+  failMessage = 'gh: GraphQL mutation rejected',
+  nodeIdJson,
+  addJson,
+  itemFieldsJson,
+} = {}) {
   const calls = [];
   const exec = (args) => {
     calls.push(args);
     const query = args[3];
-    if (failOn && query.includes(failOn)) throw new Error('gh: GraphQL mutation rejected');
+    if (failOn && query.includes(failOn)) throw new Error(failMessage);
     if (query.includes('issue(number:')) {
       return JSON.stringify(nodeIdJson ?? issueItemReply([], { issueId: ISSUE_NODE_ID }));
     }
@@ -122,6 +130,78 @@ test('addIssueToBoard is idempotent: an issue already on the board still gets bo
   assert.equal(updates.length, 2);
   assert.match(updates[0][3], /itemId:"PVTI_alreadythere".*singleSelectOptionId:"opt-inprogress"/s);
   assert.match(updates[1][3], /itemId:"PVTI_alreadythere".*singleSelectOptionId:"ws-platform"/s);
+});
+
+// The board's auto-add can add the issue between our lookup and our add, and GitHub then
+// rejects the add with "Content already exists in this project" instead of returning
+// the existing item: the item is on the board, so read it back and set its fields.
+const RACE_ERROR = 'gh: Content already exists in this project';
+
+function raceItem(id, isArchived) {
+  return { id, isArchived, project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: null };
+}
+
+test("addIssueToBoard recovers the item when the board's auto-add already added the issue", () => {
+  const { exec, calls } = recordingExec({
+    failOn: 'addProjectV2ItemById',
+    failMessage: RACE_ERROR,
+    nodeIdJson: issueItemReply([raceItem('PVTI_raced', false)], { issueId: ISSUE_NODE_ID }),
+  });
+  const result = addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec);
+
+  assert.equal(result.itemId, 'PVTI_raced');
+  assert.equal(calls.filter((call) => call[3].includes('issue(number:543)')).length, 2);
+  assert.equal(calls.filter((call) => call[3].includes('addProjectV2ItemById')).length, 1);
+  const updates = calls.filter((call) => call[3].includes('updateProjectV2ItemFieldValue'));
+  assert.equal(updates.length, 2);
+  assert.match(updates[0][3], /itemId:"PVTI_raced".*singleSelectOptionId:"opt-ready"/s);
+  assert.match(updates[1][3], /itemId:"PVTI_raced".*singleSelectOptionId:"ws-platform"/s);
+});
+
+test('addIssueToBoard fails loudly when GitHub says the item exists but the re-read finds none', () => {
+  const { exec, calls } = recordingExec({
+    failOn: 'addProjectV2ItemById',
+    failMessage: RACE_ERROR,
+    nodeIdJson: issueItemReply([], { issueId: ISSUE_NODE_ID }),
+  });
+  assert.throws(
+    () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
+    (error) => {
+      assert.match(error.message, /#543/);
+      assert.match(error.message, /Content already exists in this project/);
+      assert.match(error.message, /re-read found no item/);
+      return true;
+    },
+  );
+  assert.equal(ran(calls, 'updateProjectV2ItemFieldValue'), false, 'updated a field with no item');
+});
+
+test('addIssueToBoard fails loudly when the re-read finds the item archived', () => {
+  const { exec, calls } = recordingExec({
+    failOn: 'addProjectV2ItemById',
+    failMessage: RACE_ERROR,
+    nodeIdJson: issueItemReply([raceItem('PVTI_archived', true)], { issueId: ISSUE_NODE_ID }),
+  });
+  assert.throws(
+    () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
+    (error) => {
+      assert.match(error.message, /PVTI_archived/);
+      assert.match(error.message, /archived item PVTI_archived/);
+      assert.match(error.message, /unarchive it/);
+      return true;
+    },
+  );
+  assert.equal(ran(calls, 'updateProjectV2ItemFieldValue'), false, 'updated a field on an archived item');
+});
+
+test('addIssueToBoard rethrows any other add-item error unchanged', () => {
+  const { exec, calls } = recordingExec({ failOn: 'addProjectV2ItemById' });
+  assert.throws(
+    () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
+    /gh: GraphQL mutation rejected/,
+  );
+  assert.equal(calls.filter((call) => call[3].includes('issue(number:543)')).length, 1);
+  assert.equal(ran(calls, 'updateProjectV2ItemFieldValue'), false, 'updated a field after a rejected add');
 });
 
 test('addIssueToBoard rejects a missing issue node id before mutation', () => {
@@ -321,6 +401,66 @@ test('board-add CLI fails loud on a wrong argument count, without calling GitHub
     assert.equal(code, 1, `exit code for ${JSON.stringify(badArgs)}`);
     assert.match(errors[0], /usage: node scripts\/board-add\.mjs <issue#> <Status> <Workstream>/);
     assert.equal(called, 0, `GitHub was called for ${JSON.stringify(badArgs)}`);
+  }
+});
+
+// Literal: the printed help is the oracle for what an agent reads.
+const ADD_USAGE_TEXT = 'usage: node scripts/board-add.mjs <issue#> <Status> <Workstream>\n' +
+  '       node scripts/board-add.mjs --help   prints the modes, with no board read';
+const ADD_HELP_TEXT = `${ADD_USAGE_TEXT}
+
+  <issue#> <Status> <Workstream>   put the issue on the board with its Status and Workstream set
+  --help                           this text, with no board read
+
+It files cards on a GitHub board only; the markdown, Linear, Jira and Azure trackers refuse it.`;
+
+test('board-add --help prints the help on stdout and returns 0 before any gh call', () => {
+  let called = 0;
+  const logs = [];
+  const errors = [];
+  const output = { log: (m) => logs.push(m), error: (m) => errors.push(m) };
+  const ghExec = () => { called += 1; return ''; };
+  assert.equal(boardAddMain(['--help'], { output, ghExec }), 0);
+  assert.deepEqual(logs, [ADD_HELP_TEXT]);
+  assert.deepEqual(errors, []);
+  for (const args of [['--help', '543'], ['543', 'Ready', 'Platform', '--help']]) {
+    errors.length = 0;
+    assert.equal(boardAddMain(args, { output, ghExec }), 1, JSON.stringify(args));
+    assert.deepEqual(errors, [`board-add: ${ADD_USAGE_TEXT}`], JSON.stringify(args));
+  }
+  assert.equal(called, 0);
+});
+
+// The help is the one place an agent learns the argument form, so it must name exactly what the
+// command accepts. The flags are read from the real source through a parser.
+test('BOARD_ADD_HELP names exactly the modes and arguments board-add accepts', NEEDS_PARSER, () => {
+  const accepted = flagLiterals(fileURLToPath(new URL('../board-add.mjs', import.meta.url)));
+  assert.deepEqual([...new Set(BOARD_ADD_HELP.match(/--[a-z][a-z-]*=?/g))].sort(), accepted);
+});
+
+// The help's form line is driven through main, so a form that gains or loses an argument without its
+// help changing fails.
+test('the BOARD_ADD_HELP form line runs as written and is a usage error with one argument fewer or more', () => {
+  const formLines = BOARD_ADD_HELP.split('\n').filter((line) => line.startsWith('  <issue#>'));
+  assert.equal(formLines.length, 1, 'the help has no argument form line');
+  const placeholders = { '<issue#>': '543', '<Status>': 'In progress', '<Workstream>': 'Platform' };
+  const args = formLines[0].trim().split(/ {2,}/)[0].split(' ').map((token) => placeholders[token]);
+  assert.ok(args.every((arg) => arg !== undefined), formLines[0]);
+
+  const run = (given) => {
+    const { exec, calls } = recordingExec();
+    const errors = [];
+    const code = boardAddMain(given, { output: { log: () => {}, error: (m) => errors.push(m) }, ghExec: exec });
+    return { code, errors, calls };
+  };
+  const full = run(args);
+  assert.equal(full.code, 0, full.errors.join('\n'));
+  assert.equal(full.calls.length, 6);
+  for (const given of [args.slice(0, -1), [...args, 'extra']]) {
+    const refused = run(given);
+    assert.equal(refused.code, 1, JSON.stringify(given));
+    assert.deepEqual(refused.errors, [`board-add: ${ADD_USAGE_TEXT}`], JSON.stringify(given));
+    assert.deepEqual(refused.calls, [], JSON.stringify(given));
   }
 });
 

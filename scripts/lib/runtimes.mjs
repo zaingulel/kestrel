@@ -149,7 +149,7 @@ export function checkContained(root, path) {
 // What a tree with no settings file is judged as.
 const NO_SETTINGS_FILE = '{"version":1,"seats":{}}';
 
-/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager, a valid `runtimes` value, a `planApproval`, a `greptile`, a `docSweep` and a `productManager` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
+/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun, a valid `runtimes` value, a `planApproval`, a `greptile`, a `docSweep`, a `productManager` and a `preApprovedRun` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
 export function readSettingsHeader(text, label) {
   let settings;
   try {
@@ -160,12 +160,13 @@ export function readSettingsHeader(text, label) {
   if (!isRecord(settings)) throw refusal(label, 'file', 'must hold one JSON object', settings);
   if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the shared workflow (only 1)', settings.version, true);
   for (const key of Object.keys(settings)) {
-    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview' && key !== 'productManager') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager', key, true);
+    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview' && key !== 'productManager' && key !== 'preApprovedRun') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun', key, true);
   }
   if (settings.planApproval !== undefined && typeof settings.planApproval !== 'boolean') throw refusal(label, 'planApproval', 'must be true or false', settings.planApproval);
   if (settings.greptile !== undefined && typeof settings.greptile !== 'boolean') throw refusal(label, 'greptile', 'must be true or false', settings.greptile);
   if (settings.docSweep !== undefined && typeof settings.docSweep !== 'boolean') throw refusal(label, 'docSweep', 'must be true or false', settings.docSweep);
   if (settings.productManager !== undefined && typeof settings.productManager !== 'boolean') throw refusal(label, 'productManager', 'must be true or false', settings.productManager);
+  if (settings.preApprovedRun !== undefined && typeof settings.preApprovedRun !== 'boolean') throw refusal(label, 'preApprovedRun', 'must be true or false', settings.preApprovedRun);
   if (settings.crossFamilyReview !== undefined && settings.crossFamilyReview !== true) throw refusal(label, 'crossFamilyReview', 'must be true, or left out to record no authorization', settings.crossFamilyReview);
   const runtimes = readRuntimes(settings.runtimes, label);
   if (settings.crossFamilyReview === true && runtimes.length < RUNTIMES.length) throw refusal(label, 'crossFamilyReview', 'is refused where runtimes names one runtime', settings.crossFamilyReview);

@@ -115,9 +115,9 @@ fixed, and a review finding then costs a replan.
   says so; [the `resume` skill](../.agents/skills/resume/SKILL.md) owns that route under "4. Plan".
 - **A seat file and the seat settings file disagree.** The contract test fails naming the seat until
   `node scripts/factory-sync.mjs --render` has applied the settings file and the result is committed. A settings file
-  that would put a costliest model on another seat, raise the turn cap of the `oracle` or `security-reviewer` seat
-  above 90, or name a model the agent check does not know is refused by a release update and by `--render` before
-  either writes.
+  that would put a costliest model on another seat, raise the turn cap of the `oracle` seat above 90 or of the
+  `security-reviewer` seat above 150, or name a model the agent check does not know is refused by a release update and
+  by `--render` before either writes.
 
 ## Key files
 

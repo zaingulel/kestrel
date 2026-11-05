@@ -108,7 +108,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     ['[]', `${label}: file: must hold one JSON object; found []`],
     ['{"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview and productManager; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],
     [withRuntimes(['gemini']), `${label}: ${runtimesRule}; found ["gemini"]`],
@@ -212,6 +212,26 @@ test('ANTI-REGRESSION: an override that breaks the seat policy is reported and o
   assert.deepEqual(overrideProblems('.claude/agents/oracle.md', buffer(oracle), buffer(claudeSeat('oracle', 'opus', 'xhigh', 90))), []);
   assert.deepEqual(overrideProblems('.claude/agents/oracle.md', buffer(oracle), buffer(claudeSeat('oracle', 'fable', 'xhigh', 60))), []);
   assert.deepEqual(overrideProblems('.codex/agents/architect.toml', buffer(codexSeat('architect', 'gpt-6-astra', 'high')), buffer(codexSeat('architect', 'gpt-6.1-sol', 'high'))), []);
+});
+
+// The shared file's own limit caps a capped seat's override, whatever cap this copy of the check knows, so an update
+// to a release that ships a lower default carries no raise.
+// Mutation: leave the shared file out of the seat policy run on the rendered bytes, or take the larger of the two
+// caps, and the raised cases go green.
+test('ANTI-REGRESSION: an override may not raise the oracle or security-reviewer turn limit above the shared file\'s own', () => {
+  for (const [seat, model, shipped, raised] of [['security-reviewer', 'opus', 90, [91, 150]], ['oracle', 'fable', 60, [61, 90]]]) {
+    const path = `.claude/agents/${seat}.md`;
+    const shared = buffer(claudeSeat(seat, model, 'xhigh', shipped));
+    for (const limit of raised) {
+      const problems = overrideProblems(path, shared, buffer(claudeSeat(seat, model, 'xhigh', limit)));
+      assert.equal(problems.length, 1, `${seat} ${limit}`);
+      assert.match(problems[0], new RegExp(`^${seat}\\.md: the turn limit of this seat must be one line maxTurns: N with N a whole number from 1 to ${shipped}; found \\["maxTurns: ${limit}"\\]$`));
+    }
+    for (const limit of [shipped, 1]) {
+      assert.deepEqual(overrideProblems(path, shared, buffer(claudeSeat(seat, model, 'xhigh', limit))), [], `${seat} ${limit}`);
+    }
+  }
+  assert.deepEqual(overrideProblems('.claude/agents/reviewer.md', buffer(claudeSeat('reviewer', 'opus', 'high', 60)), buffer(claudeSeat('reviewer', 'opus', 'high', 150))), []);
 });
 
 test('a problem the shared bytes already have is not charged to the override', () => {

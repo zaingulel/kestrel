@@ -10,6 +10,7 @@
 //   node scripts/board-move.mjs 274 "In review"
 //   node scripts/board-move.mjs --batch 453:Done 454:"In review"
 //   node scripts/board-move.mjs --lane 12:"To Sebastiano" 13:none
+//   node scripts/board-move.mjs --help
 //
 // Closing an issue does NOT move its board card (the Project Status field is a
 // separate operation), so #272 sat closed in Backlog after a /handoff closed it
@@ -40,14 +41,26 @@ import { moveJiraCards } from './lib/board-jira.mjs';
 import { moveAzureCards } from './lib/board-azure.mjs';
 import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, cardRef, isAzureIdentifier } from './lib/tracker.mjs';
 
+export const BOARD_MOVE_USAGE =
+  'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
+  '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
+  '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
+  '       node scripts/board-move.mjs --help   prints the modes, with no board read\n' +
+  '       on a Linear or Jira board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready\n' +
+  '       on an Azure board use AB-<positive int32>   e.g. board-move.mjs AB-299 Ready';
+
+// What `--help` prints: the usage, then each mode or argument.
+export const BOARD_MOVE_HELP = [
+  BOARD_MOVE_USAGE,
+  '',
+  '  <issue#> <Status>                 move one card; a several-word Status may be unquoted',
+  '  --batch <issue#>:<Status>...      move each card to its Status',
+  '  --lane <issue#>:<option|none>...  put each card in a parked-lane option; none clears it',
+  '  --help                            this text, with no board read',
+].join('\n');
+
 function usageError(output) {
-  output.error(
-    'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
-    '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
-    '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
-    '       on a Linear or Jira board <issue#> is the issue ID   e.g. board-move.mjs ENG-12 Ready\n' +
-    '       on an Azure board use AB-<positive int32>   e.g. board-move.mjs AB-299 Ready',
-  );
+  output.error(BOARD_MOVE_USAGE);
   return 2;
 }
 
@@ -89,6 +102,12 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const linearExecutor = dependencies.linearExec ?? linearExec;
   const jiraExecutor = dependencies.jiraExec ?? jiraExec;
   const azureExecutor = dependencies.azureExec ?? azureExec;
+  // --help reads no board and prints a fixed text, so any companion argument would promise more.
+  if (args.includes('--help')) {
+    if (args.length > 1) return usageError(output);
+    output.log(BOARD_MOVE_HELP);
+    return 0;
+  }
   const lane = args[0] === '--lane';
   let tracker;
   try {

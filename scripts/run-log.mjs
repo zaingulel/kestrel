@@ -14,10 +14,14 @@
 // global prefix when it exists, else the one beside the shim; the receipt still records the command as written.
 // No other shim is resolved: a package binary such as `eslint` is run as `npx <binary>`, and a bare one is a
 // spawn failure there.
-// The state field `head=<H> tree=<T>` is sampled before and after the command: H is the commit, or
+// The state field `head=<H> tree=<T> diff=<D>` is sampled before and after the command: H is the commit, or
 // `<before>-><after>` when it moved; T is `clean` only when both samples were clean against a known
 // commit, `dirty` when either had changes (untracked files included), and `unknown` otherwise, so an
-// unreadable state never reads as clean.
+// unreadable state never reads as clean. D fingerprints the uncommitted changes, staged or not, and
+// untracked files by content (gitignored files excluded): `none` for a clean tree, `unknown` when T is
+// `unknown` or git could not be read, else 16 hex characters, `<before>-><after>` when they differ. D is the tree
+// id of a throwaway copy of the index with everything added, so the real index and working tree stay untouched.
+// It fingerprints raw bytes: no line-ending or filter conversion applies.
 // Nothing else reads the log, and the script keeps nothing between runs.
 // Child start/completion are UTC; elapsedMs uses a monotonic clock and excludes Git snapshots.
 // RUN_LOG_RERUN_REASON is explicit caller context, never inferred from the log.
@@ -26,8 +30,8 @@
 // survives the re-raise, so the command line then exits with 128 plus the signal number instead.
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
-import { constants } from 'node:os';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { constants, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,11 +41,42 @@ function git(run, gitArgs) {
   return result.error || result.status !== 0 ? null : result.stdout;
 }
 
-function snapshot(run) {
+// 16 hex characters fingerprinting the working tree's content: the tree id git writes for a throwaway copy of the
+// index after `git add -A`. The real index and working tree are never touched, but loose blobs and trees reach the
+// object store. Git itself decides names, modes and ignore rules, and staging cannot change the result.
+// Raw bytes are hashed: the add runs with autocrlf off and the empty tree as attribute source, so no line-ending
+// normalization applies. The empty tree id is read from git because it depends on the repository's hash algorithm.
+// The empty tree switches off the repository's own .gitattributes only; a user-wide attributes file and
+// .git/info/attributes still apply their conversions.
+// Null when git cannot be read, and with git older than 2.41, which rejects --attr-source.
+function fingerprint(run, env) {
+  const indexPath = git(run, ['rev-parse', '--path-format=absolute', '--git-path', 'index'])?.trim();
+  if (!indexPath) return null;
+  const emptyTree = run('git', ['hash-object', '-t', 'tree', '--stdin'], { encoding: 'utf8', input: '' });
+  if (emptyTree.error || emptyTree.status !== 0) return null;
+  let scratch;
+  try {
+    scratch = mkdtempSync(join(tmpdir(), 'run-log-index-'));
+    const copy = join(scratch, 'index');
+    if (existsSync(indexPath)) copyFileSync(indexPath, copy);
+    const options = { encoding: 'utf8', env: { ...env, GIT_INDEX_FILE: copy } };
+    if (run('git', ['-c', 'core.autocrlf=false', `--attr-source=${emptyTree.stdout.trim()}`, 'add', '-A'], options).status !== 0) return null;
+    const tree = run('git', ['write-tree'], options);
+    return tree.error || tree.status !== 0 ? null : tree.stdout.trim().slice(0, 16);
+  } catch {
+    return null;
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+function snapshot(run, env) {
   const head = git(run, ['rev-parse', '--verify', 'HEAD'])?.trim();
+  const status = git(run, ['status', '--porcelain', '--untracked-files=normal']);
   return {
     head: /^[0-9a-f]{40}$/.test(head) ? head : null,
-    status: git(run, ['status', '--porcelain', '--untracked-files=normal']),
+    status,
+    diff: status === '' ? 'none' : status === null ? null : fingerprint(run, env),
   };
 }
 
@@ -49,10 +84,12 @@ function renderState(before, after) {
   let head = 'unknown';
   if (before.head && after.head) head = before.head === after.head ? before.head : `${before.head}->${after.head}`;
   let tree = 'unknown';
+  let diff = 'unknown';
   if (head !== 'unknown' && before.status !== null && after.status !== null) {
     tree = before.status || after.status ? 'dirty' : 'clean';
+    if (before.diff !== null && after.diff !== null) diff = before.diff === after.diff ? before.diff : `${before.diff}->${after.diff}`;
   }
-  return `head=${head} tree=${tree}`;
+  return `head=${head} tree=${tree} diff=${diff}`;
 }
 
 // The argv actually spawned: on Windows bare npm/npx run npm's CLI as the first npm.cmd/npx.cmd on PATH does,
@@ -113,7 +150,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const logFile = join(dir, `${branch.replace(/[^A-Za-z0-9._-]+/g, '_')}.md`);
 
   const [file, ...fileArgs] = spawnArgv(command, { run, env, platform });
-  const before = snapshot(run);
+  const before = snapshot(run, env);
   const started = now().toISOString();
   const startedTick = hrtime();
   const result = run(file, fileArgs, { stdio: 'inherit', shell: false });
@@ -132,7 +169,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     outcome = `exit ${result.status}`;
     exitCode = result.status;
   }
-  const state = renderState(before, snapshot(run));
+  const state = renderState(before, snapshot(run, env));
   const recordedCommand = escapeReceiptField(command);
   const recordedReason = escapeReceiptField(rerunReason);
   const line = `- ${started} | ${label} | \`${recordedCommand}\` | ${outcome} | completed=${completed} | elapsedMs=${elapsedMs} | rerunReason=\`${recordedReason}\` | ${state}`;

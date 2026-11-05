@@ -233,7 +233,7 @@ test('with no routing field, board-add takes an issue number and a Status only',
 
   const rejected = recordingOutput();
   assert.equal(main(['12', 'Backlog', 'Product'], { ghExec: exec, output: rejected }), 1);
-  assert.deepEqual(rejected.lines.error, ['board-add: usage: node scripts/board-add.mjs <issue#> <Status>']);
+  assert.deepEqual(rejected.lines.error, ['board-add: usage: node scripts/board-add.mjs <issue#> <Status>\n       node scripts/board-add.mjs --help   prints the modes, with no board read']);
 });
 
 test('with no routing field, the publish verifier checks Status only', async (t) => {
@@ -330,7 +330,7 @@ test('with a Workstream configured, a card missing it is still reported and boar
   const { exec, sent } = recordingGh('user', await boardPageFor(root));
   const output = recordingOutput();
   assert.equal(main(['12', 'Backlog'], { ghExec: exec, output }), 1);
-  assert.deepEqual(output.lines.error, ['board-add: usage: node scripts/board-add.mjs <issue#> <Status> <Workstream>']);
+  assert.deepEqual(output.lines.error, ['board-add: usage: node scripts/board-add.mjs <issue#> <Status> <Workstream>\n       node scripts/board-add.mjs --help   prints the modes, with no board read']);
   assert.deepEqual(sent, []);
 });
 

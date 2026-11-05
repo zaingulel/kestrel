@@ -23,7 +23,11 @@ import {
 
 // Adds the issue's card. Idempotent by GitHub's own contract: for an issue already
 // on the board, addProjectV2ItemById returns the EXISTING item instead of creating a
-// duplicate, so re-running the seam is safe.
+// duplicate, so re-running the seam is safe. When the board's own auto-add adds the
+// same issue at that moment, GitHub instead rejects the add with ITEM_EXISTS_MESSAGE,
+// which addIssueToBoard recovers by reading the item back.
+const ITEM_EXISTS_MESSAGE = 'Content already exists in this project';
+
 function addItemMutation(projectId, contentId) {
   return `mutation { addProjectV2ItemById(input:{projectId:"${projectId}", contentId:"${contentId}"}) ` +
     '{ item { id } } }';
@@ -117,7 +121,20 @@ export function addIssueToBoard({ issueNumber, statusName, workstreamName }, exe
     );
   }
 
-  const itemId = parseAddedItemId(query(addItemMutation(status.projectId, contentId)), issueNumber);
+  let itemId;
+  try {
+    itemId = parseAddedItemId(query(addItemMutation(status.projectId, contentId)), issueNumber);
+  } catch (err) {
+    if (!err.message.includes(ITEM_EXISTS_MESSAGE)) throw err;
+    const { item } = lookupIssueBoardItem(issueNumber, exec);
+    if (!item) {
+      throw new Error(`#${issueNumber} add was rejected (${err.message}) but the re-read found no item on the board`, { cause: err });
+    }
+    if (item.isArchived) {
+      throw new Error(`#${issueNumber} is already on the board as archived item ${item.id} — unarchive it instead of setting fields on a hidden card`, { cause: err });
+    }
+    itemId = item.id;
+  }
   for (let i = 0; i < updates.length; i++) {
     try {
       query(setFieldMutation(status.projectId, itemId, updates[i].fieldId, updates[i].optionId));

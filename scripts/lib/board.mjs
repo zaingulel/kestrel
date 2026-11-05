@@ -39,9 +39,42 @@ export const KIND_TYPES = kindTypesOf(boardConfig);
 // operator never asked — and --closeout's exit code is a proof contract, so an
 // unrecognised argument stops the command here rather than certifying a board nobody
 // asked about (the #598 silent-substitution defect class).
-const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake';
+const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake | --approval check <card>... | --help';
+
+// Every flag the parser accepts, `--status=` as the prefix of its value form. The parser builds its
+// accepted-flag map from this list and BOARD_HELP must mention each one, which a test pins.
+export const BOARD_FLAGS = ['--all', '--json', '--closeout', '--intake', '--status=', '--approval', '--help'];
+
+// What `--help` prints: the usage line, then each mode or option. The exit codes stay in the head of
+// scripts/board.mjs.
+export const BOARD_HELP = [
+  BOARD_USAGE,
+  '',
+  '  (no argument)               pickable cards, then the drift scan',
+  '  --all                       every column, then the drift scan',
+  `  --status=<Column>           one column, exactly one of ${STATUS_OPTIONS.join(', ')}`,
+  '  --json                      the normalized selection on stdout, the scan on stderr',
+  '  --closeout                  the strict proof gate: the scan alone',
+  '  --intake                    the intake document on stdout, the outcome on stderr',
+  "  --approval check <card>...  each card's advance approval line, with no board read",
+  '  --help                      this text, with no board read',
+].join('\n');
 
 export function parseBoardArgs(argv) {
+  // --help reads no board and prints a fixed text, so any companion argument would promise more.
+  if (argv.includes('--help')) {
+    if (argv.length > 1) throw new Error(`--help takes no other argument — ${BOARD_USAGE}`);
+    return { help: true };
+  }
+  // --approval reads no board, so it stands first and alone: any other shape would promise a
+  // listing it never prints, and a card that is not a positive integer names no card.
+  if (argv.includes('--approval')) {
+    const cards = argv.slice(2);
+    if (argv[0] !== '--approval' || argv[1] !== 'check' || cards.length === 0 || !cards.every((card) => /^[1-9]\d*$/.test(card))) {
+      throw new Error(`--approval takes only check and one or more card numbers — ${BOARD_USAGE}`);
+    }
+    return { approval: cards.map(Number) };
+  }
   // Checked before rejectUnknownArgs, which knows `--status=` as ONE positional and would
   // report a second as merely unrecognised: a repeat silently keeping the first is the same
   // wrong-question defect and earns its own sentence.
@@ -50,7 +83,8 @@ export function parseBoardArgs(argv) {
     throw new Error(`only one --status= filter is allowed, got ${statusFlags.join(' ')} — ${BOARD_USAGE}`);
   }
   rejectUnknownArgs(argv, {
-    flags: new Map([['--all', 0], ['--json', 0], ['--closeout', 0], ['--intake', 0]]),
+    // --status= is the positional below, and --approval and --help were handled above.
+    flags: new Map(BOARD_FLAGS.filter((flag) => !['--status=', '--approval', '--help'].includes(flag)).map((flag) => [flag, 0])),
     // An empty `--status=` names no column, so it is rejected here rather than degrading
     // into the default selection.
     positionals: [(arg) => /^--status=.+$/.test(arg)],

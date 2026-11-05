@@ -7,12 +7,20 @@
 // board-config.mjs. An incomplete TOOLKIT_LIB fails a test at import, the same way it would fail
 // a real adopter.
 //
+// `flagLiterals` reads a command's real source under scripts/, never a copy. It loads `eslint`
+// only when it runs, from this install's own scripts/lib and not from a temp toolkit, so this
+// module imports in a repository with no npm packages installed; a test that calls it carries
+// NEEDS_PARSER and skips there. The source is read through a parser, as a rule about source must
+// be (docs/TESTING-STRATEGY.md, section 2), so a flag spelt in a comment or a longer string is not
+// mistaken for one the command accepts, while a flag spelt inside a regular expression counts.
+//
 // Recurring cost: a temporary toolkit copy and fresh module load per importing test file;
-// the portability test copies once per test.
+// the portability test copies once per test; one ESLint parse per `flagLiterals` call.
 // Removal condition: retire it when the board toolkit is no longer copied into another
 // repository and no shipped test needs a configuration of its own.
 
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -48,6 +56,7 @@ export const TOOLKIT_LIB = [
   'jira-card.mjs',
   // The markdown reader's route to the repository and the cards folder.
   'posix-shell.mjs',
+  'advance-approval.mjs',
   'factory-sync.mjs',
   'runtimes.mjs',
   'seat-settings.mjs',
@@ -175,4 +184,77 @@ export function copyToolkit(configSource) {
     script: (name) => join(root, 'scripts', name),
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+const FLAG = /^--[a-z][a-z-]*=?$/;
+const REGEX_FLAG_TOKEN = /^--[a-z][a-z-]*=?/;
+
+function eslintInstalled() {
+  try {
+    createRequire(import.meta.url).resolve('eslint');
+    return true;
+  } catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    return false;
+  }
+}
+export const NEEDS_PARSER = { skip: !eslintInstalled() && 'the JavaScript parser eslint is not installed' };
+
+// The declaration name a top-level statement binds: a function, or each variable declarator,
+// exported or not.
+function declaredNodes(statement) {
+  const declaration = statement.type === 'ExportNamedDeclaration' ? statement.declaration : statement;
+  if (declaration?.type === 'FunctionDeclaration') return [[declaration.id.name, declaration]];
+  if (declaration?.type === 'VariableDeclaration') return declaration.declarations.map((d) => [d.id.name, d]);
+  return [];
+}
+
+// The flags a regular-expression literal spells, each read from a `--name=` token, or a `--name`
+// token followed directly by `$`. Anything else (the end of the pattern, `|`, `)`, a suffix) lets a
+// longer argument match, so the flags cannot be read and it throws.
+function regexFlags(path, pattern) {
+  const flags = [];
+  for (const { index } of pattern.matchAll(/--/g)) {
+    const token = REGEX_FLAG_TOKEN.exec(pattern.slice(index))?.[0];
+    const after = pattern[index + (token?.length ?? 0)];
+    if (token === undefined || !(token.endsWith('=') || after === '$')) {
+      throw new Error(`cannot read the flags ${path} accepts from the regular expression /${pattern}/: spell each flag as a string literal`);
+    }
+    flags.push(token);
+  }
+  return flags;
+}
+
+// The sorted, unique flags a source file spells: every string literal, and every template literal
+// with no expression, whose whole value is a flag (`--name` or `--name=`), and every flag spelt
+// inside a regular-expression literal; a regular expression whose flags cannot be read throws.
+// `declarations` limits the scan to the top-level declarations of those names, for a file that also
+// holds arguments that are not its own flags; a name the file does not declare throws.
+export function flagLiterals(path, declarations) {
+  const { Linter } = createRequire(import.meta.url)('eslint');
+  const linter = new Linter();
+  const messages = linter.verify(readFileSync(path, 'utf8'), { languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } });
+  const fatal = messages.find((message) => message.fatal);
+  if (fatal) throw new Error(`cannot parse ${path}: ${fatal.message} (line ${fatal.line})`);
+  const sourceCode = linter.getSourceCode();
+  let roots = [sourceCode.ast];
+  if (declarations) {
+    const declared = new Map(sourceCode.ast.body.flatMap(declaredNodes));
+    const missing = declarations.filter((name) => !declared.has(name));
+    if (missing.length > 0) throw new Error(`${path} declares no ${missing.join(', ')}`);
+    roots = declarations.map((name) => declared.get(name));
+  }
+  const flags = new Set();
+  const visit = (node) => {
+    const value = node.type === 'Literal' ? node.value
+      : node.type === 'TemplateLiteral' && node.expressions.length === 0 ? node.quasis[0].value.cooked
+        : null;
+    if (typeof value === 'string' && FLAG.test(value)) flags.add(value);
+    if (node.type === 'Literal' && node.regex) for (const flag of regexFlags(path, node.regex.pattern)) flags.add(flag);
+    for (const key of sourceCode.visitorKeys[node.type] ?? []) {
+      for (const child of [node[key]].flat()) if (child) visit(child);
+    }
+  };
+  roots.forEach(visit);
+  return [...flags].sort();
 }

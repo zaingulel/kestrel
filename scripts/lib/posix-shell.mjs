@@ -1,12 +1,12 @@
 // posix-shell.mjs — locates a POSIX `sh` to launch shell scripts through, on every platform, and
-// the git other hook code spawns.
+// the git and gh other hook code spawns.
 //
 // Off Windows `sh` is always on PATH. On Windows it is only reachable when an MSYS or Git-for-Windows
 // `usr/bin` sits on PATH, which a plain Git install does not guarantee, so the fallback is the `sh.exe`
-// Git for Windows ships three levels above its exec path (`mingw64/libexec/git-core`). sh.exe and
-// git.exe are looked up through PATH's absolute entries only, because Windows' default executable
-// search and a relative PATH entry both reach the working directory, where a repository could plant
-// either. Returns null when neither shell exists, so the caller can refuse loudly instead of spawning
+// Git for Windows ships three levels above its exec path (`mingw64/libexec/git-core`). sh.exe,
+// git.exe and gh.exe are looked up through PATH's absolute entries only, because Windows' default
+// executable search and a relative PATH entry both reach the working directory, where a repository
+// could plant any of them. Returns null when neither shell exists, so the caller can refuse loudly instead of spawning
 // a missing shell.
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -25,6 +25,12 @@ function findOnPath(name, env, exists) {
 export function gitExecutable({ platform = process.platform, env = process.env, exists = existsSync } = {}) {
   if (platform !== 'win32') return 'git';
   return findOnPath('git.exe', env, exists) ?? null;
+}
+
+// Off Windows `gh` from PATH; on Windows the first gh.exe in an absolute PATH entry, or null.
+export function ghExecutable({ platform = process.platform, env = process.env, exists = existsSync } = {}) {
+  if (platform !== 'win32') return 'gh';
+  return findOnPath('gh.exe', env, exists) ?? null;
 }
 
 function gitExecPathFromGit(env, exists) {

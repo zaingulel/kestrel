@@ -65,7 +65,7 @@ edits is not a reviewable proposal. Cover every starter section:
 | Document | Content to settle |
 |---|---|
 | `AGENTS.md` customer tail | Product purpose, hard constraints and their enforcing evidence, architecture seams, every Surfaces row and the standing guarantees. Preserve the installed trust guarantees, required headings, rows and security-review links |
-| `.agents/REPOSITORY.md` | Product/folders, repository-specific seams, grounding authorities and every Conventions row: generated artifacts and regeneration commands, visual verification, fixtures and documentation routines. Preserve its required structure |
+| `.agents/REPOSITORY.md` | Product/folders, repository-specific seams, grounding authorities and every Conventions row: generated artifacts and regeneration commands, visual verification, fixtures, documentation routines and the step taken just before a pull request is marked ready. Preserve its required structure |
 | `GLOSSARY.md` | Terms with fixed domain meanings grounded in the product's language; use the installed domain-modeling skill when sharpening the model |
 | `docs/ISSUE-TRACKER.md` | Existing tracker/board, workstream convention, issue-body sections, triage vocabulary and the route for filing work. Derive configured names from the installed board configuration; proposed conventions need confirmation |
 | `docs/CODING-STANDARDS.md` | Naming, structure and local idioms, boundaries/errors, dead code/scope, design quality and test economics appropriate to this codebase, or the existing pointer authority |

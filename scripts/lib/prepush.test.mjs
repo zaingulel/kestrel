@@ -1,7 +1,7 @@
 // prepush.test.mjs — real-shell proof for the shared pre-push gate.
 //
 // The fixture executes the tracked hook from a nested directory with isolated Git, npm, Node, and
-// local-ESLint capabilities. It observes calls and scrubbed environment at the executable boundary;
+// local-ESLint capabilities. It observes calls, scrubbed environment and the output it shows at the executable boundary;
 // no push or hook activation occurs.
 //
 // The tests of a push to main and of Git LFS use run the hook over a real git and a real repository,
@@ -10,7 +10,7 @@
 // second is the pushed commit and stays checked out. Every other test keeps the fake git, which fails
 // any call the hook should not make.
 //
-// Recurring cost: about 3.8 seconds for the file, measured on Linux with Node 26: 13 to 38
+// Recurring cost: about 2.8 seconds for the file, measured on Linux with Node 26: 13 to 38
 // milliseconds for each test over the fake git and 68 to 183 for each case over a real repository.
 // Removal condition: remove with the pre-push hook, or replace when Git supplies equivalent native
 // lint, nested-test, environment-scrub, optional-full-test, and Git LFS upload enforcement.
@@ -206,8 +206,10 @@ exec "${commandPath('grep')}" "$@"
  * `options.main` (`'admit'`, `'refuse'`, `'not-executable'` or `'absent'`) is the product gate the
  * remote's main holds and `options.pushed` (`'admit'` or `'refuse'`) the one the pushed commit holds.
  * Naming `options.main` swaps the fake git for the real one over a real repository, and `options.tar === false`
- * leaves `tar` off the hook's PATH. `options.lfs` puts `grep` on the PATH and says what the hook finds of
+ * leaves `tar` off the hook's PATH. `options.lfs` says what the hook finds of
  * Git LFS: `'installed'` or `'absent'` through the `git` of `lfsWrappers`, `'real'` the installed `git-lfs`.
+ * `options.report` (`{ stdout, stderr }`, each optional) is what the fake `node` writes to that stream when it
+ * runs the script suite, before it exits with `$SCRIPT_STATUS`.
  */
 function withFixture(options, fn) {
   const scratch = mkdtempSync(join(tmpdir(), 'workflow-prepush-'));
@@ -221,10 +223,16 @@ function withFixture(options, fn) {
     mkdirSync(bin);
     mkdirSync(temporary);
     writeFileSync(calls, '');
+    const reportEnv = {};
+    for (const [stream, name] of [['stdout', 'SCRIPT_STDOUT'], ['stderr', 'SCRIPT_STDERR']]) {
+      if (options.report?.[stream] === undefined) continue;
+      reportEnv[name] = join(scratch, `report-${stream}`);
+      writeFileSync(reportEnv[name], options.report[stream]);
+    }
 
     // Wrapper stubs rather than symlinks, because a symlink needs privilege on Windows; `sh` is on the
     // hook's PATH because a bare `sh` launcher resolves through it.
-    const tools = ['dirname', 'sh'];
+    const tools = ['dirname', 'grep', 'sh'];
     // A machine's own git config, its line-ending setting among them, must not shape the repository.
     const isolation = {
       HOME: scratch,
@@ -236,7 +244,6 @@ function withFixture(options, fn) {
     if (options.main) {
       tools.push('git', 'mktemp', 'mkdir', 'rm');
       if (options.tar !== false) tools.push('tar');
-      if (options.lfs) tools.push('grep');
       if (options.lfs === 'real') tools.push('git-lfs');
       repository = realRepository(repo, isolation, options, scratch);
     } else {
@@ -255,7 +262,10 @@ esac
       executable(join(bin, 'node'), `#!/bin/sh
 printf 'node\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$*" "$PWD" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_NAMESPACE" "$NODE_TEST_CONTEXT" "$GIT_TRACE_PACKET$GIT_TRACE2_EVENT" >> "$CALLS"
 case "$*" in
-  "--test --test-concurrency=2 scripts/lib/*.test.mjs") exit "\${SCRIPT_STATUS:-0}" ;;
+  "--test --test-concurrency=2 scripts/lib/*.test.mjs")
+    [ -z "$SCRIPT_STDOUT" ] || while IFS= read -r line || [ -n "$line" ]; do printf '%s\\n' "$line"; done <"$SCRIPT_STDOUT"
+    [ -z "$SCRIPT_STDERR" ] || while IFS= read -r line || [ -n "$line" ]; do printf '%s\\n' "$line"; done <"$SCRIPT_STDERR" >&2
+    exit "\${SCRIPT_STATUS:-0}" ;;
   *) exit 91 ;;
 esac
 `);
@@ -296,6 +306,7 @@ esac
         NODE_TEST_CONTEXT: 'nested-test',
         GIT_TRACE_PACKET: 'trace-packet',
         GIT_TRACE2_EVENT: 'trace-event',
+        ...reportEnv,
         ...extra,
       },
     });
@@ -311,6 +322,40 @@ esac
 function output(result) {
   return `${result.stdout}${result.stderr}`;
 }
+
+// What the hook's own progress lines and a failing script suite write, hand-written from the requirement.
+const PROGRESS = 'pre-push: npm run lint…\npre-push: node --test scripts/lib/…\n';
+const FAILING = `✔ alpha passes (0.36ms)
+✖ gamma fails (1.20ms)
+  AssertionError [ERR_ASSERTION]: expected 1 to equal 2
+ℹ tests 2
+ℹ suites 0
+ℹ pass 1
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 41.48
+`;
+const SUITE_WARNING = '(node:4242) Warning: a line the suite wrote to stderr\n';
+const NOTICE = "pre-push: the script suite passed; showing only node's summary.\n";
+const SPEC_COUNTS = 'ℹ tests 2\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 1\nℹ todo 0\nℹ duration_ms 41.48\n';
+const SPEC_PASS = `✔ alpha passes (0.36ms)\n﹣ beta skipped (0.07ms) # SKIP\n${SPEC_COUNTS}`;
+const TAP_COUNTS = '# tests 2\n# suites 0\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 1\n# todo 0\n# duration_ms 47.81\n';
+const TAP_PASS = `TAP version 13
+# Subtest: alpha passes
+ok 1 - alpha passes
+  ---
+  duration_ms: 0.36
+  ...
+# Subtest: beta skipped
+ok 2 - beta skipped # SKIP
+  ---
+  duration_ms: 0.07
+  ...
+1..2
+${TAP_COUNTS}`;
+const UNKNOWN_PASS = '<testsuites>\n<testsuite name="alpha" tests="1"/>\n</testsuites>\n';
 
 test('pre-push invokes installed lint exactly once, then the script suite, from the resolved root', () => {
   withFixture({}, ({ recorded, root, run }) => {
@@ -346,11 +391,31 @@ test('pre-push refuses a completed red lint before the script suite', () => {
   });
 });
 
-test('pre-push refuses a nonzero script suite after lint passes', () => {
-  withFixture({}, ({ recorded, run }) => {
-    const result = run({ SCRIPT_STATUS: '1' });
-    assert.notEqual(result.status, 0);
+test('ANTI-REGRESSION: pre-push refuses a failing script suite with its own exit status and shows its whole output', () => {
+  withFixture({ report: { stdout: FAILING, stderr: SUITE_WARNING } }, ({ recorded, run }) => {
+    const result = run({ SCRIPT_STATUS: '3' });
+    assert.equal(result.status, 3);
+    assert.equal(output(result), PROGRESS + FAILING + SUITE_WARNING);
     assert.deepEqual(recorded().map((line) => line.split('\t')[0]), ['npm', 'node']);
+  });
+});
+
+for (const [reporter, passing, counts] of [['spec', SPEC_PASS, SPEC_COUNTS], ['TAP', TAP_PASS, TAP_COUNTS]]) {
+  test(`pre-push shows only the summary counts of a passing script suite under the ${reporter} reporter`, () => {
+    withFixture({ report: { stdout: passing } }, ({ run }) => {
+      const result = run();
+      assert.equal(result.status, 0, output(result));
+      assert.equal(result.stdout, PROGRESS + NOTICE + counts);
+      assert.equal(result.stderr, '');
+    });
+  });
+}
+
+test('pre-push shows the whole output of a passing script suite when it finds no summary counts', () => {
+  withFixture({ report: { stdout: UNKNOWN_PASS } }, ({ run }) => {
+    const result = run();
+    assert.equal(result.status, 0, output(result));
+    assert.equal(result.stdout, PROGRESS + UNKNOWN_PASS);
   });
 });
 

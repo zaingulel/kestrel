@@ -88,8 +88,8 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
   [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "4. Plan".
 - **Product manager run, where the repository turns it on.** The owner can hand the work-pick to the session instead of
-  choosing a row. On Claude Code the owner launches a session at the repository root and says `Start a product
-  manager run.`; on Codex the owner runs `node scripts/product-manager-run.mjs` in a terminal outside any session. A run
+  choosing a row. On Claude Code the owner launches a session at the repository root, in a terminal or the desktop app,
+  and says `Start a product manager run.`; on Codex the owner runs `node scripts/product-manager-run.mjs` in a terminal outside any session. A run
   starts only where the git guard is shown running. On Claude Code the owner first turns on
   "Require trusted devices" in their Claude account and the "Push when Claude decides" and "Push when actions required"
   notifications; where "Require trusted devices" cannot be on, no Claude Code run starts, and the owner can run it on
@@ -97,25 +97,47 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   Codex's Auto-review may answer the run's approval requests. The session cannot check the Claude Code settings. The
   run reads the owner's direction page from the fetched `main` and starts a fresh session for each card on either
   runtime; each picks the card the page ranks highest among
-  those it may take, skipping any that touches a waiting job's files, names the pick and the reason in the table's
-  closing line, and takes it through the usual stages to `Awaiting push`. The run stops once 3 jobs wait or no pickable
-  card is left. On Codex the launcher runs outside any session because Codex's sandbox refuses a session started from
-  inside a session, and it ends the run when a session's runtime log does not show the git guard's refusal, or does not
-  show a publish refusal that only run sessions have. A Codex run session has nobody to answer a prompt, so a prompt
-  Auto-review cannot answer is refused and the run stops and says why. A Claude Code card session starts with flags that refuse pushing and publishing a pull request; this catches
-  mistakes rather than a deliberate workaround, and the session the owner reopens to deliver runs without them. A card needing owner direction or sign-off, or that cannot be built or decided without the owner's ears or hardware, is not built: the run
-  leaves a comment beginning `Needs owner:` on it and moves it to `Backlog`, where it is held until the owner returns it. A card with fixed criteria whose final proof alone needs listening is built and marked as needing the owner's ears. A question that
-  comes up mid-build parks the job the same way, with its commits kept on the local branch, and the run goes on to the next card. A parked job counts toward the 3 that wait; a held card with no job does not. A run may suggest new cards, at most 3 and fewer while earlier ones wait: each is filed at the end of the run with a title beginning `Proposed: `, which holds it until the owner says yes or no.
-  A card found not free stops the run. Push authorisation stays the owner's yes.
-  The owner can ask to see what is waiting and answer each job in turn: a yes delivers it, a no parks it with the
-  owner's reason, and each answer leaves a `Verdict:` comment on the card. A run's summary reports the three stage 2
-  measures from those comments, saying why where one cannot be computed yet.
-  When the run stops, the session the owner launched, on Codex a final end session, says once why and what the
-  owner does next, then gives a summary of what it built, parked, needs from the owner and suggested, and any change it wants to the direction page: on Claude Code the reason arrives as a
-  push to the owner's phone, and on Codex it is printed in the terminal the launcher was started from, because Codex sends no push. A prompt or
-  approval from the runtime waits for the owner's own answer. The mode is off unless the settings file on `main` turns
-  it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
-  [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2. Work-pick".
+  those it may take, skipping any that touches a waiting job's files other than the manifest, whose fingerprints follow
+  the shared files they record, names the pick and the reason in the table's closing line, and takes it through the
+  usual stages to `Awaiting push`. The run stops once 3 jobs wait or no pickable card is left. On Codex the launcher
+  runs outside any session because Codex's sandbox refuses a session started from inside a session, and it ends the run
+  when a session's runtime log does not show the git guard's refusal, or does not show a publish refusal that only run
+  sessions have. A Codex run session has nobody to answer a prompt, so a prompt Auto-review cannot answer is refused and
+  the run stops and says why. A Claude Code card session starts with flags that refuse pushing and publishing a pull
+  request; this catches mistakes rather than a deliberate workaround, and the session the owner reopens to deliver runs
+  without them. A run session in a terminal and one in the desktop app start each card session with the same command,
+  run in the background, whose finish wakes the run session to read the result and start the next; a card session
+  that ends with no result line stops the run. A card needing owner direction or sign-off, or that cannot be built or
+  decided without the owner's ears or hardware, is not built: the run leaves a comment beginning `Needs owner:` on it
+  and moves it to `Backlog`, where it is held until the owner returns it. A card with fixed criteria whose final proof
+  alone needs listening is built and marked as needing the owner's ears. A question that comes up mid-build parks the
+  job the same way, with its commits kept on the local branch, and the run goes on to the next card. A parked job counts
+  toward the 3 that wait; a held card with no job does not. A run may suggest new cards, at most 3 and fewer while
+  earlier ones wait: each is filed at the end of the run with a title beginning `Proposed: `, which holds it until the
+  owner says yes or no. A card found not free stops the run. Push authorisation stays the owner's yes. The owner can ask
+  to see what is waiting and answer each job in turn: a yes delivers it, a no parks it with the owner's reason, and each
+  answer leaves a `Verdict:` comment on the card. A run's summary reports the three stage 2 measures from those
+  comments, saying why where one cannot be computed yet. When the run stops, the session the owner launched, on Codex a
+  final end session, says once why and what the owner does next, then gives a summary of what it built, parked, needs
+  from the owner and suggested, and any change it wants to the direction page: on Claude Code the reason arrives as a
+  push to the owner's phone, and on Codex it is printed in the terminal the launcher was started from, because Codex
+  sends no push. A prompt or approval from the runtime waits for the owner's own answer. The mode is off unless the
+  settings file on `main` turns it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the
+  gate under "Owner gates", and [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2.
+  Work-pick".
+- **Pre-approved run, where the repository turns it on.** The owner can approve cards in advance, one comment on each
+  card that binds the card's text as it then stands, and then say `Start a pre-approved run.` on Claude Code or run
+  `node scripts/product-manager-run.mjs --pre-approved` on Codex. The run takes only cards with a valid record, the
+  oldest record first, builds each in a fresh session and merges it with no yes at push authorisation; it picks and
+  files nothing else, and a split proposal or a question parks the job. Editing the card, editing or deleting the
+  record, or closing the card withdraws the approval, and a record written after the run starts waits for the next
+  run. For a command written plainly, the guard admits the run's push, draft, ready mark and merge only for its own job
+  branch and pull request, in the repository it fetches from and into its default branch, and only while `node scripts/board.mjs --approval check <card>` still prints `approved`; a job that touches an
+  owner-directed or sign-off surface, or whose result shows a failure or an unfixed finding, stops at `Awaiting push`
+  for the owner's yes instead. It works only with GitHub issues, is off unless the settings file on `main` turns it on,
+  and is held by the git guard in its sessions and instructed everywhere else.
+  `<distribution>/docs/INSTALL.md` describes the record and the check, and
+  [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps.
 - **Evidence during the build.** Every executed check runs through a logger that writes its real outcome, so the
   pull request body quotes what a script wrote, not what an agent remembers;
   [The evidence bar](AI-WORKFLOW-evidence.md) explains the log. Every green slice is committed on the job branch,

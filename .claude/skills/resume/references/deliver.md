@@ -99,31 +99,41 @@ When every receipt ran on the current head, `Carried from:` reads `none` and the
 that `Changed paths:` stays, naming the commit the paths were listed from and what the session found,
 whenever a path the testing strategy does not cover was investigated.
 
-1. Rebase onto `origin/main`, then settle each convergence check the testing strategy names under the Receipt reuse
-   rule above. The pre-push hook still runs its own gates on every push. Then push;
-   `gh pr create --draft --body-file <body>` with `Closes #<issue>` in the body. The external review is requested only for the
-   sign-off tier in section 6, and only where the add-on is on; every other change goes straight to step 3. Move the
-   card to `In review`.
+1. Rebase onto `origin/main`. A rebase replays commits without the commit gate, so in the canonical repository each
+   stop on a conflict in `.agents/factory-manifest.json` is settled at that stop: keep every entry and field either
+   side adds or changes, taking either side's `sha256` where both changed the same one, and never work out a
+   fingerprint by hand. Once that stop's other conflicts are resolved, re-record every fingerprint there as
+   [Canonical recording](../../shared-files/SKILL.md#canonical-recording) says after a history replay, with
+   `node scripts/factory-sync.mjs --write`, and stage the manifest before `git rebase --continue`, so the replayed
+   commit carries it. Once the rebase finishes, run that command again: a manifest it changes means a replayed commit
+   carries a stale fingerprint, a failure that is repaired by doing the rebase again from the job's head before
+   it, settled as above, and never by committing the manifest alone, which the commit gate refuses while a file the
+   commit leaves unchanged disagrees with the fingerprint at HEAD. Every later rebase below is settled the same way.
+   Then settle each convergence check the
+   testing strategy names under the Receipt reuse rule above. The pre-push hook still runs its own gates on every push.
+   Then push; `gh pr create --draft --title '<title>' --body-file <body>` with
+   `Closes #<issue>` in the body. The external review is requested only for the sign-off tier in section 6, and only
+   where the add-on is on; every other change goes straight to step 3. Move the card to `In review`.
 2. For the sign-off tier in a repository that has turned the external review add-on on, read the `greptile` skill and
    follow it on the open draft; it owns how the review attempt is made and settled. A job whose own change removed that
    skill reads it from the fetched `main`, as section 6 says under the external review add-on.
-3. Re-read the open draft and require current local evidence, every finding/thread resolved, and a review line
-   that matches the rounds actually run and the findings actually raised and settled. For the sign-off tier with the
-   add-on on, also require the same reviewed head and a settled `COMPLETE` or `UNAVAILABLE` attempt. If a rebase is needed, do it
-   while draft, reverify under the Receipt reuse rule and push. Repeat step 2 only when the change requires
-   the external review and the skill it points to says the rebased head needs a new attempt. Before each
-   `gh pr ready <pr>`, take the step the repository's own instructions name for just before a pull request is
-   marked ready, where they name one; a repository whose instructions name none goes straight on. Then
-   `gh pr ready <pr>` starts CI, and
-   `gh pr merge --auto --squash --delete-branch <pr>` queues the merge for GitHub once `test` passes.
-   Never any other merge form; the hook refuses it. If CI needs a repair, use `gh pr ready <pr> --undo` before
-   pushing, complete local repair evidence, settling the convergence checks under the Receipt reuse rule, and
-   reassess the full pull-request diff against the section 6 tiers; repeat step 2 only when the external review is required. An
-   unchanged-head CI retry needs no new review.
+3. Re-read the open draft and require current local evidence, every finding/thread resolved, and a review line that
+   matches the rounds actually run and the findings actually raised and settled. For the sign-off tier with the add-on
+   on, also require the same reviewed head and a settled `COMPLETE` or `UNAVAILABLE` attempt. If a rebase is needed, do
+   it while draft, reverify under the Receipt reuse rule and push. Repeat step 2 only when the change requires the
+   external review and the skill it points to says the rebased head needs a new attempt. Before each `gh pr ready <pr>`,
+   take the step the `before ready` row of the Conventions table in `.agents/REPOSITORY.md` names; a row that is absent,
+   reads "None" or still holds its "Starter:" prompt names no step, and delivery goes straight on. Then
+   `gh pr ready <pr>` starts CI, and `gh pr merge --auto --squash --delete-branch <pr>` queues the merge for GitHub once
+   `test` passes. Never any other merge form; the hook refuses it. If CI needs a repair, use `gh pr ready <pr> --undo`
+   before pushing, complete local repair evidence, settling the convergence checks under the Receipt reuse rule, and
+   reassess the full pull-request diff against the section 6 tiers; repeat step 2 only when the external review is
+   required. An unchanged-head CI retry needs no new review.
 4. Watch it land with one owned waiting command, awaited as the Waiting rule under "5. Build" says.
    `<pr>` is the pull request number, typed as a literal. The command only reads GitHub, exits 0
    only when the pull request has merged, and otherwise exits 1 with its reason as the last line of output: closed,
-   a failed required check, blocked or behind, an unknown required set, or a `gh` failure. Once the pull request state
+   a failed required check, blocked or behind, an unknown required set, no test run started for the head commit within
+   10 minutes while a required check has not reported, a test job queued with no runner for 15 minutes, or a `gh` failure. Once the pull request state
    is `MERGED` or `CLOSED`, the watch ends before reading check statuses; only an `OPEN` pull request needs that read.
 
    ```sh
@@ -132,3 +142,12 @@ whenever a path the testing strategy does not cover was investigated.
 
    Merged: run `closeout` in the same session; the owner's yes already covers it. Failed, blocked or closed:
    report the printed reason and repair per step 3.
+
+   The two stall stops, each with the action that clears it:
+   - No test run created: return the pull request to draft with `gh pr ready <pr> --undo`, take the `before ready` step
+     step 3 names, then run `gh pr ready <pr>` and `gh pr merge --auto --squash --delete-branch <pr>` again, and run the
+     watch again. Returning to draft cancels the queued merge, which is why the merge is queued again. The head is
+     unchanged, so no new review is needed, as step 3 says of an unchanged-head CI retry.
+   - A job waiting for a machine: the stop names the job and its runner labels. Start that runner where the repository
+     says how, or tell the owner which machine is offline and what it waits for, then run the watch again once the
+     runner is up. Never mark the pull request draft for this stop.

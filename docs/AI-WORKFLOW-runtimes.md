@@ -38,7 +38,7 @@ MIT `LICENSE` are kept in `.agents/upstream/supabase-agent-skills/`. The accessi
 which upstream keeps at `design/CONNECTORS.md` to explain the plugin's placeholders for connected tools; it is an
 optional reference that is not carried, so the link resolves to nothing by intent: from each of the skill's three copies
 it would point outside the vendored folder, at a different place each time, and the accessibility audit follows no
-connector note. One library is vendored the same way, in `.agents/upstream/squirrelchat-smol-toml/`: the CommonJS build `dist/index.cjs` of the TOML parser smol-toml 1.9.1, taken from its npm package with its BSD-3-Clause `LICENSE`, which the closeout cleanup helper loads to read Codex's settings; it is replaced whole on an upgrade and never edited. [`AGENTS.md`](../AGENTS.md) owns how each copy is refreshed, under "Runtime notes". The agent seats
+connector note. One library is vendored the same way, in `.agents/upstream/squirrelchat-smol-toml/`: the CommonJS build `dist/index.cjs` of the TOML parser smol-toml 1.9.1, taken from its npm package with its BSD-3-Clause `LICENSE`, which the closeout cleanup helper loads to read Codex's settings; it is replaced whole on an upgrade and never edited. [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md) owns how each copy is refreshed, under "How shared files are kept". The agent seats
 under `.claude/agents/` and `.codex/agents/` are maintained counterparts, with shared charters kept aligned across the
 two runtime formats. The safety hooks exist as twins: `.claude/settings.json` wires the Claude set, `.codex/hooks.json`
 the Codex set.
@@ -180,8 +180,7 @@ in the settings file stands apart from push authorisation too.
 
 ## Where the rules live
 
-- [`AGENTS.md`](../AGENTS.md) under "Runtime notes": which file each runtime reads, and how the vendored skills
-  are refreshed.
+- [`AGENTS.md`](../AGENTS.md) under "Runtime notes": which file each runtime reads.
 - [`.claude/settings.json`](../.claude/settings.json) and [`.codex/hooks.json`](../.codex/hooks.json): Claude Code's
   shared allowances, which hook runs on which event, and the Windows form of each Codex hook command.
 - [The `closeout` skill](../.agents/skills/closeout/SKILL.md): scratch provenance, the checked cleanup command and
@@ -191,8 +190,8 @@ in the settings file stands apart from push authorisation too.
 - [The `resume` skill](../.agents/skills/resume/SKILL.md) under "Before intake": how a session checks that its hooks
   are running, and what the owner does when they are not.
 - [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): which suites run on which platform.
-- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md): how a repository names its runtimes, and which files
-  each owns.
+- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md): how a repository names its runtimes, which files
+  each owns, and how the vendored skills are refreshed.
 - [The `resume` skill](../.agents/skills/resume/SKILL.md) under "6. Verify and review": how a session reads the
   recorded cross-family authorization, what it asks where none is recorded, and that the authorization answers no
   permission prompt.
@@ -291,7 +290,10 @@ in the settings file stands apart from push authorisation too.
 - `.claude/settings.json` and `.codex/hooks.json`: the hook registrations.
 - `.codex/hooks/verify-green.mjs` and `scripts/lib/posix-shell.mjs`: the Windows route to the shell hooks.
 - `scripts/lib/codex-hooks-windows.test.mjs`: the proof of the Windows registrations.
-- `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out.
+- `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out, and the check of the settings file's keys, `preApprovedRun` included.
 - `scripts/merge-watch.mjs`: with `--draft`, the local session's wait for a cloud build's draft.
 - `scripts/product-manager-run.mjs` and `scripts/lib/product-manager-run.mjs`: the Codex product manager run's launcher,
-  which starts each card session and the end session in turn.
+  which starts each card session and the end session in turn; with `--pre-approved` it is the pre-approved run's
+  launcher, which takes one start time for the whole run and marks every session with it.
+- `scripts/lib/advance-approval.mjs`: reads the owner's advance approval record on a card, and judges whether a
+  pre-approved run session may publish; the `--approval check` mode of `scripts/board.mjs` prints its lines.

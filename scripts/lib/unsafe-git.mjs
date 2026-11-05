@@ -1,12 +1,22 @@
-// unsafe-git.mjs: pure Git refusals shared by the Claude and Codex PreToolUse(Bash) guards,
-// plus cleanup-specific permission for the Claude root hook. The hooks supply checkout facts;
-// direct unit tests cover the policy and subprocess tests cover its wiring.
+// unsafe-git.mjs: Git refusals shared by the Claude and Codex PreToolUse(Bash) guards, plus
+// cleanup-specific permission for the Claude root hook. The hooks supply checkout facts; direct unit
+// tests cover the policy and subprocess tests cover its wiring. The rules read nothing, except that a
+// pre-approved run session's publish is judged on git and GitHub reads (advance-approval.mjs).
 //
-// Fourteen plain rules, judged on the actual command segments of an agent's shell call:
+// Fifteen plain rules, judged on the actual command segments of an agent's shell call:
 //   git push / gh pr create / ready / merge in a product manager run session
 //                            -> a run session does not publish, whatever the form; judged only when
-//                                the hook passes `{ runSession: true }`, which only the Codex hook
-//                                does, for a session the launcher marked
+//                                the hook passes `{ runSession: true }`, which both hooks do for a
+//                                session the launcher marked
+//   git push / gh pr create / ready / merge in a pre-approved run session
+//                            -> admitted only as a plain delivery form, the whole command, from the
+//                                session's own working directory, for its own job/<n> card with a
+//                                valid advance approval read from its origin repository; taking its
+//                                own job pull request back to draft needs no approval. Judged only
+//                                when the hook passes `{ preApproved }`; when both marks are set the
+//                                run session rule wins.
+//                                In either run session a command holding `Approved:` is refused, so
+//                                nothing a run types can become a record
 //   git commit --no-verify   -> skips the pre-commit gates
 //   git push --no-verify     -> skips the lint pre-push hook
 //   git -c core.hooksPath=… / git --config-env core.hooksPath=… /
@@ -35,7 +45,8 @@
 //   git worktree remove --force / -f
 //                            -> deletes the worktree's uncommitted and untracked changes, and,
 //                                given twice, a locked worktree
-//   gh pr create (no --draft)-> skips the draft stage before the metered suite
+//   gh pr create / new (no --draft)
+//                            -> skips the draft stage before the metered suite
 //   gh pr merge              -> only `gh pr merge --auto --squash --delete-branch <number>`, alone
 //                                in its segment, is allowed: an admin token merges regardless of
 //                                checks, and --auto lets GitHub merge only once the required test
@@ -81,12 +92,14 @@
 // admit and fail closed on any segment that invokes either and that they cannot fully read (a
 // quoted word, the command words `gh`, `pr`, `merge` and `ready` included, a variable, a command
 // substitution, a redirection, a wrapper, an assignment prefix, -R/--repo, a path-qualified or
-// capitalised `gh`). They also read four shapes the other rules leave alone: an invocation glued to
+// capitalised `gh`). They also read five shapes the other rules leave alone: an invocation glued to
 // a lone `&` or `|&`, one that follows a shell comment or arithmetic holding a `<<word` or a quote
 // character, one in a command substitution inside a double-quoted span, where a backslash-escaped
-// `$(` or backtick is text and opens or closes nothing, and one whose `gh`, `pr`, `merge` or
-// `ready` word is quoted, which is seen and refused even when the rest of the segment is the
-// delivery form. Residuals, none of which matches the two `gh` allow rules: a `sh -c` or other
+// `$(` or backtick is text and opens or closes nothing, one captured by a leading assignment, such
+// as `out=$(gh pr merge ...)`, which assignment stripping would otherwise remove, and one whose
+// `gh`, `pr`, `merge` or `ready` word is quoted, which is seen and refused even when the rest of
+// the segment is the delivery form. Residuals, none of which matches the two `gh` allow rules: a
+// `sh -c` or other
 // wrapper string is not looked inside, a substitution that carries a heredoc inside double quotes
 // is not read, and a quoted capitalised or path-qualified name and a partly quoted or
 // backslash-escaped command word are not unquoted, and a `$(…)` inside double quotes whose closing
@@ -213,14 +226,21 @@
 // expansion is read as a redirection with its target; a process substitution nested inside another
 // hides the invocation its redirection precedes; and `git worktree move --force` is not judged.
 import { posix, win32 } from 'node:path';
+import { publishCheck } from './advance-approval.mjs';
 
 // Returns a reason string when `cmd` should be blocked, or "" when it's allowed. `checkout` is the
 // hook's working-directory context, `{ cwd, isRootCheckout(dir), platform }`, whose platform picks the
 // path rules the walk resolves with; without it the root-checkout rule is not judged, and every other
 // rule is unchanged. `runSession` says the session is a product manager run's; without it the
-// publishing rule is not judged.
-export function blockReason(cmd, checkout, { runSession = false } = {}) {
+// publishing rule is not judged. `preApproved`, `{ start, tracker }` plus the injectable `env`, `exec`,
+// `git`, `platform` and `exists` publishCheck takes, says the session is a pre-approved run's; without
+// it the advance approval is not judged and nothing is read.
+export function blockReason(cmd, checkout, { runSession = false, preApproved = null } = {}) {
   cmd = cmd ?? "";
+  // A run writes no approval record and quotes none, so nothing it types can become one.
+  if ((runSession || preApproved) && cmd.includes('Approved:')) {
+    return `${runSession ? 'a product manager' : 'a pre-approved'} run session does not write or quote an advance approval record: only the owner's own session posts one, so a command holding \`Approved:\` is refused`;
+  }
   // Widen each letter of a name to its own class rather than using a regex `i` flag, which would
   // also loosen every option match in the same expression (`-F` for `-f`, `-D` for `-d`).
   const ci = (name) => [...name].map((ch) => (/[a-z]/.test(ch) ? `[${ch.toUpperCase()}${ch}]` : ch)).join('');
@@ -321,9 +341,9 @@ export function blockReason(cmd, checkout, { runSession = false } = {}) {
   // -R/--repo is inherited by `gh pr`, so it is valid before `pr` or before the subcommand.
   const GH_REPO_OPT = String.raw`(?:-R\S+|--repo=\S+|(?:-R|--repo)\s+\S+)\s+`;
   const GH_EXEC = String.raw`${EXEC_PATH}${ci('gh')}`;
-  // Merge and ready are detected anywhere in the segment (after a wrapper, glued to a lone `&`,
-  // inside an unquoted `$(` or backticks), then the whole segment, before assignment stripping, must
-  // be the delivery form.
+  // Merge and ready are detected anywhere in the segment before assignment stripping (after a wrapper,
+  // glued to a lone `&`, inside an unquoted `$(` or backticks, or captured by an assignment such as
+  // `out=$(gh pr merge ...)`), then the whole segment, before assignment stripping, must be the delivery form.
   const GH_PR_MERGE = new RegExp(String.raw`(?:^|[\s(\`&])${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*merge\b`);
   const GH_PR_READY = new RegExp(String.raw`(?:^|[\s(\`&])${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*ready\b`);
   const REASON_MERGE = "gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused";
@@ -457,7 +477,8 @@ export function blockReason(cmd, checkout, { runSession = false } = {}) {
   const UNDER_WORKTREES = /\.claude\/worktrees\/([\s\S]*)/;
   const CLIMBS_OUT = /(?:^|\/)\.\.(?:\/|$)/;
   const PLAIN_WORD = /^[\w./:@+,-]+$/;
-  const GH_PR_CREATE = new RegExp(String.raw`^${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*create\b`);
+  const GH_PR_CREATE = new RegExp(String.raw`^${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*(?:create|new)\b`);
+  const DELIVERY_CREATE = /^gh pr create --draft --title (?:[A-Za-z0-9][A-Za-z0-9._:/-]*|'[^'\r\n]+'|"[^"$`\\!\r\n]+") --body-file [A-Za-z0-9._/][A-Za-z0-9._/-]*$/;
   const DELIVERY_MERGE = /^gh pr merge --auto --squash --delete-branch \d+$/;
   const DELIVERY_READY = /^gh pr ready (?:\d+(?: --undo)?|--undo \d+)$/;
   const NO_VERIFY = /(?:^|\s)--no-verify(?:\s|=|$)/;
@@ -540,10 +561,38 @@ export function blockReason(cmd, checkout, { runSession = false } = {}) {
     const passedOver = [...text.matchAll(WORKTREE_PROCESS_SUBSTITUTION)].map((substitution) => worktreeReason(substitution[1]));
     return [...reasons, ...passedOver].find(Boolean) ?? '';
   };
+  // A pre-approved run session publishes only a plain delivery form, as the whole command, from its own
+  // working directory.
+  // These refusals read nothing; publishCheck then reads the branch, origin and the approval.
+  const preApprovedReason = (s, raw) => {
+    const refuse = (why) => `a pre-approved run session ${why}`;
+    const kind = GIT_PUSH.test(s) ? 'push' : GH_PR_CREATE.test(s) ? 'create' : GH_PR_READY.test(raw) ? 'ready' : 'merge';
+    // Git for Windows reads an environment variable name in any letter case.
+    const named = /\b(?:GH_REPO|GH_HOST|GIT_DIR|GIT_WORK_TREE)\b/i.exec(cmd)?.[0];
+    if (named) return refuse(`publishes nothing from a command naming ${named}, which can point git or gh away from origin`);
+    // A segment before or after it could repoint the remote, the branch, the directory or the
+    // environment the publish runs with, so the whole command must be the publish alone.
+    if (sanitized.trim() !== raw) return refuse('publishes only as a command on its own, with nothing before or after it');
+    if (raw !== s) return refuse('publishes only a plain command, with no assignment before it');
+    if (!checkout?.cwd) return refuse('publishes nothing without its working directory');
+    // The whole raw command must be the one form, so quoting or a heredoc cannot hide code the checks never read.
+    if (kind === 'create' && !DELIVERY_CREATE.test(cmd)) {
+      return refuse(`opens a pull request only as \`gh pr create --draft --title <title> --body-file <path>\`, the title a letter or digit then letters, digits and . _ : / -, single-quoted with no ' or newline, or double-quoted with no ", $, backtick, backslash, ! or newline`);
+    }
+    // The lone-command refusal above already keeps any `cd` from preceding it.
+    if (/(?:^|\s)(?:-C|--git-dir|--work-tree)/.test(s)) return refuse('publishes nothing from a command holding -C, --git-dir or --work-tree, which can move it out of its own working directory');
+    if (kind === 'ready' && !DELIVERY_READY.test(raw)) return refuse('marks ready only with `gh pr ready <number>`, with or without --undo');
+    if (kind === 'merge' && !DELIVERY_MERGE.test(raw)) return refuse('merges only with `gh pr merge --auto --squash --delete-branch <number>`');
+    return publishCheck(kind, raw, { ...preApproved, cwd: checkout.cwd });
+  };
   const ruleReason = (s, raw) => {
-    if (runSession && (GIT_PUSH.test(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(s) || GH_PR_READY.test(s))) {
+    const publishes = GIT_PUSH.test(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(raw) || GH_PR_READY.test(raw);
+    if (runSession && publishes) {
       return "a product manager run session does not publish: a built job waits for the owner's yes to push";
     }
+    // An admitted publish still meets every rule below.
+    const preApprovedRefusal = preApproved && publishes ? preApprovedReason(s, raw) : '';
+    if (preApprovedRefusal) return preApprovedRefusal;
     if (GIT_COMMIT.test(s) && NO_VERIFY.test(s)) {
       return "git commit --no-verify skips the pre-commit gates";
     }
@@ -568,10 +617,10 @@ export function blockReason(cmd, checkout, { runSession = false } = {}) {
     }
     // Auto-merge is GitHub's own wait-for-green: the agent's owner-authorised merge is queued, never
     // forced. The allow list runs these two prefixes unprompted, so only the exact forms pass.
-    if (GH_PR_MERGE.test(s) && !DELIVERY_MERGE.test(raw)) {
+    if (GH_PR_MERGE.test(raw) && !DELIVERY_MERGE.test(raw)) {
       return REASON_MERGE;
     }
-    if (GH_PR_READY.test(s) && !DELIVERY_READY.test(raw)) {
+    if (GH_PR_READY.test(raw) && !DELIVERY_READY.test(raw)) {
       return REASON_READY;
     }
     return worktreeReason(s);

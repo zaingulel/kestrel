@@ -31,7 +31,8 @@ disagrees with its issue; closeout runs it in its strict mode, and resume intake
 adds the full details of every pickable card and every claimed card with no closing pull request and marks whatever
 it could not read as unavailable. [`scripts/board-move.mjs`](../scripts/board-move.mjs) moves a card and, on a board
 with a parked lane, parks a card in that lane or releases it; on a board with no parked lane it refuses that request
-before making any `gh` call. The head of each script owns its modes and argument forms.
+before making any `gh` call. The head of each script owns its modes and argument forms, and `node scripts/board.mjs --help` prints the board
+command's.
 
 `lookupIssueBoardItem` in [`scripts/lib/board-move.mjs`](../scripts/lib/board-move.mjs) supplies one guarded
 issue-side read to `moveCards`, `addIssueToBoard` and the publication verifier's missing-card check. It reads up to

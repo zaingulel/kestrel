@@ -1,9 +1,9 @@
 // unsafe-git.test.mjs — mutation-proof unit tests for the PreToolUse(Bash) guard rules.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
-// Every blocked fixture asserts the exact rule reason, or for the run session rule the opening words
-// the launcher's witness reads, never a bare truthy, so a rule that fires for the wrong reason reddens
-// a test instead of hiding behind another rule's verdict.
+// Every blocked fixture asserts the exact rule reason, or for the run session rules the opening words
+// the launcher's witness reads and the text the reason must name, never a bare truthy, so a rule that
+// fires for the wrong reason reddens a test instead of hiding behind another rule's verdict.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -1371,5 +1371,519 @@ test('ANTI-REGRESSION: a run session refuses git push and gh pr create, ready an
     for (const command of publishing) assert.equal(blockReason(command, undefined, options), '', command);
     assert.equal(blockReason('git push --force origin job/1', undefined, options), REASON_PUSH_FORCE);
     assert.equal(blockReason('gh pr create --title x', undefined, options), REASON_CREATE);
+  }
+});
+
+// ── gh pr new is gh pr create ───────────────────────────────────────────────
+// gh lists `new` as an alias of `create`, so every rule that judges a create judges the alias alike.
+
+test('gh pr new is judged as gh pr create', () => {
+  assert.equal(blockReason('gh pr new --title x --body y'), REASON_CREATE);
+  assert.equal(blockReason('GH pr new --title x --body y'), REASON_CREATE);
+  assert.equal(blockReason('gh pr new --draft --title x'), '');
+  assert.equal(blockReason('gh pr new -d --title x'), '');
+  assert.equal(blockReason('gh pr new --title "block it without --draft " --body x'), REASON_CREATE);
+  assert.equal(blockReason('gh pr new --body "see --draft docs" --title x'), REASON_CREATE);
+  assert.equal(blockReason('gh pr new --title x --body "line1\nline2" --draft'), '');
+  assert.equal(blockReason('gh -R owner/repo pr new --title x'), REASON_CREATE);
+  assert.equal(blockReason('gh pr -R owner/repo new --title x'), REASON_CREATE);
+  assert.equal(blockReason('gh -Rowner/repo pr new --title x'), REASON_CREATE);
+  assert.equal(blockReason('GH_HOST=github.com gh pr new --title x'), REASON_CREATE);
+  assert.equal(blockReason('GH_HOST=github.com gh pr new --draft --title x'), '');
+  assert.equal(blockReason('/opt/homebrew/bin/gh pr new --title x'), REASON_CREATE);
+  assert.equal(blockReason('/usr/local/bin/gh pr new --draft --title x'), '');
+  assert.equal(blockReason('GH pr new --draft --title x'), '');
+  assert.equal(blockReason("gh pr new --title x --body \"$(cat <<'EOF'\nwe now require --draft on every PR\nEOF\n)\""), REASON_CREATE);
+  assert.equal(blockReason('gh pr new <<EOF --title x\nbody mentions --draft\nEOF'), REASON_CREATE);
+  assert.equal(blockReason('gh pr new --title x <<EOF --draft\nbody\nEOF'), '');
+  assert.equal(blockReason('echo "gh pr new"'), '');
+  // A product manager run session refuses the alias as it refuses the create, and outside the mark nothing changes.
+  const REFUSED = /^a product manager run session does not publish/;
+  assert.match(blockReason('gh pr new --draft --title x', undefined, { runSession: true }), REFUSED);
+  for (const options of [undefined, { runSession: false }]) {
+    assert.equal(blockReason('gh pr new --draft --title x', undefined, options), '');
+    assert.equal(blockReason('gh pr new --title x', undefined, options), REASON_CREATE);
+  }
+});
+
+// ── pre-approved run session ─────────────────────────────────────────────────
+// The advance approval check reads git and GitHub through two injected runners, each taking the
+// argument list and returning stdout or throwing, as merge-watch's gitExec and ghExec do. The fakes
+// answer only the reads the check makes, for a job/7 worktree whose origin is acme/widgets and whose
+// GraphQL reply carries GitHub's own field names, and record every call so a case can say which reads
+// a refusal must come before. The expected lines are written by hand from the plan's record form,
+// validity rules and exit codes.
+
+const PRE_APPROVED = 'a pre-approved run session ';
+const NOT_APPROVED = `${PRE_APPROVED}found no valid advance approval (check exit 0): not approved 7: `;
+const UNAVAILABLE = `${PRE_APPROVED}found no valid advance approval (check exit 2): unavailable 7: `;
+const REASON_RUN_SESSION = "a product manager run session does not publish: a built job waits for the owner's yes to push";
+const RUN_START = '2026-11-04T12:00:00Z';
+const ORIGIN_URL = 'https://github.com/acme/widgets.git';
+const ORIGIN_ID = 'R_kgDOwidgets';
+const PUSH = 'git push -u origin job/7';
+const CREATE = 'gh pr create --draft --title t --body-file b';
+const CREATE_ONLY = `${PRE_APPROVED}opens a pull request only as \`gh pr create --draft --title <title> --body-file <path>\`, the title a letter or digit then letters, digits and . _ : / -, single-quoted with no ' or newline, or double-quoted with no ", $, backtick, backslash, ! or newline`;
+const READY = 'gh pr ready 12';
+const MERGE = 'gh pr merge --auto --squash --delete-branch 12';
+const DELIVERY = [PUSH, CREATE, READY, MERGE];
+const PR_VIEW = 'gh pr view 12 --json state,headRefName,baseRefName,headRepository,isCrossRepository';
+const isGh = (call) => call.startsWith('gh ');
+const isGraphql = (call) => call.startsWith('gh api graphql');
+const record = (fields = {}) => ({
+  author: { login: 'zain' },
+  createdAt: '2026-11-03T09:00:00Z',
+  lastEditedAt: null,
+  url: 'https://github.com/acme/widgets/issues/7#issuecomment-1',
+  body: 'Approved: card=7 edited=none',
+  ...fields,
+});
+
+function preApprovedRun({
+  start = RUN_START,
+  tracker = 'github',
+  env = {},
+  branch = 'job/7',
+  pushUrls = `${ORIGIN_URL}\n`,
+  originPush = { status: 1, message: 'Command failed: git config --get-all remote.origin.push' },
+  mergeBase = { status: 1, message: 'Command failed: git config --get branch.job/7.gh-merge-base' },
+  unscopedId = ORIGIN_ID,
+  repository = {},
+  pullRequest = {},
+  issue = {},
+  closedAt = [],
+  comments = [record()],
+  hasNextPage = false,
+  repositoryId = ORIGIN_ID,
+  graphqlError,
+} = {}) {
+  const calls = [];
+  const git = (args) => {
+    const call = `git ${args.join(' ')}`;
+    calls.push(call);
+    if (call === 'git symbolic-ref --quiet --short HEAD') return `${branch}\n`;
+    if (call === 'git remote get-url --push --all origin') return pushUrls;
+    if (call === 'git remote get-url origin') return `${ORIGIN_URL}\n`;
+    // Git prints each value it holds, and exits 1 with no output where the key is unset.
+    if (call === 'git config --get-all remote.origin.push') {
+      if (typeof originPush === 'string') return originPush;
+      throw Object.assign(new Error(originPush.message), { status: originPush.status });
+    }
+    if (call === `git config --get branch.${branch}.gh-merge-base`) {
+      if (typeof mergeBase === 'string') return mergeBase;
+      throw Object.assign(new Error(mergeBase.message), { status: mergeBase.status });
+    }
+    throw new Error(`unexpected read: ${call}`);
+  };
+  const exec = (args) => {
+    const call = `gh ${args.join(' ')}`;
+    calls.push(call);
+    if (call === `gh repo view --json id,nameWithOwner,defaultBranchRef -- ${ORIGIN_URL}`) return JSON.stringify({ id: ORIGIN_ID, nameWithOwner: 'acme/widgets', defaultBranchRef: { name: 'main' }, ...repository });
+    if (call === 'gh repo view --json id') return JSON.stringify({ id: unscopedId });
+    if (call === PR_VIEW) {
+      return JSON.stringify({ state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', headRepository: { id: ORIGIN_ID, name: 'widgets' }, isCrossRepository: false, ...pullRequest });
+    }
+    if (isGraphql(call)) {
+      if (graphqlError) throw new Error(graphqlError);
+      return JSON.stringify({
+        data: {
+          viewer: { login: 'zain' },
+          repository: {
+            id: repositoryId,
+            issue: {
+              state: 'OPEN',
+              title: 'Show the logo',
+              lastEditedAt: null,
+              ...issue,
+              timelineItems: { nodes: closedAt.map((createdAt) => ({ createdAt })) },
+              comments: { pageInfo: { hasNextPage }, nodes: comments },
+            },
+          },
+        },
+      });
+    }
+    throw new Error(`unexpected read: ${call}`);
+  };
+  return { calls, preApproved: { start, tracker, env, exec, git, platform: 'linux' } };
+}
+
+const judged = (command, fixture, options = {}) => {
+  const run = preApprovedRun(fixture);
+  return { reason: blockReason(command, inJob, { preApproved: run.preApproved, ...options }), calls: run.calls };
+};
+
+test('ANTI-REGRESSION: a pre-approved run session refuses git push, gh pr create, ready and merge without a valid advance approval for its own card, and admits the delivery forms with one', () => {
+  for (const command of DELIVERY) {
+    assert.equal(
+      judged(command, { comments: [record({ body: 'Looks good to me' })] }).reason,
+      `${NOT_APPROVED}no record`,
+      command,
+    );
+    assert.equal(judged(command, { graphqlError: 'HTTP 502: Bad Gateway' }).reason, `${UNAVAILABLE}HTTP 502: Bad Gateway`, command);
+    // A run's refusal never carries the record text, so the run is never handed a record to post.
+    const voided = {
+      'an edited record': { comments: [record({ lastEditedAt: '2026-11-03T09:30:00Z' })] },
+      'a card edited after its record': { issue: { lastEditedAt: '2026-11-03T09:30:00Z' }, comments: [record()] },
+      'another author': { comments: [record({ author: { login: 'mallory' } })] },
+      'a stale edited value': { issue: { lastEditedAt: '2026-11-02T09:00:00Z' }, comments: [record({ body: 'Approved: card=7 edited=2026-11-01T08:00:00Z' })] },
+      'a record created after the run started': { comments: [record({ createdAt: '2026-11-04T12:00:01Z' })] },
+      'a record created before the last close': { closedAt: ['2026-11-03T10:00:00Z'] },
+    };
+    for (const [label, fixture] of Object.entries(voided)) {
+      assert.equal(judged(command, fixture).reason, `${NOT_APPROVED}no valid record`, `${command}, ${label}`);
+    }
+    const ineligible = {
+      'a closed card': [{ issue: { state: 'CLOSED' }, closedAt: ['2026-11-02T10:00:00Z'] }, 'the card is closed'],
+      'a proposed card': [{ issue: { title: 'Proposed: Show the logo' } }, 'the card is still a proposal'],
+    };
+    for (const [label, [fixture, why]] of Object.entries(ineligible)) {
+      assert.equal(judged(command, fixture).reason, `${NOT_APPROVED}${why}`, `${command}, ${label}`);
+    }
+    const nextPage = judged(command, { hasNextPage: true }).reason;
+    assert.ok(nextPage.startsWith(UNAVAILABLE), `${command}, a next page: ${JSON.stringify(nextPage)}`);
+    for (const start of ['', '2026-11-04 12:00:00']) {
+      const { reason, calls } = judged(command, { start });
+      assert.ok(reason.startsWith(PRE_APPROVED), `${command}, mark ${JSON.stringify(start)}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(calls, [], `${command}, mark ${JSON.stringify(start)}`);
+    }
+    const onMain = judged(command, { branch: 'main' });
+    assert.ok(onMain.reason.startsWith(PRE_APPROVED), `${command}, on main: ${JSON.stringify(onMain.reason)}`);
+    assert.deepEqual(onMain.calls.filter(isGh), [], `${command}, on main`);
+  }
+  for (const command of [READY, MERGE]) {
+    const { reason, calls } = judged(command, { pullRequest: { headRefName: 'job/8' } });
+    assert.ok(reason.startsWith(PRE_APPROVED), `${command}, head job/8: ${JSON.stringify(reason)}`);
+    assert.deepEqual(calls.filter(isGraphql), [], `${command}, head job/8`);
+  }
+  const moved = judged('cd ../8 && git push -u origin job/8');
+  assert.ok(moved.reason.startsWith(PRE_APPROVED), JSON.stringify(moved.reason));
+  assert.deepEqual(moved.calls, []);
+  const otherBranch = judged('git push -u origin job/9');
+  assert.ok(otherBranch.reason.startsWith(PRE_APPROVED), JSON.stringify(otherBranch.reason));
+  assert.deepEqual(otherBranch.calls.filter(isGh), []);
+  for (const command of DELIVERY) {
+    assert.equal(judged(command).reason, '', command);
+    const editedCard = { issue: { lastEditedAt: '2026-11-03T08:00:00Z' }, comments: [record({ body: 'Approved: card=7 edited=2026-11-03T08:00:00Z' })] };
+    assert.equal(judged(command, editedCard).reason, '', command);
+    assert.equal(judged(command, {}, { runSession: true }).reason, REASON_RUN_SESSION, command);
+  }
+});
+
+test('a pre-approved run session refuses a ready, merge, create or assignment-led form outside its delivery form before any read', () => {
+  const MERGE_FORM = 'merges only with `gh pr merge --auto --squash --delete-branch <number>`';
+  const ASSIGNMENT_FORM = 'publishes only a plain command, with no assignment before it';
+  const outside = {
+    'gh pr merge 8 --admin': `${PRE_APPROVED}${MERGE_FORM}`,
+    'gh pr merge --auto --squash 8': `${PRE_APPROVED}${MERGE_FORM}`,
+    'gh pr ready 8 --admin': `${PRE_APPROVED}marks ready only with \`gh pr ready <number>\`, with or without --undo`,
+    'gh pr create -R x/y --draft --title t --body-file b': CREATE_ONLY,
+    'gh pr create --repo x/y --draft --title t --body-file b': CREATE_ONLY,
+    'gh pr create --head other --draft --title t --body-file b': CREATE_ONLY,
+    'gh pr create -B release --draft --title t --body-file b': CREATE_ONLY,
+    'gh pr create --base release --draft --title t --body-file b': CREATE_ONLY,
+    'gh pr create --draft --base=release --title t --body-file b': CREATE_ONLY,
+    'FOO=1 gh pr create --draft --title t --body-file b': `${PRE_APPROVED}${ASSIGNMENT_FORM}`,
+    'FOO=1 gh pr ready 8': `${PRE_APPROVED}${ASSIGNMENT_FORM}`,
+    'FOO=1 git push -u origin job/7': `${PRE_APPROVED}${ASSIGNMENT_FORM}`,
+  };
+  for (const [command, reason] of Object.entries(outside)) {
+    const judgement = judged(command);
+    assert.equal(judgement.reason, reason, command);
+    assert.deepEqual(judgement.calls, [], command);
+  }
+});
+
+test('ANTI-REGRESSION: a merge or ready captured by a leading assignment is refused in every session, before any read', () => {
+  const forms = [
+    ['out=$(gh pr merge --auto --squash --delete-branch 12)', REASON_MERGE],
+    ['out=`gh pr ready 12`', REASON_READY],
+    ['x=$(gh pr merge --admin 12)', REASON_MERGE],
+    ['FOO=1 x=$(gh pr merge --admin 12)', REASON_MERGE],
+  ];
+  for (const [command, refusal] of forms) {
+    assert.equal(blockReason(command, inJob), refusal, command);
+    assert.equal(blockReason(command, inJob, { runSession: true }), REASON_RUN_SESSION, command);
+    const { reason, calls } = judged(command);
+    assert.equal(reason, `${PRE_APPROVED}publishes only a plain command, with no assignment before it`, command);
+    assert.deepEqual(calls, [], command);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session opens a pull request only into the default branch, refusing a configured gh merge base or bundled short flags', () => {
+  const MERGE_BASE = `${PRE_APPROVED}opens a pull request only into the default branch, and branch.job/7.gh-merge-base is set: release`;
+  assert.equal(judged(CREATE, { mergeBase: 'release\n' }).reason, MERGE_BASE);
+  assert.equal(judged(CREATE).reason, '');
+  assert.equal(judged(CREATE, { mergeBase: { status: 128, message: 'fatal: bad config line 3' } }).reason, `${PRE_APPROVED}publishes nothing: fatal: bad config line 3`);
+  for (const command of [
+    'gh pr create --draft -dB release --title t --body-file b',
+    'gh pr create -dR other/repo --title t --body-file b',
+    'gh pr create --draft -dBrelease --title t --body-file b',
+    'gh pr create -fdB release --title t --body-file b',
+    'gh pr create --draft -dH other:job/7 --title t --body-file b',
+  ]) {
+    const bundled = judged(command);
+    assert.equal(bundled.reason, CREATE_ONLY, command);
+    assert.deepEqual(bundled.calls, [], command);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session opens a pull request with no command or process substitution or heredoc in it, before any read', () => {
+  const substituted = [
+    'gh pr create --draft --title "$(gh repo set-default other/repo)" --body-file b',
+    'gh pr create --draft --title "`gh repo set-default other/repo`" --body-file b',
+    'gh pr create --draft --title t --body-file <(git switch job/9)',
+    'gh pr create --draft --title t --body-file >(cat)',
+    'gh pr create --draft --title t --body-file - <<EOF\n$(git switch job/9)\nEOF',
+    'gh pr create --draft --title t --body-file - <<EOF\nplain body\nEOF',
+    'gh pr create --draft --title t --body-file - <<EOF -R other/repo\nplain body\nEOF',
+    'gh pr create --draft --title t --body-file - <<<"$(git switch job/9)"',
+  ];
+  for (const command of substituted) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, CREATE_ONLY, JSON.stringify(command));
+    assert.deepEqual(calls, [], JSON.stringify(command));
+  }
+  // A single-quoted title is literal text, so it is part of the one allowed form.
+  const literal = judged("gh pr create --draft --title '$(literal)' --body-file b");
+  assert.equal(literal.reason, '');
+  assert.ok(literal.calls.some(isGraphql), JSON.stringify(literal.calls));
+  assert.equal(judged(CREATE).reason, '');
+});
+
+test('ANTI-REGRESSION: a pre-approved run session opens a pull request only in its one exact form, before any read', () => {
+  const refused = [
+    'gh pr create --draft "-B" release --title t --body-file b',
+    "gh pr create --draft '-R' other/repo --title t --body-file b",
+    'gh pr create --draft "--head=fork:job/7" --title t --body-file b',
+    "gh pr create --draft ''-B release --title t --body-file b",
+    'gh pr create --draft \\-B release --title t --body-file b',
+    'gh pr create --draft {-B,release} --title t --body-file b',
+    "gh pr create --draft $'-B' release --title t --body-file b",
+    'gh pr create --draft "-dB" release --title t --body-file b',
+    'gh pr create --draft -d"B" release --title t --body-file b',
+    'gh pr create --draft --title "${ git switch job/9; printf t; }" --body-file b',
+    'gh pr create --draft --title "${| gh repo set-default other/repo; }" --body-file b',
+    'gh pr create --draft --title t --body-file =(gh repo set-default other/repo)',
+    'gh pr new --draft -B release -R other/repo --title t --body-file b',
+    'gh pr create --title t --body-file b --draft',
+    'gh pr create -d --title t --body-file b',
+    'gh pr create --draft --title t --body-file -',
+    'gh pr create --draft --title t --body-file b -B release',
+    'gh pr create --draft --title t --body-file b -R other/repo',
+    'gh pr create --draft --title a#b --body-file b',
+    'gh pr create --draft --title a#-#-Rother/repo --body-file b',
+  ];
+  for (const command of refused) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, CREATE_ONLY, JSON.stringify(command));
+    assert.deepEqual(calls, [], JSON.stringify(command));
+  }
+  const admitted = [
+    CREATE,
+    "gh pr create --draft --title 'A plain title' --body-file b",
+    'gh pr create --draft --title "The owner\'s card (#461): approve once" --body-file .claude/worklog/body.md',
+  ];
+  for (const command of admitted) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, '', JSON.stringify(command));
+    assert.ok(calls.some(isGraphql), `${JSON.stringify(command)}: ${JSON.stringify(calls)}`);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session publishes only as a command on its own, so nothing before or after a delivery form can change where it goes, before any read', () => {
+  const ALONE = `${PRE_APPROVED}publishes only as a command on its own, with nothing before or after it`;
+  const chained = [
+    `git remote set-url origin https://github.com/mirror/widgets.git && ${PUSH}`,
+    `git config remote.origin.push refs/heads/job/7:refs/heads/main && ${PUSH}`,
+    `git switch job/9 && ${PUSH}`,
+    `export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:main; ${PUSH}`,
+    `pushd /tmp/elsewhere && ${PUSH}`,
+    `builtin cd /tmp/elsewhere && ${PUSH}`,
+    `export GIT_COMMON_DIR=/tmp/elsewhere/.git && ${PUSH}`,
+    `export GH_CONFIG_DIR=/tmp/elsewhere && ${CREATE}`,
+    `export GH_TOKEN=other && ${MERGE}`,
+    `false || ${READY}`,
+    `git status\n${PUSH}`,
+    `${PUSH} | cat`,
+    `${PUSH} && echo pushed`,
+    `${PUSH};`,
+  ];
+  for (const command of chained) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, ALONE, JSON.stringify(command));
+    assert.deepEqual(calls, [], JSON.stringify(command));
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session never pushes to main, even with a valid record, and pushes its own branch with --force-with-lease', () => {
+  const toMain = judged('git push origin HEAD:main');
+  assert.equal(toMain.reason, `${PRE_APPROVED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`);
+  assert.deepEqual(toMain.calls.filter(isGh), []);
+  assert.equal(judged('git push --force-with-lease origin job/7').reason, '');
+});
+
+test('ANTI-REGRESSION: a pre-approved run session pushes nothing while remote.origin.push is set or unreadable, and pushes while it is unset', () => {
+  const READ = 'git config --get-all remote.origin.push';
+  const set = judged(PUSH, { originPush: 'refs/heads/job/7:refs/heads/main\n' });
+  assert.equal(set.reason, `${PRE_APPROVED}pushes nothing while remote.origin.push is set, since it can send the push to another branch: refs/heads/job/7:refs/heads/main`);
+  assert.deepEqual(set.calls.filter(isGraphql), []);
+  const unreadable = judged(PUSH, { originPush: { status: 128, message: 'fatal: bad config line 3' } });
+  assert.equal(unreadable.reason, `${PRE_APPROVED}publishes nothing: fatal: bad config line 3`);
+  const unset = judged(PUSH);
+  assert.equal(unset.reason, '');
+  assert.ok(unset.calls.includes(READ), JSON.stringify(unset.calls));
+});
+
+test('a pre-approved run session refuses a command naming GH_REPO, GH_HOST, GIT_DIR or GIT_WORK_TREE, in any letter case, before any read', () => {
+  const naming = {
+    GH_REPO: `GH_REPO=x/y ${CREATE}`,
+    GH_HOST: `GH_HOST=github.example.com ${MERGE}`,
+    GIT_DIR: `GIT_DIR=/tmp/elsewhere/.git ${PUSH}`,
+    GIT_WORK_TREE: `GIT_WORK_TREE=/tmp/elsewhere ${PUSH}`,
+    git_dir: `git_dir=/tmp/elsewhere/.git ${PUSH}`,
+  };
+  for (const [name, command] of Object.entries(naming)) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, `${PRE_APPROVED}publishes nothing from a command naming ${name}, which can point git or gh away from origin`, command);
+    assert.deepEqual(calls, [], command);
+  }
+});
+
+test('a pre-approved run session refuses a command holding -C, --git-dir or --work-tree, before any read', () => {
+  const HOLDS = `${PRE_APPROVED}publishes nothing from a command holding -C, --git-dir or --work-tree, which can move it out of its own working directory`;
+  const holding = {
+    'gh pr create --draft --title -C': CREATE_ONLY,
+    'gh pr create --draft --title --git-dir': CREATE_ONLY,
+    'gh pr create --draft --title --work-tree': CREATE_ONLY,
+    'git -C . push -u origin job/7': HOLDS,
+  };
+  for (const [command, expected] of Object.entries(holding)) {
+    const { reason, calls } = judged(command);
+    assert.equal(reason, expected, command);
+    assert.deepEqual(calls, [], command);
+  }
+});
+
+test('ANTI-REGRESSION: a run session refuses any command that writes or quotes an advance approval record, and without a mark nothing changes', () => {
+  const quoting = [
+    'gh issue comment 7 --body "Approved: card=7 edited=none"',
+    "gh issue comment 7 --body-file - <<'EOF'\nApproved: card=7 edited=none\nEOF",
+    "printf 'Approved: card=7 edited=none' > record.md",
+    'grep -rn "Approved:" .claude/worklog',
+  ];
+  for (const command of quoting) {
+    const runSession = blockReason(command, inJob, { runSession: true });
+    assert.ok(runSession.startsWith('a product manager run session '), `${command}: ${JSON.stringify(runSession)}`);
+    const { reason, calls } = judged(command);
+    assert.ok(reason.startsWith(PRE_APPROVED), `${command}: ${JSON.stringify(reason)}`);
+    assert.deepEqual(calls, [], command);
+    assert.equal(blockReason(command, inJob), '', command);
+    assert.equal(blockReason(command, inJob, { runSession: false }), '', command);
+  }
+  // The marks take nothing else: an ordinary command and the approval check itself pass.
+  for (const command of ['git status', 'node scripts/board.mjs --approval check 7']) {
+    assert.equal(blockReason(command, inJob, { runSession: true }), '', command);
+    const { reason, calls } = judged(command);
+    assert.equal(reason, '', command);
+    assert.deepEqual(calls, [], command);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin repository and only where the tracker is GitHub issues', () => {
+  for (const command of DELIVERY) {
+    for (const [name, value] of [['GH_REPO', 'x/y'], ['GH_HOST', 'github.example.com']]) {
+      const { reason, calls } = judged(command, { env: { [name]: value } });
+      assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes(name), `${command}, ${name}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(calls, [], `${command}, ${name}`);
+    }
+    const pushDestinations = [`${ORIGIN_URL}\nhttps://github.com/mirror/widgets.git\n`, 'https://github.com/mirror/widgets.git\n'];
+    for (const pushUrls of pushDestinations) {
+      const { reason, calls } = judged(command, { pushUrls });
+      assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes('origin pushes to'), `${command}, ${JSON.stringify(pushUrls)}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(calls.filter(isGh), [], `${command}, ${JSON.stringify(pushUrls)}`);
+    }
+    assert.ok(
+      judged(command, { pushUrls: pushDestinations[1] }).reason.includes('origin pushes to https://github.com/mirror/widgets.git, not the repository it fetches from'),
+      command,
+    );
+    const unscoped = judged(command, { unscopedId: 'R_kgDOother' });
+    assert.ok(unscoped.reason.startsWith(PRE_APPROVED), `${command}, unscoped id: ${JSON.stringify(unscoped.reason)}`);
+    assert.deepEqual(unscoped.calls.filter(isGraphql), [], `${command}, unscoped id`);
+    const graphqlRepository = judged(command, { repositoryId: 'R_kgDOother' }).reason;
+    assert.ok(graphqlRepository.startsWith(UNAVAILABLE), `${command}, GraphQL repository: ${JSON.stringify(graphqlRepository)}`);
+    const jira = judged(command, { tracker: 'jira' });
+    assert.ok(
+      jira.reason.startsWith(PRE_APPROVED) && jira.reason.includes("advance approval needs GitHub issues; this repository's tracker is jira"),
+      `${command}, jira: ${JSON.stringify(jira.reason)}`,
+    );
+    assert.deepEqual(jira.calls, [], `${command}, jira`);
+  }
+  const inline = judged(`GH_REPO=x/y ${CREATE}`);
+  assert.ok(inline.reason.startsWith(PRE_APPROVED) && inline.reason.includes('GH_REPO'), JSON.stringify(inline.reason));
+  assert.deepEqual(inline.calls, []);
+  for (const command of [READY, MERGE]) {
+    for (const pullRequest of [{ headRepository: { id: 'R_kgDOfork', name: 'widgets' } }, { isCrossRepository: true }]) {
+      const { reason, calls } = judged(command, { pullRequest });
+      assert.ok(reason.startsWith(PRE_APPROVED), `${command}, ${JSON.stringify(pullRequest)}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(calls.filter(isGraphql), [], `${command}, ${JSON.stringify(pullRequest)}`);
+    }
+  }
+});
+
+test("ANTI-REGRESSION: a pre-approved run session marks ready or merges only a pull request into origin's default branch", () => {
+  const INTO_MAIN = `${PRE_APPROVED}acts only on its own job pull request into the default branch: #12 targets other, not main`;
+  for (const command of [READY, MERGE, `${READY} --undo`]) {
+    const { reason, calls } = judged(command, { pullRequest: { baseRefName: 'other' } });
+    assert.equal(reason, INTO_MAIN, command);
+    assert.deepEqual(calls.filter(isGraphql), [], command);
+  }
+  for (const command of [READY, MERGE]) {
+    assert.equal(judged(command, { pullRequest: { baseRefName: 'main' } }).reason, '', command);
+    assert.equal(judged(command, { repository: { defaultBranchRef: { name: 'release' } }, pullRequest: { baseRefName: 'release' } }).reason, '', command);
+  }
+  for (const repository of [{ defaultBranchRef: undefined }, { defaultBranchRef: null }, { defaultBranchRef: { name: '' } }, { defaultBranchRef: { name: 'ma in' } }]) {
+    for (const command of DELIVERY) {
+      const { reason, calls } = judged(command, { repository });
+      assert.ok(reason.startsWith(`${PRE_APPROVED}publishes nothing: unreadable origin repository`), `${command}, ${JSON.stringify(repository)}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(calls.filter(isGraphql), [], `${command}, ${JSON.stringify(repository)}`);
+    }
+  }
+});
+
+test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.exe only from absolute PATH entries', () => {
+  // No runner is injected for the executable under test, so the default one is built from the lookup.
+  // A spawn names the file it was given in its own error, which is how a reason shows the path used.
+  const here = { cwd: process.cwd(), isRootCheckout: () => false, platform: process.platform };
+  const BIN = 'C:\\fabraik-absent\\bin';
+  const onWindows = (PATH, exists, runners = {}) => ({ start: RUN_START, tracker: 'github', env: { PATH }, platform: 'win32', exists, ...runners });
+  const { git } = preApprovedRun().preApproved;
+  const relativeGit = blockReason(PUSH, here, { preApproved: onWindows('tools\\bin', () => true) });
+  assert.ok(relativeGit.startsWith(PRE_APPROVED) && relativeGit.includes('git.exe') && !relativeGit.includes('tools\\bin'), JSON.stringify(relativeGit));
+  const relativeGh = blockReason(CREATE, here, { preApproved: onWindows('tools\\bin', () => true, { git }) });
+  assert.ok(relativeGh.startsWith(PRE_APPROVED) && relativeGh.includes('gh.exe') && !relativeGh.includes('tools\\bin'), JSON.stringify(relativeGh));
+  const exists = (candidate) => candidate === `${BIN}\\git.exe` || candidate === `${BIN}\\gh.exe`;
+  const absoluteGit = blockReason(PUSH, here, { preApproved: onWindows(`tools\\bin;${BIN}`, exists) });
+  assert.ok(absoluteGit.startsWith(PRE_APPROVED) && absoluteGit.includes(`${BIN}\\git.exe`), JSON.stringify(absoluteGit));
+  const absoluteGh = blockReason(CREATE, here, { preApproved: onWindows(`tools\\bin;${BIN}`, exists, { git }) });
+  assert.ok(absoluteGh.startsWith(PRE_APPROVED) && absoluteGh.includes(`${BIN}\\gh.exe`), JSON.stringify(absoluteGh));
+  // The branch read needs only git, so with gh.exe absent a push off main is refused for the branch, not for gh.exe.
+  const { git: gitOnMain } = preApprovedRun({ branch: 'main' }).preApproved;
+  const gitOnly = (candidate) => candidate === `${BIN}\\git.exe`;
+  const offBranch = blockReason(PUSH, here, { preApproved: onWindows(BIN, gitOnly, { git: gitOnMain }) });
+  assert.ok(
+    offBranch.startsWith(PRE_APPROVED) && offBranch.includes('publishes only from a job branch, and HEAD is "main"') && !offBranch.includes('gh.exe'),
+    JSON.stringify(offBranch),
+  );
+});
+
+test('a pre-approved run session may take its own job pull request back to draft after its record is revoked', () => {
+  const revoked = { comments: [record({ body: 'Revoked: card=7 edited=none', lastEditedAt: '2026-11-04T08:00:00Z' })] };
+  const ready = judged(READY, revoked).reason;
+  assert.ok(ready.startsWith(NOT_APPROVED), JSON.stringify(ready));
+  for (const command of ['gh pr ready 12 --undo', 'gh pr ready --undo 12']) {
+    const { reason, calls } = judged(command, revoked);
+    assert.equal(reason, '', command);
+    assert.ok(calls.includes(PR_VIEW), `${command}: ${JSON.stringify(calls)}`);
+    assert.deepEqual(calls.filter(isGraphql), [], command);
   }
 });

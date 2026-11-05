@@ -2,7 +2,9 @@
 // merge-watch.mjs — waits on GitHub, reading only, for one pull request to merge or stop, or, with `--draft`, for an
 // origin-owned pull request to open on one job branch.
 // With a pull request number: exit 0 only when merged; 1 when closed, a required check failed, the merge is blocked,
-// the required set is unknown, a pull request state, check or workflow run reply is unreadable, or `gh` failed.
+// the required set is unknown, a pull request state, check, workflow run or job reply is unreadable, no workflow run
+// on the head commit has been unfinished for 10 minutes while a required check has not reported, a test job has
+// waited 15 minutes for a runner, or `gh` failed.
 // With `--draft job/<issue>`: exit 0 once exactly one origin-owned pull request is open on that branch, printing its
 // number; 1 for foreign or unreadable provenance, multiple pull requests, or a failed read.
 // Exit 2 on a bad argument, before any external read. The reason is always the last line of output.
@@ -28,7 +30,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
   const seams = { ghExec: dependencies.ghExec ?? runGh, sleep: dependencies.sleep ?? delay };
   let watched;
   if (args.length === 1 && /^[1-9]\d*$/.test(args[0])) {
-    watched = watchMerge({ pr: args[0], ...seams });
+    watched = watchMerge({ pr: args[0], now: dependencies.now ?? Date.now, ...seams });
   } else if (args.length === 2 && args[0] === '--draft' && isJobBranch(args[1])) {
     watched = watchDraft({
       head: args[1],
