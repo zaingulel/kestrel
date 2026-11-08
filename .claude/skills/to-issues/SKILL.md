@@ -263,17 +263,16 @@ Verify each reused fold target outside that native child set in its own single-n
 a standalone new issue also takes one number. Preserve native parents; never reparent a target for verification.
 
 Report its results: board presence, Statuses and Workstreams, the one kind label or native issue type, native child
-count, and any closed card it read from its archived board item, which passes and stays archived. On failure, read
-WHICH failure:
-`absent from the board` means the publication genuinely failed — fix before reporting ready;
-`needs exactly one kind label` means correct that issue's labels with `gh issue edit <N> --add-label` or
-`--remove-label`, then re-run; `has no native issue type` or `does not name` means set it with
-`gh issue edit <N> --type <type>`, and `also carries kind label` means remove it with
-`gh issue edit <N> --remove-label <label>`, then re-run; `is archived on the board while still open` means unarchive
-that open card, never add a second; `is on the board but not in this board read` and `is not on this board read` mean
-the read lagged — re-run the verifier, never add again; `could not confirm whether` and `could not be read` mean fix
-the named cause.
-A silent skip here is the exact failure this skill already made once.
+count, any closed card it read from its archived board item, which passes and stays archived, and any card the board
+listing left out that it verified from its own board item, which passes. On failure, read WHICH failure: `absent from
+the board` means the publication genuinely failed — fix before reporting ready; `needs exactly one kind label` means
+correct that issue's labels with `gh issue edit <N> --add-label` or `--remove-label`, then re-run; `has no native issue
+type` or `does not name` means set it with `gh issue edit <N> --type <type>`, and `also carries kind label` means remove
+it with `gh issue edit <N> --remove-label <label>`, then re-run; `is archived on the board while still open` means
+unarchive that open card, never add a second; `is not on this board read` means the read returned cards it could not
+resolve, and on Linear `is not in this board read` means the read lagged: re-run the verifier, never add again; `could
+not confirm whether` and `could not be read` mean fix the named cause. A silent skip here is the exact failure this
+skill already made once.
 
 Read each folded target's updated title and body back and compare them with the owner-approved combined changes
 and preserved meaning, criteria and unrelated content.

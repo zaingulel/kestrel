@@ -19,7 +19,19 @@ import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './b
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
 
-const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
+const {
+  boardReadExec,
+  boardRequestKind,
+  hydratedItem,
+  issuesPage,
+  leanBoardPage,
+  leanNode,
+  membership,
+  membershipsPage,
+  READD_WARNING,
+  walkedIssue,
+} = await toolkit.load('lib/board-fixtures.mjs');
+const { closedNotDoneDrift } = await toolkit.load('lib/board-rules.mjs');
 // The copy's own gh-exec: the board reader tells an oversized read apart by the error class its own copy exports.
 const { ghExec } = await toolkit.load('lib/gh-exec.mjs');
 const {
@@ -311,11 +323,8 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
   secondPage.data[BOARD_OWNER_TYPE].projectV2.items.totalCount = 2;
   secondPage.data[BOARD_OWNER_TYPE].projectV2.items.nodes = [REAL_DRAFT_NODE];
   secondPage.data[BOARD_OWNER_TYPE].projectV2.items.pageInfo = { hasNextPage: false, endCursor: null };
-  const calls = [];
-  const items = fetchBoard((args) => {
-    calls.push(args);
-    return JSON.stringify([firstPage, secondPage]);
-  });
+  const { exec, calls } = boardReadExec({ board: [firstPage, secondPage] });
+  const items = fetchBoard(exec);
 
   assert.deepEqual(items, [
     {
@@ -331,7 +340,7 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
       content: { __typename: 'DraftIssue' },
     },
   ]);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter((args) => boardRequestKind(args) === 'board').length, 1);
   assert.deepEqual(calls[0].slice(0, 5), ['api', 'graphql', '--paginate', '--slurp', '-f']);
   assert.equal(calls[0][5], `query=${boardQuery()}`);
 
@@ -368,7 +377,7 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
 test('fetchBoard rejects a short read and accepts an exact one', () => {
   const page = ({ totalCount, nodes = [REAL_ISSUE_NODE], hasNextPage = false, endCursor = null }) =>
     leanBoardPage(nodes, { totalCount, pageInfo: { hasNextPage, endCursor } });
-  const fetchPages = (...pages) => fetchBoard(() => JSON.stringify(pages));
+  const fetchPages = (...pages) => fetchBoard(boardReadExec({ board: pages }).exec);
 
   assert.equal(fetchPages(page({ totalCount: 1 })).length, 1);
   assert.throws(
@@ -392,7 +401,7 @@ test('fetchBoard rejects a short read and accepts an exact one', () => {
 test('fetchBoard throws when the project identity or the field schema changes across pages', () => {
   const first = leanBoardPage([REAL_ISSUE_NODE], { totalCount: 2, pageInfo: { hasNextPage: true, endCursor: 'c1' } });
   const second = leanBoardPage([REAL_DRAFT_NODE], { totalCount: 2 });
-  const fetchPages = (...pages) => fetchBoard(() => JSON.stringify(pages));
+  const fetchPages = (...pages) => fetchBoard(boardReadExec({ board: pages }).exec);
 
   assert.equal(fetchPages(first, second).length, 2);
 
@@ -406,6 +415,291 @@ test('fetchBoard throws when the project identity or the field schema changes ac
   otherSchema.data[BOARD_OWNER_TYPE].projectV2.fields.nodes.push({ name: 'Notes', dataType: 'TEXT' });
   otherSchema.data[BOARD_OWNER_TYPE].projectV2.fields.totalCount += 1;
   assert.throws(() => fetchPages(first, otherSchema), /field schema changed across pages.*rerun/i);
+});
+
+// ── cards the project listing omits ─────────────────────────────────────────
+// GitHub's project item list can leave out a card that is on the board (#504), so the read also
+// walks the repository's issues in both states, each with its project memberships, and reads by id
+// each unarchived membership on this board the listing lacked. Every expectation below is written
+// by hand from the fixtures: an unarchived membership on this board is a card exactly once, and
+// nothing else is.
+
+const RECOVERY_LISTED = leanNode({
+  id: 'PVTI_listed',
+  content: { __typename: 'Issue', number: 10, title: 'Listed card' },
+  status: 'Ready',
+  routing: 'Product',
+});
+
+const omittedCard = (id, number, state, status) => ({
+  id,
+  content: { __typename: 'Issue', number, title: `Omitted card ${number}`, state },
+  status,
+  routing: 'Platform',
+});
+
+// Memberships of one issue on other projects, enough of them to push its board membership past
+// the walk's first page of 100.
+const elsewhere = (count, from = 0) =>
+  Array.from({ length: count }, (_, i) => membership(`PVTI_elsewhere_${from + i}`, { project: 1000 + from + i }));
+
+const sortedById = (items) => [...items].sort((a, b) => a.id.localeCompare(b.id));
+const escapeForPattern = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const namesId = (text, id) => new RegExp(`${escapeForPattern(id)}(?![\\w-])`).test(text);
+const namesNumber = (text, number) => new RegExp(`#${number}(?!\\d)`).test(text);
+
+test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', () => {
+  const draft = leanNode({ id: 'PVTI_listed_draft', content: { __typename: 'DraftIssue' }, title: 'draft note', status: 'Backlog', routing: 'Product' });
+  const unresolved = leanNode({ id: 'PVTI_listed_unresolved', content: null, status: 'Backlog', routing: 'Product' });
+  const recovered = [
+    omittedCard('PVTI_open_backlog', 11, 'OPEN', 'Backlog'),
+    omittedCard('PVTI_closed_done', 12, 'CLOSED', 'Done'),
+    omittedCard('PVTI_closed_backlog', 13, 'CLOSED', 'Backlog'),
+    omittedCard('PVTI_overflow', 15, 'OPEN', 'Ready'),
+  ];
+  const advisories = [];
+  const { exec, calls } = boardReadExec({
+    board: [leanBoardPage([RECOVERY_LISTED, draft, unresolved])],
+    issues: [
+      issuesPage([
+        walkedIssue(10, [membership('PVTI_listed')]),
+        walkedIssue(11, [membership('PVTI_open_backlog')]),
+        walkedIssue(12, [
+          membership('PVTI_closed_done'),
+          membership('PVTI_other_project', { project: BOARD_PROJECT_NUMBER + 1 }),
+          membership('PVTI_other_owner', { owner: 'someone-else' }),
+        ]),
+      ], { totalCount: 6, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }),
+      issuesPage([
+        walkedIssue(13, [membership('PVTI_closed_backlog')]),
+        walkedIssue(14, [membership('PVTI_archived', { isArchived: true })]),
+        walkedIssue(15, elsewhere(100), { totalCount: 101 }),
+      ], { totalCount: 6 }),
+    ],
+    memberships: {
+      15: [
+        membershipsPage(15, elsewhere(100), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+        membershipsPage(15, [membership('PVTI_overflow')], { totalCount: 101 }),
+      ],
+    },
+    // Every item the walk names is readable, so leaving one out is the reader's own decision.
+    items: [
+      hydratedItem(RECOVERY_LISTED),
+      ...recovered.map((card) => hydratedItem(card)),
+      hydratedItem(omittedCard('PVTI_archived', 14, 'CLOSED', 'Done'), { isArchived: true }),
+      hydratedItem(omittedCard('PVTI_other_project', 12, 'CLOSED', 'Done'), { project: BOARD_PROJECT_NUMBER + 1 }),
+      hydratedItem(omittedCard('PVTI_other_owner', 12, 'CLOSED', 'Done'), { owner: 'someone-else' }),
+    ],
+  });
+
+  const items = fetchBoard(exec, { onOmission: (advisory) => advisories.push(advisory) });
+
+  // The listed card once though the walk found it too, the draft and the unresolved card kept, the
+  // open, closed and past-the-first-page cards recovered, and the archived and other-board items left out.
+  assert.deepEqual(sortedById(items).map((i) => [i.id, i.content.number ?? null, i.status, i.content.state ?? null]), [
+    ['PVTI_closed_backlog', 13, 'Backlog', 'CLOSED'],
+    ['PVTI_closed_done', 12, 'Done', 'CLOSED'],
+    ['PVTI_listed', 10, 'Ready', 'OPEN'],
+    ['PVTI_listed_draft', null, 'Backlog', null],
+    ['PVTI_listed_unresolved', null, 'Backlog', null],
+    ['PVTI_open_backlog', 11, 'Backlog', 'OPEN'],
+    ['PVTI_overflow', 15, 'Ready', 'OPEN'],
+  ]);
+  // A recovered card is the same raw item a listed one is, so every board rule reads it alike.
+  const closedInBacklog = items.find((i) => i.id === 'PVTI_closed_backlog');
+  assert.deepEqual(closedInBacklog, {
+    id: 'PVTI_closed_backlog', status: 'Backlog', title: 'Omitted card 13', routing: 'Platform',
+    labels: [], assignees: [], blockers: [], closingPullRequests: [],
+    content: { __typename: 'Issue', number: 13, state: 'CLOSED', subIssuesSummary: { total: 0, completed: 0 } },
+  });
+  assert.equal(closedNotDoneDrift(normalizeItem(closedInBacklog)).reason, 'issue closed but card still in "Backlog" (not Done)');
+  assert.equal(closedNotDoneDrift(normalizeItem(items.find((i) => i.id === 'PVTI_closed_done'))), null);
+
+  assert.equal(advisories.length, 1, advisories.join('\n'));
+  const [advisory] = advisories;
+  assert.equal(typeof advisory, 'string');
+  for (const card of recovered) {
+    assert.ok(namesNumber(advisory, card.content.number), advisory);
+    assert.ok(namesId(advisory, card.id), advisory);
+  }
+  for (const id of ['PVTI_listed', 'PVTI_listed_draft', 'PVTI_listed_unresolved', 'PVTI_archived', 'PVTI_other_project', 'PVTI_other_owner']) {
+    assert.equal(namesId(advisory, id), false, `${id}: ${advisory}`);
+  }
+  for (const number of [10, 14]) assert.equal(namesNumber(advisory, number), false, advisory);
+  assert.match(advisory, READD_WARNING);
+
+  // The walk asks for open AND closed issues and their archived memberships, in one paginated process.
+  const issueWalks = calls.filter((args) => boardRequestKind(args) === 'issues');
+  assert.equal(issueWalks.length, 1);
+  assert.ok(issueWalks[0].includes('--paginate') && issueWalks[0].includes('--slurp'), issueWalks[0].join(' '));
+  const issueQuery = issueWalks[0].find((arg) => arg.startsWith('query='));
+  assert.match(issueQuery, /states:\s*\[\s*OPEN\s*,\s*CLOSED\s*\]/);
+  assert.match(issueQuery, /includeArchived:\s*true/);
+  assert.equal(boardRequestKind(calls[0]), 'board');
+
+  // Nothing omitted: the listing stands as read, and no advisory is raised.
+  const quiet = [];
+  const listedOnly = boardReadExec({
+    board: [leanBoardPage([RECOVERY_LISTED, draft])],
+    issues: [issuesPage([walkedIssue(10, [membership('PVTI_listed')])])],
+  });
+  assert.deepEqual(
+    sortedById(fetchBoard(listedOnly.exec, { onOmission: (advisory) => quiet.push(advisory) })).map((i) => i.id),
+    ['PVTI_listed', 'PVTI_listed_draft'],
+  );
+  assert.deepEqual(quiet, []);
+});
+
+// One card listed (#10), one omitted (#11) and one omitted past the first page of 100
+// memberships (#12, its board membership the first one the walk saw): the read the refusal
+// cases below each break one fact of.
+function recoveryBase() {
+  const firstObservation = [membership('PVTI_overflow'), ...elsewhere(99)];
+  return {
+    board: [leanBoardPage([RECOVERY_LISTED])],
+    issues: [
+      issuesPage([
+        walkedIssue(10, [membership('PVTI_listed')]),
+        walkedIssue(11, [membership('PVTI_omitted')]),
+      ], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }),
+      issuesPage([walkedIssue(12, firstObservation, { totalCount: 101 })], { totalCount: 3 }),
+    ],
+    memberships: {
+      12: [
+        membershipsPage(12, structuredClone(firstObservation), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+        membershipsPage(12, elsewhere(1, 99), { totalCount: 101 }),
+      ],
+    },
+    items: [
+      hydratedItem(omittedCard('PVTI_omitted', 11, 'OPEN', 'Backlog')),
+      hydratedItem(omittedCard('PVTI_overflow', 12, 'OPEN', 'Ready')),
+    ],
+  };
+}
+
+const walked = (base, page, index) => base.issues[page].data.repository.issues.nodes[index];
+const issuesOf = (base, page) => base.issues[page].data.repository.issues;
+const overflowPage = (base, page) => base.memberships[12][page].data.repository.issue;
+const failing = () => { throw new Error('gh: HTTP 502'); };
+
+const REFUSED_RECOVERY = [
+  // Malformed, failed and null replies.
+  ['the issue walk is not JSON', (b) => { b.issues = 'not json'; }],
+  ['the issue walk is not slurped', (b) => { b.issues = b.issues[0]; }],
+  ['the issue walk is empty', (b) => { b.issues = []; }],
+  ['the issue walk fails', (b) => { b.issues = failing; }],
+  ['an issue walk page carries GraphQL errors', (b) => { b.issues[1] = { errors: [{ message: 'Something went wrong' }] }; }],
+  ['an issue walk page is null', (b) => { b.issues[1] = null; }],
+  ['an issue walk page has a null repository', (b) => { b.issues[1].data.repository = null; }],
+  ['an issue walk page has no issues connection', (b) => { b.issues[1].data.repository.issues = null; }],
+  ['a walked issue is null', (b) => { issuesOf(b, 0).nodes[1] = null; }],
+  ['a walked issue has no number', (b) => { walked(b, 0, 1).number = null; }],
+  ['a walked issue has no membership connection', (b) => { walked(b, 0, 1).projectItems = null; }],
+  ['a membership is null', (b) => { walked(b, 0, 1).projectItems.nodes = [null]; }],
+  ['a membership has no project', (b) => { walked(b, 0, 1).projectItems.nodes[0].project = null; }],
+  ['a membership has no project owner', (b) => { walked(b, 0, 1).projectItems.nodes[0].project.owner = null; }],
+  ['a membership has no id', (b) => { walked(b, 0, 1).projectItems.nodes[0].id = null; }],
+  ['a membership archive flag is not a boolean', (b) => { walked(b, 0, 1).projectItems.nodes[0].isArchived = 'false'; }],
+  ['a membership has project number 0', (b) => { walked(b, 0, 1).projectItems.nodes[0].project.number = 0; }],
+  ['a membership has a negative project number', (b) => { walked(b, 0, 1).projectItems.nodes[0].project.number = -1; }],
+  ['a membership has a blank project owner login', (b) => { walked(b, 0, 1).projectItems.nodes[0].project.owner.login = '   '; }],
+  ['the item read fails', (b) => { b.items = failing; }],
+  ['the item read carries GraphQL errors', (b) => { b.items = { errors: [{ message: 'Something went wrong' }] }; }],
+  ['the item read answers no node list', (b) => { b.items = { data: { nodes: null } }; }],
+  ['the item read answers null for an item', (b) => { b.items = [b.items[1]]; }],
+  ['the overflow walk fails', (b) => { b.memberships[12] = failing; }],
+  ['the overflow walk answers no issue', (b) => { b.memberships[12] = [{ data: { repository: { issue: null } } }]; }],
+  // Truncated walks.
+  ['the issue walk stops while a page remains', (b) => { b.issues = [b.issues[0]]; }],
+  ['the issue walk continues past a page with no next page', (b) => { issuesOf(b, 0).pageInfo = { hasNextPage: false, endCursor: null }; }],
+  ['an issue walk page reports a next page with no cursor', (b) => { issuesOf(b, 0).pageInfo.endCursor = null; }],
+  ['the issue walk fetches fewer issues than its count', (b) => { issuesOf(b, 0).totalCount = 4; issuesOf(b, 1).totalCount = 4; }],
+  ['a walked issue holds fewer memberships than its count under the cap', (b) => { walked(b, 0, 1).projectItems.totalCount = 2; }],
+  ['a walked issue holds more memberships than its count', (b) => { walked(b, 0, 1).projectItems.totalCount = 0; }],
+  ['the overflow walk stops while a page remains', (b) => { b.memberships[12] = [b.memberships[12][0]]; }],
+  ['the overflow walk fetches fewer memberships than its count', (b) => { overflowPage(b, 1).projectItems.nodes = []; }],
+  ['the project walk is short of its count however many cards recovery finds', (b) => { b.board = [leanBoardPage([RECOVERY_LISTED], { totalCount: 3 })]; }],
+  // Repeated cursors.
+  ['the issue walk repeats a cursor', (b) => {
+    b.issues.splice(1, 0, issuesPage([], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }));
+  }],
+  ['the overflow walk repeats a cursor', (b) => {
+    b.memberships[12].splice(1, 0, membershipsPage(12, [], { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }));
+  }],
+  // Counts that change.
+  ['the issue count changes across pages', (b) => { issuesOf(b, 1).totalCount = 4; }],
+  ['the overflow membership count changes across pages', (b) => { overflowPage(b, 1).projectItems.totalCount = 102; }],
+  ['the overflow walk counts differently from the first observation', (b) => {
+    for (const page of [0, 1]) overflowPage(b, page).projectItems.totalCount = 102;
+    overflowPage(b, 1).projectItems.nodes.push(membership('PVTI_elsewhere_extra', { project: 2000 }));
+  }],
+  ['the overflow walk loses the board membership the first observation saw', (b) => {
+    overflowPage(b, 0).projectItems.nodes[0] = membership('PVTI_elsewhere_swapped', { project: 3000 });
+  }],
+  ['the overflow walk answers for another issue', (b) => { for (const page of [0, 1]) overflowPage(b, page).number = 13; }],
+  // Duplicate and conflicting identities.
+  ['an issue is walked twice', (b) => {
+    issuesOf(b, 1).nodes.push(walkedIssue(11, [membership('PVTI_omitted')]));
+    for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
+  }],
+  ['one item id is walked under two issues', (b) => {
+    issuesOf(b, 1).nodes.push(walkedIssue(13, [membership('PVTI_omitted')]));
+    for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
+  }],
+  ['one item id is listed twice under one issue', (b) => {
+    walked(b, 0, 1).projectItems = { totalCount: 2, nodes: [membership('PVTI_omitted'), membership('PVTI_omitted')] };
+  }],
+  ['one issue holds two items on this board', (b) => {
+    walked(b, 0, 1).projectItems = { totalCount: 2, nodes: [membership('PVTI_omitted'), membership('PVTI_omitted_twin')] };
+    b.items.push(hydratedItem(omittedCard('PVTI_omitted_twin', 11, 'OPEN', 'Backlog')));
+  }],
+  ['the listed item is walked under another issue', (b) => {
+    walked(b, 0, 0).projectItems = { totalCount: 0, nodes: [] };
+    walked(b, 0, 1).projectItems = { totalCount: 2, nodes: [membership('PVTI_omitted'), membership('PVTI_listed')] };
+  }],
+  // The overflow walk alone holds every id once, so only the first page can show the repeat.
+  ['one item id is listed twice in an overflowing first page', (b) => {
+    const firstPage = walked(b, 1, 0).projectItems.nodes;
+    firstPage[99] = structuredClone(firstPage[98]);
+  }],
+  ['the item read answers one item twice', (b) => { b.items = { data: { nodes: [b.items[0], b.items[0]] } }; }],
+  ['the item read answers another item id', (b) => { b.items = { data: { nodes: [{ ...b.items[0], id: 'PVTI_someone_else' }, b.items[1]] } }; }],
+  // Wrong repository, project or content.
+  ['a read item belongs to another repository', (b) => { b.items[0].content.repository = { nameWithOwner: 'someone-else/other-repo' }; }],
+  ['a read item is on another project', (b) => { b.items[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
+  ["a read item is on another owner's project", (b) => { b.items[0].project.owner.login = 'someone-else'; }],
+  ['the listed item is walked on another project', (b) => { walked(b, 0, 0).projectItems.nodes[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
+  ["the listed item is walked on another owner's project", (b) => { walked(b, 0, 0).projectItems.nodes[0].project.owner.login = 'someone-else'; }],
+  ['a read item has no project', (b) => { b.items[0].project = null; }],
+  ['a read item resolves to another issue', (b) => { b.items[0].content.number = 99; }],
+  ['a read item has no issue content', (b) => { b.items[0].content = null; }],
+  // Archive observations that disagree.
+  ['a read item is archived though its membership is not', (b) => { b.items[0].isArchived = true; }],
+  ['the overflow walk sees the board membership archived', (b) => { overflowPage(b, 0).projectItems.nodes[0].isArchived = true; }],
+  ['a listed card is archived on its issue', (b) => { walked(b, 0, 0).projectItems.nodes[0].isArchived = true; }],
+];
+
+test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () => {
+  assert.doesNotThrow(() => fetchBoard(boardReadExec(recoveryBase()).exec));
+  for (const [label, breakRead] of REFUSED_RECOVERY) {
+    const base = recoveryBase();
+    breakRead(base);
+    assert.throws(
+      () => fetchBoard(boardReadExec(base).exec),
+      (error) => {
+        // A request the fixture never expected is a broken test, not a refusal by the reader.
+        assert.doesNotMatch(error.message, /unexpected gh invocation/, label);
+        return true;
+      },
+      label,
+    );
+  }
+  // The unbroken read is what each case departs from, so it has to be accepted whole.
+  assert.deepEqual(sortedById(fetchBoard(boardReadExec(recoveryBase()).exec)).map((i) => [i.id, i.content.number]), [
+    ['PVTI_listed', 10],
+    ['PVTI_omitted', 11],
+    ['PVTI_overflow', 12],
+  ]);
 });
 
 test('parseBoardPage maps a fully-fielded issue card to the exact raw shape', () => {
@@ -1447,14 +1741,21 @@ test('intakeDocument: a complete card prints its fields, latest claim, body and 
 // `--approval check <card>...` reads advance approvals through two injected runners and no board:
 // the board ghExec throws, so a case that reads the board fails loud. The runners answer GitHub's
 // own GraphQL field names for acme/widgets, and the expected lines are written by hand from the
-// plan's line forms and decision 16's exit codes. Each run is given its environment, so a run mark
+// fixed approval diagnostics and exit codes. Each run is given its environment, so a run mark
 // in the environment running the suite cannot change a line.
 
 const APPROVAL_REPOSITORY = { id: 'R_kgDOwidgets', nameWithOwner: 'acme/widgets' };
 const APPROVAL_RECORD_URL = 'https://github.com/acme/widgets/issues/7#issuecomment-1';
 const APPROVAL_USAGE = '--approval check <card>...';
 
-function approvalRun(args, env = {}) {
+function approvalRun(args, env = {}, settings = {}) {
+  const {
+    settingOid = 'a'.repeat(40),
+    settingMode = '100644\n',
+    settingText = '{"version":1,"preApprovedRun":true}',
+    settingError,
+    jobText,
+  } = settings;
   const calls = [];
   let stdout = '';
   let stderr = '';
@@ -1483,7 +1784,15 @@ function approvalRun(args, env = {}) {
   };
   const git = (callArgs) => {
     calls.push(`git ${callArgs.join(' ')}`);
-    throw new Error('the approval mode must not read git when the repository is given');
+    const command = JSON.stringify(callArgs);
+    if (command === JSON.stringify(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}'])) {
+      if (settingError) throw settingError;
+      return `${settingOid}\n`;
+    }
+    if (command === JSON.stringify(['ls-tree', '--full-tree', '--format=%(objectmode)', settingOid, '--', '.agents/factory-settings.json'])) return settingMode;
+    if (command === JSON.stringify(['show', `${settingOid}:.agents/factory-settings.json`])) return settingText;
+    if (command === JSON.stringify(['show', 'HEAD:.agents/factory-settings.json'])) return jobText;
+    throw new Error(`unexpected approval-mode git read: ${callArgs.join(' ')}`);
   };
   const boardRead = (callArgs) => {
     throw new Error(`the approval mode must not read the board: ${callArgs.join(' ')}`);
@@ -1496,7 +1805,7 @@ function approvalRun(args, env = {}) {
   return { status, stdout, stderr, calls };
 }
 
-test("ANTI-REGRESSION: board --approval check prints each card's advance approval line and exits 0 only when every card was read, 2 when one was not, and 1 with usage for any other approval argument", () => {
+test("ANTI-REGRESSION: board --approval check prints each card's advance approval line and uses exit 0 for completed judgements, 2 for unavailable reads, and 1 with usage for rejected arguments", () => {
   const read = approvalRun(['--approval', 'check', '7', '8']);
   assert.equal(read.status, 0, read.stderr);
   assert.equal(
@@ -1533,5 +1842,61 @@ test('ANTI-REGRESSION: board --approval check leaves out the post text under eit
     const label = JSON.stringify(mark);
     assert.equal(read.status, 0, `${label}: ${read.stderr}`);
     assert.equal(read.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record\n`, label);
+  }
+});
+
+test('ANTI-REGRESSION: fetched-main pre-approved setting gates ordinary approval checks', () => {
+  const oid = 'a'.repeat(40);
+  const settingCalls = [
+    'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}',
+    `git ls-tree --full-tree --format=%(objectmode) ${oid} -- .agents/factory-settings.json`,
+    `git show ${oid}:.agents/factory-settings.json`,
+  ];
+  const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
+  const unavailable = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
+  const mainOff = { settingText: '{"version":1,"preApprovedRun":false}', jobText: '{"version":1,"preApprovedRun":true}' };
+  const mainOn = { jobText: '{"version":1,"preApprovedRun":false}' };
+  const assertRefusal = (read, stdout, status, calls = settingCalls) => {
+    assert.equal(read.stdout, stdout);
+    assert.equal(read.status, status, read.stderr);
+    assert.equal(read.stderr, '');
+    assert.doesNotMatch(read.stdout, /post:|synthetic-setting-secret|synthetic\.invalid/);
+    assert.deepEqual(read.calls, calls);
+  };
+
+  const off = approvalRun(['--approval', 'check', '7'], {}, mainOff);
+  assertRefusal(off, `not approved 7: ${disabled}\n`, 0);
+
+  const enabled = approvalRun(['--approval', 'check', '7', '8'], {}, mainOn);
+  assert.equal(enabled.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record; post: Approved: card=8 edited=none\n`);
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.equal(enabled.stderr, '');
+  assert.deepEqual(enabled.calls.filter((call) => call.startsWith('git ')), settingCalls);
+  assert.equal(enabled.calls.filter((call) => call.startsWith('gh ')).length, 2);
+  assert.equal(enabled.calls.some((call) => call.includes('HEAD:.agents/factory-settings.json')), false);
+
+  for (const settings of [
+    { settingMode: '' },
+    { settingText: '{"version":1}' },
+    mainOff,
+  ]) {
+    for (const cards of [['7'], ['7', '8']]) {
+      // The first invocation already covers the single-card false setting.
+      if (settings === mainOff && cards.length === 1) continue;
+      const read = approvalRun(['--approval', 'check', ...cards], {}, settings);
+      const stdout = cards.map((card) => `not approved ${card}: ${disabled}\n`).join('');
+      assertRefusal(read, stdout, 0, settings.settingMode === '' ? settingCalls.slice(0, 2) : settingCalls);
+    }
+  }
+
+  const reserved = approvalRun(['--approval', 'check', '7', '8'], { PRODUCT_MANAGER_RUN_SESSION: '1' }, mainOff);
+  assertRefusal(reserved, `not approved 7: ${disabled}\nnot approved 8: ${disabled}\n`, 0);
+
+  for (const settings of [
+    { settingText: '{"version":1,"preApprovedRun":synthetic-setting-secret}' },
+    { settingError: Object.assign(new Error('synthetic-setting-secret https://synthetic.invalid/private'), { code: 'PRE_APPROVED_RUN_DISABLED' }) },
+  ]) {
+    const read = approvalRun(['--approval', 'check', '7', '8'], {}, settings);
+    assertRefusal(read, `unavailable 7: ${unavailable}\nunavailable 8: ${unavailable}\n`, 2, settings.settingError ? settingCalls.slice(0, 1) : settingCalls);
   }
 });

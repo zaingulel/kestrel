@@ -45,8 +45,9 @@ Add uses the shared read's issue id but still sends the idempotent add mutation 
 mutation's returned item id determines the target of the separate Status and configured routing-field writes. If a
 field update fails, add rereads the fields and reports their observed values, or an unknown outcome when that reread
 fails, with a safe whole-command retry. The publication verifier uses the shared item, its archive flag and its card
-fields only when the board read lacks a requested card: a closed archived card is checked from that item like a
-listed one, and the lagging, open-archived and confirmed-absence diagnoses stay distinct.
+fields only when the board read, recovered cards included, lacks a requested card: a closed archived card, or an
+unarchived card still missing, is checked from that item like a listed one, and the open-archived, unresolved-read and
+confirmed-absence diagnoses stay distinct.
 
 ### The toolkit in another repository
 
@@ -179,6 +180,12 @@ titled and its card check.
 - **Automation adds a card with no routing value.** On a board with a routing field, a card that automation adds has no
   routing value; `scripts/board.mjs` reports it until the board-add script fills the field on the existing card, the
   value chosen by the convention in [`docs/ISSUE-TRACKER.md`](ISSUE-TRACKER.md).
+- **GitHub's project listing omits a card.** The listing can leave out a card that is on the board while its own count
+  agrees. The board read therefore also walks the repository's open and closed issues with their project memberships,
+  reads each unarchived card the listing lacked from its own item, and judges it like a listed one. The board and
+  publication commands print an advisory on stderr naming each recovered card and its item: it is already on the board,
+  so do not add it again. Incomplete or inconsistent recovery evidence fails the read instead of reporting the board
+  whole.
 - **Auto-add is off.** A board copied from another starts with Auto-add off; where it is off, every issue joins the
   board through the board-add script. [The head of `scripts/board-add.mjs`](../scripts/board-add.mjs) owns the
   invocation.

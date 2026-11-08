@@ -4,16 +4,17 @@
 // A card file stores only Backlog, Ready or Done. The column a card is shown in is derived from what
 // the repository holds: its status on origin/main (the published status), its job/<N> branches
 // (the claim), the status in the tip of its local branch, and the open pull requests of this
-// repository from that branch. Every read is whole or fails with its cause: a corrupt card, an
+// repository from that branch. Every read is whole or fails with a safe diagnostic: a corrupt card, an
 // unreadable origin, an origin/main copy, a pull-request list or a linked cards folder stops the
 // read, so a hostile or broken input never reads as a quiet board. docs/MARKDOWN-CARDS.md owns the
 // card format and what each card step becomes. A move rewrites only a card's Status line, and never in
 // the integration checkout.
 //
-// Git is reached through an injected runner `run(args, input) -> stdout`, which throws an Error
-// carrying git's complaint, and `gh` through the executor the caller hands in, so the whole file
-// is unit-testable. The default runner pins the working folder to this checkout's root and drops
-// every repository-scoped variable from the environment.
+// Git is reached through an injected runner `run(args, input) -> stdout`, and `gh` through the executor
+// the caller hands in. The default Git runner retains causes only for four exact local command vectors
+// whose whole selected diagnostic passes a conservative content check; other failures withhold child
+// details. It pins the working folder to this checkout's root and drops every repository-scoped variable
+// from the environment.
 
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -196,6 +197,15 @@ export function deriveColumn(published, { local, localTipDone, remote, openPullR
   return published;
 }
 
+const MAIN_REF = 'refs/remotes/origin/main';
+const GIT_FAILURE = 'Git operation failed; check repository access and configuration';
+const LOCAL_GIT_READS = [
+  ['for-each-ref', '--format=%(refname)', 'refs/heads/job/'],
+  ['rev-parse', '--verify', '--quiet', MAIN_REF],
+  ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+  ['rev-parse', 'HEAD'],
+];
+
 // The git runner a read uses unless one is injected.
 export function gitRunner(root = ROOT) {
   const git = gitExecutable();
@@ -211,7 +221,13 @@ export function gitRunner(root = ROOT) {
         maxBuffer: 64 * 1024 * 1024,
       });
     } catch (error) {
-      throw new Error(String(error.stderr ?? '').trim() || error.message);
+      const diagnostic = String(error.stderr ?? '').trim() || error.message;
+      const local = LOCAL_GIT_READS.some((known) => known.length === args.length && known.every((arg, index) => arg === args[index]));
+      // eslint-disable-next-line no-control-regex -- Control characters in Git diagnostics must be withheld.
+      if (local && typeof diagnostic === 'string' && diagnostic.trim() && !/:(?:\S|$)|[@?%\\\u0000-\u001f\u007f]/u.test(diagnostic)) {
+        throw new Error(diagnostic);
+      }
+      throw new Error(GIT_FAILURE);
     }
   };
 }
@@ -238,8 +254,6 @@ function readObjects(run, specs) {
   });
 }
 
-const MAIN_REF = 'refs/remotes/origin/main';
-
 // Each card's published status: its status on origin/main, read for every card in one call. A card
 // absent from origin/main is not published yet and takes its checkout copy's status, unless that
 // says Done: a card is first published as Backlog or Ready, so a checkout-only Done fails the read.
@@ -247,7 +261,10 @@ export function publishedStatuses(run, cards) {
   try {
     run(['rev-parse', '--verify', '--quiet', MAIN_REF]);
   } catch (error) {
-    throw new Error(`${MAIN_REF} is missing; run: git fetch origin main${error.message ? ` (${error.message})` : ''}`);
+    const context = `cannot verify ${MAIN_REF}; if origin/main has not been fetched, run: git fetch origin main`;
+    throw new Error(error.message === GIT_FAILURE
+      ? `${context}; Git diagnostic withheld to protect remote credentials`
+      : `${context}${error.message ? ` (${error.message})` : ''}`);
   }
   const numbers = [...cards.keys()];
   const copies = readObjects(run, numbers.map((number) => `${MAIN_REF}:${CARDS_DIR}/${number}.md`));
@@ -281,7 +298,9 @@ export function jobRefs(run) {
   try {
     remoteOut = run(['ls-remote', '--heads', 'origin']);
   } catch (error) {
-    throw new Error(`cannot read origin's branches (git ls-remote --heads origin): ${error.message}`);
+    throw new Error(error.message === GIT_FAILURE
+      ? "cannot read origin's branches (git ls-remote --heads origin); Git diagnostic withheld to protect remote credentials"
+      : `cannot read origin's branches (git ls-remote --heads origin): ${error.message}`);
   }
   const remote = new Map();
   for (const line of remoteOut.split('\n').filter(Boolean)) {
@@ -433,7 +452,9 @@ function checkClaim(run, number, published) {
   try {
     run(['cat-file', '-e', `${tip}^{commit}`]);
   } catch (error) {
-    throw new Error(`cannot confirm the claim: origin's ${branch} (${tip}) is not in this clone; run: git fetch origin (${error.message})`);
+    throw new Error(error.message === GIT_FAILURE
+      ? `cannot confirm the claim: origin's ${branch} (${tip}) could not be read; if it has not been fetched, run: git fetch origin; Git diagnostic withheld to protect remote credentials`
+      : `cannot confirm the claim: origin's ${branch} (${tip}) is not in this clone; run: git fetch origin (${error.message})`);
   }
   try {
     run(['merge-base', '--is-ancestor', tip, 'HEAD']);

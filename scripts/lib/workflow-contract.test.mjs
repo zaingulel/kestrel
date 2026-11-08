@@ -16,6 +16,7 @@ const SETTINGS = treeSettings(ROOT);
 const PRESENT = SETTINGS.runtimes;
 const without = (runtime) => !PRESENT.includes(runtime) && `the settings file names no ${runtime} runtime`;
 const RESUME = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
+const RUNS = readFileSync(resolve(ROOT, '.agents/skills/resume/references/runs.md'), 'utf8');
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // The independent oracle is the root-only cleanup contract and native hook exit protocol.
@@ -31,6 +32,8 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
   const sentinel = join(fixture, 'sentinel');
   const env = {
     ...gitEnvironment(),
+    PRODUCT_MANAGER_RUN_SESSION: undefined,
+    PRE_APPROVED_RUN_SESSION: undefined,
     GIT_CONFIG_GLOBAL: join(fixture, 'no-global-config'),
     GIT_CONFIG_NOSYSTEM: '1',
   };
@@ -45,6 +48,7 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
     '.claude/hooks/block-unsafe-git.mjs',
     'scripts/lib/unsafe-git.mjs',
     'scripts/lib/advance-approval.mjs',
+    'scripts/lib/runtimes.mjs',
     'scripts/lib/checkout-context.mjs',
     'scripts/lib/posix-shell.mjs',
     'scripts/closeout-cleanup.mjs',
@@ -149,11 +153,10 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
   assert.equal(readFileSync(sentinel, 'utf8'), 'retained', 'hook subprocesses did not execute the editable helper');
 });
 
-// The independent oracle is the plan's run marks: PRE_APPROVED_RUN_SESSION and PRODUCT_MANAGER_RUN_SESSION.
+// The independent oracle is the run marks or literal native connection records and the expected guard outcomes.
 // Each case starts the real hook, installed in a throwaway repository with the modules it loads, and
 // observes only its exit code, its stderr and the calls a stand-in gh recorded.
-// Recurring cost: one disposable Git fixture and one to three hook starts per case, no network.
-// Remove if the pre-approved run session is retired.
+// Recurring cost: disposable Git fixtures and bounded hook starts, no network.
 const GUARDS = {
   claude: { hook: '.claude/hooks/block-unsafe-git.mjs', modules: [], payload: (cwd, command) => ({ cwd, tool_input: { command } }) },
   codex: { hook: '.codex/hooks/block-unsafe-git.mjs', modules: ['scripts/lib/codex-hook-adapters.mjs'], payload: (cwd, command) => ({ cwd, tool_input: { cmd: command } }) },
@@ -163,6 +166,7 @@ const GUARD_MODULES = [
   'scripts/lib/checkout-context.mjs',
   'scripts/lib/posix-shell.mjs',
   'scripts/lib/advance-approval.mjs',
+  'scripts/lib/runtimes.mjs',
 ];
 // An undefined value leaves a variable out of the hook's environment, whatever session runs the suite.
 const MARKS_OFF = { GH_REPO: undefined, GH_HOST: undefined, PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined, CLAUDE_CODE_ENTRYPOINT: undefined };
@@ -177,6 +181,7 @@ function guardFixture(t, runtime, branch) {
   const git = (...args) => {
     const run = spawnSync('git', args, { cwd: root, env, encoding: 'utf8' });
     assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
+    return run.stdout.trim();
   };
   mkdirSync(root);
   git('init', '-q', '-b', branch);
@@ -187,22 +192,22 @@ function guardFixture(t, runtime, branch) {
   }
   // The hooks read only TRACKER, and these tests pin GitHub whatever tracker the install names.
   writeFileSync(join(root, 'scripts/lib/board-config.mjs'), "export const TRACKER = 'github';\n");
-  const hookRaw = (input, marks) => spawnSync(process.execPath, [join(root, guard.hook)], {
-    cwd: root, env: { ...env, ...MARKS_OFF, ...marks }, input, encoding: 'utf8',
+  const hookRaw = (input, marks, cwd = root) => spawnSync(process.execPath, [join(root, guard.hook)], {
+    cwd, env: { ...env, ...MARKS_OFF, ...marks }, input, encoding: 'utf8',
   });
   const hook = (command, marks) => hookRaw(JSON.stringify(guard.payload(root, command)), marks);
   return { dir, git, hook, hookRaw };
 }
 
-// A gh that answers the three reads of a delivery push for card 7 of o/fixture, whose card holds one valid
-// record by the viewer made long before RUN_START, and appends each call's argument list to a log.
-function standInGh(dir) {
+// Answers the delivery reads for o/fixture, with or without a record by the viewer from before RUN_START.
+// Appends each call's argument list to a log.
+function standInGh(dir, { card = 7, approved = true } = {}) {
   const bin = join(dir, 'bin');
   const log = join(dir, 'gh-calls.log');
   const repository = { id: 'R_1', nameWithOwner: 'o/fixture', defaultBranchRef: { name: 'main' } };
   const record = {
     author: { login: 'o' }, createdAt: '2020-01-01T00:00:00Z', lastEditedAt: null,
-    url: 'https://github.com/o/fixture/issues/7#issuecomment-1', body: 'Approved: card=7 edited=none',
+    url: `https://github.com/o/fixture/issues/${card}#issuecomment-1`, body: `Approved: card=${card} edited=none`,
   };
   const graphql = {
     data: {
@@ -211,7 +216,7 @@ function standInGh(dir) {
         id: 'R_1',
         issue: {
           state: 'OPEN', title: 'Card', lastEditedAt: null,
-          timelineItems: { nodes: [] }, comments: { pageInfo: { hasNextPage: false }, nodes: [record] },
+          timelineItems: { nodes: [] }, comments: { pageInfo: { hasNextPage: false }, nodes: approved ? [record] : [] },
         },
       },
     },
@@ -282,6 +287,11 @@ test('ANTI-REGRESSION: the Claude guard knows a run session by its environment m
 function assertAdmitsMarkedDeliveryPush(t, runtime) {
   const { dir, git, hook } = guardFixture(t, runtime, 'job/7');
   git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
+  mkdirSync(join(dir, 'repo/.agents'));
+  writeFileSync(join(dir, 'repo/.agents/factory-settings.json'), '{"version":1,"preApprovedRun":true}');
+  git('add', '.agents/factory-settings.json');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'enabled fetched settings');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   const gh = standInGh(dir);
 
   const run = hook('git push -u origin job/7', { PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START });
@@ -296,6 +306,28 @@ test('ANTI-REGRESSION: the Codex guard refuses publishing with a malformed pre-a
   const malformed = hook('git push -u origin job/7', { PRE_APPROVED_RUN_SESSION: 'not-a-run-start' });
   assert.equal(malformed.status, 2, malformed.stderr);
   assert.ok(malformed.stderr.includes('a pre-approved run session publishes nothing: its mark "not-a-run-start" is not a run start'), malformed.stderr);
+});
+
+test('ANTI-REGRESSION: the Codex guard refuses git push with the run session mark and passes it without', { skip: without('codex') }, (t) => {
+  const { dir, hookRaw } = guardFixture(t, 'codex', 'main');
+  const input = JSON.stringify({ cwd: join(dir, 'repo'), tool_input: { command: 'git push origin job/1' } });
+  const guard = (mark) => hookRaw(input, { PRODUCT_MANAGER_RUN_SESSION: mark });
+
+  const marked = guard('1');
+  assert.equal(marked.status, 2, marked.stderr);
+  assert.ok(marked.stderr.includes('Blocked: a product manager run session'), marked.stderr);
+
+  const unmarked = guard(undefined);
+  assert.equal(unmarked.status, 0, unmarked.stderr);
+  assert.equal(unmarked.stderr, '');
+});
+
+test('ANTI-REGRESSION: the Codex guard refuses a call whose hook payload is unreadable under the pre-approved mark', { skip: without('codex') }, (t) => {
+  const { hookRaw } = guardFixture(t, 'codex', 'main');
+
+  const unreadable = hookRaw('this is not json', { PRE_APPROVED_RUN_SESSION: RUN_START });
+  assert.equal(unreadable.status, 2, unreadable.stderr);
+  assert.ok(unreadable.stderr.includes('a pre-approved run session'), unreadable.stderr);
 });
 
 test('ANTI-REGRESSION: both guards refuse an unparseable payload or one holding no string command under the pre-approved mark, and pass it unmarked (Claude)', { skip: without('claude') }, (t) => {
@@ -335,6 +367,162 @@ test('ANTI-REGRESSION: the real Claude hook admits a marked delivery push for it
 
 test('ANTI-REGRESSION: the real Codex hook admits a marked delivery push for its own card with a valid advance approval', { skip: without('codex') || withoutStandInGh }, (t) => {
   assertAdmitsMarkedDeliveryPush(t, 'codex');
+});
+
+function nativeRunFixture(dir, git, hookRaw, kind) {
+  const worktree = join(dir, 'job-7');
+  git('worktree', 'add', '-q', '-b', 'job/7', worktree);
+  const privateGitDir = git('-C', worktree, 'rev-parse', '--path-format=absolute', '--git-dir');
+  const designationDir = join(dir, 'repo', '.git', 'fabraik-app-run');
+  mkdirSync(designationDir);
+  const digest = createHash('sha256').update(realpathSync.native(worktree), 'utf8').digest('hex');
+  const designationPath = join(designationDir, `${digest}.session`);
+  const bindingPath = join(privateGitDir, 'fabraik-app-run.json');
+  const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const record = { sessionId, kind, runStart: RUN_START, card: 7 };
+  const setPair = ({ designation = `${sessionId}\n`, binding = JSON.stringify(record) } = {}) => {
+    for (const [path, content] of [[designationPath, designation], [bindingPath, binding]]) {
+      if (content === null) rmSync(path, { force: true });
+      else writeFileSync(path, content);
+    }
+  };
+  const payload = (cmd, workdir = worktree) => ({ session_id: sessionId, cwd: worktree, tool_input: { cmd, workdir } });
+  const call = (input, marks) => hookRaw(input, marks, worktree);
+  const run = (input, marks) => call(JSON.stringify(input), marks);
+  return { worktree, designationPath, bindingPath, record, setPair, payload, call, run };
+}
+
+const NATIVE_UNAVAILABLE = /^Blocked: a native app run connection is unavailable/m;
+const NATIVE_METADATA = /^Blocked: a native app run session must leave its binding metadata to the coordinator/m;
+
+function assertNativeRefusal(run, reason) {
+  assert.equal(run.status, 2, run.stderr || 'the hook did not refuse the command');
+  assert.match(run.stderr, reason);
+}
+
+test('ANTI-REGRESSION: a native run keeps publication restrictions when its connection metadata is unavailable', { skip: without('codex') }, async (t) => {
+  const { dir, git, hookRaw } = guardFixture(t, 'codex', 'main');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'initial commit');
+  const { designationPath, bindingPath, record, setPair, payload, call, run } = nativeRunFixture(dir, git, hookRaw, 'product-manager');
+  const push = payload('git push -u origin job/7');
+  const status = payload('git status');
+  const absent = { designation: null, binding: null };
+
+  await t.test('matched product manager pair permits status and refuses a plain push', () => {
+    setPair();
+    const read = run(status);
+    assert.equal(read.status, 0, read.stderr);
+    assertNativeRefusal(run(push), /a product manager run session does not publish/);
+  });
+  await t.test('both records absent preserves ordinary publishing', () => {
+    setPair(absent);
+    const ordinary = run(push);
+    assert.equal(ordinary.status, 0, ordinary.stderr);
+    assert.equal(ordinary.stderr, '');
+  });
+
+  const corrupt = 'NATIVE-CONNECTION-CORRUPT-SENTINEL';
+  for (const [name, pair, input = push, reason = NATIVE_UNAVAILABLE] of [
+    ['designation only', { binding: null }],
+    ['binding only', { designation: null }],
+    ['invalid binding JSON', { binding: corrupt }],
+    ['wrong binding schema', { binding: JSON.stringify({ ...record, unexpected: true }) }],
+    ['invalid binding timestamp', { binding: JSON.stringify({ ...record, runStart: '2026-13-04T12:00:00Z' }) }],
+    ['wrong payload session ID', {}, { ...push, session_id: '123e4567-e89b-42d3-a456-426614174001' }],
+    ['missing payload session ID', {}, { ...push, session_id: undefined }],
+    ['missing command', {}, { ...push, tool_input: { workdir: push.tool_input.workdir } },
+      /^Blocked: a native app run session is refused a call whose hook payload holds no string command/m],
+    ['mismatched payload session cwd', {}, { ...push, cwd: join(dir, 'repo') }],
+  ]) await t.test(name, () => {
+    setPair(pair);
+    const result = run(input);
+    assert.ok(!result.stderr.includes(corrupt), 'the corrupt binding value reached stderr');
+    assertNativeRefusal(result, reason);
+  });
+  await t.test('malformed payload', () => {
+    setPair();
+    assertNativeRefusal(call('this is not json'), NATIVE_UNAVAILABLE);
+  });
+  await t.test('matched pair with an inherited run mark', () => {
+    setPair();
+    assertNativeRefusal(run(push, { PRODUCT_MANAGER_RUN_SESSION: '1' }), NATIVE_UNAVAILABLE);
+  });
+  await t.test('binding only with Git unavailable', () => {
+    setPair({ designation: null });
+    const PATH = join(dir, 'empty-bin');
+    mkdirSync(PATH);
+    const marks = { PATH };
+    const read = run(status, marks);
+    assert.equal(read.status, 0, read.stderr);
+    const results = [push, payload("gh issue comment 7 --body 'Approved: card=7 edited=none'")].map((input) => run(input, marks));
+    for (const result of results) assertNativeRefusal(result, NATIVE_UNAVAILABLE);
+  });
+  await t.test('direct removal of the named connection metadata', () => {
+    setPair();
+    const removal = payload(`rm "${designationPath}" "${bindingPath}"`);
+    const matched = run(removal);
+    setPair({ designation: null });
+    const bindingOnly = run(removal);
+    setPair(absent);
+    const ordinary = run(removal);
+    assert.equal(ordinary.status, 0, ordinary.stderr);
+    assert.equal(ordinary.stderr, '');
+    for (const result of [matched, bindingOnly]) assertNativeRefusal(result, NATIVE_METADATA);
+  });
+});
+
+test('ANTI-REGRESSION: a native pre-approved job publishes only its bound worktree and card with live approval', { skip: without('codex') || withoutStandInGh }, async (t) => {
+  const { dir, git, hookRaw } = guardFixture(t, 'codex', 'main');
+  git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
+  const settings = join(dir, 'repo', '.agents', 'factory-settings.json');
+  mkdirSync(dirname(settings));
+  writeFileSync(settings, '{"version":1,"preApprovedRun":true}');
+  git('add', '.agents/factory-settings.json');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'enabled fetched settings');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  const { worktree, setPair, payload, run } = nativeRunFixture(dir, git, hookRaw, 'pre-approved');
+  const push = 'git push -u origin job/7';
+  const gh = standInGh(dir);
+  const withGh = ({ bin }) => ({ PATH: `${bin}${delimiter}${process.env.PATH}` });
+
+  await t.test('bound job reads the live approval before admitting its push', () => {
+    setPair();
+    const result = run(payload(push), withGh(gh));
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.ok(gh.calls().some(([api, graphql, ...args]) => api === 'api' && graphql === 'graphql' && args.includes('number=7')),
+      'the hook must read the bound card advance approval through gh');
+  });
+  await t.test('bound job without a live approval record', () => {
+    setPair();
+    const noRecordDir = join(dir, 'no-record');
+    mkdirSync(noRecordDir);
+    const noRecord = standInGh(noRecordDir, { approved: false });
+    assertNativeRefusal(run(payload(push), withGh(noRecord)), /found no valid advance approval/);
+  });
+  await t.test('same branch and approval in another linked worktree', (t) => {
+    setPair();
+    const other = join(dir, 'other-worktree');
+    git('worktree', 'add', '-q', '--detach', other, 'job/7');
+    // Share the branch only for the contrast so the old branch check accepts both worktrees.
+    t.after(() => git('-C', other, 'switch', '-q', '--detach', 'HEAD'));
+    git('-C', other, 'symbolic-ref', 'HEAD', 'refs/heads/job/7');
+    const before = gh.calls().length;
+    const result = run(payload(push, other), withGh(gh));
+    assert.equal(gh.calls().length, before, 'worktree refusal precedes GitHub reads');
+    assertNativeRefusal(result, /\bbound worktree\b/);
+  });
+  await t.test('same worktree on another card branch with its own valid approval', (t) => {
+    setPair();
+    t.after(() => git('-C', worktree, 'switch', '-q', 'job/7'));
+    git('-C', worktree, 'switch', '-q', '-c', 'job/8');
+    const otherCardDir = join(dir, 'other-card');
+    mkdirSync(otherCardDir);
+    const otherCard = standInGh(otherCardDir, { card: 8 });
+    const result = run(payload('git push -u origin job/8'), withGh(otherCard));
+    assert.deepEqual(otherCard.calls(), [], 'card refusal precedes GitHub reads');
+    assertNativeRefusal(result, /\bbound card\b/);
+  });
 });
 
 // Pins the independently reviewed workflow, including its job-level branch condition.
@@ -684,13 +872,13 @@ test('ANTI-REGRESSION: the resume skill reads the plan approval setting with a c
 });
 
 test('ANTI-REGRESSION: the resume skill reads the direction page only from the fetched main', () => {
-  assert.deepEqual(RESUME.match(/git show\s+[^\s`]*PRODUCT-DIRECTION\.md[^\s`]*/g), [
+  assert.deepEqual((RESUME + '\n' + RUNS).match(/git show\s+[^\s`]*PRODUCT-DIRECTION\.md[^\s`]*/g), [
     'git show origin/main:docs/PRODUCT-DIRECTION.md',
   ]);
 });
 
 test('ANTI-REGRESSION: the resume skill reads the settings file only from the fetched main', () => {
-  const reads = RESUME.match(/git show\s+[^\s`]*factory-settings\.json[^\s`]*/g) ?? [];
+  const reads = (RESUME + '\n' + RUNS).match(/git show\s+[^\s`]*factory-settings\.json[^\s`]*/g) ?? [];
   assert.ok(reads.length > 0, 'the resume skill reads the settings file with git show');
   for (const read of reads) assert.equal(read, 'git show origin/main:.agents/factory-settings.json');
 });
@@ -699,25 +887,26 @@ test('ANTI-REGRESSION: the resume skill reads the settings file only from the fe
 // step 5. The manifest is left out because each entry changes only with the shared file it fingerprints, which the
 // listing keeps. Recurring cost: one scan of text this file already reads.
 test('both runs list the files of a waiting job with one command that leaves out only the manifest', () => {
-  const listings = inlineSpans(splitMarkdown(RESUME).prose)
+  const listings = inlineSpans(splitMarkdown(RESUME + '\n' + RUNS).prose)
     .map((span) => span.body.replace(/\s+/g, ' '))
     .filter((body) => body.includes('origin/main...job/'));
   assert.deepEqual(listings, [`git diff --name-only --no-renames origin/main...job/<card> -- ':(top,exclude)${MANIFEST_PATH}'`]);
 });
 
-// A leading environment assignment is captured, so a launch that loses its run mark fails here.
+// A leading environment assignment is captured, so a wrapper launch that loses its run mark fails here.
+// Actual Claude deny arguments are protected by the executable launcher wire test.
 // Recurring cost: one match over text this file already reads; update only after reviewing a launch change.
 test('ANTI-REGRESSION: each run starts its Claude card sessions only with its one pinned launch: a product manager run marked and refusing push and merge, a pre-approved run marked with its run start', () => {
-  assert.deepEqual(RESUME.replace(/\\\n\s*/g, ' ').match(/(?:\b[A-Z_]+=\S+ )?\bclaude\b[^`\n]*\s(?:-p|--print)\b[^`\n]*|\bcodex exec\b[^`\n]*/g), [
-    'PRODUCT_MANAGER_RUN_SESSION=1 claude -p --permission-mode auto --disallowedTools "Bash(git push *)" "Bash(gh pr create *)" "Bash(gh pr ready *)" "Bash(gh pr merge *)" --output-format json "Continue the product manager run." > <scratch>/card-session-<n>.json',
-    'PRE_APPROVED_RUN_SESSION=<run-start> claude -p --permission-mode auto --output-format json "Continue the pre-approved run." > <scratch>/card-session-<n>.json',
+  assert.deepEqual((RESUME + '\n' + RUNS).replace(/\\\n\s*/g, ' ').match(/(?:\b[A-Z_]+=\S+ )?\b(?:claude\b[^`\n]*\s(?:-p|--print)\b|node scripts\/product-manager-run\.mjs --claude-card\b)[^`\n]*|\bcodex exec\b[^`\n]*/g), [
+    'PRODUCT_MANAGER_RUN_SESSION=1 node scripts/product-manager-run.mjs --claude-card <absolute-logs-base>',
+    'PRE_APPROVED_RUN_SESSION=<run-start> node scripts/product-manager-run.mjs --claude-card <absolute-logs-base>',
+    'PRE_APPROVED_RUN_SESSION=<run-start> node scripts/product-manager-run.mjs --claude-card <phase-log-base> --prepared-context <context-file>',
   ]);
 });
 
-// Recurring cost: one read of the resume skill.
+// Recurring cost: one read of the run reference.
 test('ANTI-REGRESSION: a suggested card carries its hold in the one call that creates it', () => {
-  const skill = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
-  const step = skill.slice(skill.indexOf('10. **Suggested cards.**'), skill.indexOf('11. **Splitting a card.**'));
+  const step = RUNS.slice(RUNS.indexOf('10. **Suggested cards.**'), RUNS.indexOf('11. **Splitting a card.**'));
   const creates = step.match(/gh issue create[^`]*/g) ?? [];
   assert.equal(creates.length, 1, 'step 10 must give exactly one create command');
   assert.ok(creates[0].startsWith("gh issue create --title 'Proposed: "), `the create command must set the hold: ${creates[0]}`);
@@ -893,7 +1082,7 @@ test('ANTI-REGRESSION: every installed git guard hook refuses the hook check the
   }
   const input = JSON.stringify({ cwd: ROOT, tool_input: { command: HOOK_CHECK } });
   for (const hook of PRESENT.map((runtime) => `.${runtime}/hooks/block-unsafe-git.mjs`)) {
-    const run = spawnSync(process.execPath, [resolve(ROOT, hook)], { input, encoding: 'utf8', env: gitEnvironment() });
+    const run = spawnSync(process.execPath, [resolve(ROOT, hook)], { input, encoding: 'utf8', env: { ...gitEnvironment(), PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined } });
     assert.equal(run.status, 2, `${hook} must refuse the hook check before git runs: ${run.stderr}`);
     assert.ok(run.stderr.includes(REFUSAL), `${hook} must refuse in the words the skill reads: ${run.stderr}`);
   }
@@ -1316,4 +1505,46 @@ test('ANTI-REGRESSION: the path scan reads no file of the Greptile add-on in a t
     scannedEntries(settings, [{ path: '.greptile/config.json' }, { path: 'docs/README.md' }]).map(({ path }) => path),
     ['docs/README.md'],
   );
+});
+
+
+// Native observer of the actual guard adapter, with a positive approval control before the setting is revoked.
+// Recurring cost: one tiny repository per present runtime and four hook starts, stand-in gh only.
+test('ANTI-REGRESSION: both native guards enforce fetched-main pre-approved settings', { skip: withoutStandInGh }, async (t) => {
+  for (const runtime of PRESENT) await t.test(runtime, (t) => {
+    const { dir, git, hook } = guardFixture(t, runtime, 'job/7');
+    const settings = join(dir, 'repo/.agents/factory-settings.json');
+    mkdirSync(dirname(settings));
+    writeFileSync(settings, '{"version":1,"preApprovedRun":true}');
+    git('add', '.agents/factory-settings.json');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'enabled settings');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
+    const gh = standInGh(dir);
+    const marks = { PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START };
+    // Working settings oppose the pinned fetched-main object in both directions.
+    writeFileSync(settings, '{"version":1,"preApprovedRun":false}');
+    const allowed = hook('git push -u origin job/7', marks);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(allowed.stderr, '');
+    assert.ok(gh.calls().some(([api, graphql]) => api === 'api' && graphql === 'graphql'));
+    git('add', '.agents/factory-settings.json');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'revoked fetched settings');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    writeFileSync(settings, '{"version":1,"preApprovedRun":true}');
+    const before = gh.calls().filter(([api, graphql]) => api === 'api' && graphql === 'graphql').length;
+    const refused = hook('git push -u origin job/7', marks);
+    t.diagnostic(`revoked fetched setting: exit=${refused.status}; stderr=${JSON.stringify(refused.stderr)}`);
+    assert.equal(refused.status, 2, refused.stderr);
+    assert.equal(refused.stdout, '');
+    assert.ok(refused.stderr.includes('a pre-approved run session publishes nothing: pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main'), refused.stderr);
+    assert.equal(gh.calls().filter(([api, graphql]) => api === 'api' && graphql === 'graphql').length, before,
+      'setting refusal precedes any new approval read');
+    const unmarked = hook('git push -u origin job/7', { PATH: marks.PATH });
+    assert.equal(unmarked.status, 0, unmarked.stderr);
+    assert.equal(unmarked.stderr, '');
+    const pm = hook('git push -u origin job/7', { PATH: marks.PATH, PRODUCT_MANAGER_RUN_SESSION: '1' });
+    assert.equal(pm.status, 2, pm.stderr);
+    assert.ok(pm.stderr.includes('a product manager run session does not publish'));
+  });
 });

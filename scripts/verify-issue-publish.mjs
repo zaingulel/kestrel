@@ -34,7 +34,10 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
           ? verifyJiraPublication(args, jiraExecutor)
           : tracker === 'azure'
             ? verifyAzurePublication(args, azureExecutor)
-            : verifyIssuePublication(args, { fetchBoard: boardReader, ghExec: executor });
+            : verifyIssuePublication(args, {
+              fetchBoard: (exec) => boardReader(exec, { onOmission: (advisory) => output.error(`issue-publish: ${advisory}`) }),
+              ghExec: executor,
+            });
     for (const line of lines) output.log(line);
     return 0;
   } catch (err) {

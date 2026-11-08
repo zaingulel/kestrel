@@ -28,8 +28,10 @@ The session that talks to the owner coordinates: it plans the cards that need no
 builder seat, settles reviews, and delivers; it never builds. Residual judgment that would make a handoff
 unreliable is resolved in the plan or the slice is split smaller. In every session, job or not, discovery wider
 than a couple of files goes to the `explorer` seat, so its conclusion reaches the main thread and its file dumps do
-not. The costliest Claude model, Fable, is reached only through the `oracle` seat, and the
-costliest Codex model, Astra, only through the
+not. On Claude Code, `architect`, `oracle` and `security-reviewer` may send bounded missing discovery only to
+`explorer`, await its completed findings and then exercise their own judgment. On Codex, the coordinating session
+completes that discovery before dispatching those seats. The costliest Claude model, Fable, is reached only through
+the `oracle` seat, and the costliest Codex model, Astra, only through the
 `architect`, `oracle` and `security-reviewer` seats; the session and the builders run below that tier, each
 builder at the model its seat file sets. Every subagent is one of the named seats above, dispatched by its seat
 name; a generic, default or unnamed role is never dispatched.
@@ -74,6 +76,7 @@ Every rule this file does not hold in full has one home:
 |---|---|
 | What is true of this repository alone: its product, where its own facts live, its grounding authorities and its Conventions table | `.agents/REPOSITORY.md` |
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
+| Native phone notification capability questions, inside or outside a run | [`resume` run reference](.agents/skills/resume/references/runs.md#native-notification-capability) |
 | Advance approval and the pre-approved run | [`resume`](.agents/skills/resume/SKILL.md), "2. Work-pick" |
 | Builder seat choice; the machinery admissions, the friction route and how machinery leaves; what a plan for an interface change carries, and who decides where the `frontend-design` skill and the design system disagree; plan approval's steps | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
@@ -93,7 +96,7 @@ Every rule this file does not hold in full has one home:
 1. **Work-pick** is the owner's pick of one row of the `resume` candidate table, which approves that card's
    outcome and acceptance criteria as written and starts the job, unless the `resume` skill's checks under
    "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked; a card
-   approved in advance needs no pick.
+   approved in advance needs no pick only where fetched `main` settings explicitly hold `"preApprovedRun": true`.
    With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume` says
    under "2. Work-pick": one instruction hands over each pick until the run stops, and the start message of a session
    that run starts carries that hand-off, the one earlier-session message that does, and no other approval. No product
@@ -103,16 +106,18 @@ Every rule this file does not hold in full has one home:
 2. **Push authorisation** is one yes to the decision card and its screenshot, and any owner instruction to push is
    that yes. It approves the card and covers the whole deliver sequence in the `resume` skill, push to auto-squash
    merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. An advance
-   approval is this yes unless a stop holds. `closeout` follows the merge unasked.
+   approval is this yes only where fetched `main` settings explicitly hold `"preApprovedRun": true` at push and no
+   stop holds. `closeout` follows the merge unasked.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
    is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
    to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
    presented again before that yes. Any plan review the card requires stays the agents' own review and no part of this
    gate, and both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
 4. **Advance approval** is the owner's yes to a card through merge, given ahead of the work as an `Approved:` card
-   comment posted only on the owner's own message. With `"preApprovedRun": true` on `main` a pre-approved run merges
-   recorded cards, its publishing held by the git guard; `resume` owns the steps under "2. Work-pick" and the stops
-   under "7. Push authorisation".
+   comment posted only on the owner's own message. It replaces the pick or push yes only where fetched `main`
+   settings explicitly hold `"preApprovedRun": true`; an absent file or key, or `false`, leaves both approvals with
+   the owner. With that setting a pre-approved run merges recorded cards, its publishing held by the git guard;
+   `resume` owns the steps under "2. Work-pick" and the stops under "7. Push authorisation".
 
 **Routine board updates.** For an owner-approved job, the coordinating session has the owner's standing
 authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
@@ -212,10 +217,16 @@ Whoever can use the administrator bypass of the required check on `main` can put
 hook is skipped: the holders of that role and every write deploy key, which GitHub admits by the same bypass, so the
 repository keeps the role to the owner and carries no write deploy key.
 
-A Claude Code session started in the root checkout keeps that checkout's git guard after it enters a job worktree, while
-it reads the permission allow list from the worktree, so a change that widens the allow list is its own card, started
-only once the guard change that bounds it is on `main` in the root checkout of the canonical repository and, through a
-release update, of every adopter. An intentional adopter exception needs owner agreement and lives outside the shared files.
+A Claude Code session started in the root checkout keeps that checkout's git guard after it enters a job worktree,
+while it reads the permission allow list from the worktree. A card or release may carry both a guard and the
+capability it bounds. Activate that combined update independently in each affected repository: stop its old Claude
+Code sessions before applying it; merge and check the reviewed change in the canonical repository, or apply and
+check the reviewed named release in an adopter; advance the operating root to the reviewed state; then start fresh
+sessions, review and trust the current hooks, and verify matching guard and
+permission configuration before expanded use. Updating a job alone leaves its operating root unchanged. An
+incomplete update, stale root or unavailable activation keeps expanded use unavailable: report the cause and use
+the update's existing recovery, preserving intentional edits and restoring the trusted baseline before retrying an
+incomplete update. An intentional adopter exception needs owner agreement and lives outside the shared files.
 
 <!-- factory-shared:end -->
 

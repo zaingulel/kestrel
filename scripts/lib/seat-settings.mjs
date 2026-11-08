@@ -55,9 +55,10 @@
 // 14. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
 //     Anything else is refused. No update or check acts on the value; the session reads it on the fetched `main`, as
 //     the `resume` skill says under "2. Work-pick".
-// 15. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off.
-//     Anything else is refused. No script acts on the value; the session reads it on the fetched `main`, as the
-//     `resume` skill says under "2. Work-pick".
+// 15. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off
+//     and a record replaces neither the ordinary pick nor push yes. Anything else is refused. The launcher, board
+//     approval check and publication guard enforce explicit fetched-main true, as the `resume` skill says under
+//     "2. Work-pick"; updates leave the value untouched.
 //
 // The JSON half of rule 1, the list half of rule 9 and rules 10 to 15 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is

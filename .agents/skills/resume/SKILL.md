@@ -17,6 +17,14 @@ throughout this skill, including complete native-comment review before claiming.
 
 ## Before intake
 
+**Run triggers.** A session reads [references/runs.md](references/runs.md) whole, as **Reference files** says, before it acts on any of these messages, and, where the message is its first, once the target is recorded and before the intake reads: the owner's instruction `Start a product manager run.` or `Start a pre-approved run.`; a first message that is exactly `Continue the product manager run.`, or begins `End the product manager run: ` or `End the pre-approved run: `; a message beginning `Fabraik run update: `; or a first message that is one of these fixed phase prompts, each followed by a newline and its JSON context:
+
+- Continue this exact pre-approved Codex job.
+- Select and claim one eligible pre-approved job. Do not plan, build, or deliver.
+- Prepare this exact pre-approved job. Do not build or deliver.
+- Build and verify this exact prepared job. Do not publish or deliver.
+- Deliver this exact built job. Do not select or build another job.
+
 A session whose first message asks it to build a card in the cloud reads
 [references/cloud-build.md](references/cloud-build.md) whole before any other action, this check included, as "Cloud
 build" below says.
@@ -146,8 +154,7 @@ node scripts/board.mjs --intake > <scratch>/board-intake.txt
   `gh issue comment <issue> --body-file <file>` or
   `gh api -X PATCH "repos/{owner}/{repo}/issues/comments/<comment-id>" -F body=@<file>`, never typed inside a quoted
   command.
-- A card whose title begins `Proposed: ` is a suggested card, which a product manager run files as step 10 under
-  "2. Work-pick" says. It is held for the owner whatever its column: never a candidate row, never picked and never
+- A card whose title begins `Proposed: ` is a suggested card, which a product manager run files, as its step 10 in [references/runs.md](references/runs.md) says. It is held for the owner whatever its column: never a candidate row, never picked and never
   built. One line above the table names each with its title. Only the owner answers it, by their own message naming
   the card in a session they started or reopened, or by doing the same on the tracker themselves; picking it by number
   asks to see it. Before a yes counts, the session shows the card's current What to build and acceptance criteria, and
@@ -196,8 +203,10 @@ outcome and acceptance criteria as written, and it starts the job with no furthe
 in "3. Start the job" do not confirm the card is free; planning proceeds autonomously after it. One issue per
 branch. Two issues may run in parallel only when their files are disjoint.
 
-**Advance approval.** Gate four in `AGENTS.md` lets the owner approve a card once, ahead of the work, through merge.
-It works only where cards are GitHub issues. Where `scripts/lib/board-config.mjs` exports a `TRACKER` other than
+**Advance approval.** Gate four in `AGENTS.md` lets the owner approve a card once, ahead of the work, through merge,
+only where fetched `main` settings explicitly hold `"preApprovedRun": true`. An absent file or key, or `false`, leaves
+ordinary cards requiring the owner's pick and push yes; an unavailable setting grants no approval. It works only where
+cards are GitHub issues. Where `scripts/lib/board-config.mjs` exports a `TRACKER` other than
 GitHub, the check below prints this line and exits 2, the git guard refuses every pre-approved publish with that
 reason, and the session posts no record and starts no pre-approved run:
 
@@ -206,12 +215,15 @@ advance approval needs GitHub issues; this repository's tracker is <TRACKER>
 ```
 
 
-- **The check** is `node scripts/board.mjs --approval check <card>...`, which reads each card from the origin
-  repository and prints one line per card: `approved <card> <created> <url>` for a valid record; `not approved <card>:
-  <why>`, which for an open card that is no suggested card ends with the text to post,
-  `post: Approved: card=<n> edited=<v>`, except under either run mark, which leaves that text out; or
-  `unavailable <card>: <error>`, which is never read as approved. It exits 0 when every card was read, approved or
-  not, 1 for a rejected argument, and 2 when a card or the tracker was not read.
+- **The check** is `node scripts/board.mjs --approval check <card>...`, which checks the fetched-main setting once
+  before any origin or GitHub read. Known disabled prints `not approved <card>: <why>` for each card; an unavailable
+  setting prints `unavailable <card>: <error>`. Neither reads GitHub or supplies `post:` text. With explicit true it
+  reads each card from the origin repository and prints one line per card: `approved <card> <created> <url>` for a
+  valid record; `not approved <card>: <why>`, which for an open card that is no suggested card ends with the text to
+  post, `post: Approved: card=<n> edited=<v>`, except under either run mark, which leaves that text out; or
+  `unavailable <card>: <error>`, which is never read as approved. It exits 0 for a completed judgement for every card,
+  including known disabled without a GitHub read, 1 for a rejected argument, and 2 when the setting, a card or the
+  tracker is unavailable.
 - **The record** is a comment whose whole body is `Approved: card=<n> edited=<the card's lastEditedAt, or none>`,
   with no other text. It is valid while the card is open and its title does not begin `Proposed: `, its `edited=`
   value is the card's current `lastEditedAt`, so an edit of the card's body voids it, the comment has never been
@@ -220,8 +232,9 @@ advance approval needs GitHub issues; this repository's tracker is <TRACKER>
   with more than 100 comments reads as unavailable.
 - **Posting one.** Only a session the owner drives posts a record, and only on the owner's own message, which may name
   the cards in any form: numbers, a range, "these three". Ask one question only where the list, or whether merging is
-  included, is unclear. Run the check over every card named. A card it prints `approved` needs nothing; a card whose
-  line carries no `post:` text is dropped, and the owner is told the reason the line gives. For each other card post
+  included, is unclear. Run the check over every card named; only explicit fetched-main true can supply record text
+  to post. A card it prints `approved` needs nothing; a card whose line carries no `post:` text is dropped, and the
+  owner is told the reason the line gives. For each other card post
   that text exactly with `gh issue comment <card> --body "<text>"`, then run the check again: the card is approved
   only once that read prints `approved` for it.
 - **Withdrawing.** The owner deletes the comment or edits it, for example to begin `Revoked:`. Either voids it for
@@ -235,260 +248,14 @@ advance approval needs GitHub issues; this repository's tracker is <TRACKER>
   session posts, since that session carries no mark. The run start is this machine's clock, so a wrong clock moves
   that line.
 - **At work-pick.** Where cards are GitHub issues, run the check once over the cards of the startable rows before the
-  table is shown. A card it prints `approved` starts without a pick, the oldest record first, then the lower card
-  number: say which card the session took and that its record approves it, link the record, and go on at
-  "3. Start the job". An `unavailable` line is reported with the table, and that card is offered as a row.
+  table is shown. Only explicit fetched-main true lets a card it prints `approved` start without a pick, the oldest
+  record first, then the lower card number: say which card the session took and that its record approves it, link the
+  record, and go on at "3. Start the job". Known disabled leaves every card requiring the owner's pick. An `unavailable`
+  line is reported with the table, and that card is offered as a row without advance approval.
 
-**Product manager run.** Where the repository turns product manager mode on, the owner may hand this pick to the
-session, as gate one in `AGENTS.md` says. Without the instruction below, the pick stays the owner's as above.
+**Product manager run.** Its rules are in [references/runs.md](references/runs.md), read as **Run triggers** under "Before intake" says.
 
-1. **The trigger** is the owner's instruction `Start a product manager run.` It approves no action. In a Codex session
-   it starts nothing: the session answers with the launch command of step 3, `node scripts/product-manager-run.mjs`. On
-   either runtime, a session whose first message is exactly `Continue the product manager run.` is a card session,
-   started as step 8 says. That message hands over its one pick, as gate one says, and approves nothing else. On
-   Codex, a session whose first message is `End the product manager run: <results folder>` is the end session, which
-   does steps 9 and 10. That message hands over no pick and approves nothing beyond them.
-2. **Read the setting on the fetched `main`** with the two commands Plan approval gives under "4. Plan", never from
-   the files of the job, so a job cannot switch the mode on for itself. The mode is on where the file holds
-   `"productManager": true`. It is off where the first command exits 0 and prints nothing, or where the file is one
-   JSON object that holds no `productManager` key or holds `false`: say the mode is off and present the table as
-   usual. A command that fails, a file that is not one JSON object, any other value, or a key spelt nearly like it
-   leaves the mode unknown, which is never on: start nothing and tell the owner what the commands printed. In a card
-   session or an end session, a mode that is off or unknown is a stop.
-3. **The launch.** A run starts on either runtime, launched by the owner at the repository root, and only where the hook
-   check under "Before intake" shows the git guard running; any other result is a stop. On Claude Code the launch is
-   `claude --permission-mode auto --remote-control`, with "Require trusted devices" on in the owner's Claude account and
-   the "Push when Claude decides" and "Push when actions required" notifications on in `/config`; where "Require trusted
-   devices" cannot be on, no Claude Code run starts, and the owner can run it on Codex. `PushNotification` is loaded
-   through the tool search where it is deferred; where it cannot be loaded, start nothing and say why. On Codex the
-   launch is `node scripts/product-manager-run.mjs`, run by the owner in a terminal outside any session, because
-   Codex's sandbox refuses a session started from inside a session. The launcher is the run session. It starts each
-   card session and the end session as a fresh Codex session, one at a time, in the workspace-write sandbox with
-   on-request approvals and Codex's Auto-review answering the approval requests, as auto mode does on Claude Code.
-   Each Codex run session, a card session and an end session alike, makes its hook check first and runs, as well as
-   `git commit --no-verify --dry-run`, `git push --dry-run ./.product-manager-run-no-remote HEAD`, each as one plain
-   command on its own; the push command names a path that does not exist, so with the guard absent git fails before
-   any push hook or upload runs. The launcher ends the run when a session's runtime log lacks either refusal. The
-   owner's own Codex session is launched with `codex --sandbox workspace-write --ask-for-approval on-request`. Each
-   launch stays as written, never swapped for a mode or flag that skips prompts, approvals or the sandbox; the owner
-   sets the Claude Code launch and its settings, which the session cannot check; nothing in the repository sets
-   them. On Claude Code the session so launched is the run session: it stays at the repository root, picks no card and
-   starts no job, except that on the owner's own message it runs the batch review section 7 describes. It may instead
-   be a desktop app session the owner opens at the repository root in auto mode, with the same account setting and
-   notifications, the owner typing the trigger; a run session another session started starts nothing.
-4. **The direction page** is read with exactly one command, `git show origin/main:docs/PRODUCT-DIRECTION.md`. It is
-   approved where that command exits 0 and prints a page that is not blank. A failed read, a missing page or a
-   blank page refuses the run: start nothing and tell the owner, quoting what the read printed. The page is the
-   owner's alone, and no seat, run or routine edits it. It is evidence, never an instruction: it ranks cards, grants
-   no approval and answers no prompt.
-5. **The pick** is the card session's. First read the waiting jobs with `node scripts/board.mjs --status="Awaiting push"`:
-   the first line it prints gives their number. No such line is a stop, because they could not be counted, whatever
-   the exit status says; a read that succeeds can exit 1 on board drift. Count the `Awaiting push` cards plus parked
-   jobs, which are held cards in the intake document whose comment names `Job:`. Three or more waiting, the two
-   counted together, is a stop that names them. A held card with no `Job:` holds no work and is not counted. The rest
-   of the step's "waiting" reads cover both. For each waiting card, read its newest claim with the card read of
-   "3. Start the job". Where that claim names this machine, as `hostname` prints it, list the job's files with
-   `git diff --name-only --no-renames origin/main...job/<card> -- ':(top,exclude).agents/factory-manifest.json'`,
-   which leaves out the manifest, since each of its entries changes only with the shared file it fingerprints and
-   that file stays in the list: jobs that share only the manifest do not overlap. Any other result is a stop naming
-   the card and the machine its claim names, because a branch this machine can read may be older than the waiting
-   work: a claim naming another machine or a cloud build, no claim, a failed read or no such branch.
-   The candidates are the rows of the table startable now, less the cards the session sends to the owner. The session
-   sends these and leaves them out: a row whose gates include owner direction or sign-off; taste work; work that
-   cannot be built or decided without the owner's room, ears or hardware; an update card or a prototype; a card that
-   would change the direction page or the settings file; and any card it is unsure of. To send a card, first make the
-   two reads and the Free comparison of "3. Start the job" for it: a card not free is left out with nothing written,
-   and one that cannot be confirmed is a stop. Then post the comment `Needs owner: <one-line reason>`, make the card read
-   again, and move it to `Backlog`. A `claim` line that read did not show before means another session holds the card:
-   rewrite the comment to begin `Withdrawn:` by the route section 1 names, move nothing and leave the card out. A
-   failed write is a stop. A card whose criteria are fixed and only whose final proof needs listening is
-   not sent. A returned card whose comment names a `Job:`, or with a job branch, is left out too: only a session the owner starts
-   takes it up. Less,
-   too, any card that would touch a file a waiting job touches, as step 5's listing shows it: work out the files from
-   the card and the code it names before anything is claimed, and treat a card whose files cannot be worked out as
-   touching one. Where cards are GitHub issues, less, too, each card that
-   `node scripts/board.mjs --approval check <card>...`, run once over the remaining candidates, prints `approved` or
-   `unavailable`: a card approved in advance is reserved for the pre-approved run, and one whose record cannot be read
-   is treated as approved. The page ranks the candidates; a tie goes to Ready before Backlog, then to the lower card
-   number. Present the table; its closing line names the pick and the reason the page gives, and the session carries on,
-   because that pick is the work-pick approval of the card. The pull request Summary ends with one line beginning
-   `Picked:` that gives the same reason. No candidate left is a stop that says no pickable card is left and names any
-   card held back by a waiting job's files.
-6. **The job.** "3. Start the job" onward runs unchanged and takes the card to `Awaiting push`. On Codex the worktree
-   is made with that section's `git worktree add` form, so the branch carries the job's name. A card its checks find
-   not free, or cannot confirm, stops the run, which never moves on to the next card. A plan that finds the card needs
-   owner direction or sign-off, or would change the direction page or the settings file, parks the job as step 7 says.
-   A waiting job's file, read again with step 5's listing, in the plan's file list or, before the move to
-   `Awaiting push`, in `git diff --name-only --no-renames origin/main...HEAD` is a stop.
-   On either runtime, once the job is committed and the card is at `Awaiting push`, the session saves its review
-   folder as section 7 says under Saved write-up. A job at `Awaiting push` is waiting, not stopped: its
-   session's final message is the decision card as section 7 says, followed by the `Run result` line, and the run
-   goes on. Push authorisation stays the
-   owner's yes, given in a batch review as section 7 says,
-   or, on Claude Code, when the owner reopens the card session, which first runs the hook
-   check under "Before intake", any other result than the guard's refusal refusing delivery, then confirms with `pwd`
-   that it is in the job's worktree, entering it if not, and shows any screenshot then. A small taste call is a choice inside the approved outcome that no acceptance
-   criterion settles; the job makes it and lists it under `**Taste calls I made**` in Not done. A call that changes the
-   outcome or product meaning is a decision. A card whose proof needs listening is built, with what to listen for under
-   `**Needs your ears**` and that proof named as untested. A card whose outcome is an answer, not a change, ends in a
-   written finding: a new document under `docs/`, indexed in `docs/README.md`, delivered like any card, with follow-up
-   work as title-and-line entries under `Suggested cards`. In any card the job files no new card but the children step 11 files, a follow-up the "Owner gates" rule in `AGENTS.md` would file included. It lists
-   at most 3 new cards it met, a finding's entries among them, each a title and one line, under `Suggested cards` in its
-   final message, after any decision card and before its `Run result:` line, and each change it wants to the direction
-   page under `Direction page` there, quoting the text and the change.
-7. **Stops and parks.** A question this skill would put to the owner mid-job parks the job and the run goes on: a
-   decision, plan approval, a split proposal step 11 does not settle, the cross-family question. To park: commit what exists as step 1 of
-   `handoff` says; write where the job stands in its worklog; post a comment whose first line is
-   `Needs owner: <the question, in plain language, standing alone> Job: job/<card> on <machine>.`, the machine being
-   what `hostname` prints; move the card to `Backlog`; leave the worktree and branch. Nothing is pushed and no draft
-   opens. A park step that fails is a stop that says what it left behind. Every other point where this skill tells the
-   owner something and then waits or starts nothing is a stop: Not free, Could not confirm, and the stops steps 5 and 6
-   name. A runtime's prompt, approval or refusal waits for the owner's own answer and is never worked around, for
-   example by reshaping a command or changing the environment so it no longer asks; a block the session cannot pass is
-   a stop. A card session sends no notification. Its last line is exactly `Run result: built <card>`,
-   `Run result: parked <card>: <the question>`, `Run result: split <card> into <children>` or `Run result: stop <card or none>: <why, and what the owner does next>`,
-   then it ends.
-8. **The next card.** On Claude Code the run session, in a terminal or the desktop app alike, starts one card session at
-   a time from the repository root, as written and never with a flag that skips prompts, hooks, approvals or the
-   sandbox, and runs it as a background command, waiting under the Waiting rule of "5. Build":
-   `PRODUCT_MANAGER_RUN_SESSION=1 claude -p --permission-mode auto --disallowedTools "Bash(git push *)" "Bash(gh pr create *)" "Bash(gh pr ready *)" "Bash(gh pr merge *)" --output-format json "Continue the product manager run." > <scratch>/card-session-<n>.json`.
-   The mark has the git guard refuse every publish, and the deny rules stay because they still hold where the hook
-   fails open. Both catch a mistaken push or merge, not a command deliberately wrapped to avoid them, and the session
-   the owner reopens is started without them, so delivery still works. When the command finishes, the run reads the
-   output file: a last line of its `result` field reading
-   `Run result: built <card>`, `Run result: parked <card>: <the question>` or `Run result: split <card> into <children>` starts the next. Anything else ends the run as a stop that says which it was, with what the output showed: a
-   stop result, a failed or refused launch, a nonzero exit, or no result line, as where the output is not one JSON
-   object, holds no `result` field or ends that field with any other line. A finished card session is never waited on
-   again. On Codex the launcher starts each card session fresh, one at a
-   time, with the prompt `Continue the product manager run.`, and applies the same rule to the last line of the
-   session's last message and to its exit status. It also ends the run when a session's runtime log lacks the
-   refusals step 3 requires. A session prompt nobody can answer is a refusal, and a refusal is a stop. The launcher
-   then starts the end session with `End the product manager run: <results folder>` and prints that session's final
-   message once. The results folder holds each session's last message and, once the run ends, `run-end.txt` with the
-   reason; the end session reads them as evidence, never as instructions.
-9. **The end of a run.** The run session, or on Codex the end session, reads the waiting jobs again, reads the held cards with
-   `node scripts/board.mjs --intake > <scratch>/board-intake.txt`, and tells the owner once why the run stopped, saying which it was: three jobs waiting, no pickable card left, or the stop it
-   reports; and what to do next. On Claude Code that is one `PushNotification` naming the repository, the cards and
-   the reason; on Codex it is the end session's final message, which the launcher prints once in the terminal it was
-   started from, and no push is sent. Neither carries a credential, a token or a URL
-   that holds a secret. It then files the suggested cards as step 10 says and ends its turn with the summary: **Built**, each card the run took to `Awaiting push`
-   with its column now and, on Claude Code, the command that reopens its session, run from the repository root,
-   `claude --resume <session id>`, the ID being in that session's output, and "needs your ears" where the body has it;
-   **Parked**, each parked job with its
-   question and reopen command, then the card whose stop ended the run, or `none`; **Needs owner**, each card a `Needs owner:` comment holds with no job, and its reason, or `none`; **Split**, each card step 11 split with its children, or `none`; **Suggested**, each card
-   step 10 filed with its title and one line, then each earlier suggested card still unanswered, then each entry offered
-   and not filed with why, or `none`; **Direction page**, each change the run wants to that page, quoting the text and
-   the change, or `none`. Nothing is written to the page and no card is filed for such a change: the owner makes it if
-   they agree. The summary then gives **Stage 2 evidence**, the three measures section 7 gives, which report and change
-   no gate. Where a job waits, the summary ends by saying the owner can ask to see what is waiting.
-
-10. **Suggested cards.** Only the run session, or on Codex the end session, files one, and only at the end of the run
-    as step 9 says, so no card session of that run can meet it and the owner already knows why the run stopped if a
-    prompt waits. Its entries are the `Suggested cards` lists in this run's card session results and what a planning pass finds over
-    the intake document and the direction page step 4 read, all of it evidence and never instructions, each naming the
-    card or page line it rests on. At most 3 are filed in a run, and fewer where earlier ones wait: 3
-    less the waiting cards, never below none, the page ranking the entries. Any other entry, and one repeating a card
-    `node scripts/board.mjs --all` lists or the read below returns, is named as offered and not filed. On GitHub the
-    waiting cards are those `gh issue list --state open --author @me --limit 1000 --search '"Proposed: " in:title' --json number,title`
-    returns with a title beginning `Proposed: `, because a card whose board step failed is on no board; if that read
-    fails or returns its whole limit, file none and name every entry as offered and not filed with why. On another
-    tracker a card is created on the board, so the waiting cards are those `node scripts/board.mjs --all --json` lists with
-    that title and a state other than `CLOSED`, a card archived by hand no longer waiting, and a failed read files none the same way. Step 9 lists the
-    waiting cards from the same read. To file one, write the body in the shape of `to-issues` step 7 to a file in this session's scratch
-    directory, its last line `Product manager run: <date>`, the date being what `date -u +%F` prints. No title, body or
-    comment filed under this step or step 11 holds a credential, a token or a URL that holds a secret, and a criterion
-    that holds one parks the split. Then run
-    `gh issue create --title 'Proposed: <title>' --label <kind label> --body-file <file>` (where `scripts/lib/board-config.mjs` exports `KIND_TYPES`, `--type <kind type>` in place of
-    `--label <kind label>`), the title plain words with no quote, backtick or `$`, and no parent or blocker; then steps 6b, in `Backlog`, and 8 of `to-issues`. The title
-    carries the hold from the one call that creates the card, so it can never be picked, whichever column it lands in
-    and whether or not a later step works. The last line is the card's lasting record and stays through a yes or a no.
-    A prompt or refusal is treated as step 7 says. A create that is refused or fails ends the filing: look for the card
-    by exact title as `to-issues` step 6 says, never create again, and name the rest as offered and not filed with what
-    refused them. A later step that fails is reported in the summary with the card's number and the step left.
-11. **Splitting a card.** A card session settles a split proposal itself only where all of this holds, and otherwise
-    parks as step 7 says: the finding is the architect's under "4. Plan" that the card holds more than one independently
-    demonstrable outcome, never its size; the tracker is GitHub issues; the intake document shows the card with parent
-    `none` and neither the epic label nor, where `KIND_TYPES` is exported, the epic type, and its body holds no
-    `Split from:` line, so a card out of a split is never split again; every acceptance criterion of the card
-    stands word for word in exactly one child, every child holds at least one, no child holds a criterion the card lacks, each child's Problem and
-    What to build come only from the card's own text, and no child needs a decision
-    the owner has not made. Before anything is built, file each child by steps 6a and 6b of `to-issues`, in `Backlog`,
-    its body written to a file whose last line is `Split from: #<card>` and passed with `--body-file` in place of that step's inline body and its title plain
-    words with no quote, backtick or `$`, with no `Proposed: ` prefix because its outcome is already approved, and link
-    it to the card by step 6c. Post on the
-    card, from a file, a comment beginning `Split:` that gives each criterion as written and the child holding it. Then
-    run `gh issue edit <card> --add-label <epic label> --remove-label <its kind label> --body-file <file>` (where
-    `KIND_TYPES` is exported, `gh issue edit <card> --type <epic type> --body-file <file>`), the file
-    being its body with the criteria replaced by `Held by the native child cards. The epic closes when they close.`, and
-    `node scripts/verify-issue-publish.mjs <card> <child...>`. Then rewrite the session's own claim to
-    `Withdrawn: <machine>, <runtime>, <time>: split into <children>.` by the route "3. Start the job" gives, run
-    `gh issue edit <card> --remove-assignee @me` and `node scripts/board-move.mjs <card> Backlog`, remove the worktree and
-    branch as that route says, and end with the split result line. The first write refused parks the job. A later write
-    that fails is a stop naming what exists, and the card keeps its claim so nothing picks it. The next card session
-    ranks the children like any card.
-
-**Pre-approved run.** A run that builds and merges the cards the owner approved in advance, with no pick and no push
-question. The product manager run's steps above apply, except as these say.
-
-1. **The trigger** is the owner's instruction `Start a pre-approved run.` It approves no action: each card's record
-   is its only approval. A session whose first message is exactly `Continue the pre-approved run.` is its card
-   session, and on Codex one whose first message is `End the pre-approved run: <results folder>` is its end session.
-2. **The setting** is read as step 2 reads `productManager`, its key being `preApprovedRun`: the run is on only where
-   the file holds `"preApprovedRun": true`, and where cards are GitHub issues.
-3. **The launch** is step 3's. On Codex the owner runs `node scripts/product-manager-run.mjs --pre-approved`, which
-   takes one start time for the whole run and marks every session it starts with it, with no product manager mark.
-   Each Codex session's push probe is `git push --dry-run ./.pre-approved-run-no-remote HEAD`, and the launcher ends
-   the run unless the session's runtime log shows both `Command blocked by PreToolUse hook: Blocked: git commit` and
-   `Command blocked by PreToolUse hook: Blocked: a pre-approved run session`. On Claude Code the run session reads
-   `date -u +%Y-%m-%dT%H:%M:%SZ` once, at the start, types what it prints as `<run-start>` into every launch, and
-   starts each card session as step 8 says with:
-   `PRE_APPROVED_RUN_SESSION=<run-start> claude -p --permission-mode auto --output-format json "Continue the pre-approved run." > <scratch>/card-session-<n>.json`.
-   That launch carries no `--disallowedTools`, because those deny rules would refuse delivery, so the mark the git
-   guard reads is its only bar. Each Claude Code card session makes the hook check under "Before intake", then runs
-   `git push --dry-run ./.pre-approved-run-no-remote HEAD` as one plain command on its own, and stops unless the guard
-   refuses it with a reason beginning `a pre-approved run session`.
-4. **No direction page.** Step 4 does not apply: the records choose the cards.
-5. **The pick** keeps step 5's waiting-jobs read, its three-job cap and its file-overlap rule. The candidates are the
-   rows of the table startable now that `node scripts/board.mjs --approval check <card>...`, run once over them,
-   prints `approved` with a record time before the run start, which `printenv PRE_APPROVED_RUN_SESSION` prints; a
-   record posted later waits for the next run. They are taken oldest record first, then lower card number. No card
-   is sent to the owner and none is filed. No candidate left is a stop as step 5 says.
-6. **The job** is step 6's, except that a split proposal parks the job as step 7 says, and step 11 does not apply.
-   Suggested cards are listed in the final message as step 6 says and never filed. At section 7 the job is judged
-   by **Advance approval at push**: with no stop, the card session delivers through section 8 and closeout itself.
-   It publishes only as the guard admits: `git push -u origin job/<card>`,
-   `git push --force-with-lease origin job/<card>` and section 8's `gh pr ready` and `gh pr merge` forms, each as a
-   command on its own from its job worktree. It opens its draft only as
-   `gh pr create --draft --title <title> --body-file <path>`, the title a letter or digit followed by letters, digits
-   and `._:/-`, single-quoted with no `'` or newline, or double-quoted with no `"`, `$`, backtick, backslash, `!` or
-   newline, also as a command on its own from its job worktree. A card whose change the direct route would carry, which
-   `scripts/gates/pre-push-main` admits whole, is not delivered by the run: it is a stop under **Advance approval at
-   push**, parked for the owner's push, because the direct route is bounded only by a hook the run could edit.
-7. **Result lines** are step 7's, less the split line, plus `Run result: merged <card>`, which starts the next card
-   session as `built` and `parked` do. The launcher accepts `merged` only in a pre-approved run and no split line in
-   one.
-8. **The end** is step 9's, and step 10 does not apply: the run files no card, and the summary's **Suggested** list
-   names every entry the card sessions offered as offered and not filed. **Built** also names each card the run
-   merged, with its pull request.
-9. **Limits.** The guard judges only a publish command written plainly. A push or a draft wrapped as, for example,
-   `env gh pr create`, `command git push`, `nohup git push`, `sh -c "..."`, a subshell or a brace group is not seen, nor
-   is one after a background `&`, since the guard does not split a command there. Ready and merge are refused in more
-   places, after a wrapper word, after a lone `&`, inside a substitution and after an assignment, but they too go unseen
-   in shapes the guard cannot read, for example inside a wrapper's string such as `sh -c 'gh pr ready 12'`, in a heredoc
-   fed to a shell or after a backslash-newline between their words; the comments of `scripts/lib/unsafe-git.mjs` name
-   every such shape. A command word quoted, partly quoted or escaped may also hide any of the four: a push whose `git`
-   or `push` is quoted or escaped, such as `"git" push` or `git "push"`, a draft whose `create` is quoted or whose `gh`
-   is escaped, such as `gh pr "create"` or `\gh pr create`, and a ready or merge such as `\gh pr merge` or `gh pr
-   "mer"ge`. Since the Claude Code card launch carries no `--disallowedTools`, no rule behind the guard refuses these
-   forms there: at most auto mode's classifier judges them, and it guarantees nothing. It judges those four delivery
-   forms alone: `gh pr edit --base`, `gh api` and every other GitHub write are not judged, and the git settings gh reads
-   to choose a draft's head, `@{push}`,
-   `branch.<branch>.pushRemote`, `remote.pushDefault`, `branch.<branch>.remote` and, under `push.default` upstream,
-   `branch.<branch>.merge`, and, when the branch's push target is not at HEAD or there is none, any remote whose
-   same-named branch is at HEAD, are not checked, though ready and merge refuse a pull request not from its own branch.
-   Neither guard hook entry sets a timeout, and a Claude Code hook that times out does not block. The owner and the run
-   post as one account, so the record rules stop an accident, not a determined workaround, as **Forgery** under
-   **Advance approval** says. A withdrawal does not cancel an auto-merge a run has already queued.
+**Pre-approved run.** Its rules are in [references/runs.md](references/runs.md), read as **Run triggers** under "Before intake" says.
 
 ## 3. Start the job
 
@@ -560,8 +327,8 @@ question. The product manager run's steps above apply, except as these say.
   refuses a command only because a file path in it holds the letters `git`, the file is never renamed or left out
   of a run, and the command is rerun in the form the repository's `docs/TESTING-STRATEGY.md` names for a focused
   run in a job worktree.
-- On Codex: a Codex-managed worktree per chat, or
-  `git worktree add ../jobs/<issue> -b job/<issue> <recorded-origin-main>`. For each shell command in the job
+- On Codex: for an authorized native run, follow [the native app route](references/runs.md#native-codex-app-run); otherwise a Codex-managed worktree per chat, or
+  `git worktree add ../jobs/<issue> -b job/<issue> <recorded-origin-main>`. Outside the native run route, for each shell command in the job
   worktree, use `cd "<absolute-job-worktree>" && <command>` so the directory is visible to the git guard. Use this
   explicit prefix even when the tool also sets its working directory; the command runs only if the directory change
   succeeds.
@@ -619,17 +386,12 @@ question. The product manager run's steps above apply, except as these say.
 - Plan-first surfaces are the Surfaces table's `plan-first` row. They get an `architect` plan and one read-only
   plan review before any build. Any other card with design choices still open after work-pick gets an
   `architect` plan. Everything else gets a short plan in the pull request body.
-- The plan review runs the `plan-reviewer` charter on the Codex seat, Sol at extra-high effort, on both runtimes.
-  A Claude session reaches it through `cross-review` section 4, which runs that charter through the Codex command
-  line, read-only, with the card and the plan inlined; a Codex session dispatches its own seat. When the Codex seat
-  cannot be reached, a plan review fails or is capped, or the repository's settings file names one runtime, read
-  [references/review-routes.md](references/review-routes.md) whole before the plan review runs again or another seat
-  reviews the plan.
-  In a cloud build, read "Reviews in a cloud build" in [references/cloud-build.md](references/cloud-build.md) before the
-  plan review runs.
-  A Claude session's pass to the Codex seat is a cross-family pass and waits on the authorization section 6 reads;
-  where the owner declines, the Claude `plan-reviewer` seat reviews by that section's fallback dispatch and the body
-  records that cross-family review was not authorized, so the Sol extra-high plan review was not met.
+- The plan review runs the configured `plan-reviewer` of the other family: Claude-written plans go to Codex,
+  Codex-written plans to Claude, through `cross-review` section 4. That pass waits on the cross-family authorization
+  section 6 reads. When authorization is declined, the other family cannot be reached, a review fails or is capped, or
+  the repository's settings file names one runtime, read [references/review-routes.md](references/review-routes.md)
+  whole before the plan review runs again or another seat reviews the plan. In a cloud build, read "Reviews in a cloud
+  build" in [references/cloud-build.md](references/cloud-build.md) before the plan review runs.
 - Every plan follows `docs/CODING-STANDARDS.md`, the session's own short plan for a card without an architect
   included. Clerical corrections follow **Clerical corrections** under "5. Build".
 - Where the project has a user interface, a plan with a user-facing change, the session's own short plan included, reads
@@ -642,13 +404,16 @@ question. The product manager run's steps above apply, except as these say.
   keeps its own rule: cost and latency break only equal-reliability ties. Use `builder` for bounded substantive
   implementation, `builder-max` from the outset when uncertainty or failure consequence warrants deeper reasoning, and
   `builder-lite` only for mechanical edits with strong verification and no remaining judgment.
-- Before dispatching an `architect`, the coordinating session runs `explorer` first when discovery exceeds a
-  couple of files. Each explorer writes its completed findings with `file:line` references and explicit
-  unresolved gaps to its own distinct named findings file, such as `.claude/worklog/<branch>-discovery-<name>.md`;
-  the handoff's `Discovery:` line carries every findings file path. For discovery confined to a couple of files, the line carries the
-  session's own completed findings with the same references and gaps. Discovery is never a list of places to
-  search. On an unplanned return, the coordinating session completes the missing discovery under this rule or
-  names the missing plan file, then redispatches the architect; that return is not a capped architect.
+- An `architect` dispatch carries completed findings or, on Claude Code, a bounded unresolved lookup that its
+  charter permits it to send only to `explorer`; the architect waits for completed findings before planning.
+  On Codex, the coordinating session runs `explorer` first when discovery exceeds a couple of files; for a
+  couple of files it supplies its own completed findings. Each explorer writes completed findings with
+  `file:line` references and explicit unresolved gaps to its own distinct named findings file, such as
+  `.claude/worklog/<branch>-discovery-<name>.md`. The handoff's `Discovery:` line carries every findings file path
+  or, for the Claude lookup branch, the bounded question and its named findings-file destination. The session's
+  own findings use the same references and gaps. An unbounded list of places to search is insufficient. On an
+  unplanned return, the coordinating session completes the missing discovery under this rule or names the missing
+  plan file, then redispatches the architect; that return is not a capped architect.
 - Every `architect` dispatch is a filled copy of `.agents/templates/planner-handoff.md` whose `Deliverable:` line
   names the plan file, `.claude/worklog/<branch>-plan.md`.
 - **Capped architect.** An `architect` reply that does not end with the line `plan delivered in full` is capped. The
@@ -658,11 +423,14 @@ question. The product manager run's steps above apply, except as these say.
   that plan on its `Discovery:` line, or finishes the plan inline from it; when that fresh dispatch is capped too, the
   session finishes the plan inline. A split proposal in that plan goes to the owner as the next bullet says, never
   narrowed or finished inline. A capped architect is never by itself a reason to dispatch `oracle`.
-- Every `oracle` dispatch carries an `explorer`'s completed findings, written to findings files as the explorer
-  bullet above says, with each file's path in the dispatch and never a list of places to search, so the oracle
-  spends its turns on judgment rather than search. It also names the oracle's result file,
-  `.claude/worklog/<branch>-oracle-<name>.md`. Every `security-reviewer` dispatch names its result file,
-  `.claude/worklog/<branch>-security-review.md`.
+- Every `oracle` dispatch names its result file, `.claude/worklog/<branch>-oracle-<name>.md`, and carries an
+  `explorer`'s completed findings, with each findings-file path as above. On Claude Code it may instead carry a
+  bounded unresolved lookup and named findings-file destination: the oracle sends only that lookup to `explorer`
+  and waits for completed findings before reasoning. Codex keeps completed-findings dispatch through the
+  coordinating session. Every `security-reviewer` dispatch names its result file,
+  `.claude/worklog/<branch>-security-review.md`. For missing locations, its Claude charter permits only bounded
+  `explorer` discovery, completed before its own trust judgment; on Codex it returns the bounded request to the
+  coordinating session for completed findings before redispatch.
 - **Capped oracle or security reviewer.** A reply from either seat that does not end with its finish line,
   `brief delivered in full` for the oracle and `security review delivered in full` for the security reviewer, is
   capped; a charter's return for a missing finding or result file is not. The session never resumes or messages
@@ -675,7 +443,7 @@ question. The product manager run's steps above apply, except as these say.
   Size is the owner's judgment before work-pick, through the `to-issues` size signals; after work-pick no seat
   splits, stops or replans work for its estimated or actual size. An architect's finding that the card holds more
   than one independently demonstrable outcome goes to the owner as a split proposal before any build, and the
-  session never narrows such a plan inline or merges slices to fit. A product manager run settles a proposal only as step 11 under "2. Work-pick" says. A card that came out of a split is never split
+  session never narrows such a plan inline or merges slices to fit. A product manager run settles a proposal only as its step 11 in [references/runs.md](references/runs.md) says. A card that came out of a split is never split
   again on a session's own judgment; only the owner starts another split. A parser, state machine, or general
   framework the outcome did not name is a scope change and goes back to the owner before it is built.
 - Before implementation, every coherent claim has a fixed observer, independently grounded expectations and a
@@ -770,6 +538,9 @@ question. The product manager run's steps above apply, except as these say.
 
 - **Visual work.** Read [references/visual.md](references/visual.md) whole before driving any visual work.
 - Run every check the Surfaces table's rows name for a surface the diff touches.
+- Before dispatching any review pass, rerun each convergence check whose latest worklog receipt does not hold
+  for the clean committed head sent to review under the **Receipt reuse** rule in
+  [references/deliver.md](references/deliver.md).
 - Before dispatching the review, audit each `strict-tdd` claim's worklog and diff for the meaningful pre-implementation
   failure and coordinator validation required by "5. Build". A genuine chronology miss goes to the owner before
   review as the existing decision on accepting that claim without its required red run. Follow `AGENTS.md`'s
@@ -961,10 +732,12 @@ them, **Not done** and the `Closes #<issue>` line. It records the two answers of
 labels, Door and Blast Radius. A pull request a scheduled routine opens is written with the skill under this same rule,
 with the `## Pull request body` section of that routine's manual standing where the template stands.
 
-**Advance approval at push.** A card with a valid record, as **Advance approval** under "2. Work-pick" says, has its
-yes already: the record is gate two's yes to the card this section writes, unless a stop holds. Its Summary ends with
-the line `Approved in advance: <record url>`, the address the check prints, in place of any `Picked:` line. Once the
-card is complete, judge the stops from the saved `body.md`; each needs a fresh yes:
+**Advance approval at push.** Run the check again at push, even if the card was approved at work-pick. Only explicit
+fetched-main `"preApprovedRun": true` and a valid record, as **Advance approval** under "2. Work-pick" says, make the
+record gate two's yes to the card this section writes, unless a stop holds. Known disabled requires the owner's push
+yes; unavailable is never approval. With that approval its Summary ends with the line
+`Approved in advance: <record url>`, the address the check prints, in place of any `Picked:` line. Once the card is
+complete, judge the stops from the saved `body.md`; each needs a fresh yes:
 
 1. the plan's surface line names the Surfaces table's `owner-directed` or `sign-off` row, or section 6 chose the
    `sign-off` tier;
@@ -980,14 +753,9 @@ card is complete, judge the stops from the saved `body.md`; each needs a fresh y
 With no stop, the review folder is saved as Saved write-up says and `shown-hash` is written once the card is complete,
 though nobody is asked, and section 8's checks of that folder apply as for a yes. The body's `Decision card` block
 carries the card on GitHub, and on the direct route the commit message carries it. A session the owner drives shows
-the card in chat, says it is going ahead on the record and links it, then runs section 8. A pre-approved run's card
-session runs section 8 and closeout unasked; its final message is the decision card, the pull request's address and
-`Run result: merged <card>`, and lists anything closeout would ask the owner.
+the card in chat, says it is going ahead on the record and links it, then runs section 8. A pre-approved run's card session does as step 6 of the pre-approved run in [references/runs.md](references/runs.md) says.
 
-Where a stop holds, the yes is asked for as for any card. A session the owner drives asks it as this section says. In
-a pre-approved run the card goes to `Awaiting push`, its body's first Not done item names the stop and is saved again,
-and the card session's final message is the decision card followed by `Run result: built <card>`; the batch review
-gives the fresh yes. A question mid-job parks the job as step 7 under "2. Work-pick" says. During section 8, a repair
+Where a stop holds, the yes is asked for as for any card. A session the owner drives asks it as this section says. During section 8, a repair
 that makes a stop hold first runs `gh pr ready <pr> --undo`, which the git guard admits for the session's own job
 pull request even once its record is withdrawn, then stops as above.
 
@@ -1005,38 +773,15 @@ none of those is `changes=no`. `sent-back` is the owner's own word and is never 
 `unanswered`. Say in one line what was recorded, and where the owner corrects it, rewrite that comment by the route
 section 1 names. A `Verdict:` comment is a record and never an approval: a later session asks again.
 
-**Stage 2 evidence.** Stage 2 is a product manager run merging its own picks without the owner, which nothing here
-does, and these measures only report towards it; a pre-approved run merges only cards the owner recorded and adds
-nothing to them. Step 9 captures every verdict in its scratch directory with
-`gh api -X GET --paginate "repos/{owner}/{repo}/issues/comments" -f per_page=100 --jq '.[] | (.body | sub("\\A\\s+"; "")) as $text | select($text | startswith("Verdict:")) | [.user.login, .issue_url, .html_url, ($text | split("\r")[0] | split("\n")[0])]'`,
-the digits ending the second field being the card and GitHub's order, oldest first, deciding which is newer, never the
-typed `at=`. A comment from an account other than the one `gh api user --jq .login` prints is not counted and is named.
-A comment from this account that does not match the form, or a failed read, makes the first two measures
-`not measurable` with that comment or the printed error, never zero. It reports each measure as written here:
+**Stage 2 evidence.** Its rules are in [references/runs.md](references/runs.md), read as **Run triggers** under "Before intake" says.
 
-- **No changes needed on the last 10 approved pushes,** the newest 10 cards whose newest verdict is yes and whose card
-  is closed as completed, read with `gh issue view <card> --json state,stateReason`, so a yes whose delivery never
-  finished is named and not counted; a failed read makes this measure `not measurable` with the error. Fewer than 10:
-  `not measurable yet: <n> of 10 approved pushes recorded, <k> with no changes`. Ten, all `changes=no`: `met`. Otherwise
-  `not met:` and the cards.
-- **No card the owner would have sent back,** over every counted verdict, each comment on its own, so a later verdict
-  never hides an earlier `sent-back=yes`; only the owner's correction of that comment removes it. None recorded:
-  `not measurable yet: no verdict recorded`. Any `sent-back=yes`: `not met:` and the cards. Otherwise any `unanswered`:
-  `not measurable: <u> of <v> unanswered`. Otherwise `met: none of <v> verdicts`.
-- **Share of suggested cards accepted,** over every card this account filed with a line reading
-  `Product manager run: <date>` in its body, read with
-  `gh issue list --state all --limit 1000 --author @me --search '"Product manager run:" in:body' --json title,state,body --jq '. as $all | [.[] | select(.body | test("(?m)^Product manager run: [0-9]{4}-[0-9]{2}-[0-9]{2}\\s*$"))] | {returned: ($all | length), suggested: length, accepted: ([.[] | select(.title | startswith("Proposed: ") | not)] | length), unanswered: ([.[] | select((.title | startswith("Proposed: ")) and .state == "OPEN")] | length), declined: ([.[] | select((.title | startswith("Proposed: ")) and .state == "CLOSED")] | length)}'`.
-  A card that has lost the prefix was accepted, one that holds it and is closed was declined, and one that holds it and
-  is open is unanswered. None recorded: `not measurable yet: no suggested card recorded`. Otherwise
-  `<accepted> of <suggested> accepted, <declined> declined, <unanswered> unanswered`. A failed read, or a `returned` of
-  1000, the read's whole limit, is `not measurable` with the error or that fact, never zero.
+**Per-card attention.** Its rules are in [references/runs.md](references/runs.md), read as **Run triggers** under "Before intake" says.
 
 **Batch review.** The owner's own message asking to see what is waiting starts this, in a session at the repository
 root, the run session included, never a card session. The message approves nothing. The hook check under "Before intake"
 must show the guard's refusal; any other result refuses delivery.
 
-1. **Read.** Read the waiting jobs with `node scripts/board.mjs --status="Awaiting push"`, step 5's first-line rule
-   applying, and the held cards as step 9 does. For each waiting card make the card read of "3. Start the job" and the
+1. **Read.** Read the waiting jobs with `node scripts/board.mjs --status="Awaiting push"`: the first line it prints gives their number. No such line is a stop, because they could not be counted, whatever the exit status says; a read that succeeds can exit 1 on board drift. Read the held cards with `node scripts/board.mjs --intake > <scratch>/board-intake.txt`. For each waiting card make the card read of "3. Start the job" and the
    read section 1 names, find `job/<card>` in `git worktree list --porcelain`, and read that worktree with
    `git -C <worktree> rev-parse HEAD` and `git -C <worktree> status --porcelain --untracked-files=normal`.
    A job is shown only where the card is not held, its newest claim names this machine, as `hostname` prints it, and not
@@ -1088,11 +833,15 @@ After authorized publication, keep **Not done** current and return the card to `
 names `Claude Code cloud` instead stays in its column under that claim, as step 4 of "Cloud build" says. The next
 session finds it in step 1.
 
+For a Linux background Codex whole-job return after a park or settled workflow stop, follow the held-comment and
+identity checks and owner return below.
+Then delegate through `--continue-card` as [references/runs.md](references/runs.md#pre-approved-run) directs. This
+replaces the ordinary worktree, claim and job continuation steps. The managed worker alone resumes and edits the job.
+
 A job a product manager run or a pre-approved run parked comes back in a session the owner starts, by `claude --resume <session id>` on
-Claude Code or by picking the held card. That session makes the checks step 6 of the run names for a reopened
-session. Before anything else, either session reads the card's `Needs owner:` or `Returned:` comment with the command section 1 names and goes on only where
+Claude Code or by picking the held card. That session first runs the hook check under "Before intake", any other result than the guard's refusal refusing delivery, then confirms with `pwd` that it is in the job's worktree, entering it if not, and shows any screenshot then. Before anything else, either session reads the card's `Needs owner:` or `Returned:` comment with the command section 1 names and goes on only where
 the comment's account is its own, its `Job:` is exactly `job/<card>` and its machine is this one; anything else is
-reported, the card stays held and nothing starts here, no claim included. A new session then finds the worktree with
+reported, the card stays held and nothing starts here, no claim included. A new session on the ordinary return route then finds the worktree with
 `git worktree list`, enters it rather than creating one, and posts a new claim. Either rewrites the comment to begin
 `Returned:` with the owner's answer, as section 1 says, moves the card to `In progress` and continues from the
 worklog. `handoff` stays the owner's route to publish a parked job.

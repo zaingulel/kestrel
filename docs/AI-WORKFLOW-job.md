@@ -87,16 +87,21 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   the plan presented again. The gate is off unless the repository's settings file turns it on, and no guard holds
   it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
   [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "4. Plan".
+- **Native Codex run chats.** With the owner's authorization to create managed-worktree chats and send follow-ups,
+  either run can use one visible chat per card. The coordinator verifies setup, binding, guard refusals and actual
+  completion; the existing card approvals, reservations and stops remain. A fresh yes and any required screenshot are
+  handled in an unbound owner session. A remaining managed checkout holds cleanup and its reservation. The
+  [run reference](../.agents/skills/resume/references/runs.md#native-codex-app-run) owns the route and its limits.
 - **Product manager run, where the repository turns it on.** The owner can hand the work-pick to the session instead of
   choosing a row. On Claude Code the owner launches a session at the repository root, in a terminal or the desktop app,
-  and says `Start a product manager run.`; on Codex the owner runs `node scripts/product-manager-run.mjs` in a terminal outside any session. A run
+  and says `Start a product manager run.`; on Codex the owner may authorize the native route above or run `node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID>` in a terminal outside any session. The selected existing owner chat receives each saved result; the session supplies its UUID from native context when available, otherwise the owner uses supported native chat selection. A run
   starts only where the git guard is shown running. On Claude Code the owner first turns on
   "Require trusted devices" in their Claude account and the "Push when Claude decides" and "Push when actions required"
   notifications; where "Require trusted devices" cannot be on, no Claude Code run starts, and the owner can run it on
-  Codex. On Codex the launcher starts every session in the workspace-write sandbox with on-request approvals, and
+  Codex. On the Codex terminal route the launcher starts every session in the workspace-write sandbox with on-request approvals, and
   Codex's Auto-review may answer the run's approval requests. The session cannot check the Claude Code settings. The
   run reads the owner's direction page from the fetched `main` and starts a fresh session for each card on either
-  runtime; each picks the card the page ranks highest among
+  runtime; the card session, or native coordinator, picks the card the page ranks highest among
   those it may take, skipping any that touches a waiting job's files other than the manifest, whose fingerprints follow
   the shared files they record, names the pick and the reason in the table's closing line, and takes it through the
   usual stages to `Awaiting push`. The run stops once 3 jobs wait or no pickable card is left. On Codex the launcher
@@ -114,22 +119,67 @@ path qualifies skips the pull request, is pushed straight to `main`, and is clos
   job the same way, with its commits kept on the local branch, and the run goes on to the next card. A parked job counts
   toward the 3 that wait; a held card with no job does not. A run may suggest new cards, at most 3 and fewer while
   earlier ones wait: each is filed at the end of the run with a title beginning `Proposed: `, which holds it until the
-  owner says yes or no. A card found not free stops the run. Push authorisation stays the owner's yes. The owner can ask
+  owner says yes or no. A card found not free stops the run. Each result reaches the owner coordinator: Claude Code uses background completion and `PushNotification`; the Codex terminal launcher queues a fixed reference to the selected chat, while the active native coordinator observes its chats. The coordinator reads saved evidence, checks the current job and presents the decision card and screenshots or a plain parked or stopped question. The terminal-route Codex coordinator then ends its native turn for the completion notification. A queued update is not proof of phone delivery; [Native phone notifications](AI-WORKFLOW-runtimes.md#native-phone-notifications) explains the capability and evidence limits. Push authorisation stays the owner's yes. The owner can also ask
   to see what is waiting and answer each job in turn: a yes delivers it, a no parks it with the owner's reason, and each
   answer leaves a `Verdict:` comment on the card. A run's summary reports the three stage 2 measures from those
   comments, saying why where one cannot be computed yet. When the run stops, the session the owner launched, on Codex a
   final end session, says once why and what the owner does next, then gives a summary of what it built, parked, needs
-  from the owner and suggested, and any change it wants to the direction page: on Claude Code the reason arrives as a
-  push to the owner's phone, and on Codex it is printed in the terminal the launcher was started from, because Codex
-  sends no push. A prompt or approval from the runtime waits for the owner's own answer. The mode is off unless the
+  from the owner and suggested, and any change it wants to the direction page. Phone arrival and real console delivery require observation in an owner-started run; queuing alone does not establish delivery. A prompt or approval from the runtime waits for the owner's own answer. The mode is off unless the
   settings file on `main` turns it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the
   gate under "Owner gates", and [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2.
   Work-pick".
 - **Pre-approved run, where the repository turns it on.** The owner can approve cards in advance, one comment on each
-  card that binds the card's text as it then stands, and then say `Start a pre-approved run.` on Claude Code or run
-  `node scripts/product-manager-run.mjs --pre-approved` on Codex. The run takes only cards with a valid record, the
-  oldest record first, builds each in a fresh session and merges it with no yes at push authorisation; it picks and
-  files nothing else, and a split proposal or a question parks the job. Editing the card, editing or deleting the
+  card that binds the card's text as it then stands, and then say `Start a pre-approved run.` on Claude Code or use the authorized native route above or run
+  `node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID> --pre-approved` on Codex. The run takes only cards with a valid record, the
+  oldest eligible record first, and merges it with no yes at push authorisation. On Linux background Codex, one managed
+  worker owns each whole job, including its reviews and delivery; independent jobs can run concurrently. Claude, the
+  native app and non-Linux routes use serial selection and preparation, concurrent independent builds and serial delivery.
+  Fabraik sets no numeric maximum on independent
+  CLI sessions. Runtime-managed temporary waiting may continue when the runtime resumes it; terminal launch or runtime
+  failures are reported and stop under the existing failure rules, without an automatic retry or a recovery guarantee.
+  Native helper concurrency limits apply within their own sessions, not to these independent processes. Current jobs
+  with unknown reviewed scope block potentially overlapping builds, including an older waiting job; a branch diff
+  cannot establish all planned files or resources. Prepared jobs retain their reservations when the run ends waiting
+  on such a blocker. Whole-job reservations survive until verified settlement; parked files remain protected while
+  proven stopped local resources are released.
+  On the phase routes, a built job keeps its file and exclusive-resource reservation until delivery or disposition. Preparation itself
+  reserves intent: after ownership, accepted review, completed preparation and an empty application delta are verified,
+  a built job can deliver past that inactive intent. Conflicting inactive preparations take turns only when eligible,
+  ordered by original claim time and then card number. An older job blocked by another job cannot hold up its later
+  prerequisite or a job independent of that blocker. Unknown scope or eligibility still holds potentially conflicting
+  work. Job-owned changes are compared with the current main baseline while the originally selected base remains an
+  ancestry anchor.
+
+  On the phase routes, the admission command distinguishes the requested build or delivery phase from proof that the phase may start:
+  `--check-admission` returns allow with exit 0, wait with exit 3 or unavailable with exit 1. Those routes retain
+  phase-start context before dispatch and the completed outcome afterward. Claude's `.request.json` is staging input;
+  the executable's `.context.json` records the validated start. Fixed `job-<card>-<phase>` names bind that evidence to
+  one job. A missing expected start record cannot turn a running build back into an inactive plan. Codex keeps its
+  job state; native Claude keeps the highest phase actually dispatched and its task ID. Lost history stays held.
+
+  All routes keep run evidence in temporary results outside every inventory job worktree and the integration checkout,
+  checked against canonical existing roots. Only a root absent with `ENOENT` contains nothing; other read failures
+  leave containment unknown. On the phase routes, plans and reviews stay at their normal job paths, with small same-hash snapshots retained
+  before build and rechecked before delivery. This lets legitimate cleanup finish without erasing the evidence the
+  coordinator still needs; ordinary open jobs still need their original files. The records support execution
+  accounting, without making the filesystem unforgeable.
+
+  On the phase routes, a delivery can close its issue and remove its worktree before the child returns. With retained delivery/build
+  context, completed build, accepted review and snapshots, current ownership and actual closing progress verified,
+  the coordinator waits for that child and its accounting. This wait grants no new authority and preserves the job's
+  identity and scope until delivery verification, outcome storage and attention finish. Missing ownership or corrupt
+  evidence remains unavailable. Independent builds can continue during an ordinary open delivery. A selection already
+  in flight is kept once; after closing clears, its one serial preparation precedes any new selection. The authoritative
+  evidence, precedence and settling rules are in [the `resume` skill](../.agents/skills/resume/SKILL.md) under
+  "2. Work-pick", **Pre-approved run**.
+
+  A normal phase stop ends new work, accounts for work already running and produces one end summary; a safety stop
+  ends without one.
+  Jobs and end sessions have no factory expiry. Each phase still revalidates the original claim and its unchanged
+  creation time. A native tool timeout or interruption retains reservations while detached work may remain; a tool
+  timeout does not establish that a signal was delivered or descendants stopped. Each phase's immutable outcome is checked before owner attention; it is evidence, not
+  approval. The end summary is a separate run event, not proof that every job merged or a release of reservations.
+  The run picks and files nothing else, and a split proposal or a question parks the job. Editing the card, editing or deleting the
   record, or closing the card withdraws the approval, and a record written after the run starts waits for the next
   run. For a command written plainly, the guard admits the run's push, draft, ready mark and merge only for its own job
   branch and pull request, in the repository it fetches from and into its default branch, and only while `node scripts/board.mjs --approval check <card>` still prints `approved`; a job that touches an

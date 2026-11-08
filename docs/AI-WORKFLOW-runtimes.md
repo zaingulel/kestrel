@@ -43,6 +43,41 @@ under `.claude/agents/` and `.codex/agents/` are maintained counterparts, with s
 two runtime formats. The safety hooks exist as twins: `.claude/settings.json` wires the Claude set, `.codex/hooks.json`
 the Codex set.
 
+### Native Codex run chats
+
+An authorized native app run uses one visible managed-worktree chat per card. The coordinator verifies the ready
+chat and worktree, binds the run, observes both guard refusals and monitors actual results; it does not infer a wake
+or phone delivery from a queued or completed turn. A fresh owner approval is presented in an unbound owner session,
+with the screenshot where required. The [run reference](../.agents/skills/resume/references/runs.md#native-codex-app-run)
+owns the steps and retains the terminal and Claude routes.
+
+The Bash guard checks submitted command text for the literal `fabraik-app-run` stem. Globs, variables, partial paths,
+wrappers, substitutions and out-of-band access can evade that check. If both connection records disappear and Git proves
+both absent, later classification can be ordinary. Direct metadata removal is refused when the connection is bound or
+unavailable; this is not a universal security boundary.
+
+### Native phone notifications
+
+App support, an explicit sender exposed to a session, and a notification observed on a phone are different facts.
+[Claude Code Remote Control](https://code.claude.com/docs/en/remote-control#mobile-push-notifications) documents
+mobile push while Remote Control is active, with the same account and organization, phone notification permission and
+push categories enabled. A focused or actively used connected terminal can suppress pushes. The workflow's Trusted
+Devices requirement applies to its Claude run, not to every documented push. An explicit sender tool must be discovered
+in the current session; its absence does not mean the app lacks mobile support.
+
+[OpenAI remote connections](https://learn.chatgpt.com/docs/remote-connections) documents mobile access and task or
+attention notifications for supported connected hosts and accounts. The documented mobile route pairs the mobile app
+through a supported desktop app host that stays awake and online, signed in to the same ChatGPT account and workspace;
+setup is through the desktop app, not the command line. Its host requirements do not establish that every
+other context or account lacks notifications. [Notification controls](https://learn.chatgpt.com/docs/notifications)
+vary by surface; command-line notifications and external programs do not themselves establish a native phone route.
+The session's actual tools, account and settings may be unverified even when documentation describes support.
+
+In either runtime, a terminal child finishing alone does not establish a native phone notification route. A queued
+update, a coordinator presenting it, a native turn completing and a notification arriving on a phone are
+separate observations. None alone proves the next. Phone arrival needs observation on the phone. For the capability
+check and run-specific requirements, see [the run reference](../.agents/skills/resume/references/runs.md#native-notification-capability).
+
 ### On native Windows
 
 On native Windows both runtimes need Git for Windows. Claude Code runs its hook commands through Git Bash (the
@@ -292,8 +327,6 @@ in the settings file stands apart from push authorisation too.
 - `scripts/lib/codex-hooks-windows.test.mjs`: the proof of the Windows registrations.
 - `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, and which paths a repository's settings leave out, and the check of the settings file's keys, `preApprovedRun` included.
 - `scripts/merge-watch.mjs`: with `--draft`, the local session's wait for a cloud build's draft.
-- `scripts/product-manager-run.mjs` and `scripts/lib/product-manager-run.mjs`: the Codex product manager run's launcher,
-  which starts each card session and the end session in turn; with `--pre-approved` it is the pre-approved run's
-  launcher, which takes one start time for the whole run and marks every session with it.
+- `scripts/product-manager-run.mjs` and `scripts/lib/product-manager-run.mjs`: the Codex run launcher, which starts each card session and the end session in turn and queues result references to the selected owner chat; `--pre-approved` marks sessions with one run start time. Its fixed `--claude-card` mode runs one Claude Code card session. Neither route imposes a factory expiry; manual interruption still attempts bounded cleanup, and native tool timeouts require unresolved-activity handling.
 - `scripts/lib/advance-approval.mjs`: reads the owner's advance approval record on a card, and judges whether a
   pre-approved run session may publish; the `--approval check` mode of `scripts/board.mjs` prints its lines.

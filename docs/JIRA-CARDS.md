@@ -142,7 +142,7 @@ errors go to standard error and suppress success rows. These interfaces are impl
 | `assign <KEY>` / `unassign <KEY>` | Confirmed `["assignees",[accountId]]` or `["assignees",[]]`, or `["no-op"]`; another holder is refused |
 | `comment <KEY> (--body <text> \| --body-file <file>)` | Confirmed `["comment",id,url]` |
 | `edit-comment <KEY> <comment ID> (--body <text> \| --body-file <file>)` | The same confirmed row, only for the current account's comment; the ID is positive decimal without leading zeros |
-| `create --title <text> --body-file <file> --status <column> --kind <kind> [--parent <KEY>] [--blocked-by <KEY>,...]` | `["created",key]`, followed by confirmed block rows when requested |
+| `create --title <text> --body-file <file> --status Backlog\|Ready --kind <kind> [--parent <KEY>] [--blocked-by <KEY>,...]` | `["created",key]`, followed by confirmed block rows when requested |
 | `edit <KEY> [--title <text>] [--body-file <file>]` | At least one edit is required; `["edited",key]` after intended-field read-back |
 | `parent <KEY> --to <epic KEY>` | `["parent",key,parentKey]` or `["no-op"]`; same-project hierarchy level 0 child and level 1 parent, never self |
 | `block <KEY> --by <blocker KEY>` | `["block",key,blockerKey]` or `["no-op"]`; same project, never self |

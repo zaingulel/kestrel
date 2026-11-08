@@ -6,8 +6,8 @@ description: "Reconcile a merged pull request for work in this repository: board
 # closeout
 
 Runs in the same session the moment the merge lands, under the push authorisation that covered the merge;
-no further ask. Everything here is observable from git, GitHub, Docker's container and volume records and the machine's
-process list; nothing is inferred from chat.
+no further ask. Establish state and ownership from the direct observations each step requires. Never infer
+either from chat alone.
 
 Where `scripts/lib/board-config.mjs` exports `TRACKER = "markdown"`, cards are files, and `docs/MARKDOWN-CARDS.md` says
 what each card step here becomes. Where it exports `TRACKER = "linear"`, cards are issues in a Linear team, and
@@ -54,14 +54,24 @@ throughout this skill, including complete native-comment review before claiming.
    reconcile anything it reports.
 5. **Branch and worktree.** Confirm the exact job worktree path and its ownership, then settle which scratch goes
    with it. **Lasting links.** Build the owner-facing deliverable inventory from files changed by the merged pull
-   request or confirmed pushed commit and from the job plan or worklog. Add job files linked in chat or opened for
+   request or confirmed pushed commit and from the job plan or worklog. Add job deliverables linked in chat or opened for
    review when that history is available; chat is never the inventory's sole source. Use the verified repository
    and the full confirmed merge or pushed commit from step 1. For each published file, make an authenticated GitHub
    Contents API read with `ref` set to that full commit and use the response's `html_url` as its permalink. Require
    that URL to identify the verified repository, exact commit and intended repository-relative path after decoding.
-   Before deleting any target containing a deliverable, send its verified link to the owner in chat. If the
-   destination is unpublished or cannot be verified, retain the deliverable and its containing cleanup target and
-   report why. This does not authorize uploading or pushing private or untracked evidence.
+   Before deleting any target containing a deliverable, send its verified link to the owner in chat. Retain the
+   deliverable and containing target if its lasting destination cannot be verified, and report why.
+   **Verification records.** Read the merged pull request body or confirmed pushed commit message for a direct
+   push, using the delivery identified in step 1. Verify it contains the required short receipts under
+   [resume's delivery rules](../resume/SKILL.md); keep raw logs and private contents out of published records.
+   Never create a local verification archive. Once receipts are verified, treat job-owned local worklogs, raw
+   verification output and review copies that served only that completed job as scratch under the existing rules;
+   a prior chat link alone does not make a verification record a deliverable. Report and retain logs when the
+   published record or required receipts cannot be verified, or ownership or continuing need is unclear. Before
+   naming a verification record as scratch, check the exact record and its containing worktree for holds, and keep
+   the logs with a held worktree; the helper handles scratch before it finishes worktree checks. Keep the existing
+   Windows refusal and protections through the existing route.
+
    **Scratch files and folders.** Apply `AGENTS.md`'s Disposable job cleanup authority to job scratch,
    including local prompts, drafts and disposable verification reports once no longer needed, inside or outside
    the worktree and not just verifier-reported paths. Inspect each exact target and its contents against actual
@@ -292,16 +302,35 @@ independent cleanup or work selection.
    `git fetch --no-prune origin main` and record the fetched commit. Load this procedure, `AGENTS.md`, and `resume`
    from that commit under the Instruction reuse rule in the `resume` skill's "Before intake" before applying it.
    A failed fetch leaves freshness unavailable: preserve local state and stop before board operations.
-2. Record `refs/heads/main`, inspect `git worktree list --porcelain` and runtime ownership, and require
+2. Record `refs/heads/main`, inspect `git worktree list --porcelain` and require
    `git merge-base --is-ancestor <recorded-local-main> <recorded-origin-main>`. If local `main` is missing, ahead
-   or divergent, retain it and report why. A clean checkout is eligible only when it is also idle, available, has
-   no merge, rebase or other operation in progress, and no other task owns it. The coordinating resume or closeout
-   session may establish that it is idle when no other owner exists.
-3. When `main` is checked out, inspect tracked, untracked, and ignored files for incoming file or directory path
-   collisions. Recheck ownership, branch and status immediately before
-   `git -C <main-worktree> merge --ff-only --no-overwrite-ignore <recorded-origin-main>`. Preserve active,
-   dirty, unavailable, uncertain, or collision-bearing checkouts; never switch, reset, stash or clean one to make
-   it eligible.
+   or divergent, retain it and report why. A checkout must be clean, available, free of an operation in progress
+   and free of another task's ownership. Reconcile active or resumable tasks and their exact worktree or assigned
+   checkout from trusted runtime activity and the job/worktree inventory. Clean status, branch lists, folder
+   references, absence of open files or descendants, and a removal-helper verdict do not establish that the
+   checkout is free of task ownership or active use. Defer if a task owns or uses `main`, actual use cannot be
+   resolved, or observations conflict.
+3. When `main` is checked out, corroborate a passive folder reference with native working-directory, open-file
+   and process-tree observations. A runtime-spawned noninteractive helper with verified identity and runtime
+   ownership may keep `main` as its working directory when step 2 established that no task owns or uses `main`, and
+   fresh native observations show only the folder reference, with no work by the helper or its descendants in that
+   checkout. Do not infer helper eligibility from its process name alone. A per-helper runtime idle status is
+   unnecessary in that case. Active file access, a running command in the checkout, or an unresolved descendant
+   defers. For an app, require a directly observed passive view or trusted runtime activity evidence for its
+   user-facing window or view; this applies to that view, not its noninteractive helpers. For an interactive shell,
+   require a trusted runtime tab observation matched to the exact holder that explicitly reports nothing running,
+   such as the desktop app's `list_terminal_tabs` when it can identify the tab. Native working-directory, terminal
+   and process-tree observations can rule out idleness; establish shell idleness from the matching runtime tab.
+   Defer when the runtime cannot observe an interactive shell, without typing into it. A verified passive reference
+   can accompany an eligible update. Removal holds govern removal.
+
+   Inspect tracked, untracked and ignored files for incoming file or directory collisions. Immediately recheck
+   exact ownership, activity, branch, tip, operation state and status before
+   `git -C <main-worktree> merge --ff-only --no-overwrite-ignore <recorded-origin-main>`. Leave active, dirty,
+   unavailable, uncertain or collision-bearing checkouts intact. Never switch, reset, stash or clean one to make
+   it eligible. Defer without asking the owner to quit an app, stop a session, or move a terminal. Leave unrelated
+   sessions alone. Follow
+   [the separate guard and capability activation procedure](../../../AGENTS.md#shared-workflow-adoption) where it applies.
 4. When no worktree checks out `main` and no active task owns it, recheck the inventory and use
    `git update-ref refs/heads/main <recorded-origin-main> <recorded-local-main>`. The expected old commit protects
    against concurrent movement. This advances only an unoccupied branch ref; it does not refresh files in a root
@@ -339,7 +368,8 @@ file in this session's existing scratch area, not a registry or approval-only ar
 repository and host identity, exact known retained paths and branch with observed tip, delivered pull request
 or commit where relevant, actual helper exit/result lines or why no call was admitted, and references to
 existing ownership, creation and deliverable evidence. Mark early-stop facts not reverified as such. Include
-no credentials or transcript/prompt bodies. Record the returned comment URL in the existing worklog/report.
+no credentials, raw verification logs or transcript/prompt contents. Record
+the returned comment URL in the existing worklog/report.
 With no current verifier, this narrow reporting may run while cleanup and stale-code board operations stay
 stopped. If recording fails, report it unavailable, preserve the evidence and claim no reliable saved reminder.
 
@@ -361,8 +391,9 @@ Every inherited target follows the whole current [Leftover rule](#leftover-rule)
 and verifier code: actual origin/ownership, open dependencies, ignored contents, unmerged state, current claim,
 host use and immediate rechecks. A prior unused result expires; unused alone is not dead, and cancellation
 does not make unmerged work disposable. Preserve needed or unpublished deliverables and obtain lasting links
-under step 5. A replaced path, moved tip, changed registration or new claim invalidates the old target
-match; investigate current ownership instead of replaying a command.
+under step 5. Apply the Verification records checks in step 5 before any retry involving verification records. A
+replaced path, moved tip,
+changed registration or new claim invalidates the old target match. Investigate current ownership before any retry.
 
 Once dead is established, use the existing eligible cleanup route for the exact still-matching job. Derive
 every argument, including scratch and regenerated paths, from fresh local inventory and re-established
@@ -455,7 +486,8 @@ An owner file or a tracked deliverable is never a leftover.
    target while carrying out available supported diagnosis. Distinguish that refusal from a safeguard finding
    that protects the target; never force or bypass a target-protecting safeguard. A failed or unavailable check
    is unavailable evidence, never proof that a leftover is dead.
-5. **Settle the exact target.** After the available investigation, apply these criteria:
+5. **Settle the exact target.** Before disposition, apply closeout step 5's Verification records checks to any
+   leftover verification record or worktree containing one. Then, after the available investigation, apply these criteria:
 
    - Live: an open card with a recent claim, unmerged work, in use, or evidence concretely needed by unfinished
      work. Leave it and report the dependency or other evidence.

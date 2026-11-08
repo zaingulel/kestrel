@@ -3,17 +3,21 @@
 //
 // Every test loads the module from a copy wired to the literal markdown configuration, never
 // to this install's own board-config.mjs, so they hold under any tracker. Git and `gh` are
-// injected: each expected value below is written by hand from the card format and git's
+// normally injected; one isolated default-runner execution-boundary mock protects Git diagnostics.
+// Each expected value below is written by hand from the card format and git's
 // documented output formats, not computed by the module. The temporary-repository tests that
 // prove the same reads against real refs are in board-portability.test.mjs.
 //
-// Price tag: recurring cost is one toolkit copy and a handful of small temporary folders, about
-// 20 ms per suite run.
+// Price tag: recurring cost is one toolkit copy, a handful of small temporary folders and one
+// isolated default-runner execution-boundary mock, which starts no child process. The claim
+// observer creates one card in the existing toolkit and removes it in finally.
 // Removal condition: retire it with the markdown tracker.
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
@@ -26,9 +30,11 @@ const {
   containCards,
   configuredTracker,
   deriveColumn,
+  gitRunner,
   jobRefs,
   markdownBoardItems,
   markdownCardDetails,
+  moveMarkdownCards,
   openPullRequests,
   parseCard,
   publishedStatuses,
@@ -306,7 +312,19 @@ test('publishedStatuses reads every card from origin/main in one batch call, fra
 test('publishedStatuses refuses a missing origin/main, naming the fetch', () => {
   assert.throws(
     () => publishedStatuses(fakeGit({ ref: false }).run, new Map([[1, card(1)]])),
-    { message: /^refs\/remotes\/origin\/main is missing; run: git fetch origin main \(fatal: Needed a single revision\)$/ },
+    { message: 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main (fatal: Needed a single revision)' },
+  );
+  const calls = [];
+  assert.throws(
+    () => publishedStatuses((args) => {
+      calls.push(args);
+      throw new Error('Git operation failed; check repository access and configuration');
+    }, new Map([[1, card(1)]])),
+    (error) => {
+      assert.deepEqual(calls, [['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']]);
+      assert.equal(error.message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
+      return true;
+    },
   );
 });
 
@@ -363,11 +381,162 @@ test('jobRefs reads the local and origin job branches, the local tips\' card sta
   ]);
 });
 
+test('ANTI-REGRESSION: markdown Git runner errors keep remote credentials out of diagnostics', (t) => {
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const args = ['ls-remote', '--heads', 'origin'];
+  const calls = [];
+  let stderr;
+  let message = `Git failed for ${unsafeUrl}`;
+  let status = 1;
+  const wrapped = t.mock.method(childProcess, 'execFileSync', (file, argv) => {
+    calls.push(argv);
+    throw Object.assign(new Error(message), { stderr, status });
+  });
+  try {
+    syncBuiltinESMExports();
+    const run = gitRunner();
+    for (const output of [`cannot access ${unsafeUrl}\n`, '']) {
+      stderr = output;
+      calls.length = 0;
+      assert.throws(() => run(args), (error) => {
+        assert.deepEqual(calls, [args], 'one Git failure must not dispatch another child');
+        for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+          assert.ok(!error.message.includes(secret), `remote credentials leaked in ${JSON.stringify(error.message)}`);
+        }
+        assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+        return true;
+      });
+    }
+
+    const localArgs = ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'];
+    const encodedUrl = '%68%74%74%70%73%3A%2F%2F%75%73%65%72%3A%73%65%63%72%65%74%2D%74%6F%6B%65%6E%40%67%69%74%68%75%62%2E%63%6F%6D%2F%6F%2F%72%2E%67%69%74%3F%74%6F%6B%65%6E%3D%71%75%65%72%79%2D%73%65%63%72%65%74';
+    for (const diagnostic of [
+      `fatal: bad numeric config value '${unsafeUrl}' for 'core.repositoryformatversion' in file .git/config: invalid unit`,
+      `fatal: bad numeric config value '${encodedUrl}' for 'core.repositoryformatversion' in file .git/config: invalid unit`,
+      'fatal: unable to read user@host',
+      'fatal: unable to read repo?token=query-secret',
+      'fatal: unable to read host:path',
+      String.raw`fatal: unable to read user\x40host`,
+    ]) {
+      for (const fromStderr of [true, false]) {
+        stderr = fromStderr ? `${diagnostic}\n` : '';
+        message = fromStderr ? `Git failed for ${unsafeUrl}` : diagnostic;
+        status = 128;
+        calls.length = 0;
+        assert.throws(() => run(localArgs), (error) => {
+          assert.deepEqual(calls, [localArgs]);
+          for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl, encodedUrl, diagnostic]) {
+            assert.ok(!error.message.includes(secret), `sensitive Git diagnostic leaked in ${JSON.stringify(error.message)}`);
+          }
+          assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+          return true;
+        });
+      }
+    }
+
+    const mainArgs = ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'];
+    stderr = '';
+    message = String.raw`Command failed: C:\Program Files\Git\cmd\git.exe rev-parse --verify --quiet refs/remotes/origin/main`;
+    status = 1;
+    calls.length = 0;
+    assert.throws(() => publishedStatuses(run, new Map([[1, card(1)]])), (error) => {
+      assert.deepEqual(calls, [mainArgs], 'an unverifiable main ref must stop after one attempt');
+      assert.equal(error.message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
+      return true;
+    });
+
+    for (const [localArgs, cause] of [
+      [['for-each-ref', '--format=%(refname)', 'refs/heads/job/'], 'fatal: not a git repository (or any of the parent directories): .git'],
+      [mainArgs, 'fatal: bad object refs/remotes/origin/main'],
+      [['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], "fatal: Unable to create '.git/index.lock': File exists"],
+      [['rev-parse', 'HEAD'], 'fatal: bad object HEAD'],
+    ]) {
+      for (const fromStderr of [true, false]) {
+        stderr = fromStderr ? `${cause}\n` : '';
+        message = fromStderr ? `Git failed for ${unsafeUrl}` : cause;
+        calls.length = 0;
+        assert.throws(() => run(localArgs), (error) => {
+          assert.deepEqual(calls, [localArgs]);
+          assert.equal(error.message, cause, 'a safe local cause must survive stderr selection and message fallback');
+          return true;
+        });
+      }
+    }
+
+    for (const remoteArgs of [
+      args,
+      ['fetch', 'origin'],
+      ['cat-file', '--batch'],
+      ['cat-file', '-e', `${REMOTE_A}^{commit}`],
+      ['merge-base', '--is-ancestor', REMOTE_A, 'HEAD'],
+      ['rev-parse', '--verify', unsafeUrl],
+    ]) {
+      stderr = 'fatal: not a git repository';
+      message = stderr;
+      calls.length = 0;
+      assert.throws(() => run(remoteArgs), (error) => {
+        assert.deepEqual(calls, [remoteArgs]);
+        assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+        return true;
+      });
+    }
+  } finally {
+    wrapped.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
 test('jobRefs fails the read when ls-remote fails', () => {
   assert.throws(
     () => jobRefs(fakeGit({ remotes: new Error('fatal: unable to access origin') }).run),
     { message: "cannot read origin's branches (git ls-remote --heads origin): fatal: unable to access origin" },
   );
+  const git = fakeGit({ remotes: new Error('Git operation failed; check repository access and configuration') });
+  assert.throws(() => jobRefs(git.run), (error) => {
+    assert.deepEqual(git.calls.map(({ args }) => args), [
+      ['for-each-ref', '--format=%(refname)', 'refs/heads/job/'],
+      ['ls-remote', '--heads', 'origin'],
+    ]);
+    assert.equal(error.message, "cannot read origin's branches (git ls-remote --heads origin); Git diagnostic withheld to protect remote credentials");
+    return true;
+  });
+});
+
+test('claim failures keep useful detail without repeating the default Git advice', () => {
+  const file = join(toolkit.root, CARDS_DIR, '7.md');
+  mkdirSync(join(toolkit.root, CARDS_DIR), { recursive: true });
+  writeFileSync(file, publishedCopy('Claim card', 'Ready'));
+  try {
+    for (const [cause, expected] of [
+      ['fatal: Not a valid object name', `cannot confirm the claim: origin's job/7 (${REMOTE_A}) is not in this clone; run: git fetch origin (fatal: Not a valid object name)`],
+      ['Git operation failed; check repository access and configuration', `cannot confirm the claim: origin's job/7 (${REMOTE_A}) could not be read; if it has not been fetched, run: git fetch origin; Git diagnostic withheld to protect remote credentials`],
+    ]) {
+      const git = fakeGit({ blobs: { [ON_MAIN(7)]: publishedCopy('Claim card', 'Ready') }, remotes: `${REMOTE_A}\trefs/heads/job/7\n` });
+      const calls = [];
+      const ghCalls = [];
+      const run = (args, input) => {
+        calls.push(args);
+        if (JSON.stringify(args) === JSON.stringify(['symbolic-ref', '--short', 'HEAD'])) return 'job/7\n';
+        if (JSON.stringify(args) === JSON.stringify(['cat-file', '-e', `${REMOTE_A}^{commit}`])) throw new Error(cause);
+        return git.run(args, input);
+      };
+      assert.throws(() => moveMarkdownCards([{ issueNumber: 7, statusName: 'In progress' }], run, (args) => ghCalls.push(args)), (error) => {
+        assert.deepEqual(ghCalls, [], 'a failed claim must not query GitHub');
+        assert.deepEqual(calls, [
+          ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'],
+          ['cat-file', '--batch'],
+          ['symbolic-ref', '--short', 'HEAD'],
+          ['for-each-ref', '--format=%(refname)', 'refs/heads/job/'],
+          ['ls-remote', '--heads', 'origin'],
+          ['cat-file', '-e', `${REMOTE_A}^{commit}`],
+        ]);
+        assert.equal(error.cause?.message, expected);
+        return true;
+      });
+    }
+  } finally {
+    rmSync(file);
+  }
 });
 
 test('jobRefs fails the read on an ls-remote line that is not an object id, a tab and a branch', () => {

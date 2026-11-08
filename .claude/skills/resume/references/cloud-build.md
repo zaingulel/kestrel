@@ -271,10 +271,9 @@ left. A released, withdrawn or later claim admits no new cloud build, so a start
 
 ## Reviews in a cloud build
 
-In a cloud build the plan review runs in the cloud: the Claude `plan-reviewer` seat reviews by the fallback dispatch of
-`cross-review` section 4, with no cross-family pass and no authorization asked, and the pull request body records which
-seat reviewed the plan and that the job was built in a cloud session, so the Sol extra-high plan review does not apply
-and no plan review of the other family runs at local delivery.
+In a cloud build the Claude `plan-reviewer` seat reviews the plan natively in the cloud, with no cross-family pass
+and no authorization asked. The pull request body records
+“&lt;seat&gt; reviewed the plan; &lt;reason&gt;; the cross-family plan review does not apply”, naming the cloud build as the reason. No plan review of the other family runs at local delivery.
 
 In a cloud build every review runs in the cloud on this family's own seats, the review of the final tree included, and
 there is no cross-family pass and no authorization to ask: the same `reviewer` charter runs on this family's own seat,

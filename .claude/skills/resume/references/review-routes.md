@@ -5,17 +5,16 @@ This file is part of the `resume` skill: a section number or quoted heading in i
 
 ## Plan review
 
-When the Codex seat cannot be reached, its provider out of usage, unauthenticated or failing, the plan does not wait:
-the Claude `plan-reviewer` seat, Opus at high effort, reviews instead by the fallback route of `cross-review` section 4,
-and the pull request body records which seat reviewed the plan, that Codex was unavailable and how that was established,
-and that the Sol extra-high plan review was therefore not met. As for the review of the final tree below, that recording
-is the whole of the exception: a substitution the body does not declare is a skip. A plan review that failed or was
-capped for any other reason is run again, never substituted.
+When authorization is declined, or the other family's provider is evidenced out of usage, unauthenticated or failing,
+run this family's own `plan-reviewer` natively by `cross-review` section 4. The pull request body records
+“&lt;seat&gt; reviewed the plan; &lt;reason&gt;; the cross-family plan review was therefore not met”, with the refusal or
+unavailable provider and its evidence as the reason. That record is the whole exception: an undeclared substitution
+is a skip. A review that failed or was capped for any other reason is diagnosed and run again, never substituted or
+claimed clean.
 
-In a repository that runs Claude Code alone the Claude `plan-reviewer` seat reviews by the fallback dispatch of
-`cross-review` section 4, and the pull request body records which seat reviewed the plan and that the repository runs
-Claude Code alone, so the Sol extra-high plan review does not apply; in a repository that runs Codex alone its own Codex
-seat reviews, as a Codex session dispatches it.
+In a repository whose settings file names one runtime, run its own `plan-reviewer` natively and record
+“&lt;seat&gt; reviewed the plan; &lt;reason&gt;; the cross-family plan review does not apply”, naming the single runtime as the
+reason. An undeclared single-family review is a skip.
 
 ## The review of the final tree
 

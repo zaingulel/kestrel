@@ -49,7 +49,7 @@ function write() {
   const origin = git('-C', root, 'remote', 'get-url', 'origin');
   if (!origin.ok || !isGithubRepository(origin.out, manifest.canonical)) {
     throw new Error(
-      `refusing to --write: origin ${origin.ok ? origin.out : '(none)'} is not github.com/${manifest.canonical}; record a change in the canonical repository only`,
+      `refusing to --write: origin is not github.com/${manifest.canonical}; record a change in the canonical repository only`,
     );
   }
   const { canonical } = manifest;

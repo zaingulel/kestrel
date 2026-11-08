@@ -141,24 +141,25 @@ function unresolvedReadMessage(number, unresolvedCount) {
   return `requested issue #${number} is not on this board read, which returned ${unresolvedCount} card(s) whose content did not resolve — a just-added card lags the board read, so #${number} may be one of them. Re-run this check before adding the card again.`;
 }
 
-// The card of a requested issue the board read could not list because it is archived: read
-// from the issue-side probe's own board item through the board read's parser, so it is judged
-// like a listed card. Only a closed card passes; an open one is the operator's to unarchive, and
-// an item that cannot be read as this issue's card is never accepted.
-function archivedClosedCard(number, item) {
+// The card of a requested issue the board listing omitted: read from the issue-side probe's own
+// board item through the board read's parser, so it is judged like a listed card. An item that
+// cannot be read as this issue's card is never accepted. An archived card passes only closed; an
+// open one is the operator's to unarchive.
+function probedCard(number, item) {
   const archived = `requested issue #${number} is archived on the board`;
+  const prefix = item.isArchived ? archived : `requested issue #${number} is omitted from the board listing`;
   let card;
   try {
     card = normalizeItem(parseNode(item));
   } catch (err) {
-    throw new Error(`${archived}, but its board item could not be read: ${err.message}`);
+    throw new Error(`${prefix}, but its board item could not be read: ${err.message}`);
   }
   if (card.number !== number) {
     throw new Error(
-      `${archived}, but its board item could not be read: its content resolved to ${card.number == null ? 'no issue' : `#${card.number}`}`,
+      `${prefix}, but its board item could not be read: its content resolved to ${card.number == null ? 'no issue' : `#${card.number}`}`,
     );
   }
-  if (card.state !== 'CLOSED') {
+  if (item.isArchived && card.state !== 'CLOSED') {
     throw new Error(`${archived} while still open, so this read — which lists only unarchived cards — does not show it; unarchive the card rather than adding it again.`);
   }
   return card;
@@ -200,22 +201,25 @@ function checkCardFields(number, card) {
   }
 }
 
-// Returns the requested numbers that were verified from an archived board item.
+// Returns the requested numbers verified from an archived board item and those verified from an
+// unarchived item the board listing omitted.
 function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
   const archivedNumbers = [];
+  const unlistedNumbers = [];
   for (const number of numbers) {
     let card = cardsByNumber.get(number);
     if (!card) {
-      // Every way out of here but a closed archived card is a failure — the ordering only names
-      // the cause the operator should act on, and never softens the verdict on a read the check
-      // could not confirm (#572):
+      // Every way out of here but a card read from its own board item is a failure — the ordering
+      // only names the cause the operator should act on, and never softens the verdict on a read the
+      // check could not confirm (#572):
       // 1. the probe failed and the read returned unresolved cards → the evidence the read DID
       //    establish beats the evidence the probe could not: report the hedged cause;
       // 2. the probe failed on a clean read → no cause is established at all, so say only that;
       // 3. the issue reports an ARCHIVED item on this project → the board read lists unarchived
       //    cards only, so that item is the card's one view: a closed card is read from it and
       //    checked below like a listed one, and an open card fails, since unarchiving is the only fix;
-      // 4. it reports an unarchived item on THIS project → the board read lagged, positively identified;
+      // 4. it reports an unarchived item on THIS project → that item is the card's own record, read
+      //    and checked below like a listed one even though the listing omitted it;
       // 5. no item on this project → the hedged cause if the read was dirty, otherwise a
       //    confirmed absence, not an inference from nothing.
       let probe;
@@ -227,11 +231,9 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
           `could not confirm whether issue #${number} is on the board: ${err.message}`,
         );
       }
-      if (probe?.isArchived) {
-        card = archivedClosedCard(number, probe);
-        archivedNumbers.push(number);
-      } else if (probe) {
-        throw new Error(`requested issue #${number} is on the board but not in this board read, which lagged the card; re-run this check rather than adding the card again.`);
+      if (probe) {
+        card = probedCard(number, probe);
+        (probe.isArchived ? archivedNumbers : unlistedNumbers).push(number);
       } else {
         throw new Error(unresolvedCount > 0
           ? unresolvedReadMessage(number, unresolvedCount)
@@ -240,7 +242,7 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
     }
     checkCardFields(number, card);
   }
-  return archivedNumbers;
+  return { archivedNumbers, unlistedNumbers };
 }
 
 function formatNumbers(numbers) {
@@ -275,13 +277,13 @@ function boardVerifiedLines(requestedNumbers) {
 // tests. The board is deliberately read once, then the subject gets one native
 // `subIssues` query for its total and its child numbers: no raw project-list read.
 // The board-item probe is one extra request for each requested card the board read
-// lacks, which fails unless the probe finds it closed and archived.
+// lacks, which fails unless the probe finds its item on the board and the item passes the card checks.
 export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
   const { subjectNumber, childNumbers } = parseIssuePublishArgs(args);
   const standalone = childNumbers.length === 0;
   const requestedNumbers = [subjectNumber, ...childNumbers];
   const { cards, unresolvedCount } = boardCardsByNumber(fetchBoard(ghExec));
-  const archivedNumbers = verifyBoardCards(requestedNumbers, cards, unresolvedCount, ghExec);
+  const { archivedNumbers, unlistedNumbers } = verifyBoardCards(requestedNumbers, cards, unresolvedCount, ghExec);
 
   const response = ghExec([
     'api', 'graphql', '-f', `query=${nativeChildrenQuery(subjectNumber)}`,
@@ -291,6 +293,9 @@ export function verifyIssuePublication(args, { fetchBoard, ghExec }) {
     ...boardVerifiedLines(requestedNumbers),
     ...(archivedNumbers.length === 0 ? [] : [
       `issue-publish: closed cards archived on the board, verified from their own board items: ${formatNumbers(archivedNumbers)}.`,
+    ]),
+    ...(unlistedNumbers.length === 0 ? [] : [
+      `issue-publish: cards omitted from the board listing, verified from their own board items: ${formatNumbers(unlistedNumbers)}.`,
     ]),
   ];
 

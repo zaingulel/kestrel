@@ -49,6 +49,9 @@ flowchart LR
     O -.->|trust perimeter widened| S[security-reviewer]
     O -.->|locate only| E[explorer]
     O -.->|explicit escalation| X[oracle]
+    A -.->|Claude only: bounded lookup| E
+    X -.->|Claude only: bounded lookup| E
+    S -.->|Claude only: bounded lookup| E
 ```
 
 The diagram shows who hands what to whom: the orchestrator is the only seat that talks to every other seat,
@@ -58,10 +61,21 @@ In words: the orchestrator sends the architect a planner handoff. Where the card
 architect's fixed plan goes to the plan-reviewer, which reports findings to the orchestrator. The orchestrator
 then hands a builder one slice at a time and receives a diff with focused evidence. It sends the final tree to
 the reviewer and receives findings. Only when the trust perimeter widens does it call the security-reviewer; the
-explorer is called only to locate code, and the oracle only on explicit escalation.
+explorer is called only to locate code, and the oracle only on explicit escalation. On Claude Code, the architect,
+oracle and security-reviewer can each send a bounded missing lookup directly to explorer. Each waits for completed
+findings in a named file before doing its own planning, reasoning or trust judgment. These are the three
+Claude-only discovery edges; explorer never supplies their judgment.
 
-A plan-first card's plan is read by the `plan-reviewer` charter before any builder starts. Which cards are
-plan-first, which seat and model run that review, how a session on either runtime reaches it, and what happens
+On Codex, missing discovery returns to the orchestrator, which supplies completed findings before redispatching
+the protected seat. This is the coordinator-first instruction policy; inherited permissions do not establish an
+enforced per-seat child-role limit. The Claude seats' plain `Agent` tool permits delegation, while the handoff hook
+limits their child role to `explorer`; their [charters](../.claude/agents/) define the bounded lookup and waiting
+contract. The [planner template](../.agents/templates/planner-handoff.md) carries either completed findings or the
+Claude lookup branch, and [resume's planning step](../.agents/skills/resume/SKILL.md#4-plan) owns dispatch.
+
+A plan-first card's plan is read by the `plan-reviewer` charter before any builder starts. Normally Claude-written
+plans go to Codex and Codex-written plans go to Claude, so the other family reviews the plan. Which cards are
+plan-first, how the configured seat is reached, and what happens
 when it cannot be reached are in [the `resume` skill](../.agents/skills/resume/SKILL.md) under "4. Plan" and
 [the `cross-review` skill](../.agents/skills/cross-review/SKILL.md) under "4. Review a plan before the build".
 
