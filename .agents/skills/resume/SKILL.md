@@ -334,6 +334,11 @@ advance approval needs GitHub issues; this repository's tracker is <TRACKER>
   succeeds.
 - Before edits in any newly created runtime worktree, require `git rev-parse HEAD` to equal that newly recorded
   commit. Preserve and report a mismatch before edits.
+- After entering the verified job worktree or the worktree created for a parallel slice, read its project files and
+  run its commands there, including read-only checks and packaging. Give file tools that worktree path when their
+  default folder differs.
+  Use the fetched commit or its selected verifier where a step requires current `main`. Follow the named runtime
+  setup, guard and closeout steps in their own checkout contexts.
 - Keep scratch files, plans, and local draft or review prompts inside the job worktree where possible;
   the existing gitignored .claude/worklog area is suitable. Retain artifacts needed for unfinished work or
   handoff. Apply routine scratch cleanup through [closeout step 5](../closeout/SKILL.md) under `AGENTS.md`'s
@@ -378,7 +383,7 @@ advance approval needs GitHub issues; this repository's tracker is <TRACKER>
     lacked, with the error printed; and what the session has already written to the card. Read again on the
     owner's say, without posting a second claim, and withdraw as above when a complete read shows another
     claim first.
-- Run `npm ci` in a fresh checkout, then confirm `git config --get core.hooksPath` prints `.githooks`; when it
+- Run `npm ci` in the fresh job worktree, then confirm `git config --get core.hooksPath` prints `.githooks`; when it
   does not, run `git config core.hooksPath .githooks` and report it.
 
 ## 4. Plan

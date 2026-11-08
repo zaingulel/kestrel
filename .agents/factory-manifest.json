@@ -1,10 +1,10 @@
 {
   "canonical": "zaingulel/fabraik",
   "release": {
-    "tag": "v0.11.0",
-    "id": 438160479,
-    "assetId": 723549003,
-    "digest": "sha256:3d6b4a16dad5341424da39610b2fb7663d21e7718a7670cb1b7579fc4764d6ce"
+    "tag": "v0.11.1",
+    "id": 438209707,
+    "assetId": 723773112,
+    "digest": "sha256:1e6b7578f3ed1d02c91b2878cb3711093f1f860bb2e2aae36dec9e9720f9d4d6"
   },
   "entries": [
     {
@@ -145,7 +145,7 @@
     },
     {
       "path": ".agents/skills/resume/SKILL.md",
-      "sha256": "87292cfa34597693a650c88e6ce292ba91970785944db05eff3ed4b9f8938fb5"
+      "sha256": "97d86e3b3c0cac350bc4462c280c28033a9b80c000ccd929ea2b31e9e069b865"
     },
     {
       "path": ".agents/skills/resume/references/cloud-build.md",
@@ -597,7 +597,7 @@
     },
     {
       "path": ".claude/skills/resume/SKILL.md",
-      "sha256": "87292cfa34597693a650c88e6ce292ba91970785944db05eff3ed4b9f8938fb5"
+      "sha256": "97d86e3b3c0cac350bc4462c280c28033a9b80c000ccd929ea2b31e9e069b865"
     },
     {
       "path": ".claude/skills/resume/references/cloud-build.md",
@@ -713,7 +713,7 @@
     },
     {
       "path": ".codex/agents/security-reviewer.toml",
-      "sha256": "f56eec0761a8cf23e7e3cb32e25ad6b958c6f05e004af2fd7204fc8f283f2577"
+      "sha256": "4fd4b8c143d04e65e0deccef1cbeb3a1293a48a82280a0748f75a3e913d5d1e9"
     },
     {
       "path": ".codex/hooks.json",
