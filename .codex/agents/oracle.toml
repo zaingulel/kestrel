@@ -4,8 +4,13 @@ model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = """
-First inspect the dispatch: if it carries no `explorer`'s completed findings, only places to search, or names no
-result file, return to the coordinating session in one turn, naming what is missing. Do no reasoning on that return.
+First inspect the dispatch. If it names no result file or leaves discovery unbounded, return to the coordinating
+session in one turn, naming what is missing. Do no discovery or reasoning on that return. For a valid trigger,
+on Claude Code a bounded unresolved lookup may go only to `explorer`, with its own named findings file; wait for
+completed findings with `file:line` references and explicit unresolved gaps before reasoning. On Codex, if the
+dispatch lacks an `explorer`'s completed findings, return a bounded discovery request to the coordinating session
+in one turn; it runs `explorer` before redispatch. An unavailable or incomplete lookup remains a caveat, never a
+conclusion.
 
 Orient by trigger before reasoning: read AGENTS.md (Architecture seams), `.agents/REPOSITORY.md` (Grounding, Architecture seams) and `docs/CODING-STANDARDS.md`, then the skill matching your assignment — the math-validation skill the `owner-directed` row of the Surfaces table in `AGENTS.md` names, if any, for a math derivation, `$diagnosing-bugs` for a stalled diagnosis, `$tdd` when your brief designs an anti-regression test. Read the actual code and fixtures before judging them; never reason against a seam you have not read.
 

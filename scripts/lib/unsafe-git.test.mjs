@@ -7,6 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { join, resolve, sep } from 'node:path';
 import { blockReason, cleanupPermission } from './unsafe-git.mjs';
 
@@ -1412,7 +1414,8 @@ test('gh pr new is judged as gh pr create', () => {
 // answer only the reads the check makes, for a job/7 worktree whose origin is acme/widgets and whose
 // GraphQL reply carries GitHub's own field names, and record every call so a case can say which reads
 // a refusal must come before. The expected lines are written by hand from the plan's record form,
-// validity rules and exit codes.
+// validity rules and exit codes. Origin-lookup credential custody also uses an isolated builtin
+// execution mock; the Windows executable cases retain their real missing-executable failures.
 
 const PRE_APPROVED = 'a pre-approved run session ';
 const NOT_APPROVED = `${PRE_APPROVED}found no valid advance approval (check exit 0): not approved 7: `;
@@ -1456,11 +1459,27 @@ function preApprovedRun({
   hasNextPage = false,
   repositoryId = ORIGIN_ID,
   graphqlError,
+  settingOid = 'a'.repeat(40),
+  settingMode = '100644\n',
+  settingText = '{"version":1,"preApprovedRun":true}',
+  settingError,
 } = {}) {
   const calls = [];
   const git = (args) => {
     const call = `git ${args.join(' ')}`;
     calls.push(call);
+    if (call === 'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}') {
+      if (settingError === 'ref') throw new Error('synthetic-setting-secret https://synthetic.invalid/private');
+      return `${settingOid}\n`;
+    }
+    if (call === `git ls-tree --full-tree --format=%(objectmode) ${settingOid} -- .agents/factory-settings.json`) {
+      if (settingError === 'tree') throw new Error('synthetic-setting-secret https://synthetic.invalid/private');
+      return settingMode;
+    }
+    if (call === `git show ${settingOid}:.agents/factory-settings.json`) {
+      if (settingError === 'blob') throw new Error('synthetic-setting-secret https://synthetic.invalid/private');
+      return settingText;
+    }
     if (call === 'git symbolic-ref --quiet --short HEAD') return `${branch}\n`;
     if (call === 'git remote get-url --push --all origin') return pushUrls;
     if (call === 'git remote get-url origin') return `${ORIGIN_URL}\n`;
@@ -1796,14 +1815,26 @@ test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin r
       assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes(name), `${command}, ${name}: ${JSON.stringify(reason)}`);
       assert.deepEqual(calls, [], `${command}, ${name}`);
     }
-    const pushDestinations = [`${ORIGIN_URL}\nhttps://github.com/mirror/widgets.git\n`, 'https://github.com/mirror/widgets.git\n'];
+    const unsafeUrl = 'https://user:secret-token@github.com/o/r.git';
+    const queryUrl = `${unsafeUrl}?token=query-secret`;
+    const pushDestinations = [
+      `${ORIGIN_URL}\nhttps://github.com/mirror/widgets.git\n`,
+      'https://github.com/mirror/widgets.git\n',
+      `${unsafeUrl}\n`,
+      `${queryUrl}\n`,
+      `${ORIGIN_URL}\n${unsafeUrl}\n`,
+      `${ORIGIN_URL}\n${queryUrl}\n`,
+    ];
     for (const pushUrls of pushDestinations) {
       const { reason, calls } = judged(command, { pushUrls });
-      assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes('origin pushes to'), `${command}, ${JSON.stringify(pushUrls)}: ${JSON.stringify(reason)}`);
+      for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl, queryUrl]) {
+        assert.ok(!reason.includes(secret), `${command}: remote credentials leaked in ${JSON.stringify(reason)}`);
+      }
+      assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes('origin does not have exactly one push destination matching the repository it fetches from'), `${command}, ${JSON.stringify(pushUrls)}: ${JSON.stringify(reason)}`);
       assert.deepEqual(calls.filter(isGh), [], `${command}, ${JSON.stringify(pushUrls)}`);
     }
     assert.ok(
-      judged(command, { pushUrls: pushDestinations[1] }).reason.includes('origin pushes to https://github.com/mirror/widgets.git, not the repository it fetches from'),
+      judged(command, { pushUrls: pushDestinations[1] }).reason.includes('origin does not have exactly one push destination matching the repository it fetches from'),
       command,
     );
     const unscoped = judged(command, { unscopedId: 'R_kgDOother' });
@@ -1830,6 +1861,58 @@ test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin r
   }
 });
 
+test('ANTI-REGRESSION: advance approval origin lookup errors keep remote credentials out of diagnostics', (t) => {
+  const here = { cwd: process.cwd(), isRootCheckout: () => false, platform: process.platform };
+  const BIN = 'C:\\fabraik-absent\\bin';
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const expected = [
+    [`${BIN}\\git.exe`, ['symbolic-ref', '--quiet', '--short', 'HEAD']],
+    [`${BIN}\\git.exe`, ['remote', 'get-url', '--push', '--all', 'origin']],
+    [`${BIN}\\git.exe`, ['remote', 'get-url', 'origin']],
+    [`${BIN}\\gh.exe`, ['repo', 'view', '--json', 'id,nameWithOwner,defaultBranchRef', '--', unsafeUrl]],
+  ];
+  const calls = [];
+  let malformedJson = false;
+  const originalExecFileSync = childProcess.execFileSync;
+  const wrapped = t.mock.method(childProcess, 'execFileSync', (file, args, options) => {
+    calls.push([file, args]);
+    const index = expected.findIndex(([command, argv]) => file === command && JSON.stringify(args) === JSON.stringify(argv));
+    if (index === 0) return 'job/7\n';
+    if (index === 1 || index === 2) return `${unsafeUrl}\n`;
+    if (index === 3) {
+      if (malformedJson) return `{invalid JSON: ${unsafeUrl}`;
+      throw Object.assign(new Error(`GitHub lookup failed for ${unsafeUrl}`), { stderr: `cannot access ${unsafeUrl}\n`, status: 1 });
+    }
+    return originalExecFileSync(file, args, options);
+  });
+  try {
+    syncBuiltinESMExports();
+    for (const malformed of [false, true]) {
+      malformedJson = malformed;
+      calls.length = 0;
+      const reason = blockReason(PUSH, here, { preApproved: {
+        start: RUN_START,
+        tracker: 'github',
+        env: { PATH: BIN },
+        platform: 'win32',
+        exists: (candidate) => candidate === `${BIN}\\git.exe` || candidate === `${BIN}\\gh.exe`,
+      } });
+      assert.deepEqual(calls, expected, 'the matching origin must reach only the origin-bound GitHub lookup');
+      for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+        assert.ok(!reason.includes(secret), `remote credentials leaked in ${JSON.stringify(reason)}`);
+      }
+      if (malformedJson) {
+        assert.equal(reason, `${PRE_APPROVED}publishes nothing: unreadable origin repository: GitHub CLI returned invalid JSON`);
+      } else {
+        assert.equal(reason, `${PRE_APPROVED}publishes nothing: unreadable origin repository: the GitHub CLI lookup failed; check that gh is installed on PATH and can access the repository`);
+      }
+    }
+  } finally {
+    wrapped.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
 test("ANTI-REGRESSION: a pre-approved run session marks ready or merges only a pull request into origin's default branch", () => {
   const INTO_MAIN = `${PRE_APPROVED}acts only on its own job pull request into the default branch: #12 targets other, not main`;
   for (const command of [READY, MERGE, `${READY} --undo`]) {
@@ -1850,7 +1933,7 @@ test("ANTI-REGRESSION: a pre-approved run session marks ready or merges only a p
   }
 });
 
-test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.exe only from absolute PATH entries', () => {
+test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.exe only from absolute PATH entries', (t) => {
   // No runner is injected for the executable under test, so the default one is built from the lookup.
   // A spawn names the file it was given in its own error, which is how a reason shows the path used.
   const here = { cwd: process.cwd(), isRootCheckout: () => false, platform: process.platform };
@@ -1859,13 +1942,46 @@ test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.
   const { git } = preApprovedRun().preApproved;
   const relativeGit = blockReason(PUSH, here, { preApproved: onWindows('tools\\bin', () => true) });
   assert.ok(relativeGit.startsWith(PRE_APPROVED) && relativeGit.includes('git.exe') && !relativeGit.includes('tools\\bin'), JSON.stringify(relativeGit));
-  const relativeGh = blockReason(CREATE, here, { preApproved: onWindows('tools\\bin', () => true, { git }) });
-  assert.ok(relativeGh.startsWith(PRE_APPROVED) && relativeGh.includes('gh.exe') && !relativeGh.includes('tools\\bin'), JSON.stringify(relativeGh));
+  const relativeCalls = [];
+  const relativeLookup = t.mock.method(childProcess, 'execFileSync', (file, args) => {
+    relativeCalls.push([file, args]);
+    throw new Error('relative executable must not run');
+  });
+  try {
+    syncBuiltinESMExports();
+    const relativeGh = blockReason(CREATE, here, { preApproved: onWindows('tools\\bin', () => true, { git }) });
+    assert.deepEqual(relativeCalls, [], 'a relative gh.exe lookup must never execute a child');
+    assert.equal(relativeGh, `${PRE_APPROVED}publishes nothing: found no gh.exe in an absolute PATH entry`);
+    assert.ok(relativeGh.startsWith(PRE_APPROVED) && !relativeGh.includes('tools\\bin'), JSON.stringify(relativeGh));
+  } finally {
+    relativeLookup.mock.restore();
+    syncBuiltinESMExports();
+  }
   const exists = (candidate) => candidate === `${BIN}\\git.exe` || candidate === `${BIN}\\gh.exe`;
   const absoluteGit = blockReason(PUSH, here, { preApproved: onWindows(`tools\\bin;${BIN}`, exists) });
   assert.ok(absoluteGit.startsWith(PRE_APPROVED) && absoluteGit.includes(`${BIN}\\git.exe`), JSON.stringify(absoluteGit));
-  const absoluteGh = blockReason(CREATE, here, { preApproved: onWindows(`tools\\bin;${BIN}`, exists, { git }) });
-  assert.ok(absoluteGh.startsWith(PRE_APPROVED) && absoluteGh.includes(`${BIN}\\gh.exe`), JSON.stringify(absoluteGh));
+  const originLookup = ['repo', 'view', '--json', 'id,nameWithOwner,defaultBranchRef', '--', ORIGIN_URL];
+  const absoluteCalls = [];
+  const originalExecFileSync = childProcess.execFileSync;
+  const absoluteLookup = t.mock.method(childProcess, 'execFileSync', (file, args, options) => {
+    absoluteCalls.push([file, args]);
+    if (file === `${BIN}\\gh.exe` && JSON.stringify(args) === JSON.stringify(originLookup)) {
+      return JSON.stringify({ id: ORIGIN_ID, nameWithOwner: 'acme/widgets', defaultBranchRef: { name: 'main' } });
+    }
+    return originalExecFileSync(file, args, options);
+  });
+  try {
+    syncBuiltinESMExports();
+    const absoluteGh = blockReason(CREATE, here, { preApproved: onWindows(`tools\\bin;${BIN}`, exists, { git }) });
+    assert.deepEqual(absoluteCalls, [
+      [`${BIN}\\gh.exe`, originLookup],
+      [`${BIN}\\gh.exe`, ['repo', 'view', '--json', 'id']],
+    ]);
+    assert.ok(absoluteGh.startsWith(PRE_APPROVED) && absoluteGh.includes(`${BIN}\\gh.exe`), JSON.stringify(absoluteGh));
+  } finally {
+    absoluteLookup.mock.restore();
+    syncBuiltinESMExports();
+  }
   // The branch read needs only git, so with gh.exe absent a push off main is refused for the branch, not for gh.exe.
   const { git: gitOnMain } = preApprovedRun({ branch: 'main' }).preApproved;
   const gitOnly = (candidate) => candidate === `${BIN}\\git.exe`;
@@ -1886,4 +2002,107 @@ test('a pre-approved run session may take its own job pull request back to draft
     assert.ok(calls.includes(PR_VIEW), `${command}: ${JSON.stringify(calls)}`);
     assert.deepEqual(calls.filter(isGraphql), [], command);
   }
+});
+
+
+// The launcher repeats this matrix to protect its separate wire.
+test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', async (t) => {
+  const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
+  const unavailable = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
+  const enabled = '{"version":1,"preApprovedRun":true}';
+  const off = '{"version":1,"preApprovedRun":false}';
+  const cases = [
+    { name: '40-digit OID true', fixture: {} },
+    { name: '64-digit OID true', fixture: { settingOid: 'c'.repeat(64) } },
+    { name: 'executable regular mode', fixture: { settingMode: '100755\n' } },
+    { name: 'absent file', fixture: { settingMode: '' }, error: disabled },
+    { name: 'absent key', fixture: { settingText: '{"version":1}' }, error: disabled },
+    { name: 'false', fixture: { settingText: off }, error: disabled },
+    { name: 'unreadable ref', fixture: { settingError: 'ref' }, error: unavailable },
+    { name: 'unreadable tree', fixture: { settingError: 'tree' }, error: unavailable },
+    { name: 'unreadable blob', fixture: { settingError: 'blob' }, error: unavailable },
+    { name: 'invalid OID', fixture: { settingOid: 'synthetic-setting-secret' }, error: unavailable },
+    { name: 'symlink', fixture: { settingMode: '120000\n' }, error: unavailable },
+    { name: 'directory', fixture: { settingMode: '040000\n' }, error: unavailable },
+    { name: 'malformed JSON', fixture: { settingText: '{synthetic-setting-secret' }, error: unavailable },
+    { name: 'nonobject JSON', fixture: { settingText: '["synthetic-setting-secret"]' }, error: unavailable },
+    { name: 'null JSON', fixture: { settingText: 'null' }, error: unavailable },
+    { name: 'wrong value', fixture: { settingText: '{"version":1,"preApprovedRun":"synthetic-setting-secret"}' }, error: unavailable },
+    { name: 'near key', fixture: { settingText: '{"version":1,"preApprovedRuns":true}' }, error: unavailable },
+    { name: 'invalid schema', fixture: { settingText: '{"version":2,"preApprovedRun":true}' }, error: unavailable },
+  ];
+  for (const command of DELIVERY) {
+    for (const scenario of cases) await t.test(`${command}: ${scenario.name}`, () => {
+      const { reason, calls } = judged(command, scenario.fixture);
+      assert.equal(reason, scenario.error ? `${PRE_APPROVED}publishes nothing: ${scenario.error}` : '');
+      assert.doesNotMatch(reason, /synthetic-setting-secret|synthetic\.invalid/);
+      if (scenario.error) assert.deepEqual(calls.filter(isGraphql), [], 'setting refusal precedes the approval read');
+      else {
+        const oid = scenario.fixture.settingOid ?? 'a'.repeat(40);
+        assert.deepEqual(calls.filter((call) => /^git (?:rev-parse|ls-tree|show) /.test(call)), [
+          'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}',
+          `git ls-tree --full-tree --format=%(objectmode) ${oid} -- .agents/factory-settings.json`,
+          `git show ${oid}:.agents/factory-settings.json`,
+        ]);
+        assert.ok(calls.some(isGraphql), 'enabled publication still checks the approval');
+      }
+    });
+  }
+  for (const [name, text, jobText, error] of [
+    ['job true main false', off, enabled, disabled], ['job false main true', enabled, off, undefined],
+  ]) await t.test(name, () => {
+    const run = preApprovedRun({ settingText: text });
+    const git = (args) => args.join(' ') === 'show HEAD:.agents/factory-settings.json' ? jobText : run.preApproved.git(args);
+    const reason = blockReason(PUSH, inJob, { preApproved: { ...run.preApproved, git } });
+    assert.equal(reason, error ? `${PRE_APPROVED}publishes nothing: ${error}` : '');
+    assert.ok(!run.calls.includes('git show HEAD:.agents/factory-settings.json'));
+  });
+  await t.test('one pinned object per check and next check observes fetched revocation', () => {
+    const old = 'a'.repeat(40);
+    const next = 'b'.repeat(40);
+    let current = old;
+    const reads = [];
+    const run = preApprovedRun();
+    const git = (args) => {
+      if (args[0] === 'rev-parse') {
+        reads.push(args);
+        const pinned = current;
+        current = next;
+        return pinned + '\n';
+      }
+      if (args[0] === 'ls-tree') { reads.push(args); return '100644\n'; }
+      if (args[0] === 'show') { reads.push(args); return args[1] === `${old}:.agents/factory-settings.json` ? enabled : off; }
+      return run.preApproved.git(args);
+    };
+    const judge = () => blockReason(PUSH, inJob, { preApproved: { ...run.preApproved, git } });
+    assert.equal(judge(), '');
+    assert.deepEqual(reads, [
+      ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}'],
+      ['ls-tree', '--full-tree', '--format=%(objectmode)', old, '--', '.agents/factory-settings.json'],
+      ['show', `${old}:.agents/factory-settings.json`],
+    ]);
+    reads.length = 0;
+    assert.equal(judge(), `${PRE_APPROVED}publishes nothing: ${disabled}`);
+    assert.deepEqual(reads, [
+      ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}'],
+      ['ls-tree', '--full-tree', '--format=%(objectmode)', next, '--', '.agents/factory-settings.json'],
+      ['show', `${next}:.agents/factory-settings.json`],
+    ]);
+  });
+  for (const command of ['gh pr ready 12 --undo', 'gh pr ready --undo 12']) {
+    for (const fixture of [{ settingText: off }, { settingMode: '' }, { settingError: 'ref' }]) {
+      await t.test(`${command}: disabled or unavailable setting still permits owned withdrawal ${JSON.stringify(fixture)}`, () => {
+        const { reason, calls } = judged(command, { ...fixture, comments: [] });
+        assert.equal(reason, '');
+        assert.ok(calls.includes(PR_VIEW));
+        assert.deepEqual(calls.filter((call) => /^(?:git (?:rev-parse|ls-tree|show)|gh api graphql)/.test(call)), []);
+      });
+    }
+  }
+  await t.test('unmarked and product manager paths retain their verdicts without setting reads', () => {
+    for (const command of DELIVERY) {
+      assert.equal(blockReason(command, inJob), '');
+      assert.equal(judged(command, { settingError: 'ref' }, { runSession: true }).reason, REASON_RUN_SESSION);
+    }
+  });
 });

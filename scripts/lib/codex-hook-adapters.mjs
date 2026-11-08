@@ -1,4 +1,10 @@
 // Codex hook transport adapter — keeps provider payload shapes out of unsafe-git policy.
+import { readAppRunConnection } from './checkout-context.mjs';
+export { CODEX_APP_RUN_UNAVAILABLE } from './checkout-context.mjs';
+
+export function readCodexAppRun({ sessionCwd, payload, env, operatingRoot }) {
+  return readAppRunConnection({ sessionCwd, sessionId: payload?.session_id, reportedCwd: payload?.cwd, env, operatingRoot });
+}
 
 export function codexCommandForGuard(toolInput) {
   if (typeof toolInput?.cmd === 'string') return toolInput.cmd;

@@ -118,8 +118,10 @@ update writes or removes.
 
 **What else the settings file may hold.** A consumer's settings file may hold `planApproval`, `true` or `false`,
 which the settings check then admits: no script acts on the value, so it changes no byte an update writes, no seat
-and no runtime a repository runs. It may hold `productManager` and `preApprovedRun` on the same terms. A consumer's
-settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
+and no runtime a repository runs. It may hold `productManager` on the same terms. It may hold `preApprovedRun`,
+`true` or `false`, without changing update bytes, seats or runtimes; the launcher, board approval check and
+publication guard enforce its explicit fetched-main opt-in. Only true lets a record replace an ordinary pick or push
+yes, as [resume](../resume/SKILL.md#2-work-pick) says. A consumer's settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
 other value and a file naming one runtime still refused: no update, check or hook acts on the value, so it changes no
 byte an update writes, no seat and no runtime; `fabraik init` writes it only on a yes to its cross-family disclosure,
 and a session reads it on `main` as the owner's standing authorization for the reviews the tiers call cross-family.

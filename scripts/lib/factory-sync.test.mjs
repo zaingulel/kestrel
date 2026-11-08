@@ -700,13 +700,20 @@ test('without --write the CLI prints its usage and exits non-zero', (t) => {
 });
 
 test('--write refuses a repository whose origin is not the canonical, and one with no origin', (t) => {
-  for (const origin of ['https://github.com/example-owner/adopter.git', undefined]) {
+  const unsafeUrl = 'https://user:secret-token@github.com/example-owner/adopter.git';
+  const queryUrl = `${unsafeUrl}?token=query-secret`;
+  for (const origin of ['https://github.com/example-owner/adopter.git', undefined, unsafeUrl, queryUrl]) {
     const root = staleRepository(t, origin);
     const before = manifestBytes(root);
     const run = runCli(root, '--write');
     assert.notEqual(run.status, 0, `origin ${origin}`);
-    assert.match(run.stderr, /refusing to --write: .* is not github\.com\/example-owner\/example-repo/);
     assert.equal(manifestBytes(root), before, 'a refused --write must leave the manifest untouched');
+    for (const output of [run.stdout, run.stderr]) {
+      for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl, queryUrl]) {
+        assert.ok(!output.includes(secret), `remote credentials leaked in ${JSON.stringify(output)}`);
+      }
+    }
+    assert.match(run.stderr, /refusing to --write: .* is not github\.com\/example-owner\/example-repo/);
   }
 });
 
@@ -979,7 +986,11 @@ test('render refuses the canonical repository and invalid settings and writes no
   git(root, 'remote', 'set-url', 'origin', CANONICAL_URL);
   assertRenderRefused(
     root,
-    /^Error: the origin https:\/\/github\.com\/example-owner\/example-repo is the canonical github\.com\/example-owner\/example-repo, whose seat lines are the defaults/,
+    (error) => {
+      assert.ok(!String(error).includes(CANONICAL_URL), `configured origin echoed in ${String(error)}`);
+      assert.match(String(error), /^Error: the origin is the canonical github\.com\/example-owner\/example-repo, whose seat lines are the defaults/);
+      return true;
+    },
   );
 });
 

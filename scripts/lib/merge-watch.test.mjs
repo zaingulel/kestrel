@@ -4,11 +4,12 @@
 // Polling scenarios run `main` with an in-memory ghExec, a fake clock and a recording sleep that advances it by the
 // requested milliseconds and returns at once. The pull-request
 // form's argument contract and terminal success/failure cases run the real command as a subprocess with the same fake
-// replies. The draft wait also has one positive and one negative process case in fresh Git repositories, isolated from
-// the machine's and the environment's Git configuration. The cloud draft case also runs under an injected URL rewrite.
+// replies. The draft wait also has positive, provenance-refusal and credential-diagnostic process cases in fresh Git
+// repositories, isolated from machine and environment Git configuration.
+// The cloud draft case also runs under an injected URL rewrite.
 //
 // Recurring cost: no subprocess or disk state for in-memory polling; CLI wire proofs start Node for the command and
-// each faked gh call, with no network. Only the two draft wire cases initialize Git repositories.
+// each faked gh call, with no network. The three draft wire cases initialize Git repositories.
 // Removal condition: retire with scripts/merge-watch.mjs, and the draft-wait tests with its `--draft` mode.
 
 import { spawnSync } from 'node:child_process';
@@ -900,12 +901,18 @@ test('the draft wait reads only the open pull requests on its branch, keeps wait
   assert.deepEqual(run.sleeps, [30_000, 30_000]);
 });
 
-test('the draft wait exits 1 the moment gh fails, with the gh error as its last line and no read after it', async () => {
-  const run = await waitDraft([[0, '[]'], [1, 'error connecting to api.github.com']]);
+test('the draft wait exits 1 the moment gh fails, with a safe reason last and no read after it', async () => {
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const run = await waitDraft([[0, '[]'], [1, `error connecting to ${unsafeUrl}`]], undefined, { origin: `${unsafeUrl}\n` });
   assert.equal(run.status, 1);
-  assert.equal(run.last, 'error connecting to api.github.com');
-  assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST, DRAFT_LIST]);
+  assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST, DRAFT_LIST].map((args) => args.map((arg) => (arg === DRAFT_ORIGIN ? unsafeUrl : arg))));
   assert.equal(run.sleeps.length, 1);
+  for (const line of run.lines) {
+    for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+      assert.ok(!line.includes(secret), `remote credentials leaked in ${JSON.stringify(line)}`);
+    }
+  }
+  assert.equal(run.last, 'could not list origin pull requests; check Git and GitHub CLI installation, repository access and configuration');
 });
 
 test('the draft wait exits 1 without waiting on a pull request list it cannot read', async () => {
@@ -916,10 +923,17 @@ test('the draft wait exits 1 without waiting on a pull request list it cannot re
     assert.equal(run.sleeps.length, 0, body);
     assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST], body);
   }
-  const garbled = await waitDraft([[0, 'not json']]);
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const garbled = await waitDraft([[0, `{invalid JSON: ${unsafeUrl}`]]);
   assert.equal(garbled.status, 1);
-  assert.match(garbled.last, /JSON/);
   assert.equal(garbled.sleeps.length, 0);
+  assert.deepEqual(garbled.calls, [DRAFT_REPO, DRAFT_LIST]);
+  for (const line of garbled.lines) {
+    for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+      assert.ok(!line.includes(secret), `remote credentials leaked in ${JSON.stringify(line)}`);
+    }
+  }
+  assert.equal(garbled.last, 'unreadable pull request list: GitHub CLI returned invalid JSON');
 });
 
 test('the draft wait exits 1 naming each number when more than one pull request is open on its branch', async () => {
@@ -976,12 +990,20 @@ test('ANTI-REGRESSION: cloud drafts require origin repository and exact job bran
       assert.deepEqual(run.sleeps, [], label);
     }
   }
-  for (const body of ['null', '[]', '{}', '{"id":""}', '{"id":7}', '{"id":"R origin"}', 'not json']) {
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const malformedJson = `{invalid JSON: ${unsafeUrl}`;
+  for (const body of ['null', '[]', '{}', '{"id":""}', '{"id":7}', '{"id":"R origin"}', malformedJson]) {
     const run = await waitDraft([[0, JSON.stringify([draftPr()])]], undefined, { repository: [0, body] });
     assert.equal(run.status, 1, body);
     assert.ok(run.last.trim(), body);
     assert.deepEqual(run.calls, [DRAFT_REPO], body + ': no list after refusal');
     assert.deepEqual(run.sleeps, [], body);
+    for (const line of run.lines) {
+      for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+        assert.ok(!line.includes(secret), `remote credentials leaked in ${JSON.stringify(line)}`);
+      }
+    }
+    if (body === malformedJson) assert.equal(run.last, 'unreadable origin repository: GitHub CLI returned invalid JSON');
   }
   for (const origin of ['', '\n', 'first\nsecond\n', new Error('origin unavailable')]) {
     const run = await waitDraft([[0, JSON.stringify([draftPr()])]], undefined, { origin });
@@ -990,14 +1012,25 @@ test('ANTI-REGRESSION: cloud drafts require origin repository and exact job bran
     assert.deepEqual(run.calls, []);
     assert.deepEqual(run.sleeps, []);
   }
-  const unreadable = await waitDraft([[0, 'not json'], [0, JSON.stringify([draftPr()])]]);
+  const unreadable = await waitDraft([[0, malformedJson], [0, JSON.stringify([draftPr()])]]);
   assert.equal(unreadable.status, 1);
   assert.deepEqual(unreadable.calls, [DRAFT_REPO, DRAFT_LIST]);
   assert.deepEqual(unreadable.sleeps, []);
-  const unavailable = await waitDraft([], undefined, { repository: [1, 'repository unavailable'] });
+  for (const line of unreadable.lines) {
+    for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+      assert.ok(!line.includes(secret), `remote credentials leaked in ${JSON.stringify(line)}`);
+    }
+  }
+  assert.equal(unreadable.last, 'unreadable pull request list: GitHub CLI returned invalid JSON');
+  const unavailable = await waitDraft([], undefined, { origin: `${unsafeUrl}\n`, repository: [1, `repository unavailable: ${unsafeUrl}`] });
   assert.equal(unavailable.status, 1);
-  assert.equal(unavailable.last, 'repository unavailable');
-  assert.deepEqual(unavailable.calls, [DRAFT_REPO]);
+  assert.deepEqual(unavailable.calls, [DRAFT_REPO.map((arg) => (arg === DRAFT_ORIGIN ? unsafeUrl : arg))]);
+  for (const line of unavailable.lines) {
+    for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+      assert.ok(!line.includes(secret), `remote credentials leaked in ${JSON.stringify(line)}`);
+    }
+  }
+  assert.equal(unavailable.last, 'could not read origin repository; check Git and GitHub CLI installation, repository access and configuration');
   const valid = await waitDraft([[0, JSON.stringify([draftPr()])]]);
   assert.equal(valid.status, 0);
   assert.equal(valid.last, '12');
@@ -1036,4 +1069,17 @@ test('ANTI-REGRESSION: cloud draft CLI binds reads to origin', (t) => {
     if (status === 0) assert.equal(run.lastOut, '12');
     else assert.equal(run.lastOut, `foreign or unverified pull request on job/7: ${JSON.stringify([pr])}`);
   }
+});
+
+test('ANTI-REGRESSION: draft CLI errors keep remote credentials out of both output streams', () => {
+  const unsafeUrl = 'https://user:secret-token@github.com/o/r.git?token=query-secret';
+  const run = runCli(['--draft', 'job/7'], [], { draft: { origin: unsafeUrl, reply: [1, `cannot access ${unsafeUrl}`] } });
+  assert.equal(run.status, 1, run.stdout + run.stderr);
+  assert.deepEqual(run.calls, [DRAFT_REPO, DRAFT_LIST].map((args) => args.map((arg) => (arg === DRAFT_ORIGIN ? unsafeUrl : arg))));
+  for (const output of [run.stdout, run.stderr]) {
+    for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
+      assert.ok(!output.includes(secret), `remote credentials leaked in ${JSON.stringify(output)}`);
+    }
+  }
+  assert.equal(run.lastOut, 'could not list origin pull requests; check Git and GitHub CLI installation, repository access and configuration');
 });

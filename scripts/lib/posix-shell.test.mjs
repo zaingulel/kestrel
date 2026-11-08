@@ -125,25 +125,23 @@ test('a non-win32 platform runs git by name', () => {
 });
 
 test('win32 runs the git.exe in an absolute PATH entry, never one in a relative entry', () => {
-  assert.equal(
-    gitExecutable({
-      platform: 'win32',
-      env: { PATH: '.;relative\\bin;C:\\Program Files\\Git\\cmd' },
-      exists: existsOnly('git.exe', 'relative\\bin\\git.exe', 'C:\\Program Files\\Git\\cmd\\git.exe'),
-    }),
-    'C:\\Program Files\\Git\\cmd\\git.exe',
-  );
+  const search = '.;relative\\bin;C:\\Program Files\\Git\\cmd';
+  const git = 'C:\\Program Files\\Git\\cmd\\git.exe';
+  const exists = existsOnly('git.exe', 'relative\\bin\\git.exe', git, 'C:\\other\\git.exe');
+  for (const env of [{ PATH: search }, { Path: search }, { pAtH: search }, { Path: 'C:\\other', PATH: search }]) {
+    assert.equal(gitExecutable({ platform: 'win32', env, exists }), git, Object.keys(env).join(', '));
+  }
 });
 
 test('win32 with no git.exe in an absolute PATH entry returns null', () => {
-  assert.equal(
-    gitExecutable({
-      platform: 'win32',
-      env: { PATH: '.;C:\\Windows\\System32' },
-      exists: existsOnly('git.exe'),
-    }),
-    null,
-  );
+  const exists = existsOnly('git.exe', 'C:\\tools\\git.exe');
+  for (const env of [
+    { PATH: '.;C:\\Windows\\System32' },
+    { path: 'C:\\tools', Path: 'C:\\Windows\\System32' },
+    { Path: 'C:\\tools', PATH: '' },
+  ]) {
+    assert.equal(gitExecutable({ platform: 'win32', env, exists }), null, Object.keys(env).join(', '));
+  }
 });
 
 // Windows' default executable search tries the working directory before PATH, so a hook run in a

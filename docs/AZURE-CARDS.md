@@ -174,7 +174,7 @@ read-backs before treating an operation as complete.
 | `assign <AB-ID>` / `unassign <AB-ID>` | Assign the viewer or remove the viewer's assignment; refuse another holder |
 | `comment <AB-ID> --body-file <file>` | Post Markdown source and confirm the native comment |
 | `edit-comment <AB-ID> <comment-id> --body-file <file>` | Edit only the viewer's native comment and confirm its text/version |
-| `create --title <text> --body-file <file> --status <column> --kind <kind> [--parent <AB-ID>] [--blocked-by <AB-ID>,...]` | Create a typed, tagged item with optional native parent/block relationships |
+| `create --title <text> --body-file <file> --status Backlog\|Ready --kind <kind> [--parent <AB-ID>] [--blocked-by <AB-ID>,...]` | Create a typed, tagged item with optional native parent/block relationships |
 | `edit <AB-ID> [--title <text>] [--body-file <file>]` | Edit at least one supplied field, with exact read-back |
 | `parent <AB-ID> --to <AB-ID>` | Add a same-project native parent; refuse a different existing parent or self-reference |
 | `block <AB-ID> --by <AB-ID>` | Add a same-project blocker; refuse self-reference |

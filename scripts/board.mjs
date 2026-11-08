@@ -16,7 +16,7 @@
 //
 // Fail-loud: a provider error or malformed data exits non-zero. On GitHub a zero-item
 // read also exits non-zero — a broken board read never prints an empty "nothing to pick"
-// and returns success. The exit code of every mode but --intake is scanOutcome's, so an
+// and returns success. Board-scan modes use scanOutcome's exit code, except --intake, so an
 // ordinary read exits 1 on drift too: the session-start bookend exists to surface exactly
 // that, and only --closeout spares the advisory rows (one merge's proof gate is not a
 // sibling lane's business).
@@ -33,13 +33,15 @@
 //
 // --approval check reads no board: it prints one line per card from approvalReport
 // (scripts/lib/advance-approval.mjs) on stdout, leaving out the text to post under either run
-// mark. Exit 0: every card was read, approved or not.
-// 1: a rejected argument. 2: the tracker or a card was not read.
+// mark. It checks the fetched-main setting before any GitHub read. Exit 0: a completed judgement for
+// every card, including known-disabled settings without a GitHub read. 1: a rejected argument.
+// 2: the setting, tracker or a card is unavailable.
 //
 // #461: reads the board via the lean GraphQL page query (scripts/lib/board.mjs), not
 // `gh project item-list` (a measured 203 GraphQL points per read). #1155: the whole
 // walk runs inside one `gh api graphql --paginate --slurp` process, and every rule in
-// scripts/lib/board-rules.mjs is answered off those pages.
+// scripts/lib/board-rules.mjs is answered off those pages and the cards a repository issue
+// walk recovers beside them (#504), each recovery named on stderr.
 //
 // A thin shell: every decision (what to select, what to print, what to exit with) lives
 // in the pure parseBoardArgs/parkedLine/intakeDocument (scripts/lib/board.mjs) and
@@ -161,7 +163,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     } else if (tracker === 'azure') {
       ({ items } = readAzureBoard(azure, executor));
     } else {
-      items = fetchBoard(executor);
+      items = fetchBoard(executor, { onOmission: (advisory) => output.error(`board: ${advisory}`) });
     }
   } catch (err) {
     const source = { markdown: 'markdown cards', linear: `Linear team ${linearTeamKey()}`, jira: 'Jira project', azure: 'Azure project', github: 'GitHub Projects board' }[tracker];

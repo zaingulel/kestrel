@@ -12,7 +12,8 @@
 //      orchestrator's convergence step; a builder capped mid-cycle ships mutated source).
 // Every failed check is reported together in one rejection, so a session fixes the handoff in one re-send.
 // Architect handoffs: a filled copy of .agents/templates/planner-handoff.md.
-// Any other agent type passes through untouched.
+// Protected Claude callers may request only explorer, before prompt checks; unreadable caller identity is refused.
+// Legacy and nonprotected callers retain the prompt contract above; other requested types pass through.
 
 const SELF_MUTATION_RE =
   /(?:verify|prove|re-?prove|check)\s+(?:the\s+|your\s+(?:own\s+)?)?mutation[- ]sensitivity|re-?prove\s+your\s+own\s+test/i;
@@ -66,9 +67,18 @@ function rejection(kind, problems, template) {
     : { ok: false, reason: `${kind} handoff ${problems.join("; ")}: fill ${template} instead of hand-writing the handoff` };
 }
 
-export function checkHandoff(toolInput) {
-  const prompt = typeof toolInput?.prompt === "string" ? toolInput.prompt : "";
+export function checkHandoff(toolInput, callerContext = {}) {
+  const callerType = callerContext.callerType;
+  const callerAbsent = callerType === undefined || callerType === "";
+  if ((callerAbsent && callerContext.hasCallerId)
+    || (!callerAbsent && (typeof callerType !== "string" || callerType !== callerType.trim()))) {
+    return { ok: false, reason: "agent handoff requires a readable calling-seat identity" };
+  }
   const type = toolInput?.subagent_type;
+  if (["architect", "oracle", "security-reviewer"].includes(callerType) && type !== "explorer") {
+    return { ok: false, reason: `${callerType} may start only explorer helpers` };
+  }
+  const prompt = typeof toolInput?.prompt === "string" ? toolInput.prompt : "";
 
   if (type === "builder" || type === "builder-max" || type === "builder-lite") {
     const problems = [];

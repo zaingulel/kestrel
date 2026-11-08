@@ -26,6 +26,8 @@ import { pathToFileURL } from 'node:url';
 import { installFakeGh, installFakeTransport } from './fake-gh.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { CARDS_DIR } from './board-markdown.mjs';
+// Request routing and the empty issue walk only, which read no board configuration.
+import { boardRequestKind, issuesPage } from './board-fixtures.mjs';
 import { CONFIG_TAIL, GITHUB_KIND_TYPES_TEST_CONFIG, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const ORGANISATION_CONFIG = `export const BOARD_OWNER = 'acme-org';
@@ -74,6 +76,8 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }, is
     sent.push(args);
     if (args[0] === 'project' && args[1] === 'item-edit') return '';
     const query = args.find((arg) => arg.startsWith('query=')).slice('query='.length);
+    // The repository issue walk finds no card the listing lacks.
+    if (boardRequestKind(args) === 'issues') return JSON.stringify([issuesPage([])]);
     if (args.includes('--paginate')) return JSON.stringify([boardPage]);
     const field = query.match(/field\(name:"([^"]+)"\)/);
     if (field) {
@@ -147,7 +151,7 @@ test('an organisation-configured board read queries the organization root and pa
   const items = fetchBoard(exec);
 
   assert.deepEqual(items.map((i) => [i.content.number, i.status, i.routing]), [[11, 'Ready', 'Product']]);
-  assert.equal(sent.length, 1);
+  assert.equal(sent.filter((args) => boardRequestKind(args) === 'board').length, 1);
   const query = sent[0].find((arg) => arg.startsWith('query='));
   assert.ok(query.includes('organization(login:"acme-org") { login projectV2(number:7)'), query);
   assert.equal(query.includes('user('), false, query);
@@ -350,7 +354,8 @@ export const PARKED_LANE = { field: 'Lane', option: 'To Sebastiano' };
 `;
 
 // The fake `gh` the copied CLIs are spawned against. It answers the single-process board
-// walk from FAKE_BOARD, as board-cli.test.mjs's does, and, only when FAKE_LANE is set, the
+// walk from FAKE_BOARD and the repository issue walk with one empty page, telling them apart
+// as board-cli.test.mjs's does, and, only when FAKE_LANE is set, the
 // Lane field query, the item query of each issue FAKE_LANE.items holds, and item-edit
 // writes. Anything else fails loud. With FAKE_GH_CALLS set it logs each argv as a JSON line.
 const fakeGh = installFakeGh('board-portability-cli-', `#!/usr/bin/env node
@@ -360,18 +365,22 @@ if (process.env.FAKE_GH_CALLS) appendFileSync(process.env.FAKE_GH_CALLS, JSON.st
 const query = args.find((arg) => arg.startsWith('query=')) ?? '';
 const lane = process.env.FAKE_LANE ? JSON.parse(process.env.FAKE_LANE) : null;
 const itemReply = lane?.items[query.match(/issue\\(number:(\\d+)\\)/)?.[1]];
-if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
-  process.stdout.write(process.env.FAKE_BOARD);
-} else if (lane && args[0] === 'project' && args[1] === 'item-edit') {
-  // A successful write prints nothing the caller reads.
-} else if (lane && query.includes('field(name:"Lane")')) {
-  process.stdout.write(JSON.stringify(lane.field));
-} else if (itemReply) {
-  process.stdout.write(JSON.stringify(itemReply));
-} else {
-  process.stderr.write('unexpected gh invocation: ' + args.join(' '));
-  process.exitCode = 2;
-}
+import(${JSON.stringify(new URL('./board-fixtures.mjs', import.meta.url).href)}).then(({ boardRequestKind }) => {
+  if (boardRequestKind(args) === 'issues') {
+    process.stdout.write(process.env.FAKE_ISSUES);
+  } else if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
+    process.stdout.write(process.env.FAKE_BOARD);
+  } else if (lane && args[0] === 'project' && args[1] === 'item-edit') {
+    // A successful write prints nothing the caller reads.
+  } else if (lane && query.includes('field(name:"Lane")')) {
+    process.stdout.write(JSON.stringify(lane.field));
+  } else if (itemReply) {
+    process.stdout.write(JSON.stringify(itemReply));
+  } else {
+    process.stderr.write('unexpected gh invocation: ' + args.join(' '));
+    process.exitCode = 2;
+  }
+});
 `);
 after(() => fakeGh.cleanup());
 
@@ -381,7 +390,11 @@ function runCopiedBoard(root, page, args = [], env = {}) {
   return spawnSync(process.execPath, [realpathSync(join(root, 'scripts', 'board.mjs')), ...args], {
     encoding: 'utf8',
     timeout: 30_000,
-    env: fakeGh.env({ FAKE_BOARD: JSON.stringify([page]), ...env }),
+    env: fakeGh.env({
+      FAKE_BOARD: JSON.stringify([page]),
+      FAKE_ISSUES: JSON.stringify([issuesPage([])]),
+      ...env,
+    }),
   });
 }
 
@@ -1474,7 +1487,8 @@ test('native types: the copied board CLI shows the type and judges the epic by i
   const listing = runCopiedBoard(root, page, ['--all']);
 
   assert.deepEqual(JSON.parse(json.stdout).map((i) => [i.number, i.issueType]), [[11, 'Epic'], [12, null]]);
-  const queries = readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line).find((arg) => arg.startsWith('query=')));
+  const queries = readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    .filter((args) => boardRequestKind(args) === 'board').map((args) => args.find((arg) => arg.startsWith('query=')));
   assert.equal(queries.length, 1);
   assert.ok(queries[0].includes('issueType { name }'), queries[0]);
   assert.ok((json.stdout + json.stderr).includes('epic open but all 2 child issues closed — close it and move to Done'), json.stdout + json.stderr);

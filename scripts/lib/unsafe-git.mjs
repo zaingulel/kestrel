@@ -231,15 +231,19 @@ import { publishCheck } from './advance-approval.mjs';
 // Returns a reason string when `cmd` should be blocked, or "" when it's allowed. `checkout` is the
 // hook's working-directory context, `{ cwd, isRootCheckout(dir), platform }`, whose platform picks the
 // path rules the walk resolves with; without it the root-checkout rule is not judged, and every other
-// rule is unchanged. `runSession` says the session is a product manager run's; without it the
-// publishing rule is not judged. `preApproved`, `{ start, tracker }` plus the injectable `env`, `exec`,
-// `git`, `platform` and `exists` publishCheck takes, says the session is a pre-approved run's; without
-// it the advance approval is not judged and nothing is read.
-export function blockReason(cmd, checkout, { runSession = false, preApproved = null } = {}) {
+// rule is unchanged. `runSession` identifies a product manager run. `preApproved`, `{ start, tracker }`
+// plus the optional `appJob` and runner injections publishCheck takes, identifies a pre-approved run.
+// `appRun` marks an enrolled native session; `runUnavailable` is a refusal used for publication and
+// approval records when native classification failed. Either protects the reserved metadata name.
+export function blockReason(cmd, checkout, { runSession = false, preApproved = null, appRun = false, runUnavailable = '' } = {}) {
   cmd = cmd ?? "";
+  // Check submitted text, including quoted paths, without importing the Git-spawning checkout module.
+  if ((appRun || runUnavailable) && cmd.includes('fabraik-app-run')) {
+    return 'a native app run session must leave its binding metadata to the coordinator';
+  }
   // A run writes no approval record and quotes none, so nothing it types can become one.
-  if ((runSession || preApproved) && cmd.includes('Approved:')) {
-    return `${runSession ? 'a product manager' : 'a pre-approved'} run session does not write or quote an advance approval record: only the owner's own session posts one, so a command holding \`Approved:\` is refused`;
+  if ((runSession || preApproved || runUnavailable) && cmd.includes('Approved:')) {
+    return runUnavailable || `${runSession ? 'a product manager' : 'a pre-approved'} run session does not write or quote an advance approval record: only the owner's own session posts one, so a command holding \`Approved:\` is refused`;
   }
   // Widen each letter of a name to its own class rather than using a regex `i` flag, which would
   // also loosen every option match in the same expression (`-F` for `-f`, `-D` for `-d`).
@@ -623,7 +627,7 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     if (GH_PR_READY.test(raw) && !DELIVERY_READY.test(raw)) {
       return REASON_READY;
     }
-    return worktreeReason(s);
+    return worktreeReason(s) || (publishes ? runUnavailable : '');
   };
   // Integration-checkout rule. The root checkout (the main working tree, never a linked worktree)
   // stays on main and nothing is branched, switched, or committed there: two sessions sharing it

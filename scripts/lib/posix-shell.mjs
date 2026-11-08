@@ -14,7 +14,11 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 function findOnPath(name, env, exists) {
-  return (env.PATH ?? '')
+  // Windows treats PATH spellings as aliases, and Node passes only the lexicographically first key.
+  const key = Object.keys(env).filter((entry) => entry.toUpperCase() === 'PATH').sort()[0];
+  const search = key === undefined ? undefined : env[key];
+  if (typeof search !== 'string') return undefined;
+  return search
     .split(';')
     .filter((dir) => path.win32.isAbsolute(dir))
     .map((dir) => path.win32.join(dir, name))

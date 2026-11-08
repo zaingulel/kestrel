@@ -14,13 +14,24 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { installFakeGh } from './fake-gh.mjs';
 import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
 
-const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
+const {
+  boardReadExec,
+  boardRequestKind,
+  hydratedItem,
+  issuesPage,
+  leanBoardPage,
+  leanNode,
+  membership,
+  READD_WARNING,
+  walkedIssue,
+} = await toolkit.load('lib/board-fixtures.mjs');
 const { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
 const { BOARD_HELP } = await toolkit.load('lib/board.mjs');
 const { main: boardMain } = await toolkit.load('board.mjs');
@@ -28,26 +39,32 @@ const { main: boardMain } = await toolkit.load('board.mjs');
 const SCRIPT = toolkit.script('board.mjs');
 const UNQUALIFIED_CLEAN = 'board: no drift found.';
 
-// Only the one call the command makes on these fixtures is answered — the
-// single-process board walk, and only when it carries `--paginate --slurp` (#1155).
+// Only the calls the command makes on these fixtures are answered, each told apart by the
+// fixtures' own boardRequestKind: the single-process board walk, and only when it carries
+// `--paginate --slurp` (#1155), from FAKE_BOARD; the repository issue walk from FAKE_ISSUES.
 // The --intake mode's card-detail reads are `api graphql` without `--paginate`, answered
 // from FAKE_DETAILS when a test sets it; unset, the call is unexpected, which is how a
 // test makes the detail read fail.
 // Anything else fails the fake loud (exit 2) rather than being swallowed, so an
 // unanticipated read surfaces here as a failed run instead of a quietly broadened fake.
-// Every invocation is logged so a caller can assert that GitHub was never reached.
+// Every invocation is logged as a JSON line so a caller can assert that GitHub was never reached.
 const fakeGh = installFakeGh('board-cli-', `#!/usr/bin/env node
 const { appendFileSync } = require('node:fs');
 const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_GH_CALLS, args.join(' ') + '\\n');
-if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
-  process.stdout.write(process.env.FAKE_BOARD);
-} else if (args[0] === 'api' && args[1] === 'graphql' && !args.includes('--paginate') && process.env.FAKE_DETAILS) {
-  process.stdout.write(process.env.FAKE_DETAILS);
-} else {
-  process.stderr.write('unexpected gh invocation: ' + args.join(' '));
-  process.exitCode = 2;
-}
+appendFileSync(process.env.FAKE_GH_CALLS, JSON.stringify(args) + '\\n');
+import(${JSON.stringify(pathToFileURL(toolkit.script('lib/board-fixtures.mjs')).href)}).then(({ boardRequestKind }) => {
+  const kind = boardRequestKind(args);
+  if (kind === 'board' && args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
+    process.stdout.write(process.env.FAKE_BOARD);
+  } else if (kind === 'issues') {
+    process.stdout.write(process.env.FAKE_ISSUES);
+  } else if (kind === 'other' && args[0] === 'api' && args[1] === 'graphql' && !args.includes('--paginate') && process.env.FAKE_DETAILS) {
+    process.stdout.write(process.env.FAKE_DETAILS);
+  } else {
+    process.stderr.write('unexpected gh invocation: ' + args.join(' '));
+    process.exitCode = 2;
+  }
+});
 `);
 after(() => fakeGh.cleanup());
 
@@ -61,30 +78,27 @@ function runBoard(args, page, extraEnv = {}) {
   const run = spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
     timeout: 30_000,
-    // One slurped page: the array shape `--slurp` returns.
-    env: fakeGh.env({ FAKE_BOARD: JSON.stringify([page]), FAKE_GH_CALLS: callsFile, ...extraEnv }),
+    // One slurped page: the array shape `--slurp` returns. The issue walk finds no card the
+    // listing lacks.
+    env: fakeGh.env({
+      FAKE_BOARD: JSON.stringify([page]),
+      FAKE_ISSUES: JSON.stringify([issuesPage([])]),
+      FAKE_GH_CALLS: callsFile,
+      ...extraEnv,
+    }),
   });
-  return { ...run, calls: readFileSync(callsFile, 'utf8').split('\n').filter(Boolean) };
+  return { ...run, calls: readFileSync(callsFile, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) };
 }
 
 // The in-process twin of runBoard: main is called with an executor that records every call's
-// arguments and answers as the fake `gh` does — the slurped board walk, and a detail read
-// only when `details` is supplied; anything else throws, as a failing `gh` makes the real
-// executor throw — and an output sink that collects each stream.
-function runBoardInProcess(args, page, details) {
-  const calls = [];
+// arguments and answers as the fake `gh` does — the slurped board walk, the repository issue
+// walk and item reads from `recovery` (by default a walk that finds nothing the listing lacks),
+// and a detail read only when `details` is supplied; anything else throws, as a failing `gh`
+// makes the real executor throw — and an output sink that collects each stream.
+function runBoardInProcess(args, page, details, recovery = {}) {
   let stdout = '';
   let stderr = '';
-  const ghExec = (callArgs) => {
-    calls.push(callArgs);
-    if (callArgs[0] === 'api' && callArgs[1] === 'graphql' && callArgs.includes('--paginate') && callArgs.includes('--slurp')) {
-      return JSON.stringify([page]);
-    }
-    if (callArgs[0] === 'api' && callArgs[1] === 'graphql' && !callArgs.includes('--paginate') && details) {
-      return details;
-    }
-    throw new Error(`unexpected gh invocation: ${callArgs.join(' ')}`);
-  };
+  const { exec: ghExec, calls } = boardReadExec({ board: [page], other: details, ...recovery });
   const output = {
     log: (line) => { stdout += `${line}\n`; },
     error: (line) => { stderr += `${line}\n`; },
@@ -175,7 +189,7 @@ test('ANTI-REGRESSION (#600 closeout gate, end to end): the real command fails a
   // …and still never claims coverage it does not have.
   assert.equal(ordinary.stdout.includes(UNQUALIFIED_CLEAN), false, ordinary.stdout);
   // One read answers both halves: the listing and the scan come off the same walk.
-  assert.equal(ordinary.calls.length, 1, ordinary.calls.join('\n'));
+  assert.equal(ordinary.calls.filter((call) => boardRequestKind(call) === 'board').length, 1, ordinary.calls.join('\n'));
   assert.match(
     ordinary.stdout,
     new RegExp(`^Board ${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER} — Backlog/Ready: 0 of 1 item\\(s\\)$`, 'm'),
@@ -232,24 +246,22 @@ const PICKABLE_PAGE = leanBoardPage([
   }),
 ]);
 
-// What the single detail read answers for one card with one comment.
-const detailsFor = (number, body, comment) => JSON.stringify({
+// What the single detail read answers for each [number, body, comment] card, each with one comment.
+const detailsFor = (...cards) => JSON.stringify({
   data: {
-    repository: {
-      [`i${number}`]: {
-        number,
-        body,
-        parent: null,
-        comments: { totalCount: 1, pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [{ body: comment }] },
-      },
-    },
+    repository: Object.fromEntries(cards.map(([number, body, comment]) => [`i${number}`, {
+      number,
+      body,
+      parent: null,
+      comments: { totalCount: 1, pageInfo: { hasPreviousPage: false, startCursor: null }, nodes: [{ body: comment }] },
+    }])),
   },
 });
 
 const linesOf = (stream) => stream.slice(0, -1).split('\n');
 
 test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with its true line count, and the scan and outcome on stderr', () => {
-  const run = runBoard(['--intake'], PICKABLE_PAGE, { FAKE_DETAILS: detailsFor(20, 'Outcome line\nsecond line', 'Claim: m, codex, t') });
+  const run = runBoard(['--intake'], PICKABLE_PAGE, { FAKE_DETAILS: detailsFor([20, 'Outcome line\nsecond line', 'Claim: m, codex, t']) });
 
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stdout.endsWith('\n'), true);
@@ -269,8 +281,11 @@ test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with 
     'board intake: details complete for 1 card(s).',
     `board intake: ${document.length} line(s) on stdout.`,
   ]);
-  // The board read, then one detail read: nothing else reached GitHub.
-  assert.equal(run.calls.length, 2, run.calls.join('\n'));
+  // The board read, then one detail read: nothing else reached GitHub but the repository issue walk.
+  const kinds = run.calls.map(boardRequestKind);
+  assert.equal(kinds.filter((kind) => kind === 'board').length, 1, kinds.join('\n'));
+  assert.equal(kinds.filter((kind) => kind === 'other').length, 1, kinds.join('\n'));
+  assert.ok(kinds.every((kind) => ['board', 'issues', 'other'].includes(kind)), kinds.join('\n'));
 });
 
 test('ANTI-REGRESSION: an intake board read that failed, drift and an unavailable card detail exit 2, 3 and 4', () => {
@@ -281,7 +296,7 @@ test('ANTI-REGRESSION: an intake board read that failed, drift and an unavailabl
   assert.match(failed.stderr, /board: failed to read the GitHub Projects board — incomplete board items read:/);
   assert.match(failed.stderr, /GitHub reported 2 board items but 1 were fetched/);
 
-  const drifted = runBoardInProcess(['--intake'], DRIFTED_PAGE, detailsFor(272, 'CVE body', 'a comment'));
+  const drifted = runBoardInProcess(['--intake'], DRIFTED_PAGE, detailsFor([272, 'CVE body', 'a comment']));
 
   assert.equal(drifted.status, 3, drifted.stderr);
   assert.ok(linesOf(drifted.stdout).includes('=== #272 [Backlog] CVE sweep ==='), drifted.stdout);
@@ -296,4 +311,76 @@ test('ANTI-REGRESSION: an intake board read that failed, drift and an unavailabl
   assert.ok(document.some((line) => line.startsWith('details: UNAVAILABLE — ')), unread.stdout);
   assert.equal(document.some((line) => line.startsWith('body:')), false, unread.stdout);
   assert.match(unread.stderr, /^board intake: details UNAVAILABLE in whole or part for 1 of 1 card\(s\): #20\.$/m);
+});
+
+// The #504 incident end to end: GitHub's project listing leaves out a card that is on the board,
+// and the repository issue walk finds it. Each expected line is written by hand from the fixtures.
+const recoveryOf = (listedId, listedNumber, card) => ({
+  issues: [issuesPage([
+    walkedIssue(listedNumber, [membership(listedId)]),
+    walkedIssue(card.content.number, [membership(card.id)]),
+  ])],
+  items: [hydratedItem(card)],
+});
+
+const RECOVERED_PICKABLE = {
+  id: 'PVTI_recovered_e2e',
+  content: { __typename: 'Issue', number: 21, title: 'Recovered card' },
+  status: 'Backlog',
+  routing: 'Product',
+};
+
+const RECOVERED_CLOSED_IN_BACKLOG = {
+  id: 'PVTI_recovered_closed_e2e',
+  content: { __typename: 'Issue', number: 272, title: 'CVE sweep', state: 'CLOSED' },
+  status: 'Backlog',
+  routing: 'Product',
+};
+
+// The omission advisory names each recovered card and its item and warns against adding it again.
+function assertOmissionAdvisory(stream, card) {
+  assert.match(stream, new RegExp(`#${card.content.number}(?!\\d)`));
+  assert.ok(stream.includes(card.id), stream);
+  assert.match(stream, READD_WARNING);
+}
+
+test('ANTI-REGRESSION: recovered cards reach intake and closeout', () => {
+  const recovery = recoveryOf('PVTI_pickable_e2e', 20, RECOVERED_PICKABLE);
+  const details = detailsFor([20, 'Listed outcome', 'a comment'], [21, 'Recovered outcome', 'a comment']);
+
+  const intake = runBoardInProcess(['--intake'], PICKABLE_PAGE, details, recovery);
+
+  assert.equal(intake.status, 0, intake.stderr);
+  const document = linesOf(intake.stdout);
+  assert.match(
+    document[0],
+    new RegExp(`^Board ${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER} — Backlog/Ready: 2 of 2 item\\(s\\)$`),
+  );
+  assert.ok(document.includes('=== #21 [Backlog] Recovered card ==='), intake.stdout);
+  assert.ok(document.includes('| Recovered outcome'), intake.stdout);
+  assert.equal(document.at(-1), `board intake: end of document, ${document.length} line(s).`);
+  assert.equal(intake.stdout.includes(RECOVERED_PICKABLE.id), false, intake.stdout);
+  assertOmissionAdvisory(intake.stderr, RECOVERED_PICKABLE);
+  assert.match(intake.stderr, /^board intake: details complete for 2 card\(s\)\.$/m);
+
+  // Under --json stdout stays the parseable selection, the recovered card in it, and the advisory goes to stderr.
+  const json = runBoardInProcess(['--json'], PICKABLE_PAGE, undefined, recovery);
+
+  assert.equal(json.status, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout).map((card) => card.number).sort((a, b) => a - b), [20, 21]);
+  assertOmissionAdvisory(json.stderr, RECOVERED_PICKABLE);
+
+  // A recovered closed card still in Backlog is closeout drift, so the proof gate refuses.
+  const closeout = runBoardInProcess(
+    ['--closeout'],
+    cleanPage(1),
+    undefined,
+    recoveryOf('PVTI_shipped_e2e', 610, RECOVERED_CLOSED_IN_BACKLOG),
+  );
+
+  assert.equal(closeout.status, 1, closeout.stdout + closeout.stderr);
+  assert.match(closeout.stdout, /⚠ BOARD DRIFT/);
+  assert.match(closeout.stdout, /^#272 \[Backlog\] CVE sweep — issue closed but card still in "Backlog" \(not Done\)$/m);
+  assert.equal(closeout.stdout.includes(RECOVERED_CLOSED_IN_BACKLOG.id), false, closeout.stdout);
+  assertOmissionAdvisory(closeout.stderr, RECOVERED_CLOSED_IN_BACKLOG);
 });

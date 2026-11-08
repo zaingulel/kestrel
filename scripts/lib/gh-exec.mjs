@@ -52,6 +52,7 @@ export function runGh(args) {
   try {
     return execFileSync(command, [...prefix, ...args], {
       encoding: 'utf8',
+      stdio: 'pipe',
       timeout: 60_000,
       maxBuffer: GH_MAX_OUTPUT_BYTES,
     });

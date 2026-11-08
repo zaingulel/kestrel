@@ -6,7 +6,8 @@
 //
 // boardQuery fetches only the fields the scripts consume, about 2 GraphQL points per
 // 100-item page, and fetchBoard walks every page inside one
-// `gh api graphql --paginate --slurp` process.
+// `gh api graphql --paginate --slurp` process, then walks the repository's issues the same
+// way to recover the cards that listing omits.
 //
 // Do not migrate this read to the REST Projects API: at parity on these
 // fields it sends 24.1x the payload, and the quota a migration would save is
@@ -128,8 +129,9 @@ export function parseBoardArgs(argv) {
 // only the field's name is needed here, to read one card's value off fieldValues.
 const STATUS_FIELD = 'Status';
 
-// One board item's card fields: the board read asks for them on every listed item, and the
-// issue-side probe on an archived item the read cannot list, so both parse through parseNode.
+// One board item's card fields: the board read asks for them on every listed item and on each
+// item it recovers by id, and the issue-side probe on an archived item the read cannot list, so
+// all parse through parseNode.
 // The issue type is asked for only where the configuration chooses native types, so a labels
 // repository's requests are the same bytes as before.
 export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } ${KIND_TYPES ? 'issueType { name } ' : ''}labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
@@ -490,7 +492,7 @@ function parseSlurpedBoardPages(out) {
   return pages;
 }
 
-// Read the whole board in one `gh` process: `--paginate` walks the pages on the
+// Read the project's item listing in one `gh` process: `--paginate` walks the pages on the
 // query's `$endCursor`, `--slurp` returns them as one array, and this checks the
 // walk it was handed the way the page-by-page loop it replaced did (#1155): a
 // constant totalCount, a fresh cursor behind every hasNextPage (parseBoardPage has
@@ -498,7 +500,7 @@ function parseSlurpedBoardPages(out) {
 // item count at the end. The
 // injected executor keeps the board transport at the CLI edge while making the
 // walk checks testable without `gh`.
-export function fetchBoard(exec) {
+function fetchListedBoard(exec) {
   const out = exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${boardQuery()}`]);
   const pages = parseSlurpedBoardPages(out).map(parseBoardPage);
   const items = [];
@@ -539,7 +541,8 @@ export function fetchBoard(exec) {
     }
   });
   // This catches a pagination or short-read mismatch against GitHub's totalCount,
-  // but not a server omission already excluded from GitHub's own totalCount.
+  // but not a server omission already excluded from GitHub's own totalCount, which
+  // fetchBoard's issue walk recovers.
   if (items.length !== expected.totalCount) {
     throw new Error(
       boardItemsReadError(`GitHub reported ${expected.totalCount} board items but ${items.length} were fetched`),
@@ -548,6 +551,226 @@ export function fetchBoard(exec) {
   // Each page is duplicate-free on its own; the same issue or the same id on two PAGES
   // is only visible here, once the whole walk is in hand.
   assertNoDuplicateCards(items);
+  return items;
+}
+
+const recoveryError = (detail) =>
+  `incomplete board recovery: ${detail}; rerun the board read, and if it repeats inspect the GitHub issue and project item responses`;
+
+// The same membership fields board-move.mjs's issue-side probe asks for; an item's project
+// owner is a user or an organisation, so its login is read through both.
+const MEMBERSHIP_FIELDS = 'id isArchived project { number owner { ... on User { login } ... on Organization { login } } }';
+
+// The issue walk reads one issue's memberships up to this cap; an issue past it has its
+// memberships walked on their own.
+const MEMBERSHIP_PAGE_SIZE = 100;
+
+// How many omitted items one read by id asks for.
+const OMITTED_ITEM_BATCH_SIZE = 20;
+
+// Every issue of the repository, open and closed, with its project memberships, archived ones
+// included so an archived card is told apart from an absent one. Only the issues connection
+// carries a pageInfo: gh pages on the first one it finds.
+function issueWalkQuery() {
+  return `query($endCursor: String) { repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issues(first:100, after:$endCursor, states:[OPEN,CLOSED]) { totalCount pageInfo { hasNextPage endCursor } nodes { number projectItems(first:${MEMBERSHIP_PAGE_SIZE}, includeArchived:true) { totalCount nodes { ${MEMBERSHIP_FIELDS} } } } } } }`;
+}
+
+function membershipWalkQuery(number) {
+  return `query($endCursor: String) { repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issue(number:${number}) { number projectItems(first:${MEMBERSHIP_PAGE_SIZE}, after:$endCursor, includeArchived:true) { totalCount pageInfo { hasNextPage endCursor } nodes { ${MEMBERSHIP_FIELDS} } } } } }`;
+}
+
+// Item ids are GitHub's own opaque strings; JSON quoting is valid GraphQL string syntax.
+function omittedItemsQuery(ids) {
+  return `query { nodes(ids:[${ids.map((id) => JSON.stringify(id)).join(',')}]) { ... on ProjectV2Item { ${MEMBERSHIP_FIELDS} ${BOARD_CARD_FIELDS} } } }`;
+}
+
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function parseRecoveryReply(out, what) {
+  let reply;
+  try {
+    reply = JSON.parse(out);
+  } catch (err) {
+    throw new Error(recoveryError(`the ${what} is not JSON (${err.message})`));
+  }
+  return reply;
+}
+
+// One slurped walk → its nodes, held to the checks the project walk applies to its own pages
+// (fetchListedBoard keeps its copy, whose messages and per-page identity checks are the
+// board's): a constant totalCount, a fresh cursor behind every hasNextPage, none on the last
+// page, and exactly totalCount nodes at the end. A page carrying GraphQL errors is refused
+// whatever data rides beside it.
+function walkConnection(out, what, connectionOf) {
+  const pages = parseRecoveryReply(out, what);
+  if (!Array.isArray(pages) || pages.length === 0) {
+    throw new Error(recoveryError(`the ${what} is not a list of --slurp pages`));
+  }
+  const nodes = [];
+  const usedCursors = new Set();
+  let totalCount;
+  pages.forEach((page, index) => {
+    if (!isPlainObject(page) || page.errors != null) {
+      throw new Error(recoveryError(`page ${index + 1} of the ${what} is not a GraphQL data object or carries errors`));
+    }
+    const connection = connectionOf(page);
+    assertConnectionShape(connection, what, `page ${index + 1}`);
+    if (totalCount === undefined) {
+      totalCount = connection.totalCount;
+    } else if (connection.totalCount !== totalCount) {
+      throw new Error(recoveryError(`the ${what} count changed across pages from ${totalCount} to ${connection.totalCount}`));
+    }
+    const { hasNextPage, endCursor } = connection.pageInfo ?? {};
+    if (hasNextPage !== (index < pages.length - 1)) {
+      throw new Error(recoveryError(`page ${index + 1} of ${pages.length} of the ${what} reports hasNextPage ${hasNextPage}`));
+    }
+    if (hasNextPage) {
+      if (typeof endCursor !== 'string' || endCursor.trim() === '' || usedCursors.has(endCursor)) {
+        throw new Error(recoveryError(`the ${what} reports a next page without a fresh endCursor`));
+      }
+      usedCursors.add(endCursor);
+    }
+    nodes.push(...connection.nodes);
+  });
+  if (nodes.length !== totalCount) {
+    throw new Error(recoveryError(`GitHub reported ${totalCount} in the ${what} but ${nodes.length} were fetched`));
+  }
+  return nodes;
+}
+
+function assertMembership(membership, where) {
+  if (
+    !isPlainObject(membership)
+    || typeof membership.id !== 'string' || membership.id.trim() === ''
+    || typeof membership.isArchived !== 'boolean'
+    || !Number.isInteger(membership.project?.number) || membership.project.number < 1
+    || typeof membership.project.owner?.login !== 'string' || membership.project.owner.login.trim() === ''
+  ) {
+    throw new Error(recoveryError(`${where} carried a project item without an id, a boolean archive flag and a project number and owner`));
+  }
+}
+
+const isOnBoard = (membership) =>
+  membership.project.number === BOARD_PROJECT_NUMBER && membership.project.owner.login === BOARD_OWNER;
+
+const membershipKey = (m) => JSON.stringify([m.id, m.isArchived, m.project.number, m.project.owner.login]);
+
+// One walked issue's memberships, whole. Past the first page they are walked on their own, and
+// that walk must still hold every membership the first page showed, unchanged.
+function issueMemberships(exec, issue) {
+  const where = `issue #${issue.number}`;
+  const firstPage = issue.projectItems;
+  assertConnectionShape(firstPage, 'projectItems', where);
+  firstPage.nodes.forEach((membership) => assertMembership(membership, where));
+  // The overflow walk is compared with the first page as a set, so a repeat here would pass it.
+  const firstIds = new Set();
+  for (const { id } of firstPage.nodes) {
+    if (firstIds.has(id)) {
+      throw new Error(recoveryError(`${where} returned project item ${id} twice on its first page`));
+    }
+    firstIds.add(id);
+  }
+  if (firstPage.nodes.length > firstPage.totalCount) {
+    throw new Error(recoveryError(`${where} returned ${firstPage.nodes.length} project items but reports totalCount ${firstPage.totalCount}`));
+  }
+  if (firstPage.nodes.length === firstPage.totalCount) return firstPage.nodes;
+  if (firstPage.nodes.length !== MEMBERSHIP_PAGE_SIZE) {
+    throw new Error(recoveryError(`${where} has ${firstPage.totalCount} project items but only ${firstPage.nodes.length} fetched`));
+  }
+  const out = exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${membershipWalkQuery(issue.number)}`]);
+  const memberships = walkConnection(out, `project item walk of ${where}`, (page) => {
+    const walked = page.data?.repository?.issue;
+    if (!isPlainObject(walked) || walked.number !== issue.number) {
+      throw new Error(recoveryError(`the project item walk of ${where} answered for another issue or none`));
+    }
+    return walked.projectItems;
+  });
+  memberships.forEach((membership) => assertMembership(membership, where));
+  const walkedKeys = new Set(memberships.map(membershipKey));
+  if (memberships.length !== firstPage.totalCount || firstPage.nodes.some((m) => !walkedKeys.has(membershipKey(m)))) {
+    throw new Error(recoveryError(`the project item walk of ${where} disagrees with the issue walk's first observation`));
+  }
+  return memberships;
+}
+
+// Every unarchived item on this board the listing lacked, as `{ id, number }`. A listed item
+// seen on another board, archived or under another issue is evidence that disagrees with the
+// listing, and so is one item id or one issue seen twice; an unresolved listed card has no
+// number to disagree with.
+function omittedMemberships(exec, listed) {
+  const listedNumbers = new Map(listed.map((item) => [item.id, item.content?.number ?? null]));
+  const issues = walkConnection(
+    exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${issueWalkQuery()}`]),
+    'repository issue walk',
+    (page) => page.data?.repository?.issues,
+  );
+  const seenNumbers = new Set();
+  const seenIds = new Set();
+  const omitted = [];
+  for (const issue of issues) {
+    if (!isPlainObject(issue) || !Number.isInteger(issue.number) || issue.number < 1 || seenNumbers.has(issue.number)) {
+      throw new Error(recoveryError('the repository issue walk returned an issue without a number, or one issue twice'));
+    }
+    seenNumbers.add(issue.number);
+    for (const membership of issueMemberships(exec, issue)) {
+      if (seenIds.has(membership.id)) {
+        throw new Error(recoveryError(`project item ${membership.id} was walked twice`));
+      }
+      seenIds.add(membership.id);
+      if (listedNumbers.has(membership.id)) {
+        if (!isOnBoard(membership)) {
+          throw new Error(recoveryError(`listed board item ${membership.id} is walked on project ${membership.project.number} of ${membership.project.owner.login} on issue #${issue.number}`));
+        }
+        const number = listedNumbers.get(membership.id);
+        if (membership.isArchived || (number !== null && number !== issue.number)) {
+          throw new Error(recoveryError(`listed board item ${membership.id} is ${membership.isArchived ? 'archived' : `#${number}`} on issue #${issue.number}`));
+        }
+      } else if (isOnBoard(membership) && !membership.isArchived) {
+        omitted.push({ id: membership.id, number: issue.number });
+      }
+    }
+  }
+  return omitted;
+}
+
+// Each omitted item read by its own id, in batches, and parsed as a listed card is, once its
+// id, archive flag, board and issue agree with what the walk saw.
+function readOmittedItems(exec, omitted) {
+  const items = [];
+  for (let start = 0; start < omitted.length; start += OMITTED_ITEM_BATCH_SIZE) {
+    const batch = omitted.slice(start, start + OMITTED_ITEM_BATCH_SIZE);
+    const reply = parseRecoveryReply(exec(['api', 'graphql', '-f', `query=${omittedItemsQuery(batch.map((m) => m.id))}`]), 'omitted item read');
+    const nodes = reply?.data?.nodes;
+    if (!isPlainObject(reply) || reply.errors != null || !Array.isArray(nodes) || nodes.length !== batch.length) {
+      throw new Error(recoveryError('the omitted item read carried errors or not one node per requested item'));
+    }
+    batch.forEach(({ id, number }, index) => {
+      const node = nodes[index];
+      assertMembership(node, `omitted item ${id}`);
+      if (node.id !== id || node.isArchived || !isOnBoard(node) || node.content?.__typename !== 'Issue' || node.content.number !== number) {
+        throw new Error(recoveryError(`omitted item ${id} did not read back as the unarchived board card of issue #${number}`));
+      }
+      items.push(parseNode(node));
+    });
+  }
+  return items;
+}
+
+// GitHub's project item list can leave out a card that is on the board while its own
+// totalCount agrees (#504), so the listing alone cannot show the gap. The issue side still
+// holds each card's membership: this walks the repository's issues and reads by id every
+// unarchived membership on this board the listing lacked, then returns listed and recovered
+// cards as one list the board rules judge alike. A recovery calls `onOmission` once with an
+// advisory naming each recovered card; any evidence that is incomplete or disagrees throws,
+// so a reconciliation that could not finish never reads as a whole board.
+export function fetchBoard(exec, { onOmission = () => {} } = {}) {
+  const listed = fetchListedBoard(exec);
+  const recovered = readOmittedItems(exec, omittedMemberships(exec, listed));
+  if (recovered.length === 0) return listed;
+  const items = [...listed, ...recovered];
+  assertNoDuplicateCards(items);
+  const named = recovered.map((item) => `${cardRef(item.content.number)} (${item.id})`).join(', ');
+  onOmission(`GitHub's project listing left out ${recovered.length} card(s) that are on the board, read from their issues instead: ${named}. They are already on the board, so do not add them again.`);
   return items;
 }
 
@@ -713,8 +936,8 @@ export function fetchCardDetails(exec, numbers) {
   return details;
 }
 
-// The exit status of `--intake` alone; every other mode keeps scanOutcome's. 1 stays the
-// rejected argument, so no outcome of a read reuses it.
+// The exit status of `--intake` alone; other board-scan modes keep scanOutcome's.
+// Approval checks have their own outcomes. 1 stays the rejected argument, so no outcome of a read reuses it.
 export const INTAKE_EXIT = Object.freeze({ complete: 0, readFailed: 2, drift: 3, incomplete: 4, driftAndIncomplete: 5 });
 
 const LINE_BREAK = /\r\n|\n|\r/;

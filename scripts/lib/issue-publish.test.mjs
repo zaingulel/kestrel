@@ -13,7 +13,18 @@ after(() => toolkit.cleanup());
 
 const { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, KIND_LABELS } = await toolkit.load('lib/board-config.mjs');
 const { fetchBoard } = await toolkit.load('lib/board.mjs');
-const { leanBoardPage, leanNode, issueItemReply } = await toolkit.load('lib/board-fixtures.mjs');
+const {
+  boardReadExec,
+  boardRequestKind,
+  hydratedItem,
+  issueItemReply,
+  issuesPage,
+  leanBoardPage,
+  leanNode,
+  membership,
+  READD_WARNING,
+  walkedIssue,
+} = await toolkit.load('lib/board-fixtures.mjs');
 const {
   boardCardsByNumber,
   parseIssuePublishArgs,
@@ -30,7 +41,7 @@ const typesToolkit = copyToolkit(GITHUB_KIND_TYPES_TEST_CONFIG);
 after(() => typesToolkit.cleanup());
 const { BOARD_OWNER: TYPES_OWNER, BOARD_PROJECT_NUMBER: TYPES_PROJECT_NUMBER } = await typesToolkit.load('lib/board-config.mjs');
 const { fetchBoard: typesFetchBoard } = await typesToolkit.load('lib/board.mjs');
-const { leanBoardPage: typesLeanBoardPage, leanNode: typesLeanNode, issueItemReply: typesIssueItemReply } = await typesToolkit.load('lib/board-fixtures.mjs');
+const { issuesPage: typesIssuesPage, leanBoardPage: typesLeanBoardPage, leanNode: typesLeanNode, issueItemReply: typesIssueItemReply } = await typesToolkit.load('lib/board-fixtures.mjs');
 const { verifyIssuePublication: typesVerifyIssuePublication } = await typesToolkit.load('lib/issue-publish.mjs');
 const { main: typesMain } = await typesToolkit.load('verify-issue-publish.mjs');
 
@@ -257,15 +268,17 @@ const UNRESOLVED_NODE = leanNode({
   status: 'Backlog',
 });
 
-function boardRead(nodes, { probeProjects = [], probeResponse, children = [] } = {}) {
+function boardRead(nodes, { probeProjects = [], probeResponse, children = [], childrenTotal } = {}) {
   const queries = [];
   const ghExec = (command) => {
     const query = command.find((arg) => arg.startsWith('query='));
     queries.push(query);
+    // The repository issue walk finds no card the listing lacks; it asks for projectItems too, so it is told apart first.
+    if (boardRequestKind(command) === 'issues') return JSON.stringify([issuesPage([])]);
     // One slurped page: the array shape the real `--paginate --slurp` walk hands fetchBoard (#1155).
     if (query.includes('projectV2')) return JSON.stringify([leanBoardPage(nodes)]);
     if (query.includes('projectItems')) return probeResponse ?? graphProbe(probeProjects);
-    return graphChildren(children);
+    return graphChildren(children, childrenTotal);
   };
   return { queries, dependencies: { fetchBoard, ghExec } };
 }
@@ -285,6 +298,23 @@ function archivedItem(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_O
 
 function archivedProbe(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER) {
   return JSON.stringify(issueItemReply([archivedItem(card, project, owner)]));
+}
+
+// An active card the board listing omitted: the issue-side probe answers with its own UNARCHIVED
+// board item on this board, carrying the card fields the listing would have carried.
+const ACTIVE_CARD = {
+  id: 'PVTI_omitted',
+  content: { __typename: 'Issue', number: 999, title: 'Omitted card', state: 'OPEN', labels: [KIND_LABELS.task] },
+  status: 'Ready',
+  routing: 'Platform',
+};
+
+function activeItem(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER) {
+  return { ...leanNode({ ...ACTIVE_CARD, ...card }), isArchived: false, project: { number: project, owner: { login: owner } } };
+}
+
+function activeProbe(card = {}, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER) {
+  return JSON.stringify(issueItemReply([activeItem(card, project, owner)]));
 }
 
 test('issue-publish: a card that was never added still fails loud as absent from the board', () => {
@@ -338,56 +368,6 @@ test('issue-publish: a card the board read could not resolve is reported as a la
   });
   assert.equal(status, 1);
   assert.match(errors.join('\n'), /Re-run this check before adding the card again/);
-});
-
-test('issue-publish: an issue whose card the board read omitted entirely is reported as a lagging read, not as absent', () => {
-  // The captured production shape (#600): the lagging card is missing from `items` ENTIRELY,
-  // so there is no numberless card of any kind and `unresolvedCount` is 0. Nothing in the board
-  // read distinguishes this from "never added" — only the issue side can, and it says otherwise.
-  const { queries, dependencies } = boardRead([RESOLVED_NODE], { probeProjects: [BOARD_PROJECT_NUMBER] });
-
-  assert.throws(
-    () => verifyIssuePublication(['999'], dependencies),
-    (error) => {
-      assert.match(error.message, /#999 is on the board but not in this board read/);
-      assert.match(error.message, /re-run this check rather than adding the card again/);
-      assert.doesNotMatch(error.message, /absent from the board/);
-      return true;
-    },
-  );
-  // The probe is only trustworthy while it reads the SAME project the board read read (#572).
-  // The probe query names no project at all, so its side is proven behaviourally by this pair:
-  // an item on the configured project yields the lagging-read verdict above, and an item on any
-  // OTHER project must leave the verdict at plain absence below, or the probe would
-  // confirm a card nowhere near this board. This assertion pins the board read to the configured
-  // project, so both sides are proven against the same configured number. A literal would be
-  // blind exactly at the port (#1296): a board query hardcoded to the literal's value stays
-  // green under any other configuration.
-  assert.match(
-    queries.find((q) => q.includes('projectV2')),
-    new RegExp(`projectV2\\(number:${BOARD_PROJECT_NUMBER}\\)`),
-  );
-  assert.throws(
-    () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE], { probeProjects: [BOARD_PROJECT_NUMBER + 1] }).dependencies),
-    /requested issue #999 is absent from the board/,
-  );
-  // Pin the probe's TARGET as well as its project: without it the probe could ask about another
-  // issue, or another repository, and every assertion above would still pass — reporting a
-  // never-added #999 as a lagging read forever because some OTHER issue is on the board.
-  assert.match(queries.find((q) => q.includes('projectItems')), /issue\(number:999\)/);
-  assert.match(
-    queries.find((q) => q.includes('projectItems')),
-    new RegExp(`owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}"`),
-  );
-
-  // Positively identifying the cause must not soften the exit status: the check still fails.
-  const errors = [];
-  const status = main(['999'], {
-    ...boardRead([RESOLVED_NODE], { probeProjects: [BOARD_PROJECT_NUMBER] }).dependencies,
-    output: { log: () => { throw new Error('no success line may be printed'); }, error: (line) => errors.push(line) },
-  });
-  assert.equal(status, 1);
-  assert.match(errors.join('\n'), /re-run this check rather than adding the card again/);
 });
 
 test('issue-publish: an open card archived on the board is reported as archived with an unarchive action, never as a lagging read', () => {
@@ -502,7 +482,8 @@ test('issue-publish: an Epic whose children include a closed card archived on th
   ]);
   // The archived card is judged from the probe's own item, so the probe has to ask for the card
   // fields the board read asks for, on the right issue; without them its item has no Status.
-  const probeQuery = queries.find((query) => query.includes('projectItems'));
+  // The repository issue walk asks for projectItems too, so the probe is the other request that does.
+  const probeQuery = queries.find((query) => boardRequestKind([query]) === 'other' && query.includes('projectItems'));
   assert.match(probeQuery, /issue\(number:999\)/);
   assert.match(
     probeQuery,
@@ -662,6 +643,7 @@ test('issue-publish: passes an issue with exactly one kind label among other lab
 function typesBoardRead(nodes, { probeResponse } = {}) {
   const ghExec = (command) => {
     const query = command.find((arg) => arg.startsWith('query='));
+    if (boardRequestKind(command) === 'issues') return JSON.stringify([typesIssuesPage([])]);
     if (query.includes('projectV2')) return JSON.stringify([typesLeanBoardPage(nodes)]);
     if (query.includes('projectItems')) return probeResponse ?? graphProbe();
     return graphChildren([]);
@@ -741,6 +723,167 @@ test('issue-publish native types: judges a closed archived card by its type', ()
   const dependencies = typesBoardRead([typedNode(475, { name: 'Task' }, [])], { probeResponse: JSON.stringify(typesIssueItemReply([archived])) });
 
   assert.throws(() => typesVerifyIssuePublication(['999'], dependencies), { message: noTypeMessage(999) });
+});
+
+// A card the board listing omitted but whose own board item is unarchived on this board is judged from
+// that item like a listed card. Nothing about it is a lagging read, so no refusal may say it is.
+const LAG_TEXT = /not in this board read|lagged|re-run/i;
+const OMITTED_ADVISORY = 'issue-publish: cards omitted from the board listing, verified from their own board items: #999.';
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function runMain(mainFn, args, dependencies) {
+  const lines = [];
+  const errors = [];
+  const status = mainFn(args, { ...dependencies, output: { log: (line) => lines.push(line), error: (line) => errors.push(line) } });
+  return { status, lines, errors };
+}
+
+function assertRefused(verifyFn, mainFn, makeDependencies, args, expected) {
+  assert.throws(() => verifyFn(args, makeDependencies()), (error) => {
+    assert.match(error.message, expected);
+    assert.doesNotMatch(error.message, LAG_TEXT);
+    return true;
+  });
+  // The refusal reaches the exit status, and no success line is printed.
+  const { status, lines, errors } = runMain(mainFn, args, makeDependencies());
+  assert.equal(status, 1);
+  assert.deepEqual(lines, []);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], expected);
+}
+
+function typesActiveItem(issueType, labels) {
+  return {
+    ...typedNode(999, issueType, labels),
+    isArchived: false,
+    project: { number: TYPES_PROJECT_NUMBER, owner: { login: TYPES_OWNER } },
+  };
+}
+
+function typesOmittedRead(...items) {
+  return typesBoardRead([typedNode(475, { name: 'Task' }, [])], { probeResponse: JSON.stringify(typesIssueItemReply(items)) });
+}
+
+test('issue-publish: omitted active cards verify from their own items', () => {
+  const standalone = [
+    'issue-publish: board presence verified for #999.',
+    'issue-publish: Statuses and Workstreams verified for #999.',
+    'issue-publish: exactly one kind label verified for #999.',
+    OMITTED_ADVISORY,
+    'issue-publish: #999 verified as a standalone issue; it has 0 native child issues (none supplied; pass them as arguments to verify an Epic).',
+  ];
+  const closed = { content: { ...ACTIVE_CARD.content, state: 'CLOSED' }, status: 'Done' };
+
+  // An open and a closed unarchived card, with and without unresolved cards in the listing.
+  for (const nodes of [[RESOLVED_NODE], [RESOLVED_NODE, UNRESOLVED_NODE]]) {
+    for (const card of [{}, closed]) {
+      const make = () => boardRead(nodes, { probeResponse: activeProbe(card) }).dependencies;
+      assert.deepEqual(verifyIssuePublication(['999'], make()), standalone);
+      const { status, lines, errors } = runMain(main, ['999'], make());
+      assert.equal(status, 0, errors.join('\n'));
+      assert.deepEqual(errors, []);
+      assert.deepEqual(lines, standalone);
+      assert.doesNotMatch(lines.join('\n'), LAG_TEXT);
+    }
+  }
+
+  // The probe is the card's one view only while it reads the SAME project the board read read (#572):
+  // an item on another project number, or on another owner's project of the same number, leaves plain absence.
+  for (const probe of [{ probeProjects: [BOARD_PROJECT_NUMBER + 1] }, { probeResponse: activeProbe({}, BOARD_PROJECT_NUMBER, 'someone-else') }]) {
+    assert.throws(
+      () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE], probe).dependencies),
+      /requested issue #999 is absent from the board/,
+    );
+  }
+  // Pin the board read to the configured project, and the probe's TARGET: without them the probe could ask about
+  // another issue or repository and every assertion above would still pass. A literal would be blind at the port (#1296).
+  const read = boardRead([RESOLVED_NODE], { probeResponse: activeProbe() });
+  verifyIssuePublication(['999'], read.dependencies);
+  assert.match(
+    read.queries.find((q) => q.includes('projectV2')),
+    new RegExp(`projectV2\\(number:${BOARD_PROJECT_NUMBER}\\)`),
+  );
+  const probeQuery = read.queries.find((q) => boardRequestKind([q]) === 'other' && q.includes('projectItems'));
+  assert.match(probeQuery, /issue\(number:999\)/);
+  assert.match(probeQuery, new RegExp(`owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}"`));
+
+  // Under native issue types the same card is judged by its type.
+  const typed = runMain(typesMain, ['999'], typesOmittedRead(typesActiveItem({ name: 'Task' }, ['area:board'])));
+  assert.equal(typed.status, 0, typed.errors.join('\n'));
+  assert.ok(typed.lines.includes(OMITTED_ADVISORY), typed.lines.join('\n'));
+  assert.ok(typed.lines.includes('issue-publish: native issue type verified for #999.'), typed.lines.join('\n'));
+  assert.doesNotMatch(typed.lines.join('\n'), LAG_TEXT);
+  assert.ok(typesVerifyIssuePublication(['999'], typesOmittedRead(typesActiveItem({ name: 'Task' }, ['area:board']))).includes(OMITTED_ADVISORY));
+});
+
+test('issue-publish: omitted active cards retain validation failures', () => {
+  const kinds = ACTIVE_CARD.content;
+  const cases = [
+    [{ status: undefined }, /#999 has no non-empty Status/],
+    [{ status: '   ' }, /#999 has no non-empty Status/],
+    [{ routing: undefined }, /#999 has no non-empty Workstream/],
+    [{ routing: '   ' }, /#999 has no non-empty Workstream/],
+    [{ content: { ...kinds, labels: ['area:board'] } }, /#999 needs exactly one kind label .* but has 0/],
+    [{ content: { ...kinds, labels: [KIND_LABELS.task, KIND_LABELS.bug] } }, /#999 needs exactly one kind label .* but has 2/],
+    [{ content: { ...kinds, number: 1000 } }, /resolved to #1000/],
+    [{ content: { ...kinds, repository: { nameWithOwner: 'someone-else/other' } } }, /belongs to someone-else\/other, not /],
+    [{ content: { ...kinds, labels: { totalCount: 25, nodes: [] } } }, /has 25 labels but only 0 fetched/],
+  ];
+  for (const [card, expected] of cases) {
+    assertRefused(verifyIssuePublication, main, () => boardRead([RESOLVED_NODE], { probeResponse: activeProbe(card) }).dependencies, ['999'], expected);
+  }
+
+  // Two items on this board are as unreadable for an active card as for an archived one.
+  assertRefused(
+    verifyIssuePublication,
+    main,
+    () => boardRead([RESOLVED_NODE], { probeResponse: JSON.stringify(issueItemReply([activeItem(), activeItem()])) }).dependencies,
+    ['999'],
+    /could not confirm whether issue #999 is on the board: .*2 items on project/,
+  );
+
+  const typedCases = [
+    [typesActiveItem(null, ['area:board']), noTypeMessage(999)],
+    [typesActiveItem({ name: 'Story' }, ['area:board']), `requested issue #999 has native issue type Story, which KIND_TYPES does not name (${TYPE_NAMES})`],
+    [typesActiveItem({ name: 'Task' }, ['task', 'area:board']), 'requested issue #999 has native issue type Task and also carries kind label task; remove it with gh issue edit 999 --remove-label <label>'],
+  ];
+  for (const [item, message] of typedCases) {
+    assertRefused(typesVerifyIssuePublication, typesMain, () => typesOmittedRead(item), ['999'], new RegExp(escapeRegExp(message)));
+  }
+});
+
+test('issue-publish: omitted active children retain exact native membership', () => {
+  const epic = leanNode({
+    id: 'PVTI_epic',
+    content: { __typename: 'Issue', number: 475, title: 'Epic card', labels: [KIND_LABELS.epic] },
+    status: 'Ready',
+    routing: 'Platform',
+  });
+  const task = leanNode({
+    id: 'PVTI_task',
+    content: { __typename: 'Issue', number: 476, title: 'Task card', labels: [KIND_LABELS.task] },
+    status: 'Ready',
+    routing: 'Product',
+  });
+  const read = (options) => () => boardRead([epic, task], { probeResponse: activeProbe(), ...options }).dependencies;
+  const args = ['475', '476', '999'];
+  const matching = [
+    'issue-publish: board presence verified for #475, #476, #999.',
+    'issue-publish: Statuses and Workstreams verified for #475, #476, #999.',
+    'issue-publish: exactly one kind label verified for #475, #476, #999.',
+    OMITTED_ADVISORY,
+    'issue-publish: native child set verified: #475 has exactly the 2 supplied child issues.',
+  ];
+
+  assert.deepEqual(verifyIssuePublication(args, read({ children: [476, 999] })()), matching);
+  const passed = runMain(main, args, read({ children: [476, 999] })());
+  assert.equal(passed.status, 0, passed.errors.join('\n'));
+  assert.deepEqual(passed.lines, matching);
+
+  // A missing child, an extra child and a truncated native page each fail, whatever the board shows.
+  assertRefused(verifyIssuePublication, main, read({ children: [476] }), args, /Epic #475 child mismatch: supplied but not native children: #999; native children but not supplied: none/);
+  assertRefused(verifyIssuePublication, main, read({ children: [476, 999, 1000] }), args, /Epic #475 child mismatch: supplied but not native children: none; native children but not supplied: #1000/);
+  assertRefused(verifyIssuePublication, main, read({ children: [476, 999], childrenTotal: 130 }), args, /#475 reports 130 native child issues.*read only one page of 2/);
 });
 
 test('issue-publish: fails loud when duplicate board cards share a requested issue number', () => {
@@ -932,4 +1075,37 @@ test('issue-publish: CLI exits non-zero for invalid arguments without invoking G
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /positive issue number/);
   assert.equal(readFileSync(callsFile, 'utf8'), '');
+});
+
+// The #504 incident through the publication command and the real board reader: the project listing
+// omits #999, which is on the board, and the repository issue walk finds it. The card is then on the
+// board read itself, so no issue-side probe is needed, and the advisory reaches stderr.
+test('ANTI-REGRESSION: publication reports recovered board cards', () => {
+  const { exec, calls } = boardReadExec({
+    board: [leanBoardPage([RESOLVED_NODE])],
+    issues: [issuesPage([
+      walkedIssue(475, [membership('PVTI_resolved')]),
+      walkedIssue(999, [membership(ACTIVE_CARD.id)]),
+    ])],
+    items: [hydratedItem(ACTIVE_CARD)],
+    // GitHub would answer the issue-side probe with the card's own item, so only the call log shows it was not needed.
+    other: (command) => (command.find((arg) => arg.startsWith('query=')).includes('projectItems') ? activeProbe() : graphChildren([])),
+  });
+
+  const { status, lines, errors } = runMain(main, ['999'], { ghExec: exec });
+
+  assert.equal(status, 0, errors.join('\n'));
+  assert.deepEqual(lines, [
+    'issue-publish: board presence verified for #999.',
+    'issue-publish: Statuses and Workstreams verified for #999.',
+    'issue-publish: exactly one kind label verified for #999.',
+    'issue-publish: #999 verified as a standalone issue; it has 0 native child issues (none supplied; pass them as arguments to verify an Epic).',
+  ]);
+  assert.equal(errors.length, 1, errors.join('\n'));
+  assert.match(errors[0], /#999(?!\d)/);
+  assert.ok(errors[0].includes(ACTIVE_CARD.id), errors[0]);
+  assert.match(errors[0], READD_WARNING);
+  const probes = calls.filter((command) => boardRequestKind(command) === 'other'
+    && command.find((arg) => arg.startsWith('query=')).includes('projectItems'));
+  assert.deepEqual(probes, []);
 });

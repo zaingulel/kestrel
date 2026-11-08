@@ -267,17 +267,32 @@ export async function watchMerge({ pr, ghExec, sleep, now }) {
 // Resolves to { exitCode, reason }: 0 with the number once exactly one origin-owned pull request is open on `head`,
 // 1 for every other stop. An empty list keeps the wait going.
 export async function watchDraft({ head, gitExec, ghExec, sleep }) {
+  let operation = 'read origin remote';
   try {
     const origin = gitExec(['remote', 'get-url', 'origin']).trim();
     if (!origin || /[\r\n]/.test(origin)) {
       return { exitCode: 1, reason: 'unreadable origin remote URL' };
     }
-    const repository = JSON.parse(ghExec(['repo', 'view', '--json', 'id', '--', origin]));
+    operation = 'read origin repository';
+    const repositoryReply = ghExec(['repo', 'view', '--json', 'id', '--', origin]);
+    let repository;
+    try {
+      repository = JSON.parse(repositoryReply);
+    } catch {
+      return { exitCode: 1, reason: 'unreadable origin repository: GitHub CLI returned invalid JSON' };
+    }
     if (!repository || Array.isArray(repository) || typeof repository.id !== 'string' || !repository.id || /\s/.test(repository.id)) {
       return { exitCode: 1, reason: `unreadable origin repository: ${JSON.stringify(repository)}` };
     }
     for (;;) {
-      const open = JSON.parse(ghExec(['pr', 'list', '--repo', origin, '--head', head, '--state', 'open', '--json', 'number,state,headRefName,headRepository,isCrossRepository']));
+      operation = 'list origin pull requests';
+      const listReply = ghExec(['pr', 'list', '--repo', origin, '--head', head, '--state', 'open', '--json', 'number,state,headRefName,headRepository,isCrossRepository']);
+      let open;
+      try {
+        open = JSON.parse(listReply);
+      } catch {
+        return { exitCode: 1, reason: 'unreadable pull request list: GitHub CLI returned invalid JSON' };
+      }
       if (!Array.isArray(open) || !open.every((pr) => Number.isInteger(pr?.number) && pr.number > 0)) {
         return { exitCode: 1, reason: `unreadable pull request list: ${JSON.stringify(open)}` };
       }
@@ -289,9 +304,10 @@ export async function watchDraft({ head, gitExec, ghExec, sleep }) {
       if (open.length > 1) {
         return { exitCode: 1, reason: `more than one open pull request on ${head}: ${open.map((pr) => pr.number).join(' ')}` };
       }
+      operation = 'wait for an origin pull request';
       await sleep(WATCH_INTERVAL_MS);
     }
-  } catch (err) {
-    return { exitCode: 1, reason: failureText(err) };
+  } catch {
+    return { exitCode: 1, reason: `could not ${operation}; check Git and GitHub CLI installation, repository access and configuration` };
   }
 }

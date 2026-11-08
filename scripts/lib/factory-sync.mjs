@@ -455,7 +455,7 @@ export function renderSettings(root) {
   const manifest = readManifest(tree);
   const origin = git(tree, 'remote', 'get-url', 'origin');
   if (isGithubRepository(origin, manifest.canonical)) {
-    throw new Error(`the origin ${origin} is the canonical github.com/${manifest.canonical}, whose seat lines are the defaults: a retune there edits the seat file, and no settings file is rendered`);
+    throw new Error(`the origin is the canonical github.com/${manifest.canonical}, whose seat lines are the defaults: a retune there edits the seat file, and no settings file is rendered`);
   }
   const settings = settingsWithSeats(readSettingsFile(tree), manifest);
   const { seats: overrides } = settings;
