@@ -1,136 +1,227 @@
+---
+description: This page explains how the workflow chooses evidence for a change and records each check. It also says what a recorded result can and cannot prove.
+---
+
 # The evidence bar
 
-A change is accepted on evidence appropriate to its claim: recorded execution for executable behaviour and fresh
-semantic review for instruction meaning. This page explains the chain from a
-claim to a merged commit: what each claim must show, how its proof is recorded, and which checks run before a merge.
-This page is part of [the workflow guide](AI-WORKFLOW.md). Related: [The life of one change](AI-WORKFLOW-job.md) for
-when each piece of evidence is produced, and [Enforced or instructed](AI-WORKFLOW-enforcement.md) for the hooks that
-hold the checks.
+## Summary
+
+A green check proves only what that check observed, on the inputs it ran against. It cannot show that the check was
+the right one for the claim. Use this page to understand how the workflow chooses evidence for a change and records each
+check. It also says what a recorded result can and cannot prove. Read it before you judge whether a job's evidence
+supports what its pull request says.
+
+Each repository's [testing strategy](TESTING-STRATEGY.md) owns which evidence a claim needs. The
+[`resume`](../.agents/skills/resume/SKILL.md) skill owns when each check runs and how review settles. This page explains
+how the pieces connect, and owns none of their rules.
 
 ## Mental model
 
-| Link in the chain | What it is | Who holds it |
+Evidence for a change forms a chain. Each link answers one question, and a later link cannot repair a missing earlier
+one.
+
+| Link | The question it answers | Who settles it |
 |---|---|---|
-| Claim | One observable behaviour or invariant a slice proves | The plan |
-| Construction mode | How much proof the claim needs, and in what order | [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) |
-| Discrimination proof | Evidence that rejects the claimed wrong behaviour, by the route the strategy selects | The orchestrator, at convergence |
-| Receipt | The exit code a script wrote to the run log | [`scripts/run-log.mjs`](../scripts/run-log.mjs) |
-| Hosted check | The suites run on the merge result before a merge | Continuous integration and the branch rules |
+| Claim | What observable behaviour or rule does this change promise? | The plan |
+| Observer and oracle | Which check can see that behaviour, and where does its expected result come from? | The plan, before any build |
+| Construction mode | Must a failing check come before the fix, or does it only need to exist by the end? | The plan proposes; the coordinating session validates |
+| Discrimination proof | Does the check fail on a plausible wrong version of the code? | The coordinating session, at convergence |
+| Receipt | What exit code did the check really return, and on which tree? | `scripts/run-log.mjs` |
+| Review | Does an independent reader agree the claim is met and the evidence fits it? | A fresh reviewer, on the final tree |
+| Hosted check | Does the merged result still pass where the repository's required check runs? | Continuous integration, before the merge |
+
+```mermaid
+flowchart LR
+    accTitle: The chain of evidence for a claim
+    accDescr: A job settles each link in order, from the claim through the observer and oracle, construction mode, discrimination proof, receipt and fresh review to the hosted check.
+    C[Claim] --> O[Observer and oracle]
+    O --> M[Construction mode]
+    M --> D[Discrimination proof]
+    D --> R[Receipt]
+    R --> V[Fresh review]
+    V --> H[Hosted check]
+```
+
+The preceding diagram reads left to right, in the order a job settles each link. A pull request quotes every link it
+relies on. A gap anywhere in the chain stays a gap, however green the links after it look.
+
+Four kinds of evidence answer different questions, and none stands in for another.
+
+| Kind | What it shows |
+|---|---|
+| Inspected test | What a test's assertions cover, read without running it |
+| Executed check | The exit code a command returned, as its receipt records |
+| Semantic review | An independent reader's judgment of meaning, where no executed check can observe it |
+| External observation | What a scoped read or probe of a live system showed at one moment |
 
 ## How it works
 
-[`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) owns this. Every coherent claim in a change gets one construction
-mode, which settles whether a failing test must come first, whether new evidence must land with the change, or whether
-the existing regression net is enough; that document defines the modes and when each applies.
+### Choosing what to observe
 
-The strategy distinguishes reproducible defects and consequential executable rules observable on an existing
-runnable system from ordinary features, genuinely absent runnable baselines, unchanged job-base behaviour and
-non-executable meaning. Evidence admissions depend on the claim, not the model's reputation or the difficulty of
-running the observation. Local subject floors remain binding.
+Every claim names one behaviour or rule a reader could observe. Adding code is not a claim. Neither a test
+count nor a coverage figure measures correctness. The plan then chooses the cheapest observer that can see the claim.
+A pure calculation needs a unit test, while command wiring, stored state and output honesty each need their own kind
+of observer. Lint shows that code follows its rules, never that it behaves correctly.
 
-The strategy selects how a claim shows that its evidence rejects the wrong behaviour. Qualifying ordinary pre-fix
-red followed by unchanged-test green may already demonstrate the equivalent wrong behaviour. Where a mutation is
-required, the orchestrator deliberately breaks the implementation, observes the focused evidence fail, restores it,
-and observes green. Protected invariants retain their adversarial convergence mutation.
-[`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) owns the qualifications, protected floors, focused selection and
-recording rules, and the alternative where no test can observe the claim.
+The expected result comes from somewhere the code did not: a requirement, a hand-worked example or a known-good
+fixture. A test that copies the production calculation agrees with that calculation whether it is right or wrong. So
+an implementer's own test is never the only oracle for its own work.
 
-### Before implementation
+### Construction modes
 
-The [resume skill under "5. Build"](../.agents/skills/resume/SKILL.md#5-build) separates strict construction into
-hand-offs. A test-only builder records a meaningful failure against the runnable existing system. The coordinator
-reads the actual diff and receipt, records its validation verdict with the claim and accepted red receipt in the
-branch worklog, and carries that record into the implementation handoff with the validated test contract fixed.
-This checkpoint applies to one coherent claim's smallest focused case set, which may contain related material
-behaviours or cases. Additional assertions or related cases alone do not create redispatch; independently distinct
-safeguards or claims do. An incorrect oracle returns to the coordinator for revalidation and an explicit revised
-contract.
+Each claim gets one of three construction modes. Its subject sets a minimum mode, and difficulty never lowers it.
 
-This makes expected red a valid result for a test-only stage while reserving completed implementation for green.
-The [builder handoff](../.agents/templates/builder-handoff.md) carries that stage and evidence in its existing fields;
-there is no chronology-enforcing hook. The coordinator's inspection remains necessary because an exit code cannot
-establish why a test failed.
+| Mode | When it applies | What it requires |
+|---|---|---|
+| `strict-tdd` | A reproducible defect, or a consequential rule whose missing safeguard shows on the running system | A logged meaningful failure before any fix, then the same check green after it |
+| `evidence-required` | Ordinary added or changed behaviour | Added or strengthened evidence and a discrimination proof by convergence, in whatever build order |
+| `preservation` | Behaviour already present at the job's base, with adequate evidence and an unchanged contract | The declared evidence stays green; no added test or mutation |
 
-Where there is genuinely no runnable baseline, the testing strategy's alternative starts with fixed acceptance
-examples and independent expectations before bounded implementation. The strategy distinguishes genuine production
-import defects observed at an existing public interface from unrelated setup or collection errors, including
-collection-time references to uncreated implementation modules or exported symbols. Review can judge instruction
-meaning, but cannot by itself prove important executable behaviour. Unchanged behaviour means behaviour present
-at the job base with adequate evidence; new implementation earlier in the job does not acquire that status. The [setup skill](../.agents/skills/fabraik-setup/SKILL.md) proposes these choices
-for customer confirmation, preserving the customer-owned strategy and stricter local requirements.
+A repository's testing strategy can raise the minimum mode for its own subjects, such as security or privacy. A
+failure counts as meaningful only when it shows the claimed defect through the code's public interface. A broken test
+setup or a reference to code that does not exist yet does not count.
 
-If the sequence was missed, a later base check or mutation can establish current discrimination, but cannot recreate
-pre-implementation history. The [resume skill's final audit](../.agents/skills/resume/SKILL.md#6-verify-and-review)
-keeps the owner decision and the exact question, approval and scope under `AGENTS.md`'s owner gates. That rule
-bounds reuse to the authorizing session and governs later sessions; a saved gap record is not fresh authorization.
+The session hands a `strict-tdd` claim to builders in two handoffs. A test-only builder writes the check and logs its
+meaningful failure, and an expected failure is a valid result for that stage. The coordinating session reads the diff
+and the receipt, records its verdict in the job's worklog and fixes the test contract. Only then does an implementation
+builder make the check pass. A distinct safeguard found later stops for classification, and a wrong oracle stops for
+revalidation. No builder edits the fixed assertions to reach green.
+[The builder template](../.agents/templates/builder-handoff.md) carries the stage. No hook checks this order, because an
+exit code cannot say why a test failed.
 
-### The run log
+### When no runnable baseline exists
 
-Every executed check runs through [`scripts/run-log.mjs`](../scripts/run-log.mjs), which appends the check's real
-outcome to a per-branch log so the pull request body quotes what a script wrote, not what an agent remembers; the head
-of that file lists what each line records. A rerun may carry a reason. An absent reason records `null`, never a claim of
-a first run; a supplied blank reason is a usage error before child launch. The logger records the exact supplied reason
-as escaped JSON without inferring retries from history. The [resume skill](../.agents/skills/resume/SKILL.md) owns check
-wrapping and rerun mechanics.
+Some claims have nothing to run before the change, so no meaningful failure is possible. The plan then fixes the
+acceptance examples and their independent expected values first. It names a sufficient alternative: its observer, its
+build steps and its discrimination proof. Review alone cannot prove executable behaviour. Behaviour a job added
+earlier never counts as present at the job's base, so it cannot move to `preservation`.
+
+A text-only change, such as a documentation or instruction change, has no executable observer for its meaning. Where
+it changes what a reader or agent must do, documentation lint is its mechanical check. The fresh review of the final
+tree then stands in for a mutation. Text that is only reworded or moved keeps documentation lint green as its
+protected contract. The [`fabraik-setup`](../.agents/skills/fabraik-setup/SKILL.md) skill proposes these choices to a
+repository adopting the workflow, for its own confirmation. That repository's own strategy, and any stricter rule in
+it, stays in force.
+
+### Proving the check discriminates
+
+A useful check fails on a plausible wrong version of the code and passes on a correct one. Two routes prove that. The
+first is a qualifying failure logged before the fix, followed by the unchanged check passing after it. The second is
+a mutation: the coordinating session breaks the code on purpose, sees the check fail, restores the code and sees it
+pass. A builder never runs a mutation cycle. Every changed protected rule, such as a trust or honesty rule, keeps one
+deliberate mutation even when a qualifying failure exists.
+
+Nobody can recreate a missed sequence afterwards. A later mutation can show the check discriminates on the
+code as it stands, never that a failure came first. The final audit under "6. Verify and review" in the `resume` skill
+keeps that gap visible and leaves the decision with the owner. A saved record of the gap is never fresh
+authorisation.
+
+### Recording each check
+
+Every executed check runs through `scripts/run-log.mjs`, which starts the command and appends one receipt to the
+job's worklog. The receipt holds the label, the exact command, the exit code it really returned and the time in
+Coordinated Universal Time (UTC). It also records the tree's state before and after the run. That state is the commit,
+whether the tree was clean and a fingerprint of the uncommitted changes.
+
+The receipt keeps outcomes apart that would otherwise read the same:
+
+- The logger records a command that could not start as a spawn failure with exit 127, so it never reads as a failing
+  test.
+- The logger records a command a signal ended as such, never as a completed run.
+- A receipt the logger could not write turns a passing run into exit 1, so no session claims an unrecorded pass.
+- A tree whose state the logger could not read shows `unknown`, never `clean`.
+
+The fingerprint is what makes a mutation receipt checkable. A mutation's failing run must show a fingerprint that
+differs from the passing run's, on the same commit. A matching fingerprint shows nobody changed the code, and the
+reviewer refuses that receipt. A session gives a reason for each rerun it starts, and the receipt records it word for
+word. The logger never guesses that a run was a rerun. With no reason it records none, and it refuses a blank reason
+before the command starts. Nothing else reads the worklog. The head of `scripts/run-log.mjs` owns the exact format.
 
 ### Receipts after a later commit
 
-A receipt names the commit it ran on, so a commit added afterwards leaves every earlier receipt pointing at an older
-head. The checks do not all run again for that. The session lists the paths the later commit changed, the repository's
-testing strategy says which checks those paths can affect, those run again, and every other check keeps its passed
-receipt. A check that depends on something no path shows runs again too unless the strategy accounts for it, and so
-does one whose earlier run is known to be invalidated. The pull request body lists each receipt kept as carried, with
-the commit it ran on and the paths that changed, so a carried result is never read as a run on the final commit.
-[The `resume` skill](../.agents/skills/resume/SKILL.md) owns the rule under "8. Deliver", and
-[`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md) owns which checks a changed path reruns.
+A receipt describes the commit and the tree it ran on. A receipt taken over uncommitted changes supports work in
+progress, but it is not the final evidence for publication. A commit added afterwards leaves every earlier receipt
+naming an older commit, yet not every check runs again. The session lists the paths the later commit changed. The
+repository's testing strategy maps those paths to the checks they can affect, and only those run again.
 
-### Hosted checks
+A check also runs again when it depends on an input no path shows, such as an installed dependency. The same holds
+when its earlier run is known to be invalid. After a rebase onto a moved `main`, one bounded case lets a local
+receipt stand in for a check the hosted run also covers. The pull request body lists every carried receipt with the
+commit it ran on and the paths that changed. So no reader takes it for a run on the final commit.
+[The delivery reference](../.agents/skills/resume/references/deliver.md) owns these cases under "Receipt reuse".
 
-CI runs the suites `docs/TESTING-STRATEGY.md` names. CI runs from the merge result, not the branch head, so it tests
-what would land, and it runs on the final commit whatever receipts were carried. After a rebase onto a moved `main`, a
-passed local receipt can in one bounded case stand for a check the hosted run also covers; that case is part of the
-same rule in [the `resume` skill](../.agents/skills/resume/SKILL.md) under "8. Deliver", and the pull request body
-says when it was used.
+### Checks before a merge
 
-A second check, `sweep-scope` in `.github/workflows/sweep-scope.yml`, is carried unless the repository's settings file
-turns the documentation sweep off, and a repository that carries it requires it where the documentation routines are
-active. It exists because the documentation sweep and its day-after triage land their own pull requests and no one reads
-them first. It runs from `main` rather than from the pull request it judges, and holds those branches to the scope table
-both routines answer to; [the head of `scripts/sweep-scope-check.mjs`](../scripts/sweep-scope-check.mjs) and
-[`docs/DOC-SWEEP.md`](DOC-SWEEP.md) own what it refuses and its limits.
+The repository's continuous integration runs its required check on the pull request's merge result, not its branch
+head, so it tests what would land. It runs on the final commit, whatever receipts were carried. The check reports a
+result once the session marks the draft ready. A change pushed straight to `main` triggers none of these pull request
+checks. The testing strategy records which suites the hosted check runs, on which platforms, and which run only
+locally.
+
+Where the documentation sweep is on, a second check, `sweep-scope`, guards the sweep's and its triage's branches. Those
+routines land their own pull requests, and no person reads them first. So the check runs from `main`, never from the
+pull request it judges, and holds those branches to the scope table both routines answer to. On any other branch it
+reports as passing. The head of `scripts/sweep-scope-check.mjs` and `docs/DOC-SWEEP.md` own what it refuses.
+
+### Review as evidence
+
+One fresh review reads the final tree and its evidence before the pull request opens. It challenges both the change
+and the evidence chosen for it. The reviewer derives the claims from the card and the final diff before it reads the
+selected evidence. So a downgraded mode shows up as a finding. A builder repairs a true finding, and the session
+verifies it again.
+[The review line](AI-WORKFLOW.md#the-review-line) records the review that ran. A correctly formatted line shows the
+format is right, never that a review took place.
 
 ## Where the rules live
 
-- [`docs/TESTING-STRATEGY.md`](TESTING-STRATEGY.md): the construction modes, discrimination proof and focused
-  selection, the evidence routes, which suites run where and which checks a changed path reruns.
-- [`docs/CODING-STANDARDS.md`](CODING-STANDARDS.md): what a test or a tool may cost.
-- [`AGENTS.md`](../AGENTS.md) under "Coding standards and the executed test bar": which document owns which part of the
-  bar.
-- [The `resume` skill](../.agents/skills/resume/SKILL.md) under "5. Build" and "8. Deliver": how a check is wrapped,
-  when a rerun needs a reason, and when a receipt is reused or carried to a later head.
-- [The head of `scripts/run-log.mjs`](../scripts/run-log.mjs): what each line of the run log records.
-- [The head of `scripts/sweep-scope-check.mjs`](../scripts/sweep-scope-check.mjs) and
-  [`docs/DOC-SWEEP.md`](DOC-SWEEP.md): what the `sweep-scope` check refuses.
+- [The testing strategy](TESTING-STRATEGY.md): observers and oracles, the construction modes and their minimums, the
+  discrimination routes, the receipt fields and which suites run where.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md#5-build) under "5. Build": that every check runs through the
+  logger, and the rerun reason.
+- [The strict construction reference](../.agents/skills/resume/references/strict-construction.md): the two handoffs of
+  a `strict-tdd` claim.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md#6-verify-and-review) under "6. Verify and review": the review
+  tiers, the repair rounds and the final audit of a missed sequence.
+- [The delivery reference](../.agents/skills/resume/references/deliver.md): receipt reuse after a later commit or a
+  rebase.
+- The head of `scripts/run-log.mjs`: the receipt format, its exit codes and its platform handling.
+- [The coding standards](CODING-STANDARDS.md): what a test or tool may cost.
+- [`AGENTS.md`](../AGENTS.md#coding-standards-and-the-executed-test-bar) under "Coding standards and the executed test
+  bar": which document owns which part of the evidence bar.
+- The head of `scripts/sweep-scope-check.mjs` and `docs/DOC-SWEEP.md`: what the `sweep-scope` check refuses, where the
+  sweep is on.
 
 ## Failure modes
 
-- **A test passes whatever the code does.** The strategy-selected discrimination proof must show it rejects the
-  claimed wrong behaviour, through qualifying ordinary pre-fix red, a required mutation's failing run, or the
-  strategy's named sufficient alternative.
-- **A focused command matches no test.** Zero matches is a failed verification, never a pass.
-- **A check could not run.** It is reported as unavailable evidence, never converted to a pass or a zero; work
-  stops unless the strategy admits a named sufficient alternative.
-- **Red came from broken setup.** The coordinator inspects the failure and test-only diff before implementation;
-  the strategy's behavioural-red distinction separates a production import defect from unrelated collection or
-  setup errors.
-- **Later evidence is mistaken for repaired history.** The final audit keeps the chronology gap and the owner's
-  exact acceptance separate from proof of current behaviour.
-- **A carried result reads as a fresh one.** The pull request body lists every carried receipt with the commit it ran
-  on, so no reader takes it for a run on the final commit.
+| Situation | What shows it | What follows |
+|---|---|---|
+| A test passes whatever the code does | A mutation leaves it green | It is not evidence; the claim needs a check that fails on the mutation |
+| A test run selects no tests, or the wrong ones | The receipt shows fewer tests than the handoff named, or none | The verification failed; zero tests is never a pass |
+| A check could not run | The receipt shows a spawn failure, or no receipt exists | The claim stays unproved, and the session reports it as unavailable, never as a pass |
+| The failure came from broken setup | The red run fails before reaching the claimed behaviour | It is not meaningful red, and the session classifies the evidence again |
+| A reader takes later evidence for earlier history | Someone offers a mutation to show a failure came first | The gap stays recorded and goes to the owner; nobody can rebuild history |
+| A reader takes a carried receipt for a fresh one | The pull request body's carried lines name an earlier commit | The reader judges it by the carry rule, not as a run on the final commit |
+| A reader takes a configured check for a passed one | A workflow, schedule or routine exists, but nobody read a run of it | Only an observed run shows a result; configuration shows intent |
+| A reader takes a green documentation check for accurate prose | Documentation lint or a scope check passes | It shows the form and scope are right. It never shows that the prose is true, that each changed link reaches its target, or that the change may merge |
+| A reader infers a design reason from the code | A choice has no recorded reason | The code shows what someone built, not why; an unrecorded reason stays unknown, and git history is where to look |
+| A reader takes an old assessment for a current one | A recorded audit or advisory predates the change | It shows what held when it was made; a current claim needs its own scoped assessment |
+| A reader assumes a review from its line | A well-formed review line, but no recorded findings or verdict | Only the reviewer's recorded verdict shows the review ran |
+
+The agents never turn missing evidence into a pass, a blank or a zero. Where an observation was not available, the
+pull request says so, and the related part of the claim stays unproved.
 
 ## Key files
 
-- `docs/TESTING-STRATEGY.md`: the evidence authority.
-- `docs/CODING-STANDARDS.md`: the cost standard for tests and tools.
+- `docs/TESTING-STRATEGY.md`: the repository's own evidence rules.
+- `docs/CODING-STANDARDS.md`: the test economics standard.
 - `scripts/run-log.mjs`: the logger every check runs through.
-- `.github/workflows/sweep-scope.yml` and `scripts/sweep-scope-check.mjs`: the documentation routines' scope check, where the sweep is not turned off.
+- `.github/pull_request_template.md`: where the session records the claims, the evidence and any carried receipts.
+- `.github/workflows/sweep-scope.yml` and `scripts/sweep-scope-check.mjs`: the scope check for sweep and triage
+  branches, where the sweep is on.
+
+## Where to go next
+
+- [The life of one change](AI-WORKFLOW-job.md) shows where each check runs in a job.
+- [Enforcement and instruction](AI-WORKFLOW-enforcement.md) separates what a machine refuses from what rests on an
+  instruction.
+- [The board](AI-WORKFLOW-board.md) explains what a board read can and cannot prove.

@@ -19,7 +19,8 @@ as `<origin-main>` and `git rev-parse HEAD` as `<head>`, then check the gate wit
 scripts/gates/pre-push-main`. A repository where that gate is missing or not executable has no direct route: the gate
 is not run and the job takes the pull request route below. Otherwise run `scripts/gates/pre-push-main <origin-main>
 <head>`; exit 0 means the whole change qualifies for the direct route, any other exit means the pull request route
-below. A change section 6 places above the `document` tier takes the pull request route whatever the gate's exit.
+below. A change section 6 places above the `document` tier takes the pull request route whatever the gate's exit, and so
+does a session holding a carried push yes, whose mark refuses a push to `main`.
 On the direct route: settle the convergence checks exactly as step 1 names on `<head>`, so their receipts carry
 `head=<head>` except a receipt the Receipt reuse rule below carries from a commit added on top, always from the head
 that receipt ran on, and those receipts replace any the approved body quoted for an earlier head; fill that body's

@@ -30,7 +30,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const { hooks } = JSON.parse(readFileSync(resolve(ROOT, '.codex/hooks.json'), 'utf8'));
 const windowsCommand = (event, matcher) => hooks[event].find((h) => h.matcher === matcher).hooks[0].commandWindows;
 const BASH_GUARD = windowsCommand('PreToolUse', 'Bash');
-const HANDOFF_GUARD = windowsCommand('PreToolUse', 'collaborationspawn_agent');
+const HANDOFF_GUARD = windowsCommand('PreToolUse', undefined);
 const STOP = windowsCommand('Stop', undefined);
 
 // The first file on PATH with any of the names, as a full path.
@@ -93,8 +93,8 @@ test('Bash guard commandWindows fails, not passes, when node is not on PATH', NE
   }
 });
 
-test('builder-handoff guard commandWindows blocks an incomplete builder handoff', NEEDS_POWERSHELL, () => {
-  const input = JSON.stringify({ tool_input: { agent_type: 'builder', message: 'x' } });
+test('builder-handoff guard commandWindows refuses a builder dispatch without a task name', NEEDS_POWERSHELL, () => {
+  const input = JSON.stringify({ tool_name: 'collaborationspawn_agent', tool_input: { agent_type: 'builder', message: 'x' } });
   for (const r of runEach(HANDOFF_GUARD, { cwd: ROOT, input })) {
     assert.equal(r.status, 2, `${r.ps}: ${r.stderr}`);
     assert.match(r.stderr, /Blocked:/, r.ps);

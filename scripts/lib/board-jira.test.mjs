@@ -154,7 +154,8 @@ test('Jira board reads complete project data and refuses incomplete evidence', a
     { id: '30002', accountId: 'acct-other', createdAt: '2026-01-02T00:00:00.000Z', url: SITE + '/browse/ENG-2?focusedCommentId=30002', body: 'second', position: 2 },
   ]);
   assert.deepEqual(api.jiraCardDetails(provider().exec, ['ENG-2']).get('ENG-2'), {
-    number: 'ENG-2', body: 'Acceptance\ntext\nHeading\none\ntwo\nquoted\ncode\ncell1\tcell2\n@Alice :wave:', parent: 'ENG-1',
+    number: 'ENG-2', body: 'Acceptance\ntext\nHeading\none\ntwo\nquoted\ncode\ncell1\tcell2\n@Alice :wave:',
+    whatToBuildUnread: 'not extracted from a native Jira body without a What to build heading', parent: 'ENG-1',
     comments: ['Claim: first, Codex, 2026-01-01T00:00Z', 'second'], commentCount: 2, commentsUnavailable: null,
   });
   for (const pull of [{ ...clone(PR), draft: true }, { ...clone(PR), state: 'closed', merged_at: '2026-01-01T00:00:00Z' }]) {
@@ -521,4 +522,74 @@ test('Jira inline cards preserve native URLs and reject unavailable meaning', as
   const unsupported = clone(ISSUES);
   unsupported['ENG-2'].fields.description = media;
   assert.match(api.jiraCardDetails(provider({ issues: unsupported }).exec, ['ENG-2']).get('ENG-2').unavailable, /ADF|media|unsupported/i);
+});
+
+test('612 fix D: a Jira card with a native What to build heading prints that section in the intake summary', async (t) => {
+  const api = await reader(t);
+  const heading = (text) => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
+  const paragraph = (text) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+  const issues = clone(ISSUES);
+  issues['ENG-2'].fields.description = { type: 'doc', version: 1, content: [
+    heading('What to build'), paragraph('Ship it.'), heading('Acceptance criteria'), paragraph('Criteria text.'),
+  ] };
+  const native = provider({ issues });
+  const card = api.normalizeItem(api.readJiraBoard(native.exec, native.gh).items[1]);
+  const details = api.jiraCardDetails(native.exec, ['ENG-2']);
+  const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const from = summary.findIndex((line) => line.startsWith('what to build:'));
+  assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
+    'what to build: 1 line(s)',
+    '| Ship it.',
+  ]);
+});
+
+test('612 fix F: a Jira card whose body holds a literal Markdown What to build section, as jira-card.mjs writes it, still prints that section', async (t) => {
+  const api = await reader(t);
+  // jira-card.mjs writes a body as one paragraph of text lines joined by hardBreak nodes.
+  const markdown = ['## What to build', 'Ship it.', '## Acceptance criteria', 'Criteria text.'];
+  const issues = clone(ISSUES);
+  issues['ENG-2'].fields.description = { type: 'doc', version: 1, content: [{ type: 'paragraph', content: markdown.flatMap((line, index) => [
+    ...(index ? [{ type: 'hardBreak' }] : []), { type: 'text', text: line },
+  ]) }] };
+  const literal = provider({ issues });
+  const card = api.normalizeItem(api.readJiraBoard(literal.exec, literal.gh).items[1]);
+  const details = api.jiraCardDetails(literal.exec, ['ENG-2']);
+  const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const from = summary.findIndex((line) => line.startsWith('what to build:'));
+  assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
+    'what to build: 1 line(s)',
+    '| Ship it.',
+  ]);
+});
+
+test('612 fix J: a Jira card with a code block and no native What to build heading prints the read-the-card-text advisory', async (t) => {
+  const api = await reader(t);
+  const issues = clone(ISSUES);
+  issues['ENG-2'].fields.description = { type: 'doc', version: 1, content: [
+    { type: 'paragraph', content: [{ type: 'text', text: 'Example template:' }] },
+    { type: 'codeBlock', content: [{ type: 'text', text: '## What to build\nFAKE TEMPLATE TASK\n## Acceptance criteria\nexample' }] },
+  ] };
+  const native = provider({ issues });
+  const card = api.normalizeItem(api.readJiraBoard(native.exec, native.gh).items[1]);
+  const details = api.jiraCardDetails(native.exec, ['ENG-2']);
+  const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const from = summary.findIndex((line) => line.startsWith('what to build:'));
+  assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
+    'what to build: not extracted from a native Jira body without a What to build heading, read the card text',
+  ]);
+});
+
+test('612 fix I: a Jira card whose What to build heading has no level is unavailable like any malformed ADF', async (t) => {
+  const api = await reader(t);
+  const issues = clone(ISSUES);
+  issues['ENG-2'].fields.description = { type: 'doc', version: 1, content: [
+    { type: 'heading', content: [{ type: 'text', text: 'What to build' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Ship it.' }] },
+    { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: 'Acceptance criteria' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Criteria text.' }] },
+  ] };
+  assert.match(api.jiraCardDetails(provider({ issues }).exec, ['ENG-2']).get('ENG-2').unavailable, /ADF heading level is malformed/);
 });

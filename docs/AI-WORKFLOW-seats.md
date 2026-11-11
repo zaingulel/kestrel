@@ -1,142 +1,192 @@
+---
+description: Each seat is an agent role with a narrow charter. This page shows which seat does what in a job and how work passes between seats.
+---
+
 # The seats
 
-Every job in the workflow belongs to a seat: an agent with a narrow charter and no more tools than the charter needs.
-This page explains which seat does what, and how work is handed from one to another. This page is part of
-[the workflow guide](AI-WORKFLOW.md). Related: [The life of one change](AI-WORKFLOW-job.md) for where each seat acts in
-a job, and [The evidence bar](AI-WORKFLOW-evidence.md) for what a builder's report must prove.
+## Summary
+
+A seat is an agent role with a narrow charter and no more tools than that charter needs. Use this page to see which
+seat does what in a job, and how work passes from one seat to another. Read it before you plan a job or settle a
+review, so each piece of work reaches the seat built for it. The seat files hold each charter, and the
+[`resume`](../.agents/skills/resume/SKILL.md) skill says when the session dispatches each seat.
+
+The session that talks to the owner coordinates and never builds. It plans the cards that need no architect, hands
+every edit to a builder seat, settles reviews and delivers. [`AGENTS.md`](../AGENTS.md#runtime-notes) sets that out
+under "Runtime notes".
 
 ## Mental model
 
-| Seat | Job | Writes code? |
-|---|---|---|
-| `architect` | Plans a substantial change: approach, grounding, surface assessment, file-level plan cut into bounded builder handoffs | No |
-| `plan-reviewer` | Reads the fixed plan before any builder starts, for feasibility, scope, coherence, and security | No |
-| `builder-lite` | Executes a mechanical slice on a cheaper model when verification is strong and no judgment remains | Yes |
-| `builder` | Executes one approved, bounded slice end to end when the plan leaves no consequential judgment | Yes |
-| `builder-max` | The same charter at higher capability, chosen first whenever that materially reduces risk | Yes |
-| `reviewer` | Adversarial review of the final diff: correctness, honesty, dead code, grounding, spec conformance | No |
-| `security-reviewer` | Trust-perimeter review, only when a change widens a surface in the `security review` row of the Surfaces table in `AGENTS.md` | No |
-| `explorer` | Fast read-only discovery on a cheaper model: where is X, who calls Y | No |
-| `oracle` | Escalation-tier reasoning for novel design, independent derivation, or a stalled diagnosis; never a routine rung | No |
+| Seat | What it does | Edits files? | Its report ends with |
+|---|---|---|---|
+| `explorer` | Locates code and returns findings with file and line references; judges nothing | No | No set line |
+| `architect` | Plans a `plan-first` change, or one with design choices still open, cut into bounded builder handoffs | No | `plan delivered in full` |
+| `plan-reviewer` | Reads the fixed plan before any build, for feasibility, scope, coherence and security | No | `plan review delivered in full` |
+| `builder-lite` | Builds a mechanical slice that strong checks verify and that leaves no judgment | Yes | `final on-disk state = ...` |
+| `builder` | Builds one bounded slice whose plan leaves no consequential judgment | Yes | `final on-disk state = ...` |
+| `builder-max` | The builder charter at higher capability, chosen first where uncertainty or the cost of a defect warrants it | Yes | `final on-disk state = ...` |
+| `reviewer` | Challenges the final diff and its evidence: correctness, honesty, dead code, grounding and conformance to the card | No | `review delivered in full` |
+| `security-reviewer` | Reviews a change that widens a surface the `security review` row of the Surfaces table names | No | `security review delivered in full` |
+| `oracle` | Reasons through one named unresolved problem: a novel design, an independent derivation or a stalled diagnosis | No | `brief delivered in full` |
+
+The `explorer` and `builder-lite` seats run on cheaper models. Only the seats
+[`AGENTS.md`](../AGENTS.md#runtime-notes) names under "Runtime notes" reach the costliest models. A builder's higher
+capability never widens its scope. [Why it is shaped this way](AI-WORKFLOW.md#why-it-is-shaped-this-way) explains how
+the agents choose a seat by the judgment a slice still holds.
 
 ## How it works
 
-Each first-party seat has one charter body across runtimes. `scripts/lib/check-agents.mjs` compares those bodies,
-allowing only backticked `/name` versus `$name` skill invocations to differ. Runtime metadata, including descriptions,
-is validated separately rather than compared. Consumer-owned custom seats need no counterpart but still undergo
-definition validation.
-The commit hook checks staged installed seats using staged runtime settings and checks canonical `src/` seats with
-both runtimes; each check uses its matching staged validator.
-
-The session that talks to the owner is the orchestrator. It plans the cards that need no architect, delegates
-every edit to a builder seat, reviews, and delivers; it never builds. Each seat has a narrow charter and no more
-tools than the charter needs. Which model and effort each seat runs at is set in its seat file, under
-[`.claude/agents/`](../.claude/agents/) and [`.codex/agents/`](../.codex/agents/);
-[`AGENTS.md`](../AGENTS.md) says under "Runtime notes" which seats the costliest models are kept to. Those values are the defaults: a repository that adopts the workflow may
-override a seat's settings in its own seat settings file, as [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md)
-sets out under "How a repository overrides a seat".
-
 ```mermaid
 flowchart LR
-    O[Session orchestrator]
+    accTitle: Who hands what to whom between the seats
+    accDescr: The coordinating session hands work to the architect, plan reviewer, builder and reviewer, and calls the security reviewer, explorer and oracle only when their condition holds.
+    O[Coordinating session]
     O -->|planner handoff| A[architect]
     A -->|fixed plan, where a plan review is required| PR[plan-reviewer]
     PR -->|findings| O
-    O -->|builder handoff, one slice| B[builder-lite / builder / builder-max]
-    B -->|diff + focused evidence| O
+    O -->|builder handoff, one slice| B[builder]
+    B -->|diff and focused evidence| O
     O -->|final tree| R[reviewer]
     R -->|findings| O
     O -.->|trust perimeter widened| S[security-reviewer]
     O -.->|locate only| E[explorer]
-    O -.->|explicit escalation| X[oracle]
-    A -.->|Claude only: bounded lookup| E
-    X -.->|Claude only: bounded lookup| E
-    S -.->|Claude only: bounded lookup| E
+    O -.->|named escalation| X[oracle]
+    A -.->|Claude Code only: bounded lookup| E
+    X -.->|Claude Code only: bounded lookup| E
+    S -.->|Claude Code only: bounded lookup| E
+    click A href "/.claude/agents/architect"
+    click PR href "/.claude/agents/plan-reviewer"
+    click B href "/.claude/agents/builder"
+    click R href "/.claude/agents/reviewer"
+    click S href "/.claude/agents/security-reviewer"
+    click E href "/.claude/agents/explorer"
+    click X href "/.claude/agents/oracle"
 ```
 
-The diagram shows who hands what to whom: the orchestrator is the only seat that talks to every other seat,
-builders receive one slice at a time, and the reviewers report findings back rather than fixing them.
+The preceding diagram shows who hands what to whom, and each seat name here links that seat's charter. The
+coordinating session is the only seat that talks to every other seat. It sends the
+[architect](../.claude/agents/architect.md) a planner handoff. Where the card requires a plan review, the fixed plan
+goes to the [plan reviewer](../.claude/agents/plan-reviewer.md). A [builder-lite](../.claude/agents/builder-lite.md),
+[builder](../.claude/agents/builder.md) or [builder-max](../.claude/agents/builder-max.md) receives one slice and
+returns its diff with focused evidence. The [reviewer](../.claude/agents/reviewer.md) reads the final tree and returns
+findings rather than fixes. A dotted arrow carries a dispatch only when its condition holds. A widened trust perimeter
+calls the [security reviewer](../.claude/agents/security-reviewer.md), a location question the
+[explorer](../.claude/agents/explorer.md), and a named escalation the [oracle](../.claude/agents/oracle.md). The three
+dotted arrows into the explorer exist on Claude Code alone.
 
-In words: the orchestrator sends the architect a planner handoff. Where the card requires a plan review, the
-architect's fixed plan goes to the plan-reviewer, which reports findings to the orchestrator. The orchestrator
-then hands a builder one slice at a time and receives a diff with focused evidence. It sends the final tree to
-the reviewer and receives findings. Only when the trust perimeter widens does it call the security-reviewer; the
-explorer is called only to locate code, and the oracle only on explicit escalation. On Claude Code, the architect,
-oracle and security-reviewer can each send a bounded missing lookup directly to explorer. Each waits for completed
-findings in a named file before doing its own planning, reasoning or trust judgment. These are the three
-Claude-only discovery edges; explorer never supplies their judgment.
+### Handoffs
 
-On Codex, missing discovery returns to the orchestrator, which supplies completed findings before redispatching
-the protected seat. This is the coordinator-first instruction policy; inherited permissions do not establish an
-enforced per-seat child-role limit. The Claude seats' plain `Agent` tool permits delegation, while the handoff hook
-limits their child role to `explorer`; their [charters](../.claude/agents/) define the bounded lookup and waiting
-contract. The [planner template](../.agents/templates/planner-handoff.md) carries either completed findings or the
-Claude lookup branch, and [resume's planning step](../.agents/skills/resume/SKILL.md#4-plan) owns dispatch.
+Every dispatch to a builder is a filled copy of [the builder template](../.agents/templates/builder-handoff.md). It
+carries the slice, its claim, the construction mode, the working directory and the files to edit. It also carries the
+evidence, the observer, the independent oracle, the focused verification command and the stop condition. Every
+dispatch to the architect is a filled copy of [the planner template](../.agents/templates/planner-handoff.md). It
+carries the decision, the scope, the discovery, the judgment asked for, the deliverable and the stop condition.
 
-A plan-first card's plan is read by the `plan-reviewer` charter before any builder starts. Normally Claude-written
-plans go to Codex and Codex-written plans go to Claude, so the other family reviews the plan. Which cards are
-plan-first, how the configured seat is reached, and what happens
-when it cannot be reached are in [the `resume` skill](../.agents/skills/resume/SKILL.md) under "4. Plan" and
-[the `cross-review` skill](../.agents/skills/cross-review/SKILL.md) under "4. Review a plan before the build".
+The handoff hook refuses a handoff with a missing labelled line or an unfilled slot. It checks builder handoffs on both
+runtimes, and architect handoffs on Claude Code. The hook checks shape only, never whether the plan is sound or
+followed. A builder checks the same lines itself before it edits, and stops on a decision the plan left open.
 
-A handoff to a builder is a filled copy of `.agents/templates/builder-handoff.md`; to the architect, a filled
-copy of `.agents/templates/planner-handoff.md`. [The builder template](../.agents/templates/builder-handoff.md) and
-[the planner template](../.agents/templates/planner-handoff.md) each list the labelled lines a handoff must
-carry, and the handoff hook refuses a handoff that drops one. A builder proves only its own slice: the full suite
-and every commit stay with the orchestrator, as [the `resume` skill](../.agents/skills/resume/SKILL.md) sets out
-under "5. Build".
+A builder proves only its own slice. The full suite, every commit and the convergence evidence stay with the
+coordinating session, as [the `resume` skill](../.agents/skills/resume/SKILL.md#5-build) says under "5. Build".
+[Enforcement and instruction](AI-WORKFLOW-enforcement.md) explains how the hook works on each runtime.
 
-Which seats read `docs/CODING-STANDARDS.md` before they start is a rule in [`AGENTS.md`](../AGENTS.md) under
-"Coding standards and the executed test bar". The standards are more than a builder's style guide: they also set
-what a test or tool may cost, and that choice is made in the plan. A builder cannot change a plan once it
-arrives, so a standard read only by the builder and the reviewer reaches the work after the design it governs is
-fixed, and a review finding then costs a replan.
+### Discovery on each runtime
+
+The architect, oracle and security reviewer each need located code before they judge. The two runtimes get it to them
+in different ways.
+
+| | Claude Code | Codex |
+|---|---|---|
+| Who asks the `explorer` | The seat itself, with one bounded lookup | The coordinating session, before the dispatch |
+| When the seat judges | Once completed findings are in a named file | Once the session supplies completed findings and dispatches it again |
+| What holds the limit | The handoff hook limits the seat's helpers to the `explorer`, and the charter bounds the lookup | Instruction only: inherited permissions set no per-seat limit |
+
+On both runtimes, the explorer locates and the seat judges: the explorer never supplies the planning, reasoning or
+trust judgment. [The `resume` skill](../.agents/skills/resume/SKILL.md#4-plan) owns these dispatches, under "4. Plan",
+and the planner template carries either completed findings or the Claude Code lookup.
+
+### One charter on two runtimes
+
+Each seat has one charter, written once for Claude Code under `.claude/agents/` and once for Codex under
+`.codex/agents/`. The two bodies must match, except for how each runtime invokes a skill: `/name` on Claude Code,
+`$name` on Codex. A check compares them and checks the runtime settings around each body on their own. A repository's
+own custom seat needs no counterpart on the other runtime, but the check still validates its definition.
+
+### Plan review across model families
+
+The `plan-reviewer` reads a `plan-first` card's plan before any builder starts. Normally the other model family
+reviews it: a Claude-written plan goes to Codex, and a Codex-written plan to Claude. A writer's own family shares its
+blind spots, so the other family is more likely to catch a plausible mistake. [The `resume`
+skill](../.agents/skills/resume/SKILL.md#4-plan) owns which cards get the review, and [the `cross-review`
+skill](../.agents/skills/cross-review/SKILL.md#4-review-a-plan-before-the-build) owns how it runs.
+
+### Standards enter at planning
+
+Every seat that plans, builds or reviews code reads the coding standards before it starts, as
+[`AGENTS.md`](../AGENTS.md#coding-standards-and-the-executed-test-bar) says. The standards also set what a test or tool
+may cost, and the plan makes that choice. A builder cannot change a plan once it arrives. So a standard read only at
+build time reaches the work after the plan fixes its design, and a finding then costs a replan.
+
+### Seat settings in an adopting repository
+
+Each seat file sets its seat's model and effort, and on Claude Code its turn limit. Those values are defaults. An
+adopting repository may name another value for a seat in its own seat settings file. An override changes a value the
+seat file already carries, never its instructions. A render command applies that file
+to the seat files, and every release update applies it again. A guide page that names a seat's model names the
+default. [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md#repository-settings-and-requirements) owns
+how a repository overrides a seat and what an override may not do.
 
 ## Where the rules live
 
-- The seat files under [`.claude/agents/`](../.claude/agents/) and [`.codex/agents/`](../.codex/agents/): each
-  seat's charter, tools, model, effort and turn cap.
-- [`AGENTS.md`](../AGENTS.md) under "Runtime notes" and "Codex model routing": which seats exist, which seats the
-  costliest models are kept to, and how a seat is dispatched.
-- [`AGENTS.md`](../AGENTS.md) under "Coding standards and the executed test bar": which seats read the coding
-  standards.
-- [`.agents/templates/builder-handoff.md`](../.agents/templates/builder-handoff.md) and
-  [`.agents/templates/planner-handoff.md`](../.agents/templates/planner-handoff.md): the labelled lines of each
-  handoff.
-- [The `resume` skill](../.agents/skills/resume/SKILL.md) under "4. Plan" and "5. Build": who plans, which plans are
-  reviewed and by whom, and what a builder may run.
-- [The `cross-review` skill](../.agents/skills/cross-review/SKILL.md): how a review or a plan review runs on the
-  other model family.
-- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md) under "How a repository overrides a seat": how a
-  repository overrides a seat's model, effort or turn cap, and what an override may not do.
+- The seat files under `.claude/agents/` and `.codex/agents/`: each seat's charter, tools, model, effort and turn limit.
+- [`AGENTS.md`](../AGENTS.md#runtime-notes) under "Runtime notes" and "Codex model routing": which seats exist, which
+  seats reach the costliest models and how the session dispatches a seat.
+- [`AGENTS.md`](../AGENTS.md#coding-standards-and-the-executed-test-bar) under "Coding standards and the executed test
+  bar": which seats read the coding standards.
+- [The builder template](../.agents/templates/builder-handoff.md) and
+  [the planner template](../.agents/templates/planner-handoff.md): the labelled lines of each handoff, and what to do
+  with a capped builder.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md#4-plan) under "4. Plan" and "5. Build": who plans, which plans
+  get a review, which builder takes a slice and what a builder may run.
+- [The `cross-review` skill](../.agents/skills/cross-review/SKILL.md): how a review or a plan review runs on the other
+  model family.
+- [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md#repository-settings-and-requirements): how a
+  repository overrides a seat, and the limits on an override.
 
 ## Failure modes
 
-- **One runtime carries a different first-party charter body.** The commit guard names the seat, both files and differing lines.
-  Edit both canonical source charters together and regenerate their installed copies before staging them.
-  A consumer receives the correction through a release update, as the
-  [`shared-files` skill](../.agents/skills/shared-files/SKILL.md) says.
-
-- **A builder is cut off at its turn cap.** Each Claude seat file also sets a turn cap. A builder is cut off at its
-  cap with no warning, so a builder's report ends with a literal sentinel line; a report without it means the
-  builder was capped, and the remaining work goes to a fresh builder as a smaller slice.
-- **A handoff leaves a decision open.** Judgment that would make a handoff unreliable is resolved in the plan or
-  the slice is split smaller; the session never absorbs it by editing, and a builder that meets it stops and asks
-  ([`AGENTS.md`](../AGENTS.md) under "Runtime notes").
-- **A handoff is incomplete.** The handoff hook refuses a handoff that is missing a labelled line or carries an
-  unfilled slot, and a builder checks the same lines itself before it edits.
-- **The plan-review seat cannot be reached.** Another seat reviews the plan instead and the pull request body
-  says so; [the `resume` skill](../.agents/skills/resume/SKILL.md) owns that route under "4. Plan".
-- **A seat file and the seat settings file disagree.** The contract test fails naming the seat until
-  `node scripts/factory-sync.mjs --render` has applied the settings file and the result is committed. A settings file
-  that would put a costliest model on another seat, raise the turn cap of the `oracle` seat above 90 or of the
-  `security-reviewer` seat above 150, or name a model the agent check does not know is refused by a release update and
-  by `--render` before either writes.
+- **A seat reaches its turn limit.** A seat stops at its limit with no warning, so its report lacks the finish
+  line the table in [Mental model](#mental-model) gives. The session treats that report as capped and never resumes the
+  seat. A capped builder's remaining work goes to a fresh builder as a smaller slice, and the session never finishes it
+  by hand. A capped architect, oracle or security reviewer leaves its settled points in its result file. The session
+  then dispatches one fresh seat for the open points, or finishes the result inline.
+- **A handoff leaves a decision open.** The plan settles judgment that would make a handoff unreliable, or the session
+  splits the slice smaller. The session never absorbs it by editing, and a builder that meets it stops and asks.
+- **A handoff is incomplete.** The handoff hook refuses it. On Codex it also refuses a builder dispatch with no saved
+  handoff, and every tool call of a builder thread that started without one.
+- **A handoff is complete but wrong.** The hook passes it, because it checks shape only. The plan review, the builder's
+  own stop rule and the final review catch a wrong handoff instead.
+- **The plan-review seat is unreachable.** Another seat reviews the plan and the pull request body says so.
+  [The `resume` skill](../.agents/skills/resume/SKILL.md#4-plan) owns that route under "4. Plan".
+- **The two runtimes' charters differ.** The commit check names the seat, both files and the differing lines. A builder
+  corrects both charters together at their source, and an adopter receives the correction through a release update.
+- **A seat file and the seat settings file disagree.** The contract test fails, naming the seat, until the render
+  command applies the settings file and the session commits the result. Every command that applies the settings
+  file refuses one that breaks an override limit before it writes anything.
 
 ## Key files
 
 - `.claude/agents/` and `.codex/agents/`: the seat files.
 - `.agents/templates/builder-handoff.md` and `.agents/templates/planner-handoff.md`: the handoff templates.
-- `.claude/hooks/check-builder-handoff.mjs`: the handoff hook.
+- `.claude/hooks/check-builder-handoff.mjs` and `.codex/hooks/check-builder-handoff.mjs`: the handoff hooks, which share
+  `scripts/lib/handoff-check.mjs`.
+- `scripts/lib/check-agents.mjs`: the check that compares charters across the runtimes.
+- `scripts/lib/seat-settings.mjs`: the seat settings file's path, schema and what it refuses.
 - `docs/CODING-STANDARDS.md`: the standards every planning, building and reviewing seat reads.
-- `scripts/lib/seat-settings.mjs`: the seat settings file's path, schema and substitution.
+
+## Where to go next
+
+- [The life of one change](AI-WORKFLOW-job.md) shows where each seat acts in a job.
+- [The evidence bar](AI-WORKFLOW-evidence.md) explains what a builder's report must prove.
+- [Enforcement and instruction](AI-WORKFLOW-enforcement.md) separates what the handoff hook refuses from what rests on
+  an instruction.

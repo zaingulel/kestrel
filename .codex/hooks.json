@@ -12,12 +12,23 @@
         ]
       },
       {
-        "matcher": "collaborationspawn_agent",
         "hooks": [
           {
             "type": "command",
             "command": "node \"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")/.codex/hooks/check-builder-handoff.mjs\"",
             "commandWindows": "$r = Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir); if (-not $r) { $r = '.' }; $h = \"$r/.codex/hooks/check-builder-handoff.mjs\"; $LASTEXITCODE = 1; node $h; exit $LASTEXITCODE"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")/.codex/hooks/check-builder-handoff.mjs\"",
+            "commandWindows": "$r = Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir); if (-not $r) { $r = '.' }; $h = \"$r/.codex/hooks/check-builder-handoff.mjs\"; $LASTEXITCODE = 1; node $h; exit $LASTEXITCODE",
+            "additionalContextLimit": 0
           }
         ]
       }

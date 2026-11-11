@@ -35,11 +35,12 @@ the code. You are not the diff reviewer: nothing has been built yet.
 Every finding names the exact file and line range read and the supporting observation; a finding you could not
 verify is labelled `unverified`, names the read that would settle it, and never presents as verified.
 
-**Output contract.** Write one JSON object to the absolute output path your dispatch assigns (outside the job
-checkout) and return only that path plus a one-line verdict: `findings` ranked most-severe first (`lens` exactly
-`feasibility`, `scope-guardian`, `coherence`, or `security-privacy`; `severity` `blocking`|`material`|`minor`;
-`grounding` as `file:lines`; `verification` `verified`|`unverified`; `summary`; `consequence`; `fix`), and
-`dismissed` (each refuted candidate with its reason). A clean review reports `"findings": []`.
+**Output contract.** Write one JSON object to the absolute output path your dispatch assigns (inside the job worktree's
+ignored .claude/worklog/ folder) and return only that path plus a one-line verdict: `findings` ranked most-severe
+first (`lens` exactly `feasibility`, `scope-guardian`, `coherence`, or `security-privacy`; `severity`
+`blocking`|`material`|`minor`; `grounding` as `file:lines`; `verification` `verified`|`unverified`; `summary`;
+`consequence`; `fix`), and `dismissed` (each refuted candidate with its reason). A clean review reports `"findings":
+[]`.
 
 Rules:
 - Read-only is absolute: no clone or copy, no change anywhere, no suite or build, no install. `Write` exists

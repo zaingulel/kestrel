@@ -1,6 +1,9 @@
 // Common command acceptance uses literal Jira data, injected native reads and exact write transcripts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { JIRA_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const STATES = [
@@ -112,6 +115,11 @@ test('Jira commands preserve complete publication and confirmed transitions', as
       output: { log: (line) => stdout.push(line), error: (line) => stderr.push(line) } });
     return { status, stdout, stderr };
   };
+  const intakeFolder = () => {
+    const folder = mkdtempSync(join(tmpdir(), 'jira-intake-'));
+    t.after(() => rmSync(folder, { recursive: true, force: true }));
+    return folder;
+  };
   const listed = run(board, [], native());
   assert.equal(listed.status, 0, listed.stderr.join('\n'));
   assert.ok(listed.stdout[0].startsWith('Board jira project ENG at https://example.atlassian.net'));
@@ -129,11 +137,15 @@ test('Jira commands preserve complete publication and confirmed transitions', as
   const empty = run(board, ['--all', '--json'], native({ empty: true }));
   assert.equal(empty.status, 0);
   assert.deepEqual(JSON.parse(empty.stdout[0]), []);
-  const intake = run(board, ['--intake'], native());
+  const folder = intakeFolder();
+  const intake = run(board, ['--intake', folder], native());
   assert.equal(intake.status, 0, intake.stderr.join('\n'));
+  // The claim is in the summary; the card's text is in the file the summary names.
   assert.match(intake.stdout.join('\n'), /claim: comment 1 of 2/);
-  assert.match(intake.stdout.join('\n'), /\| Acceptance text/);
-  const missing = run(board, ['--intake'], native({ commentFailure: true }));
+  assert.ok(intake.stdout.join('\n').includes(`card text: ${join(folder, 'ENG-2.txt')}, `), intake.stdout.join('\n'));
+  assert.doesNotMatch(intake.stdout.join('\n'), /Acceptance text/);
+  assert.match(readFileSync(join(folder, 'ENG-2.txt'), 'utf8'), /^\| Acceptance text$/m);
+  const missing = run(board, ['--intake', intakeFolder()], native({ commentFailure: true }));
   assert.equal(missing.status, 4);
   assert.match(missing.stdout.join('\n'), /details: UNAVAILABLE.*later comment page failed/);
   assert.doesNotMatch(missing.stdout.join('\n'), /body: empty/);
@@ -144,7 +156,7 @@ test('Jira commands preserve complete publication and confirmed transitions', as
   assert.match(advisory.stdout.join('\n'), /node scripts\/jira-card\.mjs assign ENG-2/);
   assert.doesNotMatch(advisory.stdout.join('\n'), /gh issue edit ENG-2/);
   const noReady = [{ id: '10001', statuses: STATES.filter(({ id }) => id !== '11') }, { id: '10002', statuses: STATES.filter(({ id }) => id !== '11') }];
-  const unread = run(board, ['--intake'], native({ metadata: noReady }));
+  const unread = run(board, ['--intake', intakeFolder()], native({ metadata: noReady }));
   assert.equal(unread.status, 2);
   assert.deepEqual(unread.stdout, []);
   assert.match(unread.stderr.join('\n'), /failed to read the Jira project/);

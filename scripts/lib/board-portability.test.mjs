@@ -19,7 +19,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -35,6 +35,15 @@ export const BOARD_OWNER_TYPE = 'organization';
 export const BOARD_PROJECT_NUMBER = 7;
 export const BOARD_REPOSITORY = 'widgets';
 ${CONFIG_TAIL}`;
+
+// Each --intake run writes its card files into a folder of its own, outside the install, removed when the file ends.
+const intakeFolders = [];
+function newIntakeFolder() {
+  const folder = mkdtempSync(join(tmpdir(), 'board-portability-intake-'));
+  intakeFolders.push(folder);
+  return folder;
+}
+after(() => intakeFolders.forEach((folder) => rmSync(folder, { recursive: true, force: true })));
 
 function adoptToolkit(t, configSource) {
   const toolkit = copyToolkit(configSource);
@@ -734,7 +743,8 @@ test('markdown board: intake shows the columns derived from real local, origin a
     'job/7': [{ number: 99, headRefName: 'job/7', isCrossRepository: true }],
   };
 
-  const run = runScript(toolkit.root, 'board.mjs', ['--intake'], pulls);
+  const folder = newIntakeFolder();
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake', folder], pulls);
 
   assert.equal(run.status, 3, run.stderr);
   const document = run.stdout.split('\n');
@@ -754,7 +764,11 @@ test('markdown board: intake shows the columns derived from real local, origin a
     'claim: branch job/7 (origin)',
   ]);
   assert.ok(document.includes('open blockers: #1'), run.stdout);
-  assert.ok(document.includes('| Body of the card.'), run.stdout);
+  // The summary names each card's file; the body is in the file alone.
+  assert.equal(document.includes('| Body of the card.'), false, run.stdout);
+  assert.deepEqual(readdirSync(folder).sort(), ['1.txt', '2.txt', '3.txt', '5.txt', '7.txt']);
+  assert.ok(document.includes(`card text: ${join(folder, '3.txt')}, 10 line(s)`), run.stdout);
+  assert.ok(readFileSync(join(folder, '3.txt'), 'utf8').split('\n').includes('| Body of the card.'));
   // The two pushed branches with no counted draft are the stalled claims; the Awaiting push card is not.
   const stalled = (number, word) =>
     `#${number} [In progress] Card ${word} — claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready`;
@@ -791,7 +805,7 @@ test('markdown board: a corrupt card fails the read with exit 2, naming the file
     2: ['# Card two', '', 'Status: Ready', 'Colour: red', 'Kind: task', 'Workstream: Product', '', 'Body', ''].join('\n'),
   });
 
-  const run = runScript(toolkit.root, 'board.mjs', ['--intake']);
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake', newIntakeFolder()]);
 
   assert.equal(run.status, 2, run.stderr);
   assert.equal(run.stdout, '');
@@ -811,7 +825,7 @@ test('markdown board: a linked .agents/cards is refused and the outside card is 
   symlinkSync(outside, join(toolkit.root, CARDS_DIR), 'junction');
   const before = readFileSync(outsideCard);
 
-  const run = runScript(toolkit.root, 'board.mjs', ['--intake']);
+  const run = runScript(toolkit.root, 'board.mjs', ['--intake', newIntakeFolder()]);
 
   assert.equal(run.status, 2, run.stderr);
   assert.equal(run.stdout, '');
@@ -888,7 +902,7 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
   }
   const before = readFileSync(outsideCard);
 
-  const read = runScript(worktree, 'board.mjs', ['--intake']);
+  const read = runScript(worktree, 'board.mjs', ['--intake', newIntakeFolder()]);
 
   assert.equal(read.status, 2, read.stderr);
   assert.equal(read.stdout, '');
@@ -924,16 +938,18 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
     return Object.fromEntries(JSON.parse(run.stdout).map((entry) => [entry.number, [entry.status, entry.state]]));
   };
   const intake = (root, pulls) => {
-    const run = runScript(root, 'board.mjs', ['--intake'], pulls);
+    const folder = newIntakeFolder();
+    const run = runScript(root, 'board.mjs', ['--intake', folder], pulls);
     const out = run.stdout.split('\n');
     return {
       run,
+      folder,
       sections: out.filter((line) => line.startsWith('=== ')),
-      claimed: out.find((line) => line.startsWith('Card details: ')),
+      claimed: out.find((line) => line.startsWith('Card summaries: ')),
       claims: out.filter((line) => line.startsWith('claim: ')),
     };
   };
-  const claimCount = (count) => `Card details: 0 pickable card(s), then ${count} claimed card(s) with no closing pull request.`;
+  const claimCount = (count) => `Card summaries: 0 pickable card(s), then ${count} claimed card(s) with no closing pull request.`;
   const draft = { 'job/3': [{ number: 21, headRefName: 'job/3', isCrossRepository: false }] };
 
   // The integration clone A holds the toolkit and the filed card on main, published to the bare origin.
@@ -979,6 +995,8 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   const claimed = intake(worktree);
   assert.deepEqual(claimed.sections, ['=== #3 [In progress] Card three ===']);
   assert.equal(claimed.claimed, claimCount(1));
+  assert.deepEqual(readdirSync(claimed.folder), ['3.txt']);
+  assert.ok(readFileSync(join(claimed.folder, '3.txt'), 'utf8').split('\n').includes('claim: branch job/3 (local)'));
 
   // 2. A card never published cannot be closed or read Done; a closing edit stays pending until the merge.
   const unpublished = cardFile('Card four', 'Ready');
@@ -989,7 +1007,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   assert.ok(refused.stderr.includes('#4 is not on origin/main; publish the card as Backlog or Ready through a merged change before closing it'), refused.stderr);
   assert.equal(readFileSync(cardPath(worktree, UNPUBLISHED), 'utf8'), unpublished);
   writeFileSync(cardPath(worktree, UNPUBLISHED), cardFile('Card four', 'Done'));
-  const handDone = runScript(worktree, 'board.mjs', ['--intake']);
+  const handDone = runScript(worktree, 'board.mjs', ['--intake', newIntakeFolder()]);
   assert.equal(handDone.status, 2, handDone.stderr);
   assert.equal(handDone.stdout, '');
   assert.ok(handDone.stderr.includes(`${CARDS_DIR}/4.md says Done but is not on origin/main; a card is first published as Backlog or Ready through a merged change`), handDone.stderr);
@@ -1190,7 +1208,8 @@ test('linear board: the copied CLI prints the pick view and the intake document 
     'ENG-12 [Backlog] Card twelve',
   ]);
 
-  const intake = runLinearBoard(root, ['--intake']);
+  const folder = newIntakeFolder();
+  const intake = runLinearBoard(root, ['--intake', folder]);
 
   assert.equal(intake.status, 0, intake.stderr);
   const document = intake.stdout.split('\n');
@@ -1202,11 +1221,16 @@ test('linear board: the copied CLI prints the pick view and the intake document 
   ]);
   assert.ok(document.includes('parent: ENG-2'), intake.stdout);
   assert.ok(document.includes('open blockers: ENG-2'), intake.stdout);
-  assert.ok(document.includes('| Do the twelve thing.'), intake.stdout);
-  assert.ok(document.includes('| Comment on ENG-12'), intake.stdout);
+  // The summary names each card's file; the body and the comments are in the file alone.
+  assert.equal(document.includes('| Do the twelve thing.'), false, intake.stdout);
+  assert.deepEqual(readdirSync(folder).sort(), ['ENG-11.txt', 'ENG-12.txt', 'ENG-2.txt']);
+  assert.ok(document.includes(`card text: ${join(folder, 'ENG-12.txt')}, 11 line(s)`), intake.stdout);
+  const cardFileLines = readFileSync(join(folder, 'ENG-12.txt'), 'utf8').split('\n');
+  assert.ok(cardFileLines.includes('| Do the twelve thing.'), cardFileLines.join('\n'));
+  assert.ok(cardFileLines.includes('| Comment on ENG-12'), cardFileLines.join('\n'));
   assert.ok(intake.stderr.includes('board intake: details complete for 3 card(s).'), intake.stderr);
 
-  const failed = runLinearBoard(root, ['--intake'], { FAKE_LINEAR_FAIL: 'Linear refused the API key (HTTP 401)' });
+  const failed = runLinearBoard(root, ['--intake', newIntakeFolder()], { FAKE_LINEAR_FAIL: 'Linear refused the API key (HTTP 401)' });
 
   assert.equal(failed.status, 2, failed.stderr);
   assert.equal(failed.stdout, '');
@@ -1265,8 +1289,8 @@ function completeBoardRead(result) {
   return boards.length === 1 && !boards[0].slice(1).includes(null) && JSON.stringify(read.at(-1)) === '["boards",1]' ? read : null;
 }
 
-// resume's free check against the intake document, with the decision 6 identity on Linear: the board line's
-// tracker and team are the ones the document's `Board linear team <KEY>` header names, and its column the one
+// resume's free check against the intake summary, with the decision 6 identity on Linear: the board line's
+// tracker and team are the ones the summary's `Board linear team <KEY>` header names, and its column the one
 // in the card's heading.
 function freeAgainst(document, id, cardRead, boardRead) {
   const [, team] = /^Board linear team (\S+) — /.exec(document[0]);
@@ -1362,9 +1386,9 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   assert.ok(published.stdout.endsWith('issue-publish: child set verified: ENG-2 has exactly the 2 supplied child issues.\n'), published.stdout);
   assert.deepEqual(card(['text', 'ENG-13'], filed).slice(0, 4), [['title', 'Card thirteen'], ['body', BODY], ['parent', 'ENG-2'], ['blockedBy', ['ENG-12']]]);
 
-  // Claim, once the blocker is done and the card is in Ready: the intake document, then the card and board
+  // Claim, once the blocker is done and the card is in Ready: the intake summary, then the card and board
   // reads, complete and free against it.
-  const intake = step('board.mjs', ['--intake'], ready);
+  const intake = step('board.mjs', ['--intake', newIntakeFolder()], ready);
   assert.equal(intake.status, 0, intake.stderr);
   const document = intake.stdout.split('\n');
   assert.equal(document[0], 'Board linear team ENG — Backlog/Ready: 3 of 4 item(s)');
@@ -1380,7 +1404,7 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   assert.deepEqual(card(['comment', 'ENG-13', '--body', CLAIM], { state: states['In Progress'], assignee: 'me' }), [['comment', CLAIM_ID, CLAIM_URL]]);
 
   // The read after the claim shows the recorded address as the first claim the read before did not show,
-  // and the same reads judged against the intake document are no longer free.
+  // and the same reads judged against the intake summary are no longer free.
   const heldRead = completeCardRead(step('linear-card.mjs', ['view', 'ENG-13'], claimed));
   const heldBoard = completeBoardRead(step('linear-card.mjs', ['view', 'ENG-13', '--board'], claimed));
   assert.deepEqual(heldRead, [['state', 'OPEN'], ['assignees', ['me']], ['claim', 1, 'me', claimComment.createdAt, CLAIM_URL, CLAIM, CLAIM_ID], ['comments', 1]]);

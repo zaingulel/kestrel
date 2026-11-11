@@ -13,7 +13,7 @@ import { installFakeGh } from './fake-gh.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
@@ -53,7 +53,9 @@ const {
   cardDetailsQuery,
   fetchBoard,
   fetchCardDetails,
-  intakeDocument,
+  intakeCardFileName,
+  intakeCardFiles,
+  intakeSummary,
   boardQuery,
   parseBoardArgs,
   parseBoardPage,
@@ -97,11 +99,11 @@ test('PICKABLE_STATUSES is exactly the two draw columns', () => {
 });
 
 test('parseBoardArgs: the default read, each selection, and --closeout', () => {
-  assert.deepEqual(parseBoardArgs([]), { all: false, status: null, json: false, closeout: false, intake: false });
-  assert.deepEqual(parseBoardArgs(['--all', '--json']), { all: true, status: null, json: true, closeout: false, intake: false });
-  assert.deepEqual(parseBoardArgs(['--status=Ready']), { all: false, status: 'Ready', json: false, closeout: false, intake: false });
-  assert.deepEqual(parseBoardArgs(['--closeout']), { all: false, status: null, json: false, closeout: true, intake: false });
-  assert.deepEqual(parseBoardArgs(['--intake']), { all: false, status: null, json: false, closeout: false, intake: true });
+  assert.deepEqual(parseBoardArgs([]), { all: false, status: null, json: false, closeout: false, intake: null });
+  assert.deepEqual(parseBoardArgs(['--all', '--json']), { all: true, status: null, json: true, closeout: false, intake: null });
+  assert.deepEqual(parseBoardArgs(['--status=Ready']), { all: false, status: 'Ready', json: false, closeout: false, intake: null });
+  assert.deepEqual(parseBoardArgs(['--closeout']), { all: false, status: null, json: false, closeout: true, intake: null });
+  assert.deepEqual(parseBoardArgs(['--intake', 'out/folder']), { all: false, status: null, json: false, closeout: false, intake: 'out/folder' });
 });
 
 // #598's defect class: this command's exit code is a proof contract, so a typo must never
@@ -134,14 +136,21 @@ test('parseBoardArgs: --closeout is exclusive, --all and --status= are exclusive
   );
 });
 
-test('parseBoardArgs: --intake takes no other argument', () => {
-  // --intake prints one fixed document, so every companion flag would promise output it
-  // never emits. Every pairing, in both orders.
-  for (const other of ['--all', '--status=Ready', '--json', '--closeout']) {
-    assert.throws(() => parseBoardArgs(['--intake', other]), /--intake takes no other argument/, other);
-    assert.throws(() => parseBoardArgs([other, '--intake']), /--intake takes no other argument/, other);
+test('parseBoardArgs: --intake takes one folder and no other argument', () => {
+  // --intake writes into one folder and prints one fixed summary, so a missing folder, a second
+  // value, a value that looks like a flag and every companion flag are refused. Both orders.
+  const refused = /--intake takes one folder and no other argument — usage: node scripts\/board\.mjs/;
+  assert.throws(() => parseBoardArgs(['--intake']), refused);
+  assert.throws(() => parseBoardArgs(['--intake', '']), refused);
+  assert.throws(() => parseBoardArgs(['--intake', 'one', 'two']), refused);
+  for (const value of ['-x', '--all', '--status=Ready', '--json', '--closeout', '--intake']) {
+    assert.throws(() => parseBoardArgs(['--intake', value]), refused, value);
   }
-  assert.equal(parseBoardArgs(['--intake']).intake, true);
+  for (const other of ['--all', '--status=Ready', '--json', '--closeout']) {
+    assert.throws(() => parseBoardArgs(['--intake', 'folder', other]), refused, other);
+    assert.throws(() => parseBoardArgs([other, '--intake', 'folder']), refused, other);
+  }
+  assert.equal(parseBoardArgs(['--intake', 'folder']).intake, 'folder');
 });
 
 test('parseBoardArgs: --help takes no other argument', () => {
@@ -168,6 +177,7 @@ test('BOARD_HELP names exactly the flags the parser accepts, and each one parses
   const validForm = {
     '--status=': ['--status=Ready'],
     '--approval': ['--approval', 'check', '1'],
+    '--intake': ['--intake', 'folder'],
   };
   for (const flag of accepted) {
     assert.doesNotThrow(() => parseBoardArgs(validForm[flag] ?? [flag]), flag);
@@ -207,7 +217,7 @@ test('parseBoardArgs: rejects a --status= value that is not a board column, and 
   for (const column of STATUS_OPTIONS) {
     assert.deepEqual(
       parseBoardArgs([`--status=${column}`]),
-      { all: false, status: column, json: false, closeout: false, intake: false },
+      { all: false, status: column, json: false, closeout: false, intake: null },
       column,
     );
   }
@@ -1495,14 +1505,23 @@ test('cardDetailsQuery asks for body, parent and the newest comment page with it
   }
 });
 
-// Every expected line below is written by hand from the document format, never produced
-// by the function under test.
+// Every expected line below is written by hand from the intake contract (the summary on
+// stdout, one text file per card), never produced by the function under test.
 const intakeCard = (number, status, title, { routing = 'Product', openBlockers = [], assignees = [] } = {}) => ({
   number, status, title, routing, openBlockers, assignees,
 });
 const LISTING = 'LISTING HEADER\n\nLISTING BODY';
 const [BACKLOG, READY] = PICKABLE_STATUSES;
 const routingLine = (value) => (ROUTING_FIELD ? [`${ROUTING_FIELD}: ${value}`] : []);
+const DIRECTORY = 'intake-out';
+const CARD_TEXT_LEGEND = 'Lines starting "| " are card text, and "|+ " continues the line above it.';
+const SUMMARY_LEGEND = `${CARD_TEXT_LEGEND} Each card's full body and comments are in the file its "card text:" line names.`;
+
+// The files and the summary of one intake, the way the command builds them.
+function intakeOf({ numberless = 0, ...cards }) {
+  const files = new Map(intakeCardFiles(cards).map((file) => [file.number, file]));
+  return { files, summary: intakeSummary({ listing: LISTING, numberless, ...cards, directory: DIRECTORY, files }) };
+}
 
 // One card's section: its header up to the blank line that ends it. A blank line inside
 // card text prints as a bare `|`, so the first blank line is always the end.
@@ -1511,7 +1530,7 @@ function sectionOf(lines, number) {
   return lines.slice(start, start + lines.slice(start).indexOf(''));
 }
 
-test('ANTI-REGRESSION: an unavailable card prints no body, claim or comment count, and unread older comments never read as no claim', () => {
+test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count or card text line, and unread older comments never read as no claim', () => {
   const details = new Map([
     [5, { number: 5, unavailable: 'gh: timed out' }],
     [6, {
@@ -1522,26 +1541,28 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim or comment coun
     }],
   ]);
 
-  const lines = intakeDocument({
-    listing: LISTING,
+  const { files, summary } = intakeOf({
     candidates: [
       intakeCard(5, BACKLOG, 'Unread card', { assignees: ['dev-one'] }),
       intakeCard(6, READY, 'Partly read', { openBlockers: [3, 4] }),
     ],
     claims: [intakeCard(7, 'In progress', 'Claimed card', { routing: null, assignees: ['dev-one', 'dev-two'] })],
-    numberless: 0,
     details,
   });
 
-  assert.deepEqual(sectionOf(lines, 5), [
+  // An unread card has no text file and its summary names none.
+  assert.deepEqual([...files.keys()], [6, 7]);
+  assert.deepEqual(sectionOf(summary, 5), [
     '=== #5 [Backlog] Unread card ===',
     ...routingLine('Product'),
     'open blockers: none',
     'assignees: @dev-one',
     'details: UNAVAILABLE — gh: timed out',
   ]);
+
   // The newest 2 of 5 comments were read and neither is a claim: that is not "no claim".
-  assert.deepEqual(sectionOf(lines, 6), [
+  const sixFile = [
+    CARD_TEXT_LEGEND,
     '=== #6 [Ready] Partly read ===',
     ...routingLine('Product'),
     'parent: none',
@@ -1555,10 +1576,26 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim or comment coun
     '| hello',
     '--- comment 5 of 5 ---',
     '| plain',
+  ];
+  assert.equal(files.get(6).name, '6.txt');
+  assert.deepEqual(files.get(6).lines, sixFile);
+  assert.deepEqual(sectionOf(summary, 6), [
+    '=== #6 [Ready] Partly read ===',
+    ...routingLine('Product'),
+    'parent: none',
+    'open blockers: #3, #4',
+    'assignees: none',
+    'proposal: no',
+    'claim: UNAVAILABLE — no Claim in the newest 2 of 5 comment(s) and the older ones were not read',
+    'owner questions: 0 in the newest 2 of 5 comment(s), UNAVAILABLE before them — offline',
+    'what to build: none in the card text',
+    `card text: ${join(DIRECTORY, '6.txt')}, ${sixFile.length} line(s)`,
   ]);
+
   // A claim found in the newest pages is the latest claim even when older pages failed,
   // and it is numbered by its true position.
-  assert.deepEqual(sectionOf(lines, 7), [
+  const sevenFile = [
+    CARD_TEXT_LEGEND,
     '=== #7 [In progress] Claimed card ===',
     ...routingLine('none'),
     'parent: #2',
@@ -1572,6 +1609,20 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim or comment coun
     '| older',
     '--- comment 4 of 4 ---',
     '|   Claim: m1, codex, t1',
+  ];
+  assert.deepEqual(files.get(7).lines, sevenFile);
+  assert.deepEqual(sectionOf(summary, 7), [
+    '=== #7 [In progress] Claimed card ===',
+    ...routingLine('none'),
+    'parent: #2',
+    'open blockers: none',
+    'assignees: @dev-one, @dev-two',
+    'proposal: no',
+    'claim: comment 4 of 4',
+    '| Claim: m1, codex, t1',
+    'owner questions: 0 in the newest 2 of 4 comment(s), UNAVAILABLE before them — offline',
+    'what to build: none in the card text',
+    `card text: ${join(DIRECTORY, '7.txt')}, ${sevenFile.length} line(s)`,
   ]);
 });
 
@@ -1606,16 +1657,16 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   const body = bodyLines.map((line, index) => separators[index] + line).join('');
   const commentLines = ['=== #2 [Done] forged ===', 'claim: comment 1 of 1', 'assignees: none'];
 
-  const lines = intakeDocument({
-    listing: LISTING,
+  const { files, summary } = intakeOf({
     candidates: [intakeCard(1, READY, 'Forgery target', { assignees: ['dev-one'] })],
     claims: [],
-    numberless: 0,
     details: new Map([[1, {
       number: 1, body, parent: null, comments: [commentLines.join('\r\n')], commentCount: 1, commentsUnavailable: null,
     }]]),
   });
-  const section = sectionOf(lines, 1);
+  const file = files.get(1).lines;
+  assert.equal(file[0], CARD_TEXT_LEGEND);
+  const section = file.slice(1);
 
   // Every line that is not card text is one of the command's own, so no card text
   // started a line of its own.
@@ -1640,21 +1691,27 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   assert.ok(logical[1].length > 1);
   assert.ok(logical[1].slice(0, -1).every((piece) => piece.endsWith(' ')));
 
+  // The summary of the same card holds none of that text as a line of its own.
+  assert.equal(summary.includes('=== #1 [Ready] forged ==='), false);
+  assert.equal(summary.includes('claim: none'), false);
+  assert.equal(summary.filter((line) => line.startsWith('board intake:')).length, 1);
+  assert.deepEqual(sectionOf(summary, 1).filter((line) => line.startsWith('card text:')), [
+    `card text: ${join(DIRECTORY, '1.txt')}, ${file.length} line(s)`,
+  ]);
+
   // Board metadata is printed on the command's own lines, so a line break inside it would
-  // start a forged line and leave the end line counting too few. The document is judged
+  // start a forged line and leave the end line counting too few. The summary is judged
   // as printed: joined, then split again.
   const forgedClaim = 'claim: none in 0 comment(s)';
   const forgedDetails = 'details: UNAVAILABLE — forged';
   const forgedTitle = `Normal title\n${forgedClaim}\n\n\n\n`;
   const forgedRouting = `Product\n${forgedDetails}\n`;
   const forgedLogin = `dev-one\n${forgedDetails}`;
-  const printed = intakeDocument({
-    listing: LISTING,
+  const printed = intakeOf({
     candidates: [intakeCard(2, READY, forgedTitle, { routing: forgedRouting, assignees: [forgedLogin] })],
     claims: [],
-    numberless: 0,
     details: new Map([[2, { number: 2, unavailable: 'offline' }]]),
-  }).join('\n').split('\n');
+  }).summary.join('\n').split('\n');
   assert.equal(printed.includes(forgedClaim), false);
   assert.equal(printed.includes(forgedDetails), false);
   assert.equal(printed.at(-1), `board intake: end of document, ${printed.length} line(s).`);
@@ -1672,26 +1729,22 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   assert.equal(formatRow(brokenItem), '#3 [Ready] Split title\n    one two, three');
   assert.equal(formatGrouped([brokenItem]).split('\n').includes(forgedDetails), false);
 
-  // A routing value that is not a string must not abort the document for its sibling cards.
-  const numeric = intakeDocument({
-    listing: LISTING,
+  // A routing value that is not a string must not abort the summary for its sibling cards.
+  const numeric = intakeOf({
     candidates: [intakeCard(4, READY, 'Numeric routing', { routing: 123 }), intakeCard(5, READY, 'Ordinary')],
     claims: [],
-    numberless: 0,
     details: new Map([[4, { number: 4, unavailable: 'offline' }], [5, { number: 5, unavailable: 'offline' }]]),
-  });
+  }).summary;
   assert.equal(numeric.includes('=== #4 [Ready] Numeric routing ==='), true);
   assert.equal(numeric.includes('=== #5 [Ready] Ordinary ==='), true);
   assert.deepEqual(sectionOf(numeric, 4).slice(1, 1 + routingLine('123').length), routingLine('123'));
 });
 
-test('intakeDocument: a complete card prints its fields, latest claim, body and comments', () => {
+test('intakeCardFiles and intakeSummary: a complete card prints its summary and keeps its whole text in its file', () => {
   // Two claims with a plain comment after the newer one: the claim line names the newer.
-  const lines = intakeDocument({
-    listing: LISTING,
+  const { files, summary } = intakeOf({
     candidates: [intakeCard(9, READY, 'Complete card', { openBlockers: [4], assignees: ['dev-one', 'dev-two'] })],
     claims: [],
-    numberless: 0,
     details: new Map([[9, {
       number: 9,
       body: 'first\nsecond\n\nfourth',
@@ -1702,39 +1755,255 @@ test('intakeDocument: a complete card prints its fields, latest claim, body and 
     }]]),
   });
 
-  assert.deepEqual(lines, [
+  assert.deepEqual(files.get(9), {
+    number: 9,
+    name: '9.txt',
+    lines: [
+      CARD_TEXT_LEGEND,
+      '=== #9 [Ready] Complete card ===',
+      ...routingLine('Product'),
+      'parent: #2',
+      'open blockers: #4',
+      'assignees: @dev-one, @dev-two',
+      'claim: comment 3 of 4',
+      '| Claim: m1, codex, t1',
+      'body: 4 line(s)',
+      '| first',
+      '| second',
+      '|',
+      '| fourth',
+      'comments: 4',
+      '--- comment 1 of 4 ---',
+      '| Claim: m0, claude, t0',
+      '--- comment 2 of 4 ---',
+      '| plain',
+      '--- comment 3 of 4 ---',
+      '| Claim: m1, codex, t1',
+      '| extra line',
+      '--- comment 4 of 4 ---',
+      '| thanks',
+    ],
+  });
+  assert.equal(files.get(9).lines.length, 22 + routingLine('Product').length);
+
+  assert.deepEqual(summary, [
     'LISTING HEADER',
     '',
     'LISTING BODY',
     '',
-    'Card details: 1 pickable card(s), then 0 claimed card(s) with no closing pull request.',
-    'Lines starting "| " are card text, and "|+ " continues the line above it.',
+    'Card summaries: 1 pickable card(s), then 0 claimed card(s) with no closing pull request.',
+    SUMMARY_LEGEND,
     '',
     '=== #9 [Ready] Complete card ===',
     ...routingLine('Product'),
     'parent: #2',
     'open blockers: #4',
     'assignees: @dev-one, @dev-two',
+    'proposal: no',
     'claim: comment 3 of 4',
     '| Claim: m1, codex, t1',
-    'body: 4 line(s)',
-    '| first',
-    '| second',
-    '|',
-    '| fourth',
-    'comments: 4',
-    '--- comment 1 of 4 ---',
-    '| Claim: m0, claude, t0',
-    '--- comment 2 of 4 ---',
-    '| plain',
-    '--- comment 3 of 4 ---',
-    '| Claim: m1, codex, t1',
-    '| extra line',
-    '--- comment 4 of 4 ---',
-    '| thanks',
+    'owner questions: 0',
+    'what to build: none in the card text',
+    `card text: ${join(DIRECTORY, '9.txt')}, ${22 + routingLine('Product').length} line(s)`,
     '',
-    `board intake: end of document, ${30 + routingLine('Product').length} line(s).`,
+    `board intake: end of document, ${19 + routingLine('Product').length} line(s).`,
   ]);
+});
+
+test('intakeSummary: a suggested card says so, and the numberless cards are counted', () => {
+  const read = { body: '', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  const { summary } = intakeOf({
+    candidates: [
+      intakeCard(1, READY, '  Proposed: a change'),
+      intakeCard(2, READY, 'proposed: lower case'),
+      intakeCard(3, READY, 'Proposed:no space'),
+    ],
+    claims: [],
+    numberless: 2,
+    details: new Map([1, 2, 3].map((number) => [number, { ...read, number }])),
+  });
+  assert.equal(summary.includes('Card summaries: 3 pickable card(s), then 0 claimed card(s) with no closing pull request. 2 card(s) with no issue number have no details.'), true);
+  assert.deepEqual(
+    [1, 2, 3].map((number) => sectionOf(summary, number).find((line) => line.startsWith('proposal:'))),
+    ['proposal: yes', 'proposal: no', 'proposal: no'],
+  );
+});
+
+test('intakeSummary: owner questions are the whole Needs owner comments, numbered by their true position', () => {
+  const ownerPart = (section) => section.slice(
+    section.findIndex((line) => line.startsWith('owner questions:')),
+    section.findIndex((line) => line.startsWith('what to build:')),
+  );
+  const comments = ['  Needs owner: pick a, b or c?\nsecond line\n\nlast line', 'a reply that says Needs owner: later', 'Needs owner: again'];
+  const whole = intakeOf({
+    candidates: [intakeCard(1, READY, 'Asked')],
+    claims: [],
+    details: new Map([[1, { number: 1, body: '', parent: null, comments, commentCount: 3, commentsUnavailable: null }]]),
+  }).summary;
+  assert.deepEqual(ownerPart(sectionOf(whole, 1)), [
+    'owner questions: 2',
+    '--- comment 1 of 3 ---',
+    '|   Needs owner: pick a, b or c?',
+    '| second line',
+    '|',
+    '| last line',
+    '--- comment 3 of 3 ---',
+    '| Needs owner: again',
+  ]);
+
+  // Only the newest 3 of 7 comments were read: the heading says the older four are unknown.
+  const partial = intakeOf({
+    candidates: [intakeCard(2, READY, 'Asked, partly read')],
+    claims: [],
+    details: new Map([[2, { number: 2, body: '', parent: null, comments, commentCount: 7, commentsUnavailable: 'offline' }]]),
+  }).summary;
+  assert.deepEqual(ownerPart(sectionOf(partial, 2)), [
+    'owner questions: 2 in the newest 3 of 7 comment(s), UNAVAILABLE before them — offline',
+    '--- comment 5 of 7 ---',
+    '|   Needs owner: pick a, b or c?',
+    '| second line',
+    '|',
+    '| last line',
+    '--- comment 7 of 7 ---',
+    '| Needs owner: again',
+  ]);
+});
+
+// The What to build lines of a card holding this body.
+function whatToBuild(body, bodyFormat) {
+  const detail = { number: 1, body, parent: null, comments: [], commentCount: 0, commentsUnavailable: null, ...(bodyFormat ? { bodyFormat } : {}) };
+  const section = sectionOf(intakeOf({
+    candidates: [intakeCard(1, READY, 'Card')],
+    claims: [],
+    details: new Map([[1, detail]]),
+  }).summary, 1);
+  const from = section.findIndex((line) => line.startsWith('what to build:'));
+  return section.slice(from, section.findIndex((line) => line.startsWith('card text:')));
+}
+
+test('intakeSummary: what to build is the body section under its heading, bounded by the next heading of its level or higher', () => {
+  // A deeper subheading stays inside; a same-level heading ends the section; blank lines around it are trimmed.
+  assert.deepEqual(whatToBuild('## Parent\nelsewhere\n\n## What to build\n\n\nBuild it.\n\n### Detail\nmore\n\n\n## Acceptance\ncriteria'), [
+    'what to build: 4 line(s)',
+    '| Build it.',
+    '|',
+    '| ### Detail',
+    '| more',
+  ]);
+  // A higher-level heading ends a deeper section, and a heading is matched without regard to case, closing hashes or level.
+  assert.deepEqual(whatToBuild('Intro\n### what to build ###\nline one\n#### Sub\nline two\n## Next\nline three'), [
+    'what to build: 3 line(s)',
+    '| line one',
+    '| #### Sub',
+    '| line two',
+  ]);
+  // The section runs to the end of the body when no heading follows, and a long line folds.
+  assert.deepEqual(whatToBuild(`# What to build\n${'y'.repeat(1001)}`), [
+    'what to build: 1 line(s)',
+    `| ${'y'.repeat(1000)}`,
+    '|+ y',
+  ]);
+  // A missing or empty section, a heading with other words around it, and an HTML body are said plainly.
+  assert.deepEqual(whatToBuild('Just text\n## Other\nx'), ['what to build: none in the card text']);
+  assert.deepEqual(whatToBuild('## What to build\n\n\n## Next\nx'), ['what to build: none in the card text']);
+  assert.deepEqual(whatToBuild('## What to build next\nx'), ['what to build: none in the card text']);
+  assert.deepEqual(whatToBuild('<h2>What to build</h2><p>x</p>', 'html'), ['what to build: not extracted from an HTML body, read the card text']);
+});
+
+// CommonMark: an ATX heading has 0 to 3 leading spaces, and a line inside a fenced code block
+// (3+ backticks or tildes, closed by the same character at least as long) is never a heading.
+test('612 fix B1: a heading inside a fenced code block does not end the What to build section', () => {
+  assert.deepEqual(
+    whatToBuild('## What to build\nGenerate this document:\n```markdown\n## Result\nContents\n```\nThen validate it.'),
+    [
+      'what to build: 6 line(s)',
+      '| Generate this document:',
+      '| ```markdown',
+      '| ## Result',
+      '| Contents',
+      '| ```',
+      '| Then validate it.',
+    ],
+  );
+});
+
+test('612 fix B2: a What to build heading inside a fenced code block does not start the section', () => {
+  assert.deepEqual(
+    whatToBuild('```\n## What to build\nfake\n```\n## What to build\nreal'),
+    ['what to build: 1 line(s)', '| real'],
+  );
+});
+
+test('612 fix B3: a What to build heading indented by three spaces still starts the section', () => {
+  assert.deepEqual(whatToBuild('   ## What to build\nShip it.'), ['what to build: 1 line(s)', '| Ship it.']);
+});
+
+// A backtick fence's info string may not contain a backtick (CommonMark 0.31), so this line is text, not a fence.
+test('612 fix B4: a line that opens with backticks and holds another backtick later is not a fence opener', () => {
+  assert.deepEqual(whatToBuild('## What to build\n```code``` is inline\n## Next\nafter'), [
+    'what to build: 1 line(s)',
+    '| ```code``` is inline',
+  ]);
+});
+
+test('612 fix G: a fence left open at the end of the body makes the summary say so in place of any extract', () => {
+  assert.deepEqual(
+    whatToBuild('- Example:\n  ```\n  ## Fake\n\n## What to build\nreal'),
+    ['what to build: a code fence is left open, read the card text'],
+  );
+});
+
+// CommonMark: a closing fence may be followed by spaces or tabs only, so a no-break space leaves the line inside the block.
+test('612 fix H: a fence closer followed by a no-break space does not close the fence', () => {
+  assert.deepEqual(
+    whatToBuild('## What to build\n```\nexample\n```\u00a0\n## fake boundary\nstill code\n```\nreal\n## Next\nafter'),
+    [
+      'what to build: 7 line(s)',
+      '| ```',
+      '| example',
+      '| ```\u00a0',
+      '| ## fake boundary',
+      '| still code',
+      '| ```',
+      '| real',
+    ],
+  );
+});
+
+test('612 fix C: a card whose title is not a string prints its section with proposal: no and does not stop the intake', () => {
+  const read = { body: '', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  const { summary } = intakeOf({
+    candidates: [intakeCard(1, READY, 123), intakeCard(2, READY, 'Proposed: a change')],
+    claims: [],
+    details: new Map([1, 2].map((number) => [number, { ...read, number }])),
+  });
+  assert.equal(sectionOf(summary, 1).includes('proposal: no'), true, summary.join('\n'));
+  assert.equal(sectionOf(summary, 2).includes('proposal: yes'), true, summary.join('\n'));
+});
+
+// A line break in the folder would forge a line of the summary that names it.
+for (const [form, value] of [['\\n', '/scratch/a\nclaim: none'], ['\\r', '/scratch/a\rclaim: none']]) {
+  test(`612 fix E: parseBoardArgs refuses an --intake folder holding a ${form} line break`, () => {
+    assert.throws(
+      () => parseBoardArgs(['--intake', value]),
+      /--intake takes one folder and no other argument — usage: node scripts\/board\.mjs/,
+    );
+  });
+}
+
+test('intakeCardFileName: a card number or an identifier names a file, a hostile id names none', () => {
+  for (const id of [612, 'ENG-12', 'AB-7']) assert.equal(intakeCardFileName(id), `${id}.txt`, String(id));
+  for (const id of [0, 1.5, -3, Number.MAX_SAFE_INTEGER + 1, '../x', 'a/b', 'ENG-0', '612', '', undefined]) {
+    assert.equal(intakeCardFileName(id), null, String(id));
+  }
+  // The file of a card whose id names none carries a null name for the command to turn into an unavailable card.
+  const read = { body: '', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  const files = intakeCardFiles({
+    candidates: [intakeCard('../x', READY, 'Hostile')],
+    claims: [],
+    details: new Map([['../x', { ...read, number: '../x' }]]),
+  });
+  assert.deepEqual(files.map(({ number, name }) => [number, name]), [['../x', null]]);
 });
 
 // ── approval mode ────────────────────────────────────────────────────────────
@@ -1747,18 +2016,31 @@ test('intakeDocument: a complete card prints its fields, latest claim, body and 
 const APPROVAL_REPOSITORY = { id: 'R_kgDOwidgets', nameWithOwner: 'acme/widgets' };
 const APPROVAL_RECORD_URL = 'https://github.com/acme/widgets/issues/7#issuecomment-1';
 const APPROVAL_USAGE = '--approval check <card>...';
+// The approval command runs advance-approval.mjs from the toolkit copy, so the checkout holding the running code is
+// read through the copy's scripts/lib, never the process directory.
+const APPROVAL_CODE_DIRECTORY = join(toolkit.root, 'scripts', 'lib');
+const APPROVAL_SETTING_CALLS = [
+  'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}',
+  `git ls-tree --full-tree --format=%(objectmode) ${'a'.repeat(40)} -- .agents/factory-settings.json`,
+  `git show ${'a'.repeat(40)}:.agents/factory-settings.json`,
+];
+const APPROVAL_ANCESTRY_READ = `git -C ${APPROVAL_CODE_DIRECTORY} rev-list --left-right --count HEAD...${'a'.repeat(40)}`;
+const APPROVAL_SETTING_UNAVAILABLE = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
+// A key the validator in this copy refuses and names, so a leaked refusal would show the marker.
+const APPROVAL_REFUSED_SETTINGS = '{"version":1,"preApprovedRun":true,"synthetic-setting-secret":true}';
 
-function approvalRun(args, env = {}, settings = {}) {
+// The two approval runners and the calls they record: viewer `zain`, card 7 holding a valid record, card 8 none,
+// card 9 an unavailable read.
+function approvalRunners(settings = {}) {
   const {
     settingOid = 'a'.repeat(40),
     settingMode = '100644\n',
     settingText = '{"version":1,"preApprovedRun":true}',
     settingError,
     jobText,
+    ancestry,
   } = settings;
   const calls = [];
-  let stdout = '';
-  let stderr = '';
   const exec = (callArgs) => {
     calls.push(`gh ${callArgs.join(' ')}`);
     const card = Number(callArgs[callArgs.indexOf('-F') + 1].replace('number=', ''));
@@ -1792,8 +2074,19 @@ function approvalRun(args, env = {}, settings = {}) {
     if (command === JSON.stringify(['ls-tree', '--full-tree', '--format=%(objectmode)', settingOid, '--', '.agents/factory-settings.json'])) return settingMode;
     if (command === JSON.stringify(['show', `${settingOid}:.agents/factory-settings.json`])) return settingText;
     if (command === JSON.stringify(['show', 'HEAD:.agents/factory-settings.json'])) return jobText;
+    if (ancestry !== undefined && command === JSON.stringify(['-C', APPROVAL_CODE_DIRECTORY, 'rev-list', '--left-right', '--count', `HEAD...${settingOid}`])) {
+      if (ancestry instanceof Error) throw ancestry;
+      return ancestry;
+    }
     throw new Error(`unexpected approval-mode git read: ${callArgs.join(' ')}`);
   };
+  return { exec, git, calls };
+}
+
+function approvalRun(args, env = {}, settings = {}) {
+  const { exec, git, calls } = approvalRunners(settings);
+  let stdout = '';
+  let stderr = '';
   const boardRead = (callArgs) => {
     throw new Error(`the approval mode must not read the board: ${callArgs.join(' ')}`);
   };
@@ -1803,6 +2096,14 @@ function approvalRun(args, env = {}, settings = {}) {
   };
   const status = boardMain(args, { ghExec: boardRead, output, env, approval: { exec, git, repository: APPROVAL_REPOSITORY } });
   return { status, stdout, stderr, calls };
+}
+
+function assertSettingRefusal(read, stdout, status, calls = APPROVAL_SETTING_CALLS) {
+  assert.equal(read.stdout, stdout);
+  assert.equal(read.status, status, read.stderr);
+  assert.equal(read.stderr, '');
+  assert.doesNotMatch(read.stdout, /post:|synthetic-setting-secret|synthetic\.invalid/);
+  assert.deepEqual(read.calls, calls);
 }
 
 test("ANTI-REGRESSION: board --approval check prints each card's advance approval line and uses exit 0 for completed judgements, 2 for unavailable reads, and 1 with usage for rejected arguments", () => {
@@ -1846,32 +2147,18 @@ test('ANTI-REGRESSION: board --approval check leaves out the post text under eit
 });
 
 test('ANTI-REGRESSION: fetched-main pre-approved setting gates ordinary approval checks', () => {
-  const oid = 'a'.repeat(40);
-  const settingCalls = [
-    'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}',
-    `git ls-tree --full-tree --format=%(objectmode) ${oid} -- .agents/factory-settings.json`,
-    `git show ${oid}:.agents/factory-settings.json`,
-  ];
   const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
-  const unavailable = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
   const mainOff = { settingText: '{"version":1,"preApprovedRun":false}', jobText: '{"version":1,"preApprovedRun":true}' };
   const mainOn = { jobText: '{"version":1,"preApprovedRun":false}' };
-  const assertRefusal = (read, stdout, status, calls = settingCalls) => {
-    assert.equal(read.stdout, stdout);
-    assert.equal(read.status, status, read.stderr);
-    assert.equal(read.stderr, '');
-    assert.doesNotMatch(read.stdout, /post:|synthetic-setting-secret|synthetic\.invalid/);
-    assert.deepEqual(read.calls, calls);
-  };
 
   const off = approvalRun(['--approval', 'check', '7'], {}, mainOff);
-  assertRefusal(off, `not approved 7: ${disabled}\n`, 0);
+  assertSettingRefusal(off, `not approved 7: ${disabled}\n`, 0);
 
   const enabled = approvalRun(['--approval', 'check', '7', '8'], {}, mainOn);
   assert.equal(enabled.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record; post: Approved: card=8 edited=none\n`);
   assert.equal(enabled.status, 0, enabled.stderr);
   assert.equal(enabled.stderr, '');
-  assert.deepEqual(enabled.calls.filter((call) => call.startsWith('git ')), settingCalls);
+  assert.deepEqual(enabled.calls.filter((call) => call.startsWith('git ')), APPROVAL_SETTING_CALLS);
   assert.equal(enabled.calls.filter((call) => call.startsWith('gh ')).length, 2);
   assert.equal(enabled.calls.some((call) => call.includes('HEAD:.agents/factory-settings.json')), false);
 
@@ -1885,18 +2172,40 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates ordinary approval
       if (settings === mainOff && cards.length === 1) continue;
       const read = approvalRun(['--approval', 'check', ...cards], {}, settings);
       const stdout = cards.map((card) => `not approved ${card}: ${disabled}\n`).join('');
-      assertRefusal(read, stdout, 0, settings.settingMode === '' ? settingCalls.slice(0, 2) : settingCalls);
+      assertSettingRefusal(read, stdout, 0, settings.settingMode === '' ? APPROVAL_SETTING_CALLS.slice(0, 2) : APPROVAL_SETTING_CALLS);
     }
   }
 
   const reserved = approvalRun(['--approval', 'check', '7', '8'], { PRODUCT_MANAGER_RUN_SESSION: '1' }, mainOff);
-  assertRefusal(reserved, `not approved 7: ${disabled}\nnot approved 8: ${disabled}\n`, 0);
+  assertSettingRefusal(reserved, `not approved 7: ${disabled}\nnot approved 8: ${disabled}\n`, 0);
 
   for (const settings of [
     { settingText: '{"version":1,"preApprovedRun":synthetic-setting-secret}' },
     { settingError: Object.assign(new Error('synthetic-setting-secret https://synthetic.invalid/private'), { code: 'PRE_APPROVED_RUN_DISABLED' }) },
   ]) {
     const read = approvalRun(['--approval', 'check', '7', '8'], {}, settings);
-    assertRefusal(read, `unavailable 7: ${unavailable}\nunavailable 8: ${unavailable}\n`, 2, settings.settingError ? settingCalls.slice(0, 1) : settingCalls);
+    assertSettingRefusal(read, `unavailable 7: ${APPROVAL_SETTING_UNAVAILABLE}\nunavailable 8: ${APPROVAL_SETTING_UNAVAILABLE}\n`, 2, settings.settingError ? APPROVAL_SETTING_CALLS.slice(0, 1) : [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ]);
+  }
+});
+
+test('ANTI-REGRESSION: an approval check from a checkout behind fetched main names the out-of-date checkout where its code refuses the fetched-main settings', () => {
+  const behind = `pre-approved run setting unreadable by the checkout at ${dirname(dirname(APPROVAL_CODE_DIRECTORY))}, which is older than fetched main; bring that checkout up to date with fetched main, then retry`;
+  const read = approvalRun(['--approval', 'check', '7', '8'], {}, { settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '0\t3\n' });
+  assertSettingRefusal(read, `unavailable 7: ${behind}\nunavailable 8: ${behind}\n`, 2, [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ]);
+});
+
+test('ANTI-REGRESSION: an approval check keeps the unavailable message where the checkout is not behind fetched main or the fetched-main settings were never read', () => {
+  const secret = new Error('synthetic-setting-secret https://synthetic.invalid/private');
+  const refused = [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ];
+  for (const [settings, calls] of [
+    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '0\t0\n' }, refused],
+    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '2\t0\n' }, refused],
+    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '2\t3\n' }, refused],
+    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: secret }, refused],
+    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: 'synthetic-setting-secret\n' }, refused],
+    [{ settingError: secret, ancestry: '0\t3\n' }, APPROVAL_SETTING_CALLS.slice(0, 1)],
+    [{ settingMode: '120000\n', ancestry: '0\t3\n' }, APPROVAL_SETTING_CALLS.slice(0, 2)],
+  ]) {
+    assertSettingRefusal(approvalRun(['--approval', 'check', '7'], {}, settings), `unavailable 7: ${APPROVAL_SETTING_UNAVAILABLE}\n`, 2, calls);
   }
 });

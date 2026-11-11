@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // PreToolUse(Bash) guard: apply Git refusals, then grant cleanup-specific permission only
 // from this installed root. The classifier documents the accident-catcher's wider limits.
-// The launcher's two run marks reach the publishing rule here: PRODUCT_MANAGER_RUN_SESSION=1
-// refuses every publish, and PRE_APPROVED_RUN_SESSION=<run start> admits only a delivery push the
-// owner's advance approval covers, so under that mark an unreadable call is refused, not passed.
+// The launcher's marks reach the publishing rule here: PRODUCT_MANAGER_RUN_SESSION=1 refuses every
+// publish, PRE_APPROVED_RUN_SESSION=<run start> admits only a delivery push the owner's advance
+// approval covers, and CARRIED_PUSH_YES=<card> admits only the delivery forms of the card whose yes
+// the coordinator carried. Under either of the last two an unreadable call is refused, not passed.
 import { realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,9 +14,12 @@ import { checkoutContext } from "../../scripts/lib/checkout-context.mjs";
 const installedRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
 const preApprovedStart = process.env.PRE_APPROVED_RUN_SESSION;
+const carriedPushYes = process.env.CARRIED_PUSH_YES;
+// The session that may publish, named in its refusals; blockReason refuses a session holding both marks.
+const publishingSession = preApprovedStart !== undefined ? "a pre-approved run" : carriedPushYes !== undefined ? "a carried push yes" : null;
 
-function refusePreApproved(why) {
-  console.error(`Blocked: a pre-approved run session ${why}.`);
+function refusePublishing(why) {
+  console.error(`Blocked: ${publishingSession} session ${why}.`);
   process.exit(2);
 }
 
@@ -26,7 +30,7 @@ async function preApprovedOptions() {
     const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
     return { start: preApprovedStart, tracker: TRACKER ?? "github" };
   } catch {
-    return refusePreApproved("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
+    return refusePublishing("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
   }
 }
 
@@ -36,17 +40,17 @@ process.stdin.on("end", async () => {
   let payload;
   // Uninspectable input keeps existing Git checks fail-open, with a diagnostic, but can
   // never confer cleanup permission. There is no static cleanup allowance to fall back to.
-  // A pre-approved session is refused instead: it is the one that may publish.
+  // A session that may publish is refused instead.
   try {
     payload = JSON.parse(raw);
   } catch {
-    if (preApprovedStart !== undefined) refusePreApproved("is refused a call whose hook payload is unparseable");
+    if (publishingSession) refusePublishing("is refused a call whose hook payload is unparseable");
     console.error("block-unsafe-git: unparseable hook payload; rules NOT applied to this call.");
     process.exit(0);
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)
       || typeof payload.tool_input?.command !== "string") {
-    if (preApprovedStart !== undefined) refusePreApproved("is refused a call whose hook payload holds no string command");
+    if (publishingSession) refusePublishing("is refused a call whose hook payload holds no string command");
     console.error("block-unsafe-git: no string command in hook payload; rules NOT applied to this call.");
     process.exit(0);
   }
@@ -61,6 +65,7 @@ process.stdin.on("end", async () => {
   const reason = blockReason(cmd, checkout, {
     runSession: process.env.PRODUCT_MANAGER_RUN_SESSION === "1",
     preApproved: await preApprovedOptions(),
+    carriedYes: carriedPushYes === undefined ? null : { carried: carriedPushYes },
   });
   if (reason) {
     console.error(`Blocked: ${reason}. Guards Claude's tool calls only; run it in your own terminal if you truly need it.`);

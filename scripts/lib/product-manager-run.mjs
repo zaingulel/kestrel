@@ -5,10 +5,12 @@
 // identity and footprint, with immutable outcomes before attention. The run-end diagnostic names held reservations.
 // Message files are model text: they are matched, never obeyed. The session starter is injected,
 // resolving { exitCode, spawnError, interrupted, terminationFailure, pid }; exitCode is the exit code or terminating signal.
+// A pre-approved session's request also carries its bare prompt, for a starter that builds its own command.
 // An interruption reports identity and termination state, queues attention, and starts no end session.
 //
-// A session that started counts only when its runtime log, `<logs>.stderr.log`, holds both of the runtime's own refusal
-// lines of its kind: the proof that the guard fired and that the run session mark reached it. Model text cannot reach that file.
+// A session that started counts only when its runtime log, `<logs>.stderr.log`, or the hook-event stream its starter
+// names, holds both of the runtime's own refusal lines of its kind: the proof that the guard fired and that the run
+// session mark reached it. Model text cannot reach that file, and counts in no stream.
 // Without them no further session starts and one fallback message reaches the owner. The reason is printed once: by the
 // end session, or by the fallback when the end session cannot deliver.
 
@@ -211,11 +213,11 @@ function readPreparedReference(reference, runStart, reserved = false) {
   if (reserved && !['prepare', 'build', 'deliver'].includes(reference.phase)) throw new Error('reservation phase is unavailable');
   const prepared = admissionJson(reference.descriptorPath, 'prepared descriptor');
   const descriptor = prepared.value;
-  admissionFields(descriptor, ['runStart', 'card', 'claimUrl', 'priorClaimUrls', 'branch', 'worktree', 'base', 'planPath', 'planHash', 'plannedFiles', 'prerequisites', 'scopeComplete', 'exclusiveResources'], 'prepared descriptor');
+  admissionFields(descriptor, ['runStart', 'card', 'claimUrl', 'priorClaimUrls', 'branch', 'worktree', 'base', 'planPath', 'planHash', 'plannedFiles', 'prerequisites', 'exclusiveResources'], 'prepared descriptor');
   validateSelection(Object.fromEntries(SELECTION_FIELDS.map((field) => [field, descriptor[field]])), runStart);
-  if (typeof descriptor.scopeComplete !== 'boolean' || !Array.isArray(descriptor.plannedFiles)
+  if (!Array.isArray(descriptor.plannedFiles)
     || !Array.isArray(descriptor.prerequisites) || !Array.isArray(descriptor.exclusiveResources)) {
-    throw new Error('prepared descriptor has invalid scopeComplete or scope declarations');
+    throw new Error('prepared descriptor has invalid scope declarations');
   }
   if (basename(reference.descriptorPath) !== `job-${descriptor.card}.prepared.json`
     || reference.reviewRecordPath !== join(dirname(reference.descriptorPath), `job-${descriptor.card}.reviewed.json`)) {
@@ -325,11 +327,6 @@ function prerequisiteReasons(job, byCard, repositoryName, exec) {
 
 function conflictReasons(candidate, reserved) {
   const reasons = [];
-  if (!candidate.descriptor.scopeComplete || !reserved.descriptor.scopeComplete) reasons.push(`card ${candidate.descriptor.card} needs exclusive admission: incomplete scope beside card ${reserved.descriptor.card}`);
-  for (const a of candidate.files) for (const b of reserved.files) {
-    if (a === MANIFEST_FILE && b === MANIFEST_FILE) continue;
-    if (a === b || a.startsWith(b + '/') || b.startsWith(a + '/')) reasons.push(`card ${candidate.descriptor.card} overlaps card ${reserved.descriptor.card}: ${a} / ${b}`);
-  }
   for (const resource of candidate.resources) if (reserved.resources.includes(resource)) reasons.push(`card ${candidate.descriptor.card} waits for card ${reserved.descriptor.card} resource ${resource}`);
   return reasons;
 }
@@ -501,8 +498,8 @@ export function inspectAdmission(request, { root, exec, git }) {
       throw new Error(`card ${candidate.descriptor.card} delivery requires matching retained build context and completed built outcome`);
     }
     if (closing.size) return { decision: 'wait', reasons: [...closing.keys()].map((card) => `card ${card} delivery closeout is settling; admission waits`) };
-    const reasons = [...currentCards].filter((card) => !identities.has(card))
-      .map((card) => `current job ${card} has no reviewed reservation or complete footprint; admission waits`);
+    const reasons = candidate.resources.length ? [...currentCards].filter((card) => !identities.has(card))
+      .map((card) => `current job ${card} has no reviewed reservation or complete footprint; admission waits`) : [];
     reasons.push(...prerequisiteReasons(candidate, byCard, repositoryName, exec).reasons);
     const binding = jobs.filter((job) => !job.inactive);
     for (const reserved of reservations) {
@@ -534,6 +531,105 @@ export const END_PROMPT_PREFIX = 'End the product manager run: ';
 export const GUARD_WITNESS = 'Command blocked by PreToolUse hook: Blocked: git commit';
 export const PUBLISH_WITNESS = 'Command blocked by PreToolUse hook: Blocked: a product manager run session';
 export const PRE_APPROVED_WITNESS = 'Command blocked by PreToolUse hook: Blocked: a pre-approved run session';
+export const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const CARRIED_PROMPT = 'Your coordinator carries the answer the owner gave for your card, word for word.';
+
+// A second copy of owner-queue.mjs's screenshot pattern and order, a Herdr add-on file this launcher cannot import.
+const SCREENSHOT = /^screenshot-\d+\.(?:png|jpe?g|gif|webp)$/i;
+
+// A push yes holds only for the decision card the owner saw: the card's session ended built, and its clean `job/<card>`
+// worktree is still at `shown.head` with a review folder whose content identity is `shown.hash`. The folder's own
+// `shown-hash` file is never read, so a card re-shown at the same head cannot stand in for the one answered.
+function verifyShownCard(card, shown, ended, { listFolder, git }) {
+  if (typeof ended.result !== 'string' || readRunResult(ended.result).line !== `Run result: built ${card}`) {
+    throw new Error(`the ended session of card ${card} did not end with Run result: built ${card}`);
+  }
+  const read = (args) => {
+    try {
+      return git(args);
+    } catch (error) {
+      throw new Error(`git ${args.join(' ')} failed (${error.message.trim()})`, { cause: error });
+    }
+  };
+  let records;
+  try {
+    records = readWorktreeRecords(git);
+  } catch (error) {
+    throw new Error(`the worktree inventory is unreadable (${error.message.trim()})`, { cause: error });
+  }
+  const worktree = records.find((record) => record.branch === `job/${card}`)?.path;
+  if (worktree === undefined) throw new Error(`no job/${card} worktree holds the shown card`);
+  if (read(['-C', worktree, 'rev-parse', 'HEAD']).replace(/\n$/, '') !== shown.head) throw new Error(`the job/${card} worktree has moved from the shown head ${shown.head}`);
+  if (read(['-C', worktree, 'status', '--porcelain', '--untracked-files=normal']) !== '') throw new Error(`the job/${card} worktree has uncommitted changes`);
+  const folder = `.claude/worklog/job_${card}-review-${shown.head}`;
+  const fromFolder = (readOne) => {
+    try {
+      return readOne();
+    } catch (error) {
+      throw new Error(`${join(worktree, folder)} is unreadable (${error.code ?? error.message})`, { cause: error });
+    }
+  };
+  const screenshots = fromFolder(() => listFolder(join(worktree, folder))).filter((name) => SCREENSHOT.test(name)).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+  const identity = read(['-C', worktree, 'hash-object', '--no-filters', '--', ...['body.md', ...screenshots].map((name) => `${folder}/${name}`)]);
+  if (identity.replace(/\n$/, '') !== shown.hash.replace(/\n$/, '')) throw new Error(`the saved card in ${folder} is not the card the owner was shown`);
+}
+
+// A carried answer names the logs base of an ended card session. It is accepted only from the session recorded as that
+// card's coordinator (`caller`, an already validated Claude Code session ID), for the card that base recorded, and only
+// where the base holds the ended session's ID. An answer that also holds `shown`, the head and content identity of the
+// decision card the owner saw, is a push yes, accepted only as `verifyShownCard` says. `readFile` reads one file as text,
+// `listFolder` names a folder's entries and `git` runs one Git command. Returns what the resume needs; throws the reason
+// for any refusal.
+export function verifyCarriedAnswer(answer, { caller, readFile, listFolder, git }) {
+  if (answer === null || typeof answer !== 'object' || Array.isArray(answer)
+    || !['card,from,words', 'card,from,shown,words'].includes(Object.keys(answer).sort().join())) {
+    throw new Error('the answer must be an object with exactly card, from and words, and optionally shown');
+  }
+  const { card, from, words, shown } = answer;
+  if (!Number.isSafeInteger(card) || card < 1) throw new Error('card must be a positive whole number');
+  if (typeof from !== 'string' || !isAbsolute(from) || normalize(from) !== from || CONTROL.test(from)) {
+    throw new Error('from must be the absolute, normalized logs base of the ended card session');
+  }
+  if (typeof words !== 'string' || words === '') throw new Error('words must hold the owner’s answer');
+  if (shown !== undefined && (shown === null || typeof shown !== 'object' || Array.isArray(shown)
+    || !isDeepStrictEqual(Object.keys(shown).sort(), ['hash', 'head'])
+    || typeof shown.head !== 'string' || shown.head === '' || typeof shown.hash !== 'string' || shown.hash === '')) {
+    throw new Error('shown must be an object with exactly a non-empty head and hash');
+  }
+  const record = (suffix) => {
+    try {
+      return readFile(from + suffix);
+    } catch (error) {
+      throw new Error(`${from + suffix} is unreadable (${error.code ?? error.message})`, { cause: error });
+    }
+  };
+  if (record('.coordinator') !== `${caller}\n`) throw new Error(`this session is not the coordinator recorded in ${from}.coordinator`);
+  let ended;
+  try {
+    ended = JSON.parse(record('.json'));
+  } catch (error) {
+    throw new Error(`${from}.json holds no session record (${error.message})`);
+  }
+  if (ended === null || typeof ended !== 'object' || Array.isArray(ended) || typeof ended.session_id !== 'string' || !SESSION_ID.test(ended.session_id)) {
+    throw new Error(`${from}.json names no ended Claude Code session`);
+  }
+  let recorded;
+  try {
+    const text = readFile(`${from}.card`);
+    recorded = /^[1-9]\d*\r?\n?$/.test(text) ? Number(text.trim()) : undefined;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`${from}.card is unreadable (${error.code ?? error.message})`, { cause: error });
+    try {
+      recorded = JSON.parse(record('.context.json'))?.card;
+    } catch (contextError) {
+      throw new Error(`${from} records no card (${contextError.message})`);
+    }
+  }
+  if (recorded !== card) throw new Error(`${from} records card ${recorded ?? 'none readable'}, not card ${card}`);
+  if (shown === undefined) return { sessionId: ended.session_id, card, prompt: `${CARRIED_PROMPT}\n${JSON.stringify({ card, words })}` };
+  verifyShownCard(card, shown, ended, { listFolder, git });
+  return { sessionId: ended.session_id, card, pushYes: true, prompt: `${CARRIED_PROMPT}\n${JSON.stringify({ card, words, shown })}` };
+}
 
 // Product manager result lines match the whole last line: `built 1` followed by more text is no result.
 const BUILT = /^Run result: built \S+$/;
@@ -586,8 +682,30 @@ function missingRefusal(log, witness) {
   return log.includes(witness) ? undefined : 'publish refusal';
 }
 
+const HOOK_BLOCKED = 'Command blocked by PreToolUse hook: ';
+
+// Names the first refusal a started session lacks, or undefined when it shows both. A starter that names a hook-event
+// stream is judged by that stream alone: a refusal counts only as the first stderr line of a PreToolUse hook response
+// that exited 2, so text the model wrote cannot stand in for it, and an unreadable stream shows neither refusal.
+function sessionMissingRefusal(result, logs, witness) {
+  if (result.hookEvents === undefined) return missingRefusal(readText(`${logs}.stderr.log`), witness);
+  const refusals = readText(result.hookEvents).split(/\r?\n/).flatMap((line) => {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return [];
+    }
+    return event?.type === 'system' && event.subtype === 'hook_response' && event.hook_event === 'PreToolUse'
+      && event.exit_code === 2 && typeof event.stderr === 'string' ? [event.stderr.split(/\r?\n/)[0]] : [];
+  });
+  const shown = (text) => refusals.some((line) => line.startsWith(text.slice(HOOK_BLOCKED.length)));
+  if (!shown(GUARD_WITNESS)) return 'guard refusal';
+  return shown(witness) ? undefined : 'publish refusal';
+}
+
 // Identity is display-only metadata. Never follow links or read more than the fixed sidecar limit.
-function readCardIdentity(file) {
+export function readCardIdentity(file) {
   let descriptor;
   try {
     const before = lstatSync(file);
@@ -930,7 +1048,7 @@ function wholePeer(record, facts, inventory, store, git, mainTip) {
     }
     if (!isDeepStrictEqual(wholeDelta(owner, git, mainTip), record.parkedFiles)) throw new Error('actual paths differ from the reserved parked paths');
     if (stop && stopped === null) throw new Error('native stop has not settled');
-    return { descriptor: { card, scopeComplete: true }, files: record.parkedFiles, resources: [], live: false };
+    return { live: false };
   } catch (error) {
     return { unknown: `current job ${card} is an unknown writer: ${error.message}; admission waits` };
   }
@@ -987,6 +1105,9 @@ export async function admitWholeJob(phase, requestPath, { identity, store, outpu
         peers.delete(record.card);
         for (const card of peers) {
           const peer = records.get(card);
+          if (phase === 'deliver' && peer?.delivery) live.push(`card ${record.card} waits for card ${card} delivery lane`);
+          // Only an exclusive resource can clash; files are settled at merge.
+          if (!candidate.resources.length) continue;
           if (!peer) {
             reasons.push(`current job ${card} is an unknown writer with no registered reservation; admission waits`);
             continue;
@@ -996,14 +1117,7 @@ export async function admitWholeJob(phase, requestPath, { identity, store, outpu
             reasons.push(held.unknown);
             continue;
           }
-          // A verified prebuild or stopped peer with no paths holds no scope.
-          if (held.live || held.files.length) (held.live ? live : reasons).push(...conflictReasons(candidate, held));
-          if (phase === 'deliver' && peer.delivery) live.push(`card ${record.card} waits for card ${card} delivery lane`);
-        }
-        if (phase === 'deliver' && mainTip !== owner.base) {
-          const paths = readPathList(git(['diff', '--name-only', '--no-renames', '-z', owner.base, mainTip]), record.card);
-          const main = { descriptor: { card: 'origin/main', scopeComplete: true }, resources: [], files: paths.map((path) => admissionFootprint(path)) };
-          reasons.push(...conflictReasons({ ...candidate, descriptor: { ...candidate.descriptor, scopeComplete: true } }, main));
+          if (held.live) live.push(...conflictReasons(candidate, held));
         }
         if (reasons.length) return { decision: 'wait', reasons: [...new Set([...reasons, ...live])] };
         if (live.length) return { waiting: [...new Set(live)] };
@@ -1028,11 +1142,11 @@ async function runPreApprovedSession({ folder, root, startSession }, name, promp
   const logs = join(folder, name);
   let result;
   try {
-    result = await startSession({ argv: sessionArgv(`${logs}.txt`, prompt), root, logs, ...(intentPath && { intentPath }) });
+    result = await startSession({ argv: sessionArgv(`${logs}.txt`, prompt), root, logs, prompt, ...(intentPath && { intentPath }) });
   } catch (error) {
     result = { spawnError: error.message };
   }
-  return { ...result, message: readText(`${logs}.txt`), missing: missingRefusal(readText(`${logs}.stderr.log`), PRE_APPROVED_WITNESS) };
+  return { ...result, message: readText(`${logs}.txt`), missing: sessionMissingRefusal(result, logs, PRE_APPROVED_WITNESS) };
 }
 
 function writePreApprovedOutcome(folder, name, runStart, card, claimUrl, phase, disposition, reason) {
@@ -1045,7 +1159,8 @@ function preApprovedEndFailure(end) {
     ?? (end.message.trim() ? undefined : 'it left a blank message');
 }
 
-function wholeCandidates(facts, runStart, diagnostics) {
+// `unavailable` receives each card's unreadable-approval line, `diagnostics` every other reason a card was left out.
+function wholeCandidates(facts, runStart, diagnostics, unavailable = diagnostics) {
   const candidates = [];
   for (const item of pickable(facts.board)) {
     const card = normalizeItem(item);
@@ -1053,7 +1168,7 @@ function wholeCandidates(facts, runStart, diagnostics) {
       || card.closingPullRequests.length || facts.details.get(card.number)?.comments?.some((body) => firstLine(body).startsWith('Needs owner:'))) continue;
     const metadata = facts.approvals.get(card.number);
     if (metadata instanceof Error) {
-      diagnostics.add(`Card ${card.number} approval unavailable: ${metadata.message}`);
+      unavailable.add(`Card ${card.number} approval unavailable: ${metadata.message}`);
       continue;
     }
     const approval = judgeApproval(card.number, metadata, { before: runStart, run: true });
@@ -1064,6 +1179,20 @@ function wholeCandidates(facts, runStart, diagnostics) {
     candidates.push({ card: card.number, approvedAt: Date.parse(approval.split(' ')[2]), priorClaimUrls: claimComments(metadata).map(({ url }) => url) });
   }
   return candidates.sort((a, b) => a.approvedAt - b.approvedAt || a.card - b.card);
+}
+
+// The pickable cards a pre-approved run starting at runStart may take, read as the whole-job route reads them. An
+// approval read signed in as anyone but `login`, compared case-insensitively, refuses the whole read naming both. The
+// optional Set `unavailable` receives a `Card <n> approval unavailable: <reason>` line for each card whose approval
+// could not be read.
+export function preApprovedCandidates({ exec, git, runStart, login, unavailable }) {
+  const facts = wholeFacts(exec, git, (open) => pickable(open).map((item) => item.content.number));
+  for (const metadata of facts.approvals.values()) {
+    if (!(metadata instanceof Error) && metadata.login.toLowerCase() !== login.toLowerCase()) {
+      throw new Error(`signed in to GitHub as ${metadata.login}, expected ${login}`);
+    }
+  }
+  return wholeCandidates(facts, runStart, new Set(), unavailable);
 }
 
 function wholeReturn(card, record, facts, inventory, store, git, mainTip) {
@@ -1242,7 +1371,10 @@ export async function runWholeJobs({ startSession, notify, root, folder, output,
   return 0;
 }
 
-async function runPreApproved({ startSession, notify, root, folder, output, runStart, exec, git, inspect }) {
+// With `admitSelection`, every selection first asks it, and it answers at once: a refusal waits on running phase work
+// and asks again, or with none running ends the run with 'full' before the end session. A stop reached while it
+// answers starts no selection.
+async function runPreApproved({ startSession, notify, root, folder, output, runStart, exec, git, inspect, admitSelection }) {
   const reservations = new Map();
   const pending = new Set();
   const settled = new Set();
@@ -1250,6 +1382,7 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
   let safetyStop = false;
   let workflowStopReason;
   let exhausted = false;
+  let full = false;
   let selecting = 0;
   let delivering = false;
   const stop = (reason) => {
@@ -1315,16 +1448,15 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
   }
   function admission(job, phaseName) {
     const others = [...reservations.values()].filter((entry) => entry !== job);
-    const unknown = others.filter((entry) => entry.reference === undefined);
     const answer = inspect({ runStart, phase: phaseName, candidate: job.reference,
       reservations: others.filter((entry) => entry.reference !== undefined).map((entry) => ({ ...entry.reference, phase: entry.phase })) }, { root, exec, git });
     if (answer.decision === 'unavailable') stop(answer.reasons.join('; '));
     else {
-      for (const reason of [...answer.reasons, ...unknown.map((entry) => `current job ${entry.selection.card} has no accepted prepared descriptor or complete footprint; admission waits`)]) {
+      for (const reason of answer.reasons) {
         if (!diagnostics.includes(reason)) diagnostics.push(reason);
       }
     }
-    return answer.decision === 'allow' && unknown.length === 0;
+    return answer.decision === 'allow';
   }
   function verifyDelivery(job, disposition) {
     const item = fetchBoard(exec).find((entry) => entry.content.__typename === 'Issue' && entry.content.number === job.selection.card);
@@ -1456,6 +1588,17 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
           await outcome(`select-${++selecting}`, 'select', null, 'failed', reason);
           break;
         }
+        // Phase work running when admission is asked may finish while it answers, so a refusal waits on that work.
+        const running = [...pending];
+        if (admitSelection && !await admitSelection()) {
+          if (!running.length) {
+            full = true;
+            break;
+          }
+          await Promise.race(running);
+          continue;
+        }
+        if (safetyStop || workflowStopReason) break;
         const name = `select-${++selecting}`;
         const result = await session(name, `${PHASE_PROMPTS.select}\n${JSON.stringify({ runStart })}`);
         let job;
@@ -1495,6 +1638,7 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
   await Promise.all(pending);
   saveDiagnostic();
   if (safetyStop) return 1;
+  if (full) return 'full';
   const end = await session('end', KINDS['pre-approved'].endPrefix + folder);
   if (end.interrupted) {
     const reason = cancellationReason(end, 'end', join(folder, 'end.card'), end.missing ? `guard refusal was not verified; ${GUARD_RECOVERY}` : '');
@@ -1515,14 +1659,14 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
   return 0;
 }
 
-export async function runRun({ startSession, notify, root, folder, output, kind = 'product-manager', runStart, exec, git, inspectAdmission: inspect = inspectAdmission }) {
-  if (kind === 'pre-approved') return runPreApproved({ startSession, notify, root, folder, output, runStart, exec, git, inspect });
+export async function runRun({ startSession, notify, root, folder, output, kind = 'product-manager', runStart, exec, git, inspectAdmission: inspect = inspectAdmission, admitSelection }) {
+  if (kind === 'pre-approved') return runPreApproved({ startSession, notify, root, folder, output, runStart, exec, git, inspect, admitSelection });
   const { cardPrompt, endPrefix, witness } = KINDS[kind];
   async function runSession(name, prompt) {
     const outputFile = join(folder, `${name}.txt`);
     const logs = join(folder, name);
     const outcome = await startSession({ argv: sessionArgv(outputFile, prompt), root, logs });
-    return { ...outcome, message: readText(outputFile), missing: missingRefusal(readText(`${logs}.stderr.log`), witness) };
+    return { ...outcome, message: readText(outputFile), missing: sessionMissingRefusal(outcome, logs, witness) };
   }
 
   async function queueAttention(name) {

@@ -10,7 +10,7 @@
 //   node scripts/board.mjs --status=Ready  # one column
 //   node scripts/board.mjs --json          # the normalized selection on stdout, scan on stderr
 //   node scripts/board.mjs --closeout      # the strict proof gate: the scan alone
-//   node scripts/board.mjs --intake        # the intake document on stdout, the outcome on stderr
+//   node scripts/board.mjs --intake <folder>   # the intake summary on stdout, each card's text in <folder>, the outcome on stderr
 //   node scripts/board.mjs --approval check <card>...   # each card's advance approval line, no board read
 //   node scripts/board.mjs --help          # these modes on stdout, exit 0, no board read
 //
@@ -23,13 +23,15 @@
 //
 // --intake reads the board once, then the details of each pickable card and each claimed
 // card with no closing pull request (body, parent, latest claim, every comment) through
-// two read-only GraphQL queries, and writes nothing and reads no checkout (a markdown install
-// reads its cards, origin/main and its job branches instead; Linear, Jira and Azure use native reads). Stdout is the
-// document alone and ends with a line counting itself; the scan, the details outcome and
-// the line count go to stderr. Exit 0: whole and clean. 1: a rejected argument. 2: the
+// two read-only GraphQL queries, and reads no checkout (a markdown install reads its cards,
+// origin/main and its job branches instead; Linear, Jira and Azure use native reads). It
+// creates <folder> and writes each read card's full text to <folder>/<id>.txt, and writes
+// nothing else. Stdout is the summary alone, one section per card naming its file, and ends
+// with a line counting itself; the scan, the details outcome and the line count go to stderr.
+// Exit 0: whole and clean. 1: a rejected argument, or a folder that cannot be created. 2: the
 // board read failed or returned no items. 3: drift. 4: a card's details, or the board,
-// were not fully read. 5: both 3 and 4. A card whose details were not read is marked
-// UNAVAILABLE in the document, never shown empty.
+// were not fully read, or a card's text could not be written. 5: both 3 and 4. A card whose
+// details were not read is marked UNAVAILABLE in the summary, never shown empty.
 //
 // --approval check reads no board: it prints one line per card from approvalReport
 // (scripts/lib/advance-approval.mjs) on stdout, leaving out the text to post under either run
@@ -44,35 +46,34 @@
 // walk recovers beside them (#504), each recovery named on stderr.
 //
 // A thin shell: every decision (what to select, what to print, what to exit with) lives
-// in the pure parseBoardArgs/parkedLine/intakeDocument (scripts/lib/board.mjs) and
+// in the pure parseBoardArgs/parkedLine/intakeSummary (scripts/lib/board.mjs) and
 // scanBoard/scanOutcome/intakeCards/intakeOutcome (scripts/lib/board-rules.mjs), so this
 // file holds no judgment of its own and the whole contract is unit-testable.
 
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { approvalReport } from './lib/advance-approval.mjs';
 import { ghExec } from './lib/gh-exec.mjs';
 import { linearExec } from './lib/linear-api.mjs';
 import { jiraExec } from './lib/jira-api.mjs';
 import { azureExec } from './lib/azure-api.mjs';
 import * as boardConfig from './lib/board-config.mjs';
-import { jiraCardDetails, readJiraBoard } from './lib/board-jira.mjs';
-import { azureCardDetails, readAzureBoard } from './lib/board-azure.mjs';
 import { BOARD_OWNER, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PICKABLE_STATUSES } from './lib/board-config.mjs';
-import { CARDS_DIR, configuredTracker, markdownCardDetails, readMarkdownBoard } from './lib/board-markdown.mjs';
+import { CARDS_DIR, configuredTracker } from './lib/board-markdown.mjs';
 import {
   BOARD_HELP,
   INTAKE_EXIT,
-  fetchBoard,
-  fetchCardDetails,
   formatGrouped,
-  intakeDocument,
+  intakeCardFiles,
+  intakeSummary,
   normalizeItem,
   parseBoardArgs,
   parkedLine,
   pickable,
 } from './lib/board.mjs';
-import { linearCardDetails, linearTeamKey, readLinearBoard } from './lib/board-linear.mjs';
+import { linearTeamKey } from './lib/board-linear.mjs';
+import { isFailedEmptyRead, readBoard, readDetails } from './lib/board-read.mjs';
 import { intakeCards, intakeOutcome, scanBoard, scanOutcome } from './lib/board-rules.mjs';
 
 const boardName = (tracker) => {
@@ -86,21 +87,35 @@ const boardName = (tracker) => {
 const headerLine = (label, selected, items, tracker) =>
   `Board ${boardName(tracker)} — ${label}: ${selected.length} of ${items.length} item(s)`;
 
-// The pick listing and the card details as one document on stdout; the scan and the
-// details outcome on stderr, so a caller that captures stdout holds the document alone.
-function printIntake(items, args, { executor, linear, jira, azure, output, tracker, markdown }) {
+// Each read card's full text goes to its file in the directory; a card whose file name is unsafe
+// or whose write fails turns UNAVAILABLE, so the summary and the exit code both say so.
+function writeCardFiles(cardFiles, details, directory, writeFile) {
+  const files = new Map();
+  for (const { number, name, lines } of cardFiles) {
+    if (name === null) {
+      details.set(number, { number, unavailable: `card id ${number} is not a safe file name` });
+      continue;
+    }
+    try {
+      writeFile(join(directory, name), `${lines.join('\n')}\n`);
+      files.set(number, { name, lines });
+    } catch (err) {
+      details.set(number, { number, unavailable: `could not write the card text: ${err.message}` });
+    }
+  }
+  return files;
+}
+
+// The pick listing and the card summaries on stdout, the full card texts in the directory; the
+// scan and the details outcome on stderr, so a caller that captures stdout holds the summary alone.
+function printIntake(items, args, { executor, linear, jira, azure, output, tracker, markdown, writeFile }) {
   const { candidates, claims, numberless } = intakeCards(items);
   const numbers = [...candidates, ...claims].map((card) => card.number);
-  const details = {
-    markdown: () => markdownCardDetails(markdown.cards, numbers, markdown.refs),
-    linear: () => linearCardDetails(linear, numbers),
-    jira: () => jiraCardDetails(jira, numbers),
-    azure: () => azureCardDetails(azure, numbers),
-    github: () => fetchCardDetails(executor, numbers),
-  }[tracker]();
+  const details = readDetails(tracker, { executor, linear, jira, azure, markdown }, numbers);
   const picks = pickable(items);
   const listing = `${headerLine(PICKABLE_STATUSES.join('/'), picks, items, tracker)}\n\n${formatGrouped(picks)}`;
-  const document = intakeDocument({ listing, candidates, claims, numberless, details });
+  const files = writeCardFiles(intakeCardFiles({ candidates, claims, details }), details, args.intake, writeFile);
+  const document = intakeSummary({ listing, candidates, claims, numberless, details, directory: args.intake, files });
   const { lines, exitCode } = intakeOutcome({ ...scanBoard(items), details });
   output.log(document.join('\n'));
   const parkedNote = parkedLine(items, args);
@@ -132,6 +147,15 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     return 0;
   }
 
+  if (typeof parsed.intake === 'string') {
+    try {
+      (dependencies.makeDirectory ?? ((directory) => mkdirSync(directory, { recursive: true })))(parsed.intake);
+    } catch (err) {
+      output.error(`board: could not create ${parsed.intake}: ${err.message}`);
+      return 1;
+    }
+  }
+
   // 2 under --intake and --approval, which tell a failed read from a rejected argument (1); every other mode keeps 1.
   const readFailed = parsed.intake || parsed.approval ? INTAKE_EXIT.readFailed : 1;
   let tracker;
@@ -153,30 +177,28 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   let markdown = null;
   let items;
   try {
-    if (tracker === 'markdown') {
-      markdown = readMarkdownBoard(executor);
-      ({ items } = markdown);
-    } else if (tracker === 'linear') {
-      ({ items } = readLinearBoard(linear));
-    } else if (tracker === 'jira') {
-      ({ items } = readJiraBoard(jira, executor));
-    } else if (tracker === 'azure') {
-      ({ items } = readAzureBoard(azure, executor));
-    } else {
-      items = fetchBoard(executor, { onOmission: (advisory) => output.error(`board: ${advisory}`) });
-    }
+    ({ items, markdown } = readBoard(tracker, {
+      executor,
+      linear,
+      jira,
+      azure,
+      onOmission: (advisory) => output.error(`board: ${advisory}`),
+    }));
   } catch (err) {
     const source = { markdown: 'markdown cards', linear: `Linear team ${linearTeamKey()}`, jira: 'Jira project', azure: 'Azure project', github: 'GitHub Projects board' }[tracker];
     output.error(`board: failed to read the ${source} — ${err.message}`);
     return readFailed;
   }
   // Empty markdown, Linear, Jira and Azure boards are valid; on GitHub zero items means a failed read.
-  if (items.length === 0 && tracker === 'github') {
+  if (isFailedEmptyRead(tracker, items)) {
     output.error('board: gh returned 0 items — auth/network/project problem, not an empty backlog.');
     return readFailed;
   }
 
-  if (parsed.intake) return printIntake(items, parsed, { executor, linear, jira, azure, output, tracker, markdown });
+  if (parsed.intake) {
+    const writeFile = dependencies.writeFile ?? writeFileSync;
+    return printIntake(items, parsed, { executor, linear, jira, azure, output, tracker, markdown, writeFile });
+  }
 
   // Under --json stdout is a document a caller parses, so the scan goes to stderr rather
   // than corrupting it; the verdict still reaches the operator and still sets the exit code.

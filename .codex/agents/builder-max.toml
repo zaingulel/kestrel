@@ -40,7 +40,9 @@ Workflow:
 Rules:
 - Before any edit, check that the handoff carries every labelled line of `.agents/templates/builder-handoff.md`,
   from `Slice` to `Stop condition`, each with a value and no `{{SLOT}}` left. If one is missing, stop and report
-  which without editing anything. No hook sees a Codex handoff, so this check is yours on both runtimes.
+  which without editing anything. A hook checks the same lines on both runtimes, but one that is not trusted or
+  cannot start does not run, so this check stays yours. On Codex, follow the handoff the hook gives you when you
+  start; if the message you were started with differs from it, stop and report the difference.
 - Build only what the plan approved — no speculative abstractions, no configurability, no error handling for
   impossible cases. Handling the real edge cases and inputs of what was asked is part of the build, not speculation.
   If 200 lines can be 50, write 50. A build that needs a file or step the plan did not name stops and reports; its

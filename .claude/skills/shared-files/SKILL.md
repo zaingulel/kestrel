@@ -1,6 +1,6 @@
 ---
 name: shared-files
-description: The reference for how shared workflow files are kept, recorded and overridden: fingerprints, canonical recording, seat overrides, the runtimes, the external review add-on and the documentation sweep a repository's settings choose, the settings file's other keys, and what a repository needs before it runs the workflow.
+description: "The reference for how shared workflow files are kept, recorded and overridden: fingerprints, canonical recording, seat overrides, the runtimes, the external review add-on, the Herdr add-on and the documentation sweep a repository's settings choose, the settings file's other keys, and what a repository needs before it runs the workflow."
 ---
 
 # shared-files
@@ -100,6 +100,19 @@ install, after the owner connects the repository to the review service in that s
 install does; it is changed later the same way as the runtimes: the update writes or removes the add-on's files to match, and the
 owner connects or disconnects the repository in the service's dashboard, which no update does.
 
+**How a repository turns the Herdr add-on on or off.** The same settings file may carry `herdr`, `true` or `false`;
+without it, as with `false`, the add-on is off. The add-on runs the repository's work in Herdr, a terminal app. Its own
+files are the `herdr-setup` skill, that skill's `.claude/skills/` copy, the queue panel, the queue reader with its library
+and tests, and the lead with its library and tests; `scripts/lib/runtimes.mjs` names their paths. An install and a release update write them only where the add-on
+is on and keep every entry in the manifest, and
+the contract test requires each of their paths to hold nothing where it is off and refuses anything found there; a
+consumer that turns the add-on on is held to every one of its files. The add-on is chosen at install, by the `herdr`
+answer of `fabraik init`, off unless answered `true`; it is changed later the same way as the runtimes: the update
+writes or removes the add-on's files to match, removing a file only where it still matches the trusted release and
+refusing an edited one. The steps each machine follows once to run the repository's work in Herdr are the `herdr-setup`
+skill's, which no install or update runs; a machine's unit and queue panel stay its owner's when the add-on is turned
+off, and the `herdr-setup` skill says how a machine stops listing the repository or removes the panel.
+
 **How a repository turns the documentation sweep off.** The same settings file may carry `docSweep`, `true` or
 `false`; without it, as with `true`, the sweep is on. Turning it off leaves out the sweep's shared files: the six of
 the `sweep-scope` check, which are its workflow, its command and that command's modules and test, and the
@@ -121,7 +134,7 @@ which the settings check then admits: no script acts on the value, so it changes
 and no runtime a repository runs. It may hold `productManager` on the same terms. It may hold `preApprovedRun`,
 `true` or `false`, without changing update bytes, seats or runtimes; the launcher, board approval check and
 publication guard enforce its explicit fetched-main opt-in. Only true lets a record replace an ordinary pick or push
-yes, as [resume](../resume/SKILL.md#2-work-pick) says. A consumer's settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
+yes, as [resume](../resume/SKILL.md#2-work-pick-owner-gate-one) says. A consumer's settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
 other value and a file naming one runtime still refused: no update, check or hook acts on the value, so it changes no
 byte an update writes, no seat and no runtime; `fabraik init` writes it only on a yes to its cross-family disclosure,
 and a session reads it on `main` as the owner's standing authorization for the reviews the tiers call cross-family.
@@ -142,3 +155,22 @@ compose the scans themselves must observe those same runtime and sweep rules; ca
 reimplementing them. Its `scripts/lib/doc-lint.test.mjs` command fixture must copy all modules the command imports,
 including `scripts/lib/runtimes.mjs` and, when the command calls the shared verdict, `scripts/lib/doc-lint-verdict.mjs`.
 The shared documents still name both runtimes, and the shared tests use the verdict's resolution rules.
+
+## Administrator bypass
+
+Whoever can use the administrator bypass of the required check on `main` can put any commit on `main` when the local
+hook is skipped: the holders of that role and every write deploy key, which GitHub admits by the same bypass, so the
+repository keeps the role to the owner and carries no write deploy key.
+
+## Guard and capability activation
+
+A Claude Code session started in the root checkout keeps that checkout's git guard after it enters a job worktree,
+while it reads the permission allow list from the worktree. A card or release may carry both a guard and the
+capability it bounds. Activate that combined update independently in each affected repository: stop its old Claude
+Code sessions before applying it; merge and check the reviewed change in the canonical repository, or apply and
+check the reviewed named release in an adopter; advance the operating root to the reviewed state; then start fresh
+sessions, review and trust the current hooks, and verify matching guard and
+permission configuration before expanded use. Updating a job alone leaves its operating root unchanged. An
+incomplete update, stale root or unavailable activation keeps expanded use unavailable: report the cause and use
+the update's existing recovery, preserving intentional edits and restoring the trusted baseline before retrying an
+incomplete update. An intentional adopter exception needs owner agreement and lives outside the shared files.

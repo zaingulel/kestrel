@@ -10,8 +10,10 @@
 // second is the pushed commit and stays checked out. Every other test keeps the fake git, which fails
 // any call the hook should not make.
 //
-// Recurring cost: about 2.8 seconds for the file, measured on Linux with Node 26: 13 to 38
-// milliseconds for each test over the fake git and 68 to 183 for each case over a real repository.
+// Recurring cost: about 2.8 seconds for the file apart from the setting-only test, measured on Linux
+// with Node 26: 13 to 38 milliseconds for each test over the fake git and 68 to 183 for each case over a
+// real repository. Over one run on the same machine: 0.27 seconds for the setting-only test's five hook
+// runs over a real repository.
 // Removal condition: remove with the pre-push hook, or replace when Git supplies equivalent native
 // lint, nested-test, environment-scrub, optional-full-test, and Git LFS upload enforcement.
 
@@ -70,15 +72,18 @@ const DEFINITION_PATH = 'scripts/gates/definition';
 
 // A stub product gate. It loads its definition by relative path and asks git for the checked-out tree
 // and the top level, so its one recorded line shows whose files it loaded and which repository it reached.
+// It then prints `$GATE_STDOUT`, when set, and exits with `$GATE_STATUS`, by default `status`.
 const stubGate = (status) => `#!/bin/sh
 read -r definition < ${DEFINITION_PATH}
 printf 'gate\\t%s\\t%s\\t%s\\t%s\\n' "$*" "$definition" "$(git rev-parse 'HEAD^{tree}')" "$(git rev-parse --show-toplevel)" >> "$CALLS"
-exit ${status}
+[ -z "$GATE_STDOUT" ] || printf '%s\\n' "$GATE_STDOUT"
+exit "\${GATE_STATUS:-${status}}"
 `;
 // A gate reaches a commit through the index, which holds the executable mode a Windows disk cannot.
 const GATES = {
   admit: { mode: '100755', content: stubGate(0) },
   refuse: { mode: '100755', content: stubGate(1) },
+  'marks-setting-only': { mode: '100755', content: '#!/bin/sh\necho setting-only\nexit 0\n' },
   // No shebang: Git for Windows judges `-x` by shebang or extension, not by mode.
   'not-executable': { mode: '100644', content: `printf 'gate\\t%s\\n' "$*" >> "$CALLS"\n` },
 };
@@ -204,7 +209,8 @@ exec "${commandPath('grep')}" "$@"
 
 /**
  * `options.main` (`'admit'`, `'refuse'`, `'not-executable'` or `'absent'`) is the product gate the
- * remote's main holds and `options.pushed` (`'admit'` or `'refuse'`) the one the pushed commit holds.
+ * remote's main holds and `options.pushed` (`'admit'`, `'refuse'` or `'marks-setting-only'`) the one the
+ * pushed commit holds.
  * Naming `options.main` swaps the fake git for the real one over a real repository, and `options.tar === false`
  * leaves `tar` off the hook's PATH. `options.lfs` says what the hook finds of
  * Git LFS: `'installed'` or `'absent'` through the `git` of `lfsWrappers`, `'real'` the installed `git-lfs`.
@@ -518,6 +524,46 @@ test('pre-push proceeds when the product gate on the remote main admits a push t
   });
 });
 
+const SKIPPED = "pre-push: the gate on the remote's main marks this push a setting-only seat change, so lint and the script suite are skipped.\n";
+
+test('ANTI-REGRESSION: only a push to main whose gate on the remote main prints exactly setting-only skips lint and the script suite; every other push still runs them', () => {
+  withFixture({ main: 'admit', pushed: 'marks-setting-only' }, ({ leftovers, mainSha, nativeRoot, pushedSha, recorded, run }) => {
+    const main = refLine('refs/heads/main', mainSha, pushedSha);
+    // The calls file gathers every run's lines, so each run is judged by the lines it added.
+    const push = (extra, input = main) => {
+      const before = recorded().length;
+      const result = run(extra, input);
+      return { result, tools: recorded().slice(before).map((line) => line.split('\t')[0]) };
+    };
+    const full = ['gate', 'npm', 'node'];
+
+    const silent = push({ SCRIPT_STATUS: '3' });
+    assert.equal(silent.result.status, 3, `a gate that prints nothing; the pushed copy's mark is not consulted: ${output(silent.result)}`);
+    assert.deepEqual(silent.tools, full);
+
+    const alongside = push({ GATE_STDOUT: 'setting-only', SCRIPT_STATUS: '3' }, `${refLine('refs/heads/job/1')}${main}`);
+    assert.equal(alongside.result.status, 3, `a marked main ref after another ref: ${output(alongside.result)}`);
+    assert.deepEqual(alongside.tools, full);
+
+    const more = push({ GATE_STDOUT: 'setting-only\nmore', SCRIPT_STATUS: '3' });
+    assert.equal(more.result.status, 3, `a mark followed by another line: ${output(more.result)}`);
+    assert.deepEqual(more.tools, full);
+    assert.ok(output(more.result).includes('more'), output(more.result));
+
+    const refused = push({ GATE_STDOUT: 'setting-only', GATE_STATUS: '1' });
+    assert.equal(refused.result.status, 1, `a mark from a gate that refuses: ${output(refused.result)}`);
+    assert.deepEqual(refused.tools, ['gate']);
+
+    // Without ESLint, and with lint and the suite failing, only a skip of all three lets the push through.
+    rmSync(join(nativeRoot, 'node_modules', '.bin', 'eslint'));
+    const marked = push({ GATE_STDOUT: 'setting-only', LINT_STATUS: '1', SCRIPT_STATUS: '3' });
+    assert.equal(marked.result.status, 0, `a mark alone from a gate that admits: ${output(marked.result)}`);
+    assert.deepEqual(marked.tools, ['gate']);
+    assert.ok(output(marked.result).includes(SKIPPED), output(marked.result));
+    assert.deepEqual(leftovers(), []);
+  });
+});
+
 test('pre-push never consults the product gate for other branches', () => {
   withFixture({}, ({ recorded, run }) => {
     const result = run({}, refLine('refs/heads/job/1'));
@@ -745,20 +791,23 @@ test('ANTI-REGRESSION: a push the hook refuses uploads no LFS objects', async (t
     });
   });
 
-  await t.test('b: the optional full test fails', () => {
+  await t.test('b: the optional full test fails on a push the gate on main marks setting-only', () => {
     withLfs({ pushedFiles: [TRACKING] }, ({ mainSha, pushedSha, recorded, run }) => {
-      const result = run({ RUN_TESTS: '1', FULL_TEST_STATUS: '1' }, refLine('refs/heads/job/1', mainSha, pushedSha));
-      assert.notEqual(result.status, 0);
-      assert.deepEqual(toolNames(recorded()), ['npm', 'node', 'npm']);
+      const result = run({ RUN_TESTS: '1', FULL_TEST_STATUS: '1', GATE_STDOUT: 'setting-only' }, refLine('refs/heads/main', mainSha, pushedSha));
+      assert.equal(result.status, 1, output(result));
+      const calls = recorded().map((line) => line.split('\t'));
+      assert.deepEqual(calls.map(([tool]) => tool), ['gate', 'npm']);
+      assert.equal(calls[1][1], 'test');
     });
   });
 });
 
-test('pre-push refuses a push whose LFS upload fails', () => {
-  withLfs({ pushedFiles: [TRACKING] }, ({ mainSha, pushedSha, recorded, run }) => {
-    const result = run({ LFS_STATUS: '2' }, refLine('refs/heads/job/1', mainSha, pushedSha));
+test('pre-push refuses a push to main whose LFS upload fails after the gate on main marks it setting-only', () => {
+  // This machine's attributes file, so the pushed commit carries no tracking of its own.
+  withLfs({ infoAttributes: TRACKING.content }, ({ mainSha, pushedSha, recorded, run }) => {
+    const result = run({ LFS_STATUS: '2', GATE_STDOUT: 'setting-only' }, refLine('refs/heads/main', mainSha, pushedSha));
     assert.equal(result.status, 1, output(result));
-    assert.deepEqual(toolNames(recorded()), ['npm', 'node', 'lfs']);
+    assert.deepEqual(toolNames(recorded()), ['gate', 'lfs']);
     assert.ok(result.stderr.includes(LFS_FAILED), result.stderr);
   });
 });

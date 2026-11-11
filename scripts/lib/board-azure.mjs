@@ -8,6 +8,7 @@ import { isAzureIdentifier } from './tracker.mjs';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CATEGORIES = new Set(['Proposed', 'InProgress', 'Resolved', 'Completed', 'Removed']);
 export const AZURE_CLAIM_ADVISORY = 'review complete native comments and deleted tombstones for Claim/withdrawal evidence';
+export const AZURE_OWNER_QUESTION_ADVISORY = 'review complete native comments for Needs owner: questions';
 const OPPOSITES = {
   'System.LinkTypes.Hierarchy-Forward': 'System.LinkTypes.Hierarchy-Reverse',
   'System.LinkTypes.Hierarchy-Reverse': 'System.LinkTypes.Hierarchy-Forward',
@@ -433,7 +434,7 @@ export function azureCardDetails(exec, ids) {
       const parent = parentOf(issue, project, exec);
       const comments = commentsOf(issue, project, exec);
       return [number, { number, body: issue.fields['System.Description'] ?? '', bodyFormat: 'html', parent,
-        claim: AZURE_CLAIM_ADVISORY,
+        claim: AZURE_CLAIM_ADVISORY, ownerQuestions: AZURE_OWNER_QUESTION_ADVISORY,
         comments: comments.map((comment) => `comment ${comment.id} | ${comment.format}${comment.format === 'unknown legacy' && comment.nativeFormat !== null ? ' (' + comment.nativeFormat + ')' : ''} | author ${comment.accountId} | ${comment.createdAt}${comment.isDeleted ? ' | deleted tombstone (not an active claim)' : ''}\n${comment.body}`),
         commentCount: comments.length, commentsUnavailable: null }];
     } catch (error) {

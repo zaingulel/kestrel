@@ -6,10 +6,13 @@
 #     commit's tree to a temporary directory and runs the gate from inside it, with replacement
 #     references off, so every file the gate loads by relative path is the one on main. A gate that is
 #     missing or not executable there, or that refuses, blocks the push. Other branches never consult it.
+#     A gate that admits may print exactly `setting-only` on stdout, having itself checked the push as a
+#     setting-only seat change; when every pushed ref goes to main and its gate prints that, the ESLint
+#     check, lint and the script suite below are skipped. Any other gate output is shown and changes nothing.
 #   * eslint — undefined reference, typo'd name, duplicate key.
 #   * the scripts/lib node:test suite — the guard scripts, board scripts and the pre-commit
-#     hook. Runs on every push once the dependency prerequisite passes: editing .claude/agents/ or
-#     AGENTS.md alone trips no staged-path trigger that runs it.
+#     hook. Runs on every push the gate on main does not mark, once the dependency prerequisite passes:
+#     editing .claude/agents/ or AGENTS.md alone trips no staged-path trigger that runs it.
 #   * the Git LFS upload — last, so a push any gate above refuses uploads nothing: a pushed ref whose commits use Git LFS
 #     goes to git lfs pre-push, because core.hooksPath displaces the hook Git LFS installs. Without git-lfs
 #     that push is refused before lint or tests.
@@ -143,10 +146,25 @@ carries_lfs() {
   [ -n "$changed" ]
 }
 
+# Empty until a ref is read, so a push with no refs runs every check. Any ref the gate on main does not
+# mark, or that goes elsewhere, sets it to no for good.
+seat_settings_only=
 lfs_refs=
 while read -r local_ref local_sha remote_ref remote_sha; do
   if [ "$remote_ref" = "refs/heads/main" ]; then
-    judge_main "$remote_sha" "$local_sha" </dev/null || exit 1
+    # The gate's stdout is its verdict; its stderr reaches the pusher as it is written.
+    if ! verdict=$(judge_main "$remote_sha" "$local_sha" </dev/null); then
+      [ -z "$verdict" ] || printf '%s\n' "$verdict"
+      exit 1
+    fi
+    if [ "$verdict" = setting-only ]; then
+      [ "$seat_settings_only" = no ] || seat_settings_only=yes
+    else
+      seat_settings_only=no
+      [ -z "$verdict" ] || printf '%s\n' "$verdict"
+    fi
+  else
+    seat_settings_only=no
   fi
   if carries_lfs "$1" "$local_sha" </dev/null; then
     lfs_refs="$lfs_refs$local_ref $local_sha $remote_ref $remote_sha
@@ -159,47 +177,52 @@ if [ -n "$lfs_refs" ] && ! git lfs version >/dev/null 2>&1; then
   exit 1
 fi
 
-# Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
-# .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
-# main checkout's.
-eslint_bin=""
-dir=$repo_root
-while :; do
-  if [ -x "$dir/node_modules/.bin/eslint" ]; then eslint_bin="$dir/node_modules/.bin/eslint"; break; fi
-  parent=$(dirname "$dir")
-  [ "$parent" = "$dir" ] && break
-  dir=$parent
-done
-if [ -z "$eslint_bin" ]; then
-  printf 'pre-push: eslint is not installed for %s; run npm install there for a first install without a lockfile, or npm ci with an existing lockfile, before pushing.\n' "$repo_root" >&2
-  exit 1
-fi
-
-if ! command -v npm >/dev/null 2>&1; then
-  echo "pre-push: npm not found — skipping lint gate." >&2
+# The skip branch only reports: RUN_TESTS and the Git LFS upload below still run, and still refuse, after it.
+if [ "$seat_settings_only" = yes ]; then
+  echo "pre-push: the gate on the remote's main marks this push a setting-only seat change, so lint and the script suite are skipped."
 else
-  echo "pre-push: npm run lint…"
-  npm run lint --silent
-fi
+  # Walk the ANCESTOR directories exactly as npm resolves bins: a git worktree under
+  # .claude/worktrees/ has no node_modules of its own, but `npm run lint` works there via the
+  # main checkout's.
+  eslint_bin=""
+  dir=$repo_root
+  while :; do
+    if [ -x "$dir/node_modules/.bin/eslint" ]; then eslint_bin="$dir/node_modules/.bin/eslint"; break; fi
+    parent=$(dirname "$dir")
+    [ "$parent" = "$dir" ] && break
+    dir=$parent
+  done
+  if [ -z "$eslint_bin" ]; then
+    printf 'pre-push: eslint is not installed for %s; run npm install there for a first install without a lockfile, or npm ci with an existing lockfile, before pushing.\n' "$repo_root" >&2
+    exit 1
+  fi
 
-echo "pre-push: node --test scripts/lib/…"
-# The suite's output is held until it ends, in a variable so an interrupted push leaves no file behind. A pass
-# shows only node's own summary counts, since its per-test lines cost each push hundreds of kilobytes; a failure,
-# or a pass whose counts are not found (another reporter, FORCE_COLOR), shows the whole output, both streams in
-# the order written. This repeats the test-output filter's rule because that filter is installed only with Claude
-# Code. The counts are the spec reporter's `ℹ` lines, or the TAP reporter's `# ` lines Node 20 and 22 write to a pipe.
-if suite_output=$(node --test --test-concurrency=2 "scripts/lib/*.test.mjs" 2>&1); then
-  suite_status=0
-else
-  suite_status=$?
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "pre-push: npm not found — skipping lint gate." >&2
+  else
+    echo "pre-push: npm run lint…"
+    npm run lint --silent
+  fi
+
+  echo "pre-push: node --test scripts/lib/…"
+  # The suite's output is held until it ends, in a variable so an interrupted push leaves no file behind. A pass
+  # shows only node's own summary counts, since its per-test lines cost each push hundreds of kilobytes; a failure,
+  # or a pass whose counts are not found (another reporter, FORCE_COLOR), shows the whole output, both streams in
+  # the order written. This repeats the test-output filter's rule because that filter is installed only with Claude
+  # Code. The counts are the spec reporter's `ℹ` lines, or the TAP reporter's `# ` lines Node 20 and 22 write to a pipe.
+  if suite_output=$(node --test --test-concurrency=2 "scripts/lib/*.test.mjs" 2>&1); then
+    suite_status=0
+  else
+    suite_status=$?
+  fi
+  if [ "$suite_status" -eq 0 ] && suite_summary=$(printf '%s\n' "$suite_output" | LC_ALL=C grep -E '^(ℹ|#) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) '); then
+    echo "pre-push: the script suite passed; showing only node's summary."
+    printf '%s\n' "$suite_summary"
+  elif [ -n "$suite_output" ]; then
+    printf '%s\n' "$suite_output"
+  fi
+  [ "$suite_status" -eq 0 ] || exit "$suite_status"
 fi
-if [ "$suite_status" -eq 0 ] && suite_summary=$(printf '%s\n' "$suite_output" | LC_ALL=C grep -E '^(ℹ|#) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) '); then
-  echo "pre-push: the script suite passed; showing only node's summary."
-  printf '%s\n' "$suite_summary"
-elif [ -n "$suite_output" ]; then
-  printf '%s\n' "$suite_output"
-fi
-[ "$suite_status" -eq 0 ] || exit "$suite_status"
 
 if [ "${RUN_TESTS:-0}" = "1" ]; then
   echo "pre-push: RUN_TESTS=1 → npm test…"

@@ -21,8 +21,8 @@ platform; a simulated platform or synthetic provider response does not supply th
    incompatible process rules or required fields. Keep the project's actual names, including case.
 3. Give init only those nonsecret mappings. Set up the private credential file under [Credentials](#credentials).
    Init validates the configuration without contacting Azure or asking for a token.
-4. Run `node scripts/board.mjs --intake`. Resolve native metadata, visibility or mapping refusals before work-pick.
-   A successful read does not establish permission to create, assign, comment or move.
+4. Run `node scripts/board.mjs --intake <folder>`. Resolve native metadata, visibility or mapping refusals before
+   work-pick. A successful read does not establish permission to create, assign, comment or move.
 
 ### Configuration
 
@@ -136,11 +136,11 @@ native Azure DevOps identity UUID, never display name, email matching or an Entr
 the viewer. Assignment submits the profile's exact nonblank email principal; native validation must resolve it to the
 same profile UUID before the actual write, and direct read-back must confirm that UUID.
 
-Use `node scripts/board.mjs` for the pick view, `--json` for normalized data, `--intake` for complete intake and
-`--closeout` for the strict scan. The normalized board exposes only `openBlockers`; use the complete `blockedBy`
-row from `text` when verifying the exact blocker set, including closed blockers. An empty project is valid only
-after a complete successful read. Failed,
-permission-limited or incomplete evidence must never be reported as no cards, no claims or zero children.
+Use `node scripts/board.mjs` for the pick view, `--json` for normalized data, `--intake <folder>` for the intake
+summary, each card's full text in that folder, and `--closeout` for the strict scan. The normalized board exposes only
+`openBlockers`; use the complete `blockedBy` row from `text` when verifying the exact blocker set, including closed
+blockers. An empty project is valid only after a complete successful read. Failed, permission-limited or incomplete
+evidence must never be reported as no cards, no claims or zero children.
 
 Discovery uses a flat Work Item Query Language (WIQL) query for the exact project with no truncating top limit. Batch
 reads use the same `asOf`, at most 200 identifiers each, and require the exact requested identity set. A native query
@@ -192,7 +192,7 @@ native representations on read.
 
 ## Claims and withdrawal
 
-Apply [resume's free-card and race rules](../.agents/skills/resume/SKILL.md#3-start-the-job) with Azure evidence:
+Apply [resume's free-card and race rules](../.agents/skills/resume/references/claim-reads.md) with Azure evidence:
 
 1. Read `view <AB-ID>`, `view <AB-ID> --board` and `text <AB-ID>` completely. Compare exact organization/project and
    mapped column with intake, and compare assignees and claim authors by native UUID. Inspect every complete native
@@ -241,7 +241,8 @@ publication and cleanup gate.
 
 | Step | Azure action |
 |---|---|
-| Intake and card context | `board.mjs --intake`, then `azure-card.mjs text <AB-ID>`; review complete native comments |
+| Intake and card context | `board.mjs --intake <folder>`, then `azure-card.mjs text <AB-ID>`; review complete native comments |
+| Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses an Azure install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the rows of this table |
 | Free-card, assignment, claim or withdrawal | The complete reads and native-UUID protocol in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs <AB-ID> "Awaiting push"` before requesting push authorization |
 | Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `azure-card.mjs comment <AB-ID> --body-file <file>`. Read with `node scripts/board.mjs --all`, then `azure-card.mjs text <AB-ID>` for each card it lists, one call per card, reviewing complete native comments. Compare authorship with the viewer evidence of `azure-card.mjs view <AB-ID>`. A comment whose native text wraps `Verdict:` counts as not matching the form. An approved push is a card in Done on that listing. A failed read leaves the first two measures not measurable, naming the card. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json` and the same `text` calls, applying the same title test and finding the line contained in the description, and gives those counts as the cards it could read, with the share itself `not measurable: a card a board read leaves out is not counted`; a failed read leaves no counts, naming the card |

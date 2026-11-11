@@ -21,47 +21,22 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gitEnvironment } from './factory-sync.mjs';
-import { CARD_PROMPT, END_PROMPT_PREFIX, GUARD_WITNESS, runRun, sessionArgv } from './product-manager-run.mjs';
+import { CARD_PROMPT, CARRIED_PROMPT, END_PROMPT_PREFIX, GUARD_WITNESS, runRun, sessionArgv } from './product-manager-run.mjs';
 import { main } from '../product-manager-run.mjs';
 import { copyToolkit, GITHUB_TEST_CONFIG } from './board-toolkit-copy.mjs';
+import { END_MESSAGE, END_REPLY, GUARD_REFUSAL, STDERR_FIRST_WITNESS, SYSTEMCTL, SYSTEMD_RUN, deferred, nativeSystemd, probeManagedSystemd, readPhaseEvidence, schedulerFixture } from './pre-approved-fixture.mjs';
 
-const USAGE = 'usage: node scripts/product-manager-run.mjs --coordinator <chat UUID> [--pre-approved [--continue-card <card>]] | --admit-job build|deliver <absolute request file> | --claude-card <absolute logs base> [--prepared-context <absolute context file>] | --check-admission <absolute request file> | --bind-app-job <absolute request file> | --prepare-app-phase <absolute phase-log-base> <ready-session-uuid> <original-claim-created-at> [<absolute admission-request-file>]';
+const USAGE = 'usage: node scripts/product-manager-run.mjs --coordinator <chat UUID> [--pre-approved [--continue-card <card>]] | --admit-job build|deliver <absolute request file> | --claude-card <absolute logs base> [--prepared-context <absolute context file> | --carry <absolute logs base>.answer.json] | --check-admission <absolute request file> | --bind-app-job <absolute request file> | --prepare-app-phase <absolute phase-log-base> <ready-session-uuid> <original-claim-created-at> [<absolute admission-request-file>]';
 const COORDINATOR = '11111111-1111-4111-8111-111111111111';
-const END_MESSAGE = 'End of run summary.';
-const END_REPLY = { message: END_MESSAGE };
-// The runtime's own refusal line, as the guard probe showed it on the session's stderr (spelled out here, not imported).
-const GUARD_REFUSAL = 'Command blocked by PreToolUse hook: Blocked: git commit';
-const STDERR_FIRST_WITNESS = `warning: an unrelated line\n${GUARD_REFUSAL}: the owner commits\n`;
 const firstWitnessOnly = (reply) => ({ ...reply, stderr: STDERR_FIRST_WITNESS });
 // The runtime's refusal of the run session's publish check, spelled out here for the same reason.
 const PUBLISH_REFUSAL = 'Command blocked by PreToolUse hook: Blocked: a product manager run session';
 const STDERR_SHOWN = `${STDERR_FIRST_WITNESS}${PUBLISH_REFUSAL} does not publish\n`;
 const shown = (reply) => ({ ...reply, stderr: STDERR_SHOWN });
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
-  return { promise, resolve, reject };
-}
-
-// Observations never throw inside a starter: assertion failures must remain visible outside production's catch.
-function readPhaseEvidence(logBase, card) {
-  const observed = {};
-  for (const [name, path] of Object.entries({ context: `${logBase}.context.json`,
-    plan: join(dirname(logBase), `job-${card}.plan.snapshot.md`), review: join(dirname(logBase), `job-${card}.review.snapshot.md`) })) {
-    try {
-      observed[name] = { bytes: readFileSync(path, 'utf8') };
-    } catch (error) {
-      observed[name] = { error: error.code };
-    }
-  }
-  return observed;
-}
 
 // A starter that replies from the script, one reply per session: { message, stderr, events, exitCode, spawnError }. A
 // reply without a message, stderr or events writes no such file. `maxOpen` is the most sessions ever open at once.
@@ -106,7 +81,7 @@ async function runWith(replies, args = ['--coordinator', COORDINATOR], fixture) 
 // Admission uses the existing GitHub-configured toolkit fixture so installed tracker choices cannot change its oracle.
 // Recurring cost: one toolkit copy, legacy admission/argv contrasts plus independent inventory/comment-page/Epic cases,
 // with the existing main root lookup per trace; no network or model.
-test('pre-approved admission requires current approval ownership and disjoint complete scope', async (t) => {
+test('pre-approved admission requires current approval ownership and disjoint exclusive resources', async (t) => {
   const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
   t.after(() => toolkit.cleanup());
   copyFileSync(new URL('../product-manager-run.mjs', import.meta.url), toolkit.script('product-manager-run.mjs'));
@@ -122,15 +97,15 @@ test('pre-approved admission requires current approval ownership and disjoint co
   const base = 'a'.repeat(40);
   const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
   const cases = [
-    { name: 'shared file', decision: 'wait', code: 3, reason: /\b7\b.*shared-file|shared-file.*\b7\b/ },
+    { name: 'shared file', decision: 'allow', code: 0 },
     { name: 'disjoint', decision: 'allow', code: 0 },
-    { name: 'incomplete scope', decision: 'wait', code: 3, reason: /scope|exclusive|complete/i },
     { name: 'shared resource', decision: 'wait', code: 3, reason: /preview-port/ },
     { name: 'prerequisite', decision: 'wait', code: 3, reason: /\b7\b/ },
     { name: 'revoked approval', decision: 'unavailable', code: 1, reason: /approv/i },
     { name: 'replaced claim', decision: 'unavailable', code: 1, reason: /claim/i },
     { name: 'changed review bytes', decision: 'unavailable', code: 1, reason: /review/i },
     { name: 'corrupt descriptor', decision: 'unavailable', code: 1, reason: /scope|complete|descriptor/i },
+    { name: 'legacy scopeComplete field', decision: 'unavailable', code: 1, reason: /descriptor/ },
   ];
   const check = async (scenario) => {
     const home = mkdtempSync(join(tmpdir(), 'product-manager-admission-'));
@@ -153,10 +128,10 @@ test('pre-approved admission requires current approval ownership and disjoint co
         plannedFiles: [card === 7 || scenario.name === 'shared file' ? 'shared-file' : 'independent-file'],
         prerequisites: card === 8 && scenario.prerequisiteRead ? [{ repository, number: 9 }]
           : card === 8 && scenario.name === 'prerequisite' ? [{ repository, number: 7 }] : [],
-        scopeComplete: !(card === 8 && scenario.name === 'incomplete scope'),
         exclusiveResources: scenario.name === 'shared resource' ? ['preview-port'] : [`preview-${card}`],
       };
-      if (card === 8 && scenario.name === 'corrupt descriptor') delete descriptor.scopeComplete;
+      if (card === 8 && scenario.name === 'corrupt descriptor') delete descriptor.exclusiveResources;
+      if (card === 8 && scenario.name === 'legacy scopeComplete field') descriptor.scopeComplete = true;
       writeFileSync(descriptorPath, JSON.stringify(descriptor));
       const descriptorHash = digest(readFileSync(descriptorPath));
       writeFileSync(reviewEvidencePath, 'Required independent plan review accepted the descriptor and plan.\n');
@@ -320,7 +295,7 @@ test('pre-approved admission requires current approval ownership and disjoint co
       }
       assert.equal(sessions.calls.length, 0, `${scenario.name}: read-only admission must never dispatch a model`);
       if (scenario.inventory || scenario.epicReservation) t.diagnostic(`inventory ${scenario.name}: exit=${code}; actual=${logged.join('\n')}`);
-      assert.equal(code, scenario.code, scenario.name);
+      assert.equal(code, scenario.code, `${scenario.name}: ${logged.join('\n')}`);
       assert.equal(logged.length, 1, 'admission returns one JSON decision');
       const answer = JSON.parse(logged[0]);
       assert.deepEqual(Object.keys(answer).sort(), ['decision', 'reasons']);
@@ -336,7 +311,7 @@ test('pre-approved admission requires current approval ownership and disjoint co
         assert.ok(ghCalls.some((args) => args.includes('before=older-9')), 'complete held-job evidence includes the older comment page');
       }
       t.diagnostic(`dependency ${scenario.name}: ${code} ${answer.decision}; dispatches=${sessions.calls.length}`);
-      if (scenario.name === 'shared file' || scenario.name === 'disjoint') {
+      if (scenario.name === 'shared resource' || scenario.name === 'disjoint') {
         const requestFile = join(results, 'admission-request.json');
         writeFileSync(requestFile, JSON.stringify(request));
         board = makeBoard();
@@ -458,341 +433,10 @@ test('pre-approved admission requires current approval ownership and disjoint co
     { name: 'Epic parent held job retains its reservation', inventory: { ...epicParent,
       comments: ['Needs owner: parent work parked. Job: job/9 on former-machine.'] }, decision: 'wait', code: 3, reason: /\b9\b/ },
   ]) await t.test(scenario.name, () => check(scenario));
-  await t.test('Epic supplied reviewed reservation retains its shared-file conflict', () => check({ ...cases[0], epicReservation: true }));
+  await t.test('Epic supplied reviewed reservation retains its resource conflict',
+    () => check({ ...cases.find(({ name }) => name === 'shared resource'), epicReservation: true }));
 
 });
-
-// Scheduler traces reuse authoritative board/approval/Git readers, with only the named phase completions deferred.
-// Recurring cost: one toolkit copy per test; native traces add Git and flock subprocesses. No network.
-async function schedulerFixture(t, { native = false } = {}) {
-  const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
-  t.after(() => toolkit.cleanup());
-  copyFileSync(new URL('./product-manager-run.mjs', import.meta.url), toolkit.script('lib/product-manager-run.mjs'));
-  copyFileSync(new URL('./closeout-cleanup.mjs', import.meta.url), toolkit.script('lib/closeout-cleanup.mjs'));
-  copyFileSync(new URL('../product-manager-run.mjs', import.meta.url), toolkit.script('product-manager-run.mjs'));
-  copyFileSync(new URL('./checkout-context.mjs', import.meta.url), toolkit.script('lib/checkout-context.mjs'));
-  const runtime = await toolkit.load('lib/product-manager-run.mjs');
-  const { main: launcherMain } = await toolkit.load('product-manager-run.mjs');
-  const { boardReadExec, leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
-  const { BOARD_OWNER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
-  const repository = `${BOARD_OWNER}/${BOARD_REPOSITORY}`;
-  const repositoryId = 'R_scheduler_fixture';
-  const runStart = '2026-11-05T10:00:00Z';
-  const claimTime = '2026-11-05T10:01:00Z';
-  const nativeGit = (args) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args],
-    { cwd: toolkit.root, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe' });
-  let base = 'a'.repeat(40);
-  if (native) {
-    nativeGit(['init', '-q', '-b', 'main']);
-    nativeGit(['remote', 'add', 'origin', `https://github.com/${repository}.git`]);
-    mkdirSync(join(toolkit.root, '.agents'));
-    writeFileSync(join(toolkit.root, '.agents', 'factory-settings.json'), '{"version":1,"preApprovedRun":true}\n');
-    nativeGit(['add', '.agents/factory-settings.json']);
-    nativeGit(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Fixture settings']);
-    base = nativeGit(['rev-parse', 'HEAD']).trim();
-    nativeGit(['update-ref', 'refs/remotes/origin/main', base]);
-  }
-  const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
-  const prefixes = {
-    select: 'Select and claim one eligible pre-approved job. Do not plan, build, or deliver.',
-    prepare: 'Prepare this exact pre-approved job. Do not build or deliver.',
-    build: 'Build and verify this exact prepared job. Do not publish or deliver.',
-    deliver: 'Deliver this exact built job. Do not select or build another job.',
-  };
-  return ({ cards, held = [], waiting = [], endReply = END_REPLY, observeNotification, observeOutput, phaseReplies = {} }) => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), 'product-manager-scheduler-')));
-    const folder = join(home, 'results');
-    mkdirSync(folder);
-    const jobs = new Map(cards.map((card, index) => [card, {
-      card, file: String.fromCharCode(97 + index), status: 'Ready', state: 'OPEN', selected: false,
-      worktree: join(home, `job-${card}`), claimUrl: `https://github.com/${repository}/issues/${card}#issuecomment-${1000 + card}`,
-      head: base, deltas: new Map(), ancestry: new Map([[`${base} ${base}`, true]]),
-      committed: [], unstaged: [], staged: [], untracked: [],
-    }]));
-    const gitState = { mainTip: base, mainReadError: undefined };
-    const gates = new Map(held.map((name) => [name, deferred()]));
-    const checkpoints = new Map();
-    const reached = (name) => {
-      if (!checkpoints.has(name)) checkpoints.set(name, deferred());
-      return checkpoints.get(name);
-    };
-    const calls = [];
-    const notifications = [];
-    const inspections = [];
-    const errors = [];
-    const logged = [];
-    let openDelivery = 0;
-    let maxDelivery = 0;
-    let running;
-    const selection = (job) => ({
-      runStart, card: job.card, claimUrl: job.claimUrl, priorClaimUrls: [], branch: `job/${job.card}`, worktree: job.worktree, base,
-    });
-    const select = (job) => {
-      job.selected = true;
-      job.status = 'In progress';
-      if (native) nativeGit(['worktree', 'add', '-qB', `job/${job.card}`, job.worktree, base]);
-      else mkdirSync(job.worktree);
-    };
-    const merge = (job) => {
-      job.status = 'Done';
-      job.state = 'CLOSED';
-      if (native) nativeGit(['worktree', 'remove', '--force', job.worktree]);
-      else rmSync(job.worktree, { recursive: true });
-    };
-    const prepare = (job, results = folder) => {
-      const planPath = native ? join(results, `job-${job.card}.plan.md`) : join(job.worktree, 'plan.md');
-      writeFileSync(planPath, `Reviewed scope ${job.file} for card ${job.card}.\n`);
-      const planHash = hash(readFileSync(planPath));
-      const descriptorPath = join(results, `job-${job.card}.prepared.json`);
-      const reviewRecordPath = join(results, `job-${job.card}.reviewed.json`);
-      const reviewEvidencePath = join(results, `job-${job.card}-review.md`);
-      job.descriptor = { ...selection(job), planPath, planHash, plannedFiles: job.plannedFiles ?? [job.file], prerequisites: job.prerequisites ?? [],
-        scopeComplete: true, exclusiveResources: job.exclusiveResources ?? [`${native ? 'local:' : ''}preview-${job.card}`] };
-      writeFileSync(descriptorPath, JSON.stringify(job.descriptor));
-      const descriptorHash = hash(readFileSync(descriptorPath));
-      writeFileSync(reviewEvidencePath, `Independent review accepted card ${job.card}'s descriptor and plan.\n`);
-      writeFileSync(reviewRecordPath, JSON.stringify({
-        runStart, card: job.card, claimUrl: job.claimUrl, descriptorPath, descriptorHash, planPath, planHash,
-        reviewEvidencePath, reviewEvidenceHash: hash(readFileSync(reviewEvidencePath)), verdict: 'accepted',
-      }));
-      job.reference = { descriptorPath, descriptorHash, planHash, reviewRecordPath };
-    };
-    const metadata = (job) => ({
-      state: job.state, title: `Scheduler card ${job.card}`, lastEditedAt: null, timelineItems: { nodes: [] },
-      comments: { pageInfo: { hasNextPage: false }, nodes: [
-        { author: { login: 'owner' }, createdAt: '2026-11-05T09:00:00Z', lastEditedAt: null,
-          url: `https://github.com/${repository}/issues/${job.card}#issuecomment-${2000 + job.card}`,
-          body: `Approved: card=${job.card} edited=none` },
-        ...(job.selected ? [{ author: { login: 'owner' }, createdAt: job.claimCreatedAt ?? claimTime, lastEditedAt: null, url: job.claimUrl,
-          body: `Claim: fixture-machine Codex job/${job.card} ${job.worktree}` }] : []),
-        ...(job.comments ?? []).map((body, index) => ({ author: { login: 'owner' }, createdAt: '2026-11-05T10:15:00Z',
-          lastEditedAt: null, url: `https://github.com/${repository}/issues/${job.card}#issuecomment-${4000 + index}`, body })),
-      ] },
-    });
-    const exec = (args) => {
-      if (args[0] === 'repo' && args[1] === 'view' && args.includes('--json')) {
-        return JSON.stringify({ id: repositoryId, nameWithOwner: repository, defaultBranchRef: { name: 'main' } });
-      }
-      const query = args.find((arg) => arg.startsWith('query=')) ?? '';
-      if (args[0] === 'api' && args[1] === 'graphql' && query.includes('comments(first: 100)')) {
-        const number = Number(args.find((arg) => /^number=\d+$/.test(arg))?.slice('number='.length));
-        assert.ok(jobs.has(number), `unexpected scheduler approval identity: ${JSON.stringify(args)}`);
-        return JSON.stringify({ data: { viewer: { login: 'owner' }, repository: { id: repositoryId, issue: metadata(jobs.get(number)) } } });
-      }
-      if (args[0] === 'api' && args[1] === 'graphql' && query.includes('comments(last:100')) {
-        const aliases = {};
-        for (const [, alias, text] of query.matchAll(/(i(\d+)): issue\(number:\d+\)/g)) {
-          const number = Number(text);
-          assert.ok(jobs.has(number), `unexpected scheduler detail identity: ${number}`);
-          const nodes = metadata(jobs.get(number)).comments.nodes.map(({ body }) => ({ body }));
-          aliases[alias] = { number, body: `Scope evidence for card ${number}.`, parent: null,
-            comments: { totalCount: nodes.length, pageInfo: { hasPreviousPage: false, startCursor: null }, nodes } };
-        }
-        assert.ok(Object.keys(aliases).length, `unexpected scheduler detail query: ${query}`);
-        return JSON.stringify({ data: { repository: aliases } });
-      }
-      if (args[0] === 'api' && args[1] === 'graphql') {
-        // A fresh board reader makes each authoritative read observe the fixture's current state.
-        return boardReadExec({ board: [leanBoardPage([...jobs.values()].map((job) => leanNode({
-          id: `PVTI_scheduler_${job.card}`, title: `Scheduler card ${job.card}`, status: job.status,
-          content: { __typename: 'Issue', number: job.card, state: job.state, assignees: job.assignees ?? (job.selected && job.state === 'OPEN' ? ['owner'] : []) },
-        })))] }).exec(args);
-      }
-      throw new Error(`unexpected scheduler gh invocation: ${JSON.stringify(args)}`);
-    };
-    const git = (args) => {
-      const argv = [...args];
-      const worktree = argv[0] === '-C' ? argv.splice(0, 2)[1] : undefined;
-      const job = [...jobs.values()].find((entry) => entry.selected && entry.worktree === worktree && entry.state === 'OPEN');
-      if (worktree !== undefined) assert.ok(job, `unexpected scheduler worktree: ${worktree}`);
-      if (argv[0] === 'remote' && argv[1] === 'get-url') return `https://github.com/${repository}.git\n`;
-      if (argv.join(' ') === 'rev-parse --verify --quiet refs/remotes/origin/main^{commit}') return `${base}\n`;
-      if (argv.join(' ') === `ls-tree --full-tree --format=%(objectmode) ${base} -- .agents/factory-settings.json`) return '100644\n';
-      if (argv.join(' ') === `show ${base}:.agents/factory-settings.json`) return '{"version":1,"preApprovedRun":true}';
-      if (worktree === undefined && argv.join(' ') === 'rev-parse --verify refs/remotes/origin/main^{commit}') {
-        if (gitState.mainReadError) throw new Error(gitState.mainReadError);
-        return `${gitState.mainTip}\n`;
-      }
-      if (argv[0] === 'worktree' && argv[1] === 'list' && argv[2] === '--porcelain') {
-        const separator = argv.includes('-z') ? '\0' : '\n';
-        const integration = [`worktree ${toolkit.root}`, `HEAD ${base}`, 'branch refs/heads/main', '', ''].join(separator);
-        return integration + [...jobs.values()].filter((entry) => entry.selected && existsSync(entry.worktree))
-          .map((entry) => [`worktree ${entry.worktree}`, `HEAD ${entry.head}`, `branch refs/heads/job/${entry.card}`, '', ''].join(separator)).join('');
-      }
-      if (job && argv.join(' ') === 'rev-parse --show-toplevel') return `${worktree}\n`;
-      if (job && argv[0] === 'rev-parse' && ['HEAD', '--verify'].includes(argv[1])) return `${job.head}\n`;
-      if (job && ['symbolic-ref --quiet --short HEAD', 'branch --show-current'].includes(argv.join(' '))) return `job/${job.card}\n`;
-      if (job && argv[0] === 'merge-base' && argv[1] === '--is-ancestor') {
-        const pair = `${argv[2]} ${argv[3] === 'HEAD' ? job.head : argv[3]}`;
-        assert.ok(job.ancestry.has(pair), `unexpected scheduler ancestry pair: ${pair}`);
-        if (!job.ancestry.get(pair)) throw new Error('SyntheticUnavailable: original base is not an ancestor of origin/main');
-        return '';
-      }
-      if (job && argv[0] === 'status' && argv.includes('--porcelain')) return job.unstaged.map((file) => ` M ${file}\n`).join('');
-      if (job && argv[0] === 'diff' && argv.includes('--name-only') && argv.includes('-z')) {
-        const range = argv.find((arg) => arg.includes('...'));
-        let files;
-        if (range) {
-          assert.ok(job.deltas.has(range) || range === `${base}...HEAD`, `unexpected scheduler diff range: ${range}`);
-          files = job.deltas.has(range) ? job.deltas.get(range) : job.committed;
-        } else files = argv.includes('--cached') ? job.staged : job.unstaged;
-        return files.map((file) => `${file}\0`).join('');
-      }
-      if (job && argv[0] === 'ls-files' && argv.length === 4 && ['--others', '--exclude-standard', '-z'].every((arg) => argv.includes(arg))) {
-        return job.untracked.map((file) => `${file}\0`).join('');
-      }
-      throw new Error(`unexpected scheduler git invocation: ${JSON.stringify(args)}`);
-    };
-    const startSession = async ({ argv, logs, afterClaim }) => {
-      const prompt = argv.at(-1);
-      const name = basename(logs);
-      const phase = Object.keys(prefixes).find((key) => prompt.startsWith(`${prefixes[key]}\n`));
-      const call = { name, prompt, phase, results: dirname(logs) };
-      calls.push(call);
-      const outputFile = argv[argv.indexOf('--output-last-message') + 1];
-      const reply = (message, result = { exitCode: 0 }) => {
-        writeFileSync(outputFile, message);
-        writeFileSync(`${logs}.stderr.log`, `${STDERR_FIRST_WITNESS}Command blocked by PreToolUse hook: Blocked: a pre-approved run session\n`);
-        return result;
-      };
-      if (!phase) {
-        reached(name).resolve();
-        return prompt.startsWith('End the pre-approved run: ')
-          ? reply(endReply.message, endReply.result)
-          : reply('Run result: stop none: scheduler fixture complete');
-      }
-      const context = JSON.parse(prompt.slice(prefixes[phase].length + 1));
-      call.context = context;
-      if (phase === 'select') {
-        assert.deepEqual(context, { runStart });
-        const job = [...jobs.values()].find((entry) => !entry.selected && ['Ready', 'Backlog'].includes(entry.status)
-          && !(entry.comments ?? []).some((body) => body.trimStart().startsWith('Needs owner:')));
-        if (!job) {
-          reached(name).resolve();
-          return reply('Run result: stop none: scheduler fixture complete');
-        }
-        assert.equal(name, `select-${calls.filter((entry) => entry.phase === 'select' && entry.results === call.results).length}`);
-        select(job);
-        call.card = job.card;
-        writeFileSync(`${logs}.selected.json`, JSON.stringify(selection(job)));
-        reached(name).resolve();
-        if (afterClaim) await afterClaim(job);
-        if (gates.has(name)) await gates.get(name).promise;
-        return reply(`Run result: selected ${job.card}`);
-      }
-      call.evidence = readPhaseEvidence(logs, context.card);
-      const job = jobs.get(context.card);
-      assert.ok(job?.selected, 'only the selected identity receives phase authority');
-      call.card = job.card;
-      assert.equal(name, `job-${job.card}-${phase}`);
-      assert.deepEqual(context, phase === 'prepare' ? { phase, ...selection(job) } : { phase, ...selection(job), ...job.reference });
-      if (phase === 'deliver') {
-        job.assignees ??= job.selected && job.state === 'OPEN' ? ['owner'] : [];
-        openDelivery += 1;
-        maxDelivery = Math.max(maxDelivery, openDelivery);
-      }
-      reached(name).resolve();
-      const result = gates.has(name) ? await gates.get(name).promise : { exitCode: 0 };
-      if (phase === 'deliver') openDelivery -= 1;
-      if (result.interrupted) return reply(`Run result: built ${job.card}`, result);
-      if (Object.hasOwn(phaseReplies, name)) {
-        const override = phaseReplies[name];
-        return reply(typeof override === 'function' ? override(job) : override, result);
-      }
-      if (phase === 'prepare') prepare(job, dirname(logs));
-      if (phase === 'build') {
-        job.committed = [job.file];
-        if (native) writeFileSync(join(job.worktree, job.file), `built ${job.card}\n`);
-      }
-      if (phase === 'deliver') {
-        if (waiting.includes(job.card)) job.status = 'Awaiting push';
-        else merge(job);
-      }
-      return reply(`Run result: ${phase === 'prepare' ? 'prepared' : phase === 'build' || job.status === 'Awaiting push' ? 'built' : 'merged'} ${job.card}`, result);
-    };
-    const fixture = {
-      folder, jobs, calls, notifications, inspections, errors, logged, gitState,
-      main: launcherMain, mainModuleUrl: pathToFileURL(toolkit.script('product-manager-run.mjs')).href, exec,
-      git: native ? nativeGit : git,
-      root: toolkit.root, base, runStart, repository, select, prepare, merge, startSession,
-      prepareSelected: (card) => {
-        const job = jobs.get(card);
-        select(job);
-        prepare(job);
-        writeFileSync(join(folder, `job-${card}-prepare.context.json`), JSON.stringify({ phase: 'prepare', ...selection(job) }), { flag: 'wx' });
-        writeFileSync(join(folder, `job-${card}-prepare.outcome.json`), JSON.stringify({ runStart, card, claimUrl: job.claimUrl,
-          phase: 'prepare', disposition: 'prepared', reason: `Prepared card ${card} accepted by the independent fixture review` }));
-        return { phase: 'build', ...selection(job), ...job.reference };
-      },
-      get maxDelivery() { return maxDelivery; },
-      release: (name, result = { exitCode: 0 }) => { assert.ok(gates.has(name), `no named gate ${name}`); gates.get(name).resolve(result); },
-      drain: () => new Promise((done) => setImmediate(done)),
-      noGeneric: () => assert.equal(calls.filter((call) => call.prompt === 'Continue the pre-approved run.').length, 0,
-        'a generic full-job dispatch grants forbidden selection/build/delivery authority'),
-      has: (name) => calls.some((call) => call.name === name),
-      outcome: (name, card, phase, disposition) => {
-        const bytes = readFileSync(join(folder, `${name}.outcome.json`), 'utf8');
-        const record = JSON.parse(bytes);
-        assert.deepEqual(Object.keys(record).sort(), ['card', 'claimUrl', 'disposition', 'phase', 'reason', 'runStart']);
-        assert.deepEqual({ ...record, reason: undefined }, { runStart, card, claimUrl: jobs.get(card).claimUrl, phase, disposition, reason: undefined });
-        assert.equal(typeof record.reason, 'string');
-        assert.ok(record.reason.trim());
-        return bytes;
-      },
-      retained: (identities) => assert.match(readFileSync(join(folder, 'run-end.txt'), 'utf8'),
-        new RegExp(`^Retained reservations: ${identities.length ? identities.join(',') : 'none'}$`, 'm')),
-      checkpoint: async (name) => {
-        const checkpoint = await Promise.race([
-          reached(name).promise.then(() => name), running.then(() => 'run finished'),
-          new Promise((done) => setImmediate(() => done('phase did not start'))),
-        ]);
-        fixture.noGeneric();
-        assert.equal(checkpoint, name, `the ${name} phase checkpoint must be reached`);
-      },
-      notifyGate: undefined,
-      notificationBytes: new Map(),
-      start: () => {
-        running = runtime.runRun({ root: toolkit.root, folder, kind: 'pre-approved', runStart,
-          now: () => new Date('2026-11-05T10:15:00Z'), exec, git, startSession,
-          inspectAdmission: (request, readers) => {
-            const answer = runtime.inspectAdmission(request, readers);
-            inspections.push({ request: structuredClone(request), answer: structuredClone(answer) });
-            return answer;
-          },
-          notify: async (reference) => {
-            notifications.push(reference);
-            observeNotification?.(reference);
-            if (/^job-\d+-(?:prepare|build|deliver)$/.test(reference.name)) {
-              fixture.notificationBytes.set(reference.name, readFileSync(join(reference.folder, `${reference.name}.outcome.json`), 'utf8'));
-            }
-            reached(`notify ${reference.name}`).resolve();
-            if (fixture.notifyGate?.name === reference.name) await fixture.notifyGate.gate.promise;
-          }, output: { log: (text) => { logged.push(text); observeOutput?.(text); }, error: (text) => errors.push(text) },
-        });
-        return running;
-      },
-      finish: async () => {
-        for (const gate of gates.values()) gate.resolve({ exitCode: 0 });
-        fixture.notifyGate?.gate.resolve();
-        try {
-          if (running) await running;
-          if (native) for (const job of jobs.values()) {
-            if (job.selected && existsSync(job.worktree)) nativeGit(['worktree', 'remove', '--force', job.worktree]);
-          }
-        } finally { rmSync(home, { recursive: true, force: true }); }
-      },
-      settledOnce: () => {
-        const phaseCalls = calls.filter((call) => call.phase);
-        assert.equal(new Set(phaseCalls.map((call) => call.name)).size, phaseCalls.length, 'each phase is dispatched once');
-        assert.equal(new Set(notifications.map((reference) => reference.name)).size, notifications.length, 'each outcome is notified once');
-        assert.deepEqual(notifications.filter((reference) => phaseCalls.some((call) => call.name === reference.name)).map((reference) => reference.name).sort(),
-          phaseCalls.map((call) => call.name).sort(), 'every settled phase has one notification');
-        for (const call of phaseCalls) assert.ok(existsSync(join(folder, `${call.name}.outcome.json`)), `${call.name}: durable outcome`);
-      },
-    };
-    return fixture;
-  };
-}
 
 const WHOLE_JOB_CUE = 'Continue this exact pre-approved Codex job.';
 const SECOND_COORDINATOR = '22222222-2222-4222-8222-222222222222';
@@ -973,10 +617,11 @@ test('Codex whole-job admission coordinates independent queues', {
     assert.equal(existsSync(first.worktree) || existsSync(second.worktree), false);
   });
 
-  for (const control of ['clean', 'missing stop', 'wrong stop', 'dirty path', 'prerequisite', 'corrupt record']) {
+  for (const control of ['clean', 'missing stop', 'wrong stop', 'parked same file', 'prerequisite', 'corrupt record']) {
     await scenario(async ({ fixture, queue, first, second, enableSecond }) => {
-      first.parkBeforeBuild = control !== 'dirty path';
-      first.parkAfterBuild = control === 'dirty path';
+      const admitted = control === 'clean' || control === 'parked same file';
+      first.parkBeforeBuild = control !== 'parked same file';
+      first.parkAfterBuild = control === 'parked same file';
       const stopped = queue.run(COORDINATOR);
       assert.equal(await stopped.running, 0, stopped.messages.join('\n'));
       const receipts = dirname(first.intentPath);
@@ -985,10 +630,13 @@ test('Codex whole-job admission coordinates independent queues', {
       assert.deepEqual(JSON.parse(readFileSync(stop, 'utf8')), start);
       assert.equal(first.state, 'OPEN');
       assert.match(fixture.git(['worktree', 'list', '--porcelain']), /branch refs\/heads\/job\/91/);
-      assert.equal(fixture.git(['-C', first.worktree, 'status', '--porcelain']), control === 'dirty path' ? '?? a\n' : '');
+      assert.equal(fixture.git(['-C', first.worktree, 'status', '--porcelain']), control === 'parked same file' ? '?? a\n' : '');
       if (control === 'missing stop') rmSync(stop);
       if (control === 'wrong stop') writeFileSync(stop, JSON.stringify({ ...start, invocationId: randomBytes(16).toString('hex') }));
-      if (control === 'dirty path') second.plannedFiles = ['a'];
+      if (control === 'parked same file') {
+        second.file = 'a';
+        second.plannedFiles = ['a'];
+      }
       if (control === 'prerequisite') second.prerequisites = [{ repository: fixture.repository, number: 91 }];
       if (control === 'corrupt record') writeFileSync(join(queue.store, 'job-91.json'), '{');
       enableSecond();
@@ -999,18 +647,22 @@ test('Codex whole-job admission coordinates independent queues', {
         assert.match([...(answer?.reasons ?? []), ...candidate.messages].join('\n'), /(?:record|store|reservation).*(?:corrupt|invalid|malformed|unreadable)|(?:corrupt|invalid|malformed|unreadable).*(?:record|store|reservation)/i);
       } else {
         const answer = await candidate.until('build decision 92');
-        assert.equal(answer?.decision, control === 'clean' ? 'allow' : 'wait', `${control}: ${JSON.stringify(answer)}`);
-        if (control !== 'clean') {
+        assert.equal(answer?.decision, admitted ? 'allow' : 'wait', `${control}: ${JSON.stringify(answer)}`);
+        if (!admitted) {
           const reason = answer.reasons.join('\n');
           assert.match(reason, /\b91\b/, control);
           if (control === 'prerequisite') assert.match(reason, /prerequisite/i);
-          else if (control === 'dirty path') assert.match(reason, /(?:overlap|path).*\ba\b/i);
           else assert.match(reason, /unknown|stop|writer/i);
         }
         assert.equal(await candidate.running, 0, candidate.messages.join('\n'));
       }
-      assert.equal(existsSync(queue.effect('build', 92)), control === 'clean', control);
-      if (control === 'clean') assert.equal(readFileSync(queue.effect('build', 92), 'utf8'), 'built 92 (start)\n');
+      assert.equal(existsSync(queue.effect('build', 92)), admitted, control);
+      if (admitted) assert.equal(readFileSync(queue.effect('build', 92), 'utf8'), 'built 92 (start)\n');
+      if (control === 'parked same file') {
+        assert.equal(readFileSync(queue.effect('deliver', 92), 'utf8'), 'delivered 92\n');
+        assert.equal(first.state, 'OPEN');
+        assert.match(fixture.git(['worktree', 'list', '--porcelain']), /branch refs\/heads\/job\/91/);
+      }
     });
   }
 
@@ -1059,6 +711,22 @@ test('Codex whole-job admission coordinates independent queues', {
     }
     assert.equal(await candidate.running, 0, candidate.messages.join('\n'));
   });
+
+  // Last, because it moves the shared fixture's origin/main past the base every scenario's worktree starts from.
+  await t.test('delivery proceeds after main changed a planned file', () => scenario(async ({ fixture, queue, first }) => {
+    const releaseBuild = queue.hold('build 91');
+    const run = queue.run(COORDINATOR);
+    assert.equal(await run.until('build 91'), 'built 91 (start)\n');
+    writeFileSync(join(fixture.root, 'a'), 'main changed a\n');
+    fixture.git(['add', 'a']);
+    fixture.git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Main changes a']);
+    fixture.git(['update-ref', 'refs/remotes/origin/main', fixture.git(['rev-parse', 'HEAD']).trim()]);
+    releaseBuild();
+    assert.equal(await run.running, 0, run.messages.join('\n'));
+    assert.equal(existsSync(queue.effect('deliver', 91)), true, `card 91 did not deliver: ${JSON.stringify(await run.until('deliver decision 91'))}`);
+    assert.equal(readFileSync(queue.effect('deliver', 91), 'utf8'), 'delivered 91\n');
+    assert.equal(first.state, 'CLOSED');
+  }));
 });
 
 test('Codex whole-job admission returns an explicitly returned settled workflow stop', {
@@ -1162,7 +830,8 @@ test('Codex whole-job admission revalidates every peer', {
   skip: process.platform !== 'linux' && 'whole-job admission requires Linux',
 }, async (t) => {
   const create = await schedulerFixture(t, { native: true });
-  const controls = ['live peer unreviewed path', 'live peer changed plan', 'parked peer successor claim'];
+  const controls = ['live peer unreviewed path', 'resource-free candidate beside live peer unreviewed path',
+    'live peer changed plan', 'parked peer successor claim'];
   const observed = [];
   for (const control of controls) {
     const fixture = create({ cards: [91, 92] });
@@ -1170,7 +839,9 @@ test('Codex whole-job admission revalidates every peer', {
     const first = fixture.jobs.get(91);
     const second = fixture.jobs.get(92);
     const parked = control === 'parked peer successor claim';
+    const resourceFree = control === 'resource-free candidate beside live peer unreviewed path';
     second.assignees = ['other'];
+    if (resourceFree) second.exclusiveResources = [];
     first.parkBeforeBuild = parked;
     first.parkAfterBuild = !parked;
     if (!parked) queue.hold('build 91');
@@ -1184,7 +855,7 @@ test('Codex whole-job admission revalidates every peer', {
       } else {
         assert.equal(await peer.until('build 91'), 'built 91 (start)\n');
         assert.equal(readFileSync(join(first.worktree, 'a'), 'utf8'), 'built 91 (start)\n');
-        if (control === 'live peer unreviewed path') {
+        if (control === 'live peer unreviewed path' || resourceFree) {
           writeFileSync(join(first.worktree, 'b'), 'unreviewed peer effect\n', { flag: 'wx' });
           assert.match(fixture.git(['-C', first.worktree, 'status', '--porcelain']), /^\?\? b$/m);
         } else {
@@ -1206,7 +877,9 @@ test('Codex whole-job admission revalidates every peer', {
     assert.deepEqual(queue.adapterErrors, []);
   }
   t.diagnostic(JSON.stringify(observed));
-  assert.deepEqual(observed, controls.map((control) => ({ control, decision: 'wait', namesPeer: true, effect: null })));
+  assert.deepEqual(observed, controls.map((control) => (control === 'resource-free candidate beside live peer unreviewed path'
+    ? { control, decision: 'allow', namesPeer: false, effect: 'built 92 (start)\n' }
+    : { control, decision: 'wait', namesPeer: true, effect: null })));
 });
 
 test('pre-approved independent builds have no factory ceiling', async (t) => {
@@ -1404,8 +1077,9 @@ test('pre-approved jobs progress concurrently and settle each execution once', a
       if (evidence === 'missing') rmSync(path);
       else writeFileSync(path, '{');
     } });
-    fixture.jobs.get(91).file = 'scope/shared';
-    fixture.jobs.get(92).file = 'scope/shared';
+    fixture.jobs.get(91).file = 'scope/a';
+    fixture.jobs.get(92).file = 'scope/b';
+    fixture.jobs.get(91).exclusiveResources = fixture.jobs.get(92).exclusiveResources = ['shared-preview'];
     if (evidence === 'valid') {
       fixture.jobs.get(91).claimCreatedAt = '2026-11-05T10:03:00Z';
       fixture.jobs.get(92).claimCreatedAt = '2026-11-05T10:02:00Z';
@@ -1428,7 +1102,7 @@ test('pre-approved jobs progress concurrently and settle each execution once', a
       if (evidence === 'valid') {
         assert.equal(observed.at(-1).answer.decision, 'wait', 'an actually started empty build remains a binding reservation');
         assert.match(observed.at(-1).answer.reasons.join('\n'), /91/);
-        assert.match(observed.at(-1).answer.reasons.join('\n'), /scope\/shared/);
+        assert.match(observed.at(-1).answer.reasons.join('\n'), /shared-preview/);
       } else {
         assert.equal(observed.at(-1).answer.decision, 'unavailable', 'lost or corrupt active execution evidence cannot become inactive intent');
         assert.match(observed.at(-1).answer.reasons.join('\n'), /91/);
@@ -1441,15 +1115,16 @@ test('pre-approved jobs progress concurrently and settle each execution once', a
 
   for (const fact of ['application delta', 'nonprepared outcome', 'unreadable prerequisite']) await t.test(`inactive exception refuses ${fact}`, async () => {
     const fixture = create({ cards: [91, 92] });
-    fixture.jobs.get(91).file = 'scope/shared';
-    fixture.jobs.get(92).file = 'scope/shared';
+    fixture.jobs.get(91).file = 'scope/a';
+    fixture.jobs.get(92).file = 'scope/b';
+    fixture.jobs.get(91).exclusiveResources = fixture.jobs.get(92).exclusiveResources = ['shared-preview'];
     const repository = new URL(fixture.jobs.get(91).claimUrl).pathname.split('/').slice(1, 3).join('/');
     if (fact === 'unreadable prerequisite') fixture.jobs.get(91).prerequisites = [{ repository, number: 9 }];
     // The candidate's earlier claim would win over a rival wrongly classed inactive, so only binding 91 makes it wait.
     fixture.jobs.get(91).claimCreatedAt = '2026-11-05T10:03:00Z';
     fixture.jobs.get(92).claimCreatedAt = '2026-11-05T10:02:00Z';
     const contexts = [fixture.prepareSelected(91), fixture.prepareSelected(92)];
-    if (fact === 'application delta') fixture.jobs.get(91).unstaged = ['scope/shared'];
+    if (fact === 'application delta') fixture.jobs.get(91).unstaged = ['scope/a'];
     if (fact === 'nonprepared outcome') {
       const path = join(fixture.folder, 'job-91-prepare.outcome.json');
       const record = JSON.parse(readFileSync(path, 'utf8'));
@@ -1475,7 +1150,7 @@ test('pre-approved jobs progress concurrently and settle each execution once', a
       if (fact === 'unreadable prerequisite') {
         assert.match(answer.reasons.join('\n'), /9\b/);
         assert.match(answer.reasons.join('\n'), /unreadable|unavailable/i);
-      } else assert.match(answer.reasons.join('\n'), /scope\/shared/);
+      } else assert.match(answer.reasons.join('\n'), /shared-preview/);
     } finally {
       await fixture.finish();
     }
@@ -1734,16 +1409,48 @@ test('pre-approved phase stops halt new authority and retain active outcomes', a
 
 });
 
+// The scheduler runs from the fixture's toolkit copy with an admission that answers yes only once card 91's build,
+// running while it is asked, has ended in a workflow stop.
+// Recurring cost: one in-process scheduler trace and toolkit copy, no new subprocess or external service.
+test('a stop reached while selection admission answers starts no selection', async (t) => {
+  const fixture = (await schedulerFixture(t))({ cards: [91, 92], held: ['job-91-build'],
+    phaseReplies: { 'job-91-build': 'Run result: stop 91: build requested a controlled stop' } });
+  const stopped = deferred();
+  let admissions = 0;
+  try {
+    const code = await fixture.runtime.runRun({ root: fixture.root, folder: fixture.folder, kind: 'pre-approved', runStart: fixture.runStart,
+      exec: fixture.exec, git: fixture.git, startSession: fixture.startSession,
+      output: { log: (text) => fixture.logged.push(text), error: (text) => fixture.errors.push(text) },
+      notify: ({ name }) => {
+        if (name === 'job-91-build') stopped.resolve();
+      },
+      admitSelection: async () => {
+        admissions += 1;
+        if (admissions === 1) return true;
+        fixture.release('job-91-build');
+        await stopped.promise;
+        return true;
+      } });
+    assert.equal(admissions, 2, 'admission was asked again while card 91 built');
+    fixture.outcome('job-91-build', 91, 'build', 'stopped');
+    assert.deepEqual(fixture.calls.map(({ name }) => name), ['select-1', 'job-91-prepare', 'job-91-build', 'end'],
+      'the stop decided while admission answered starts no second selection');
+    assert.equal(code, 0);
+  } finally {
+    await fixture.finish();
+  }
+});
+
 // Recurring cost: one in-process scheduler trace and toolkit copy, no new subprocess or external service.
 test('pre-approved wait diagnostics record each distinct reason once', async (t) => {
   const create = await schedulerFixture(t);
   const fixture = create({ cards: [91, 92, 93],
     held: ['job-91-build', 'job-92-build', 'job-91-deliver', 'job-92-deliver'] });
-  fixture.jobs.get(91).file = 'scope/a';
-  fixture.jobs.get(92).file = 'scope/b';
-  fixture.jobs.get(93).file = 'scope';
-  const cAgainstA = 'card 93 overlaps card 91: scope / scope/a';
-  const cAgainstB = 'card 93 overlaps card 92: scope / scope/b';
+  fixture.jobs.get(91).exclusiveResources = ['shared-a'];
+  fixture.jobs.get(92).exclusiveResources = ['shared-b'];
+  fixture.jobs.get(93).exclusiveResources = ['shared-a', 'shared-b'];
+  const cAgainstA = 'card 93 waits for card 91 resource shared-a';
+  const cAgainstB = 'card 93 waits for card 92 resource shared-b';
   const retained = 'Retained reservations: none';
   const run = fixture.start();
   try {
@@ -1783,7 +1490,7 @@ test('pre-approved wait diagnostics record each distinct reason once', async (t)
     for (const reason of [cAgainstA, cAgainstB, retained]) {
       assert.equal(lines.filter((line) => line === reason).length, 1, `one occurrence of ${reason}`);
     }
-    assert.equal(lines.some((line) => /^card 9[12] overlaps card 93:/.test(line)), false,
+    assert.equal(lines.some((line) => /^card 9[12] waits for card 93 resource /.test(line)), false,
       'inactive prepared C cannot veto A or B delivery');
     assert.equal(new Set(lines).size, lines.length, 'every retained diagnostic line is unique');
     assert.deepEqual(lines, [cAgainstA, cAgainstB, retained]);
@@ -1801,7 +1508,7 @@ test('pre-approved wait diagnostics record each distinct reason once', async (t)
   }
 });
 
-test('pre-approved delivery serializes and refuses newly overlapping changes', async (t) => {
+test('pre-approved delivery serializes and refuses an expanded footprint', async (t) => {
   const create = await schedulerFixture(t);
   for (const expanded of [false, true]) {
     const fixture = create({ cards: [91, 92], held: ['job-91-build', 'job-92-build', 'job-91-deliver'] });
@@ -1850,7 +1557,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
       observeNotification: ({ name }) => {
         if (name === 'job-91-deliver' && scenario === 'failed delivery attention') throw new Error('SyntheticUnavailable: A delivery attention failed');
       } });
-    fixture.jobs.get(93).file = 'a';
+    fixture.jobs.get(91).exclusiveResources = fixture.jobs.get(93).exclusiveResources = ['shared-preview'];
     if (normal) fixture.notifyGate = { name: 'job-91-deliver', gate: deferred() };
     let settled = false;
     const run = fixture.start();
@@ -1953,7 +1660,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
       const b = fixture.jobs.get(92);
       const c = fixture.jobs.get(93);
       a.worktree = join(aliasParent, 'job-91');
-      c.file = 'a';
+      a.exclusiveResources = c.exclusiveResources = ['shared-preview'];
       fixture.notifyGate = { name: 'job-92-build', gate: deferred() };
       const closeA = () => {
         a.state = 'CLOSED';
@@ -2070,7 +1777,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
     const fixture = create({ cards: [91, 92, 93],
       held: ['job-91-build', 'job-92-prepare', 'job-92-build', 'job-91-deliver', 'select-3'],
       phaseReplies: { 'job-91-deliver': 'Run result: merged 91' } });
-    fixture.jobs.get(93).file = 'a';
+    fixture.jobs.get(91).exclusiveResources = fixture.jobs.get(93).exclusiveResources = ['shared-preview'];
     fixture.notifyGate = { name: 'job-91-deliver', gate: deferred() };
     let settled = false;
     const run = fixture.start();
@@ -2125,7 +1832,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
   for (const order of ['earlier higher card', 'tied lower card']) await t.test(`conflicting preparations progress by ${order}`, async () => {
     const fixture = create({ cards: [91, 92, 93], held: ['job-91-build', 'job-91-deliver',
       'job-92-build', 'job-92-deliver', 'job-93-build', 'job-93-deliver'] });
-    for (const job of fixture.jobs.values()) job.file = 'scope/shared';
+    for (const job of fixture.jobs.values()) job.exclusiveResources = ['shared-preview'];
     fixture.jobs.get(92).claimCreatedAt = order === 'earlier higher card' ? '2026-11-05T10:03:00Z' : '2026-11-05T10:02:00Z';
     fixture.jobs.get(93).claimCreatedAt = '2026-11-05T10:02:00Z';
     const first = order === 'earlier higher card' ? 93 : 92;
@@ -2163,10 +1870,13 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
     }
   });
 
-  for (const known of [true, false]) await t.test(`${known ? 'known' : 'unknown'} held work governs prepared eligibility`, async () => {
-    const parkedPhase = known ? 'build' : 'prepare';
-    const fixture = create({ cards: [91, 92, 93],
-      held: known ? ['job-91-build', 'select-2', 'job-93-build', 'job-93-deliver'] : [],
+  for (const known of [true, false]) await t.test(known ? 'a build proceeds while a paused job that edits the same file holds its claim'
+    : 'a paused job with unknown scope holds only builds that declare exclusive resources', async () => {
+    const parkedPhase = known ? 'deliver' : 'prepare';
+    // A held selection also holds A's delivery launch, so the known case selects C before B and holds B's selection
+    // until A's delivery has parked.
+    const fixture = create({ cards: known ? [91, 93, 92] : [91, 92, 93],
+      held: known ? ['job-91-build', 'select-2', 'job-91-deliver', 'select-3'] : [],
       phaseReplies: { [`job-91-${parkedPhase}`]: (job) => {
         job.status = 'Backlog';
         job.comments = ['Needs owner: held work still reserves scope. Job: job/91 on fixture-machine.'];
@@ -2176,6 +1886,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
     fixture.jobs.get(92).file = 'h';
     fixture.jobs.get(92).plannedFiles = ['h', 'x'];
     fixture.jobs.get(93).file = 'x';
+    if (!known) fixture.jobs.get(92).exclusiveResources = [];
     const run = fixture.start();
     try {
       if (known) {
@@ -2183,30 +1894,35 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
         await fixture.checkpoint('select-2');
         fixture.release('job-91-build');
         await fixture.checkpoint('notify job-91-build');
-        fixture.outcome('job-91-build', 91, 'build', 'parked');
-        assert.ok(fixture.jobs.get(91).reference, 'normal preparation accepted H before its build parked');
         fixture.release('select-2');
-        await fixture.checkpoint('notify job-93-prepare');
-        await fixture.checkpoint('job-93-build');
-        assert.equal(fixture.has('job-92-build'), false, 'older C remains blocked by held H');
-        fixture.release('job-93-build');
-        await fixture.checkpoint('job-93-deliver');
-        fixture.release('job-93-deliver');
+        await fixture.checkpoint('job-91-deliver');
+        await fixture.checkpoint('select-3');
+        fixture.release('job-91-deliver');
+        await fixture.checkpoint('notify job-91-deliver');
+        fixture.outcome('job-91-deliver', 91, 'deliver', 'parked');
+        assert.ok(fixture.jobs.get(91).reference, 'normal preparation accepted H before its delivery parked');
+        assert.equal(fixture.has('job-92-prepare'), false, 'B is prepared only after A parks');
+        fixture.release('select-3');
       }
       assert.equal(await run, 0);
       const decisions = fixture.inspections.filter(({ request }) => request.candidate.descriptorPath.endsWith('job-93.prepared.json'));
       t.diagnostic(`${known ? 'known' : 'unknown'} held H: B decisions=${JSON.stringify(decisions.map(({ answer }) => answer))}`);
       assert.ok(decisions.length > 0);
-      assert.equal(fixture.has('job-92-build'), false);
       if (known) {
+        const sameFile = fixture.inspections.filter(({ request }) => request.candidate.descriptorPath.endsWith('job-92.prepared.json'));
+        assert.ok(fixture.has('job-92-build'), `B waited on paused A: ${JSON.stringify(sameFile.map(({ answer }) => answer))}`);
+        assert.equal(fixture.jobs.get(92).state, 'CLOSED');
         assert.equal(fixture.jobs.get(93).state, 'CLOSED');
         assert.ok(decisions.some(({ answer }) => answer.decision === 'allow'));
-        fixture.retained([91, 92]);
+        fixture.retained([91]);
       } else {
+        const resourceFree = fixture.inspections.filter(({ request }) => request.candidate.descriptorPath.endsWith('job-92.prepared.json'));
+        assert.ok(fixture.has('job-92-build'), `resource-free 92 waited on unknown 91: ${JSON.stringify(resourceFree.map(({ answer }) => answer))}`);
+        assert.equal(fixture.jobs.get(92).state, 'CLOSED');
         assert.equal(fixture.jobs.get(91).reference, undefined);
         assert.equal(fixture.has('job-93-build'), false, 'unknown H footprint cannot be assumed disjoint from B');
         assert.ok(decisions.every(({ answer }) => answer.decision === 'wait' && /91/.test(answer.reasons.join('\n'))));
-        fixture.retained([91, 92, 93]);
+        fixture.retained([91, 93]);
       }
       assert.ok(fixture.maxDelivery <= 1);
       fixture.settledOnce();
@@ -2220,8 +1936,7 @@ test('pre-approved delivery serializes and refuses newly overlapping changes', a
     const fixture = create({ cards: [92, 93],
       held: ['job-92-build', 'job-93-build', 'job-92-deliver', 'job-93-deliver'] });
     const b = fixture.jobs.get(92);
-    b.file = 'scope/shared';
-    fixture.jobs.get(93).file = 'scope/shared';
+    b.exclusiveResources = fixture.jobs.get(93).exclusiveResources = ['shared-preview'];
     const repository = new URL(b.claimUrl).pathname.split('/').slice(1, 3).join('/');
     b.prerequisites = [{ repository, number: 93 }];
     const run = fixture.start();
@@ -3144,37 +2859,6 @@ test('run cancellation leaves separate-session descendants unverified', async (t
   }
 });
 
-const SYSTEMD_RUN = '/usr/bin/systemd-run';
-const SYSTEMCTL = '/usr/bin/systemctl';
-
-function nativeSystemd(command, args) {
-  const result = childProcess.spawnSync(command, args, { encoding: 'utf8', timeout: 8000, maxBuffer: 65536 });
-  if (result.error) throw result.error;
-  return result;
-}
-
-function probeManagedSystemd() {
-  if (process.platform !== 'linux') return `a Linux user service manager is required (platform: ${process.platform})`;
-  for (const executable of [SYSTEMD_RUN, SYSTEMCTL, '/usr/bin/loginctl', '/usr/bin/xdg-dbus-proxy']) {
-    if (!existsSync(executable)) return `native executable unavailable: ${executable}`;
-  }
-  const runtime = nativeSystemd('/usr/bin/loginctl', ['show-user', String(process.getuid()), '--property=RuntimePath', '--value']);
-  if (runtime.status !== 0 || !runtime.stdout.trim()) return `native user runtime directory unavailable: ${runtime.stderr.trim()}`;
-  const runtimeDir = runtime.stdout.trim();
-  if (!existsSync(join(runtimeDir, 'bus'))) return `native session bus socket unavailable in ${runtimeDir}`;
-  const unit = `fabraik-fixture-probe-${randomBytes(16).toString('hex')}.service`;
-  const result = nativeSystemd(SYSTEMD_RUN, ['--user', '--wait', '--pipe', '--quiet', '--expand-environment=no',
-    `--unit=${unit}`, '--working-directory=/', '--property=Type=exec', '--property=ExitType=main',
-    '--property=KillMode=control-group', '--property=Restart=no', '--property=TimeoutStopSec=2s',
-    '--property=ExecStartPre=/usr/bin/true', '--property=ExecStopPost=/usr/bin/true', '/usr/bin/true']);
-  if (result.status === 0) return undefined;
-  const diagnostic = result.stderr.trim();
-  if (/failed to connect to (?:user scope )?bus|failed to connect to user (?:manager|service manager)/i.test(diagnostic)) return diagnostic;
-  if (/(?:unrecognized|unknown|unsupported|cannot set|not supported|invalid)/i.test(diagnostic)
-    && /expand-environment|ExitType|KillMode|Restart|TimeoutStopSec|ExecStartPre|ExecStopPost|Type=exec/i.test(diagnostic)) return diagnostic;
-  assert.fail(`native managed phase preflight failed: ${diagnostic}`);
-}
-
 function managedFixtureProcess(pid) {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -3481,6 +3165,49 @@ test('Managed Codex phase refuses delegated user units', async (t) => {
   });
 });
 
+test('a managed session with a sealed environment passes no other variable', async (t) => {
+  const unavailable = missingManagedCodexFacility();
+  if (unavailable) return t.skip(unavailable);
+  const { toolkit, root, runStart, home, cleanup } = await managedCodexFixture(t);
+  const { CODEX_PROFILE, managedSession } = await toolkit.load('product-manager-run.mjs');
+  const profile = { ...CODEX_PROFILE, seals: { hiddenBus: false, readOnlyControlGroups: false, busProxy: false }, sealed: true };
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'product-manager-run-'));
+  cleanup.push(() => rmSync(folder, { recursive: true, force: true }));
+  mkdirSync(join(folder, 'units'), { mode: 0o700 });
+  const names = join(folder, 'environment-names.json');
+  const fake = join(home, 'environment-names.mjs');
+  writeFileSync(fake, "import { writeFileSync } from 'node:fs';\nwriteFileSync(process.argv[2], JSON.stringify(Object.keys(process.env).sort()));\n");
+  const saved = { CODEX_HOME: process.env.CODEX_HOME, FABRAIK_TEST_OUTSIDE: process.env.FABRAIK_TEST_OUTSIDE };
+  process.env.CODEX_HOME = home;
+  process.env.FABRAIK_TEST_OUTSIDE = '1';
+  let expected;
+  let result;
+  try {
+    expected = [...profile.environment.filter((name) => process.env[name] !== undefined),
+      'PRE_APPROVED_RUN_SESSION', 'RUN_CARD_FILE', profile.markers.managed, profile.markers.folder].sort();
+    const session = await managedSession(profile, { folder, root: realpathSync(root), runStart, command: [process.execPath, fake] });
+    try {
+      result = await boundedStopObservation(session.startSession({ argv: [names], logs: join(folder, 'end') }),
+        'the sealed managed session did not settle');
+    } finally {
+      await session.close();
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+  assert.ok(existsSync(names), `the sealed command must run: ${JSON.stringify(result)}`);
+  const passed = JSON.parse(readFileSync(names, 'utf8'));
+  assert.deepEqual(passed, expected, 'a sealed command sees only the profile environment and the run markers');
+  for (const name of ['INVOCATION_ID', 'SYSTEMD_EXEC_PID', 'FABRAIK_TEST_OUTSIDE']) {
+    assert.ok(!passed.includes(name), `${name} must not reach a sealed command`);
+  }
+  assert.equal(result.exitCode, 0, JSON.stringify(result));
+  assert.equal(result.managedStop.disposition, 'verified-local', JSON.stringify(result));
+});
+
 // Two finite outer-launcher wires preserve interruption across the model's separately owned process group.
 async function runInterruptedStandIn(fixture, signal) {
   const home = mkdtempSync(join(tmpdir(), 'product-manager-run-interruption-'));
@@ -3707,10 +3434,18 @@ test('run retains unverified work after force kill does not stop it', async (t) 
   }
 });
 
+const CLAUDE_SESSION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const RUN_ENVIRONMENT = ['PRODUCT_MANAGER_RUN_SESSION', 'PRE_APPROVED_RUN_SESSION', 'CARRIED_PUSH_YES', 'CLAUDE_CODE_SESSION_ID'];
+
 // Claude wrapper evidence uses finite stand-ins for wiring and injected starters for refusals, without Claude or network.
-// Prepared cases reuse authoritative scheduler fixtures and restore inherited marks around their direct main call.
+// The caller's Claude Code session is `session` (null for none). Each `earlier` entry writes an ended card session's
+// `.json`, `.card` and `.coordinator`, a `files` value replacing one (null leaves it out). `answer` is the bytes or object
+// written to `<base>.answer.json`, or a function of the fixture paths returning them (undefined writes none).
+// Prepared and `inProcess` cases call main directly and restore the inherited marks and session identity around it; an
+// `inProcess` case carries `<base>.answer.json` whenever `answer` is given, or takes its whole argv from an `args` function.
+// With `worktreeRepository`, an `inProcess` case's `git worktree list --porcelain -z` is what real Git prints for that repository.
 async function runClaudeCardFixture({ marks = {}, args = [], baseKind = 'valid', existing, wire = false, cli = false, exitCode = 0, outcome,
-  preparedFixture, preparedContext, now }) {
+  preparedFixture, preparedContext, now, session = CLAUDE_SESSION, earlier = [], answer, inProcess = false, worktreeRepository }) {
   const home = preparedFixture?.folder ?? mkdtempSync(join(tmpdir(), 'product-manager-run-claude-'));
   const base = baseKind === 'relative' ? 'relative-card' : baseKind === 'blank' ? ''
     : join(home, preparedFixture ? `job-92-${preparedContext?.phase ?? 'build'}` : baseKind === 'control' ? 'card\ninvalid' : 'card');
@@ -3718,6 +3453,17 @@ async function runClaudeCardFixture({ marks = {}, args = [], baseKind = 'valid',
   const outer = join(home, 'launcher.mjs');
   const initial = 'existing owner output\n';
   if (existing) writeFileSync(base + existing, initial);
+  const paths = { home, base, earlier: Object.fromEntries(earlier.map(({ name }) => [name, join(home, name)])) };
+  for (const { name, card, session: ended, coordinator = CLAUDE_SESSION, files = {} } of earlier) {
+    for (const [suffix, bytes] of Object.entries({
+      '.json': JSON.stringify({ type: 'result', session_id: ended, result: `Run result: parked ${card}: Which layout should the page use?` }),
+      '.card': `${card}\n`, '.coordinator': `${coordinator}\n`, ...files,
+    })) if (bytes !== null) writeFileSync(paths.earlier[name] + suffix, bytes);
+  }
+  const answerBytes = typeof answer === 'function' ? answer(paths) : answer;
+  if (answerBytes !== undefined) {
+    writeFileSync(`${base}.answer.json`, typeof answerBytes === 'string' ? answerBytes : JSON.stringify(answerBytes), { flag: 'wx' });
+  }
   writeFileSync(script, `
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const [home, ordinaryExit, ...argv] = process.argv.slice(2);
@@ -3730,7 +3476,10 @@ for (const [name, path] of Object.entries(${JSON.stringify({ context: base + '.c
 }
 writeFileSync(home + '/phase-observations.json', JSON.stringify(observed));
 ` : ''}
-appendFileSync(home + '/trace.jsonl', JSON.stringify({ argv, pm: process.env.PRODUCT_MANAGER_RUN_SESSION ?? null, pre: process.env.PRE_APPROVED_RUN_SESSION ?? null }) + '\\n');
+const carried = process.env.CARRIED_PUSH_YES;
+const sid = process.env.CLAUDE_CODE_SESSION_ID;
+appendFileSync(home + '/trace.jsonl', JSON.stringify({ argv, pm: process.env.PRODUCT_MANAGER_RUN_SESSION ?? null, pre: process.env.PRE_APPROVED_RUN_SESSION ?? null,
+  ...(carried === undefined ? {} : { carried }), ...(sid === undefined ? {} : { sid }) }) + '\\n');
 console.error(${JSON.stringify(GUARD_REFUSAL)});
 console.error(${JSON.stringify(PUBLISH_REFUSAL)});
 console.error(${JSON.stringify(PRE_APPROVED_REFUSAL)});
@@ -3741,7 +3490,7 @@ if (argv.includes('--output-last-message')) {
   process.exitCode = Number(ordinaryExit);
 }
 `);
-  if (!preparedFixture) writeFileSync(outer, `
+  if (!preparedFixture && !inProcess) writeFileSync(outer, `
 import { execFileSync } from 'node:child_process';
 import { dirname } from 'node:path';
 import { gitEnvironment } from ${JSON.stringify(new URL('./factory-sync.mjs', import.meta.url).href)};
@@ -3779,33 +3528,54 @@ const code = await main(${JSON.stringify(cli ? ['--claude-card', base] : args)},
 console.log(JSON.stringify({ code, calls, notifications, printed }));
 `);
   const env = { ...process.env };
-  delete env.PRODUCT_MANAGER_RUN_SESSION;
-  delete env.PRE_APPROVED_RUN_SESSION;
+  for (const key of RUN_ENVIRONMENT) delete env[key];
+  if (session !== null) env.CLAUDE_CODE_SESSION_ID = session;
   Object.assign(env, marks);
   let observed;
   let trace = [];
   try {
-    if (preparedFixture) {
-      const inherited = { PRODUCT_MANAGER_RUN_SESSION: process.env.PRODUCT_MANAGER_RUN_SESSION,
-        PRE_APPROVED_RUN_SESSION: process.env.PRE_APPROVED_RUN_SESSION };
+    if (preparedFixture || inProcess) {
+      const inherited = Object.fromEntries(RUN_ENVIRONMENT.map((key) => [key, process.env[key]]));
       const calls = [];
       const notifications = [];
       const printed = [];
       const scheduled = [];
-      // The prepared reader functions remain in-process; the same finite wire still runs the actual child starter.
+      // A second copy of the launcher script's fetched-main answers; that child script cannot import this test module.
+      const fetchedMainGit = (gitArgs) => {
+        if (gitArgs.join(' ') === 'rev-parse --verify --quiet refs/remotes/origin/main^{commit}') return 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n';
+        if (gitArgs.join(' ') === 'ls-tree --full-tree --format=%(objectmode) aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -- .agents/factory-settings.json') return '100644\n';
+        if (gitArgs.join(' ') === 'show aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:.agents/factory-settings.json') return '{"version":1,"preApprovedRun":true}';
+        const root = worktreeRepository !== undefined && gitArgs.join(' ') === 'worktree list --porcelain -z' ? worktreeRepository
+          : dirname(execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', env: gitEnvironment(), stdio: 'pipe' }).trim());
+        return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(execFileSync('git', gitArgs, {
+          cwd: root, env: gitEnvironment(), stdio: 'pipe', timeout: 15000, maxBuffer: 64 * 1024 * 1024,
+        }));
+      };
+      // The reader functions remain in-process; with `wire` the same finite wire still runs the actual child starter.
       try {
-        for (const key of Object.keys(inherited)) delete process.env[key];
-        Object.assign(process.env, marks);
-        const contextFile = base + '.request.json';
-        if (cli) writeFileSync(contextFile, JSON.stringify(preparedContext), { flag: 'wx' });
-        const code = await preparedFixture.main(cli ? ['--claude-card', base, '--prepared-context', contextFile] : [], {
-          ...(cli ? {} : { claudeCard: base, preparedContext }), exec: preparedFixture.exec, git: preparedFixture.git,
+        for (const key of RUN_ENVIRONMENT) {
+          if (env[key] === undefined) delete process.env[key];
+          else process.env[key] = env[key];
+        }
+        let argv;
+        if (preparedFixture) {
+          const contextFile = base + '.request.json';
+          if (cli) writeFileSync(contextFile, JSON.stringify(preparedContext), { flag: 'wx' });
+          argv = cli ? ['--claude-card', base, '--prepared-context', contextFile] : [];
+        } else {
+          argv = typeof args === 'function' ? args(paths)
+            : ['--claude-card', base, ...(answer === undefined ? [] : ['--carry', `${base}.answer.json`]), ...args];
+        }
+        const code = await (preparedFixture?.main ?? main)(argv, {
+          ...(preparedFixture && !cli ? { claudeCard: base, preparedContext } : {}), exec: preparedFixture?.exec,
+          git: preparedFixture ? preparedFixture.git : fetchedMainGit,
           command: [process.execPath, script, home, String(exitCode)], now,
-          startSession: wire ? undefined : async ({ argv, logs }) => {
-            calls.push({ argv, logs, evidence: readPhaseEvidence(logs, preparedContext.card) });
-            writeFileSync(logs + '.json', JSON.stringify({ result: 'Run result: built 92' }));
+          startSession: wire ? undefined : async ({ argv: sessionArgv, logs }) => {
+            calls.push({ argv: sessionArgv, logs, coordinator: existsSync(logs + '.coordinator') ? readFileSync(logs + '.coordinator', 'utf8') : undefined,
+              ...(preparedFixture ? { evidence: readPhaseEvidence(logs, preparedContext.card) } : {}) });
+            writeFileSync(logs + '.json', JSON.stringify({ result: `Run result: built ${preparedFixture ? 92 : 502}` }));
             writeFileSync(logs + '.stderr.log', STDERR_SHOWN + PRE_APPROVED_REFUSAL + '\n');
-            return { exitCode: 0 };
+            return outcome ?? { exitCode: 0 };
           },
           scheduleCleanupTimer: (callback, milliseconds) => {
             const handle = { callback, milliseconds };
@@ -3826,7 +3596,7 @@ console.log(JSON.stringify({ code, calls, notifications, printed }));
     if (existsSync(join(home, 'trace.jsonl'))) trace = readFileSync(join(home, 'trace.jsonl'), 'utf8').trimEnd().split('\n').map((line) => JSON.parse(line));
     const artifacts = {};
     if (base.startsWith(home)) {
-      for (const suffix of ['.json', '.stderr.log', '.card']) {
+      for (const suffix of ['.json', '.stderr.log', '.card', '.coordinator']) {
         artifacts[suffix] = existsSync(base + suffix) ? readFileSync(base + suffix, 'utf8') : undefined;
       }
     }
@@ -4148,7 +3918,7 @@ async function jobOwnershipFixture(t, { enablePreApproved = false } = {}) {
     const descriptorPath = join(evidenceDirectory, 'job-92.prepared.json');
     const reviewRecordPath = join(evidenceDirectory, 'job-92.reviewed.json');
     writeFileSync(descriptorPath, JSON.stringify({ ...selection, planPath, planHash, plannedFiles,
-      prerequisites: [], scopeComplete: true, exclusiveResources: [] }));
+      prerequisites: [], exclusiveResources: [] }));
     const descriptorHash = hash(readFileSync(descriptorPath));
     writeFileSync(reviewRecordPath, JSON.stringify({ runStart, card: 92, claimUrl, descriptorPath, descriptorHash,
       planPath, planHash, reviewEvidencePath, reviewEvidenceHash: hash(readFileSync(reviewEvidencePath)), verdict: 'accepted' }));
@@ -4722,6 +4492,294 @@ test('Claude fixed card launch reports bounded stop outcomes with retained evide
   }
 });
 
+// Carried answers: the expected prompt and argv come from the plan and Claude Code's `-p --resume <session_id>` contract.
+const CARRIED_PREFIX = 'Your coordinator carries the answer the owner gave for your card, word for word.\n';
+const OTHER_CLAUDE_SESSION = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const OWNER_WORDS = 'Take the second layout, and keep the old one behind a flag.';
+const PRODUCT_MANAGER_DENY = ['--disallowedTools', 'Bash(git push *)', 'Bash(gh pr create *)', 'Bash(gh pr ready *)', 'Bash(gh pr merge *)'];
+const PARKED = [
+  { name: 'earlier-41', card: 41, session: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' },
+  { name: 'earlier-42', card: 42, session: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' },
+];
+const carriedTo = (card, name = `earlier-${card}`) => ({ earlier }) => ({ card, from: earlier[name], words: OWNER_WORDS });
+
+function assertCarryRefused(run, label) {
+  assert.equal(run.code, 2, `${label}: ${run.printed.join('\n')}`);
+  assert.equal(run.calls.length + run.trace.length, 0, `${label}: a refused carry starts no session`);
+  assert.ok(run.printed.some((text) => text.startsWith('Carried answer refused: ')), `${label}: ${JSON.stringify(run.printed)}`);
+}
+
+test('ANTI-REGRESSION: a carried answer resumes only the ended session of the card it names, with the run mark and deny rules', async () => {
+  const start = '2026-11-05T12:00:00Z';
+  for (const { marks, card, deny, pm, pre } of [
+    { marks: { PRODUCT_MANAGER_RUN_SESSION: '1', CARRIED_PUSH_YES: '9' }, card: 41, deny: PRODUCT_MANAGER_DENY, pm: '1', pre: null },
+    { marks: { PRE_APPROVED_RUN_SESSION: start, CARRIED_PUSH_YES: '9' }, card: 42, deny: [], pm: null, pre: start },
+  ]) {
+    const label = JSON.stringify(marks);
+    const run = await runClaudeCardFixture({ inProcess: true, wire: true, marks, earlier: PARKED, answer: carriedTo(card) });
+    assert.equal(run.code, 0, `${label}: ${run.printed.join('\n')}`);
+    assert.equal(run.trace.length, 1, `${label}: exactly one session starts`);
+    const [{ argv, ...environment }] = run.trace;
+    const ended = PARKED.find((parked) => parked.card === card).session;
+    assert.deepEqual(argv.slice(0, -1), ['-p', '--resume', ended, '--permission-mode', 'auto', ...deny, '--output-format', 'json'], label);
+    assert.ok(argv.at(-1).startsWith(CARRIED_PREFIX), `${label}: ${argv.at(-1)}`);
+    assert.deepEqual(JSON.parse(argv.at(-1).slice(CARRIED_PREFIX.length)), { card, words: OWNER_WORDS }, label);
+    assert.deepEqual(environment, { pm, pre }, `${label}: the run mark alone, with no inherited session identity or stale carried yes`);
+    assert.equal(run.artifacts['.card']?.replace(/\r?\n$/, ''), String(card), `${label}: the carried launch records its card`);
+    assert.equal(run.artifacts['.coordinator'], `${CLAUDE_SESSION}\n`, `${label}: the carried launch records its coordinator`);
+  }
+
+  const fromContext = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, answer: carriedTo(43),
+    earlier: [{ name: 'earlier-43', card: 43, session: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      files: { '.card': null, '.context.json': JSON.stringify({ card: 43, phase: 'build' }) } }] });
+  assert.equal(fromContext.code, 0, fromContext.printed.join('\n'));
+  assert.deepEqual(fromContext.calls.map((call) => call.argv.slice(0, 3)), [['-p', '--resume', 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee']],
+    'a phase base without a card record is read through its context');
+
+  assertCarryRefused(await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier: PARKED,
+    answer: carriedTo(41, 'earlier-42') }), 'a from naming the other card');
+});
+
+test('ANTI-REGRESSION: a carried answer from any session other than the coordinator of the card is refused before any session starts', async () => {
+  const cases = [
+    { label: 'another session', session: OTHER_CLAUDE_SESSION, named: true },
+    { label: 'another session over the child wire', session: OTHER_CLAUDE_SESSION, wire: true, named: true },
+    { label: 'a coordinator record of more than one line', named: true,
+      earlier: [{ ...PARKED[0], files: { '.coordinator': `${CLAUDE_SESSION}\n${OTHER_CLAUDE_SESSION}\n` } }] },
+    { label: 'a missing coordinator record', earlier: [{ ...PARKED[0], files: { '.coordinator': null } }], named: true },
+    { label: 'no session identity', session: null },
+    { label: 'a malformed session identity', session: 'not-a-session' },
+    { label: 'the coordinator identity in capitals', session: CLAUDE_SESSION.toUpperCase() },
+  ];
+  for (const { label, named, earlier = PARKED, ...options } of cases) {
+    const run = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier, answer: carriedTo(41), ...options });
+    if (named) assertCarryRefused(run, label);
+    else {
+      assert.equal(run.code, 2, `${label}: ${run.printed.join('\n')}`);
+      assert.equal(run.calls.length + run.trace.length, 0, `${label}: a refused carry starts no session`);
+      assert.ok(run.printed.length > 0, `${label}: the refusal is explained`);
+    }
+  }
+});
+
+test('a carried answer with a missing, unreadable or malformed record is refused before any session starts', async (t) => {
+  const valid = carriedTo(41);
+  const withAnswer = (change) => (paths) => change(valid(paths), paths);
+  const earlierWith = (files) => [{ ...PARKED[0], files }];
+  let linkable = true;
+  const probe = mkdtempSync(join(tmpdir(), 'product-manager-link-probe-'));
+  t.after(() => rmSync(probe, { recursive: true, force: true }));
+  writeFileSync(join(probe, 'target.answer.json'), '{}');
+  try {
+    symlinkSync(join(probe, 'target.answer.json'), join(probe, 'link.answer.json'), 'file');
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    linkable = false;
+    t.diagnostic('the linked answer file case is left out: this Windows account may not create symbolic links (EPERM)');
+  }
+  const cases = [
+    { label: 'a corrupt answer file', answer: '{"card":41,' },
+    { label: 'an answer that is a list', answer: '[]' },
+    { label: 'an answer that is null', answer: 'null' },
+    { label: 'a missing answer file', answer: () => undefined },
+    { label: 'an extra key', answer: withAnswer((carried) => ({ ...carried, approved: true })) },
+    ...['card', 'from', 'words'].map((key) => ({ label: `a missing ${key}`,
+      answer: withAnswer((carried) => Object.fromEntries(Object.entries(carried).filter(([name]) => name !== key))) })),
+    ...[0, -41, 4.1, '41', 2 ** 53].map((card) => ({ label: `card ${JSON.stringify(card)}`, answer: withAnswer((carried) => ({ ...carried, card })) })),
+    ...['', 41].map((words) => ({ label: `words ${JSON.stringify(words)}`, answer: withAnswer((carried) => ({ ...carried, words })) })),
+    { label: 'a relative from', answer: withAnswer((carried) => ({ ...carried, from: 'earlier-41' })) },
+    { label: 'an unnormalized from', answer: withAnswer((carried, { home }) => ({ ...carried, from: `${home}/elsewhere/../earlier-41` })) },
+    { label: 'a from with a control character', answer: withAnswer((carried) => ({ ...carried, from: `${carried.from}\n` })) },
+    { label: 'a missing session record', earlier: earlierWith({ '.json': null }) },
+    { label: 'a corrupt session record', earlier: earlierWith({ '.json': '{"session_id":' }) },
+    { label: 'a session record that is a list', earlier: earlierWith({ '.json': JSON.stringify([{ session_id: PARKED[0].session }]) }) },
+    { label: 'a session record without session_id', earlier: earlierWith({ '.json': JSON.stringify({ result: 'Run result: parked 41: Which layout?' }) }) },
+    { label: 'a malformed session_id', earlier: earlierWith({ '.json': JSON.stringify({ session_id: 'not-a-session' }) }) },
+    { label: 'an unreadable card record', earlier: earlierWith({ '.card': 'forty-one\n' }) },
+    { label: 'no card record and no context', earlier: earlierWith({ '.card': null }) },
+    { label: 'no card record and a corrupt context', earlier: earlierWith({ '.card': null, '.context.json': '{"card":' }) },
+    ...(linkable ? [{ label: 'a linked answer file', answer: (paths) => {
+      const target = join(paths.home, 'target.answer.json');
+      writeFileSync(target, JSON.stringify(valid(paths)));
+      symlinkSync(target, `${paths.base}.answer.json`, 'file');
+      return undefined;
+    } }] : []),
+    { label: 'an answer file not named for the new card base', answer: (paths) => {
+      writeFileSync(join(paths.home, 'elsewhere.answer.json'), JSON.stringify(valid(paths)));
+      return valid(paths);
+    }, args: ({ base, home }) => ['--claude-card', base, '--carry', join(home, 'elsewhere.answer.json')] },
+  ];
+  for (const { label, earlier = PARKED, answer = valid, ...options } of cases) {
+    const run = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier, answer, ...options });
+    assertCarryRefused(run, label);
+    assert.equal(run.artifacts['.card'], undefined, `${label}: a refused carry records no card`);
+  }
+
+  // The combination is an argument error, so either refusal text is accepted; the pre-approved mark admits a prepared context.
+  const prepared = await runClaudeCardFixture({ inProcess: true, marks: { PRE_APPROVED_RUN_SESSION: '2026-11-05T12:00:00Z' }, earlier: PARKED,
+    answer: valid, args: ({ base }) => ['--claude-card', base, '--carry', `${base}.answer.json`, '--prepared-context', `${base}.request.json`] });
+  assert.equal(prepared.code, 2, prepared.printed.join('\n'));
+  assert.equal(prepared.calls.length + prepared.trace.length, 0, '--carry with --prepared-context starts no session');
+  assert.ok(prepared.printed.some((text) => text === USAGE || text.startsWith('Carried answer refused: ')), JSON.stringify(prepared.printed));
+});
+
+test('a Claude card launch records its coordinator and refuses without a Claude Code session identity', async () => {
+  for (const marks of [{ PRODUCT_MANAGER_RUN_SESSION: '1' }, { PRE_APPROVED_RUN_SESSION: '2026-11-05T12:00:00Z' }]) {
+    const run = await runClaudeCardFixture({ inProcess: true, marks });
+    const label = JSON.stringify(marks);
+    assert.equal(run.code, 0, `${label}: ${run.printed.join('\n')}`);
+    assert.equal(run.calls.length, 1, label);
+    assert.equal(run.calls[0].coordinator, `${CLAUDE_SESSION}\n`, `${label}: the coordinator is recorded before the session starts`);
+    assert.equal(run.artifacts['.coordinator'], `${CLAUDE_SESSION}\n`, label);
+  }
+  for (const session of [null, 'not-a-session', CLAUDE_SESSION.toUpperCase()]) {
+    const run = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, session });
+    const label = `session ${JSON.stringify(session)}`;
+    assert.equal(run.code, 2, `${label}: ${run.printed.join('\n')}`);
+    assert.equal(run.calls.length, 0, `${label}: no session starts`);
+    assert.ok(run.printed.length > 0, `${label}: the refusal is explained`);
+    assert.equal(run.artifacts['.coordinator'], undefined, `${label}: no coordinator is recorded`);
+  }
+  const existing = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, existing: '.coordinator' });
+  assert.equal(existing.code, 2, existing.printed.join('\n'));
+  assert.equal(existing.calls.length, 0, 'an existing coordinator record starts no session');
+  assert.equal(existing.artifacts['.coordinator'], existing.initial, 'an existing coordinator record is preserved');
+});
+
+// Carried push yes: one saved decision card for card 7 in a real repository on `job/7` that ignores `.claude/`. The
+// expected identity is what real `git hash-object --no-filters` prints for the review folder's body and screenshots, in
+// the plan's numeric order, computed before anything changes; the folder's `shown-hash` is written but never the oracle.
+const PUSH_YES_WORDS = 'Yes, push it.';
+const PUSH_YES_SESSION = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+const VERSION_A = '# Decision card for card 7\n\nVersion A.\n';
+const VERSION_B = '# Decision card for card 7\n\nVersion B.\n';
+const builtEarlier = (result = 'Decision card shown.\nRun result: built 7') => [{ name: 'earlier-7', card: 7, session: PUSH_YES_SESSION,
+  files: { '.json': JSON.stringify({ type: 'result', session_id: PUSH_YES_SESSION, result }) } }];
+
+function savedCardRepository(t) {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'carried-push-yes-')));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const env = { ...gitEnvironment(), GIT_AUTHOR_NAME: 'Carry Test', GIT_AUTHOR_EMAIL: 'carry@workflow.invalid',
+    GIT_COMMITTER_NAME: 'Carry Test', GIT_COMMITTER_EMAIL: 'carry@workflow.invalid' };
+  const git = (args) => execFileSync('git', args, { cwd: root, env, encoding: 'utf8', stdio: 'pipe', timeout: 15_000 });
+  const commit = (file, bytes) => {
+    writeFileSync(join(root, file), bytes);
+    git(['add', '--', file]);
+    git(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', `change ${file}`]);
+    return git(['rev-parse', 'HEAD']).trim();
+  };
+  git(['init', '-q', '-b', 'job/7']);
+  writeFileSync(join(root, '.gitignore'), '.claude/\n');
+  git(['add', '--', '.gitignore']);
+  const head = commit('tracked.txt', 'reviewed change\n');
+  const folder = (card, at) => `.claude/worklog/job_${card}-review-${at}`;
+  const identity = (card, at, names) => git(['hash-object', '--no-filters', '--', ...names.map((name) => `${folder(card, at)}/${name}`)]).replace(/\n$/, '');
+  const present = (card, at, body) => {
+    mkdirSync(join(root, folder(card, at)), { recursive: true });
+    writeFileSync(join(root, folder(card, at), 'body.md'), body);
+    writeFileSync(join(root, folder(card, at), 'screenshot-2.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 2]));
+    writeFileSync(join(root, folder(card, at), 'screenshot-10.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 10]));
+    const shown = identity(card, at, ['body.md', 'screenshot-2.png', 'screenshot-10.png']);
+    writeFileSync(join(root, folder(card, at), 'shown-hash'), `${shown}\n`);
+    return shown;
+  };
+  const hash = present(7, head, VERSION_A);
+  const at = (name) => join(root, folder(7, head), name);
+  return { root, head, hash, git, commit, present, at, identity, shown: { head, hash } };
+}
+
+const pushYes = (shown) => ({ earlier }) => ({ card: 7, from: earlier['earlier-7'], words: PUSH_YES_WORDS, shown });
+
+test('ANTI-REGRESSION: a carried push yes for a changed or different saved card is refused before any session starts', async (t) => {
+  const saved = savedCardRepository(t);
+  // The positive control: the unchanged saved card is admitted, so each refusal below answers its own change.
+  const unchanged = await runClaudeCardFixture({ inProcess: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier: builtEarlier(),
+    answer: pushYes(saved.shown), worktreeRepository: saved.root });
+  assert.equal(unchanged.code, 0, unchanged.printed.join('\n'));
+  assert.equal(unchanged.calls.length, 1, 'the unchanged saved card starts exactly one session');
+  const otherCard = saved.present(8, saved.head, '# Decision card for card 8\n\nVersion A.\n');
+  const editBody = () => {
+    writeFileSync(saved.at('body.md'), VERSION_B);
+    return () => writeFileSync(saved.at('body.md'), VERSION_A);
+  };
+  // Each change returns its own undo, so every case starts from the saved card as shown.
+  const cases = [
+    { label: 'the body edited after showing', change: editBody },
+    { label: 'the body edited after showing, over the child wire', wire: true, change: editBody },
+    { label: 'a screenshot changed', change: () => {
+      const before = readFileSync(saved.at('screenshot-2.png'));
+      writeFileSync(saved.at('screenshot-2.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 22]));
+      return () => writeFileSync(saved.at('screenshot-2.png'), before);
+    } },
+    { label: 'a screenshot added', change: () => {
+      writeFileSync(saved.at('screenshot-3.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 3]));
+      return () => rmSync(saved.at('screenshot-3.png'));
+    } },
+    { label: 'a re-presentation at the same head and folder, carried with the first identity', change: () => {
+      const before = readFileSync(saved.at('shown-hash'), 'utf8');
+      const undoBody = editBody();
+      writeFileSync(saved.at('shown-hash'), `${saved.identity(7, saved.head, ['body.md', 'screenshot-2.png', 'screenshot-10.png'])}\n`);
+      return () => {
+        undoBody();
+        writeFileSync(saved.at('shown-hash'), before);
+      };
+    } },
+    { label: "another card's identity", shown: { head: saved.head, hash: otherCard } },
+    { label: 'a stale head, the folder at the new head holding the same card', change: () => {
+      const moved = saved.commit('tracked.txt', 'one commit on\n');
+      const identity = saved.present(7, moved, VERSION_A);
+      assert.equal(identity, saved.hash, 'the folder at the new head holds the same body and screenshots');
+      return () => {
+        saved.git(['reset', '-q', '--hard', saved.head]);
+        rmSync(join(saved.root, `.claude/worklog/job_7-review-${moved}`), { recursive: true });
+      };
+    } },
+    { label: 'a dirty tree', change: () => {
+      writeFileSync(join(saved.root, 'untracked.txt'), 'not committed\n');
+      return () => rmSync(join(saved.root, 'untracked.txt'));
+    } },
+    { label: 'a shown with an extra key', shown: { ...saved.shown, card: 7 } },
+    { label: 'a shown with an empty head', shown: { ...saved.shown, head: '' } },
+    { label: 'a shown with an empty hash', shown: { ...saved.shown, hash: '' } },
+    { label: 'a shown whose hash is a number', shown: { ...saved.shown, hash: 7 } },
+    { label: 'a shown that is a list', shown: [saved.head, saved.hash] },
+    { label: 'a last result that parks', earlier: builtEarlier('Run result: parked 7: Which layout should the page use?') },
+    { label: 'a last result built for another card', earlier: builtEarlier('Run result: built 8') },
+    { label: 'a built line that is not the last line', earlier: builtEarlier('Run result: built 7\nOne more line.') },
+    { label: 'no job/7 worktree', change: () => {
+      saved.git(['branch', '-m', 'job/8']);
+      return () => saved.git(['branch', '-m', 'job/7']);
+    } },
+  ];
+  for (const { label, change, shown = saved.shown, earlier = builtEarlier(), wire = false } of cases) {
+    const undo = change?.();
+    try {
+      const run = await runClaudeCardFixture({ inProcess: true, wire, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier,
+        answer: pushYes(shown), worktreeRepository: saved.root });
+      assertCarryRefused(run, label);
+      assert.equal(run.artifacts['.card'], undefined, `${label}: a refused carry records no card`);
+    } finally {
+      undo?.();
+    }
+  }
+});
+
+test('a carried push yes for the exact saved card resumes the session with only the carried yes mark and no deny rules', async (t) => {
+  const saved = savedCardRepository(t);
+  const run = await runClaudeCardFixture({ inProcess: true, wire: true, marks: { PRODUCT_MANAGER_RUN_SESSION: '1' }, earlier: builtEarlier(),
+    answer: pushYes(saved.shown), worktreeRepository: saved.root });
+  assert.equal(run.code, 0, run.printed.join('\n'));
+  assert.equal(run.trace.length, 1, 'exactly one session starts');
+  const [{ argv, ...environment }] = run.trace;
+  assert.deepEqual(argv.slice(0, -1), ['-p', '--resume', PUSH_YES_SESSION, '--permission-mode', 'auto', '--output-format', 'json'],
+    'the carried yes session resumes with no deny rules');
+  assert.ok(argv.at(-1).startsWith(CARRIED_PREFIX), argv.at(-1));
+  assert.deepEqual(JSON.parse(argv.at(-1).slice(CARRIED_PREFIX.length)), { card: 7, words: PUSH_YES_WORDS, shown: saved.shown });
+  assert.deepEqual(environment, { pm: null, pre: null, carried: '7' }, 'the carried yes mark alone, with no run mark or inherited session identity');
+  assert.equal(run.artifacts['.card']?.replace(/\r?\n$/, ''), '7', 'the carried launch records its card');
+  assert.equal(run.artifacts['.coordinator'], `${CLAUDE_SESSION}\n`, 'the carried launch records its coordinator');
+});
+
 // Queue acceptance with stderr is limited to the pre-approved coordinator's exact active-writer warning.
 // Recurring cost: one Node queue process per finite scenario, with no native app or network.
 test('launcher queues fixed references through the native command and rejects warning-only resume failure', async (t) => {
@@ -4808,12 +4866,13 @@ test('launcher requires a valid coordinator before starting sessions', async (t)
   }
 });
 
-// Recurring cost: one read each of the resume skill and run reference.
+// Recurring cost: one read each of the resume skill and its three run references.
 test('the resume skill names both launcher commands, the prompts and probes the launcher sends, and leaves recorded cards out of a product manager pick', () => {
   const resume = readFileSync(new URL('../../.agents/skills/resume/SKILL.md', import.meta.url), 'utf8');
-  const runs = readFileSync(new URL('../../.agents/skills/resume/references/runs.md', import.meta.url), 'utf8');
+  const productManagerRun = readFileSync(new URL('../../.agents/skills/resume/references/product-manager-run.md', import.meta.url), 'utf8');
+  const runs = ['runs.md', 'pre-approved-run.md'].map((name) => readFileSync(new URL(`../../.agents/skills/resume/references/${name}`, import.meta.url), 'utf8')).concat(productManagerRun).join('\n');
   for (const text of [
-    'node scripts/product-manager-run.mjs', CARD_PROMPT, END_PROMPT_PREFIX, 'git push --dry-run ./.product-manager-run-no-remote HEAD',
+    'node scripts/product-manager-run.mjs', CARD_PROMPT, CARRIED_PROMPT, END_PROMPT_PREFIX, 'git push --dry-run ./.product-manager-run-no-remote HEAD',
     'Continue this exact pre-approved Codex job.', 'node <operating-root>/scripts/product-manager-run.mjs --admit-job build|deliver <absolute-request-file>',
     'node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID> --pre-approved --continue-card <card>',
     'node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID> --pre-approved', PRE_APPROVED_END_PREFIX, 'git push --dry-run ./.pre-approved-run-no-remote HEAD',
@@ -4824,7 +4883,7 @@ test('the resume skill names both launcher commands, the prompts and probes the 
   for (const text of [CARD_PROMPT, END_PROMPT_PREFIX, PRE_APPROVED_END_PREFIX]) {
     assert.ok(resume.includes(text), `the resume main file does not hold ${text}`);
   }
-  const pick = runs.slice(runs.indexOf('5. **The pick** is the card session'), runs.indexOf('6. **The job.**'));
+  const pick = productManagerRun.slice(productManagerRun.indexOf('5. **The pick** is the card session'), productManagerRun.indexOf('10. **Suggested cards.**'));
   assert.ok(pick.includes('node scripts/board.mjs --approval check <card>...'), 'the product manager pick does not run the advance approval check');
 });
 
@@ -4864,6 +4923,50 @@ test('a pre-approved run sends phase selection and end prompts, needs both witne
     assert.deepEqual(refused.logged, [], args.join(' '));
     assert.equal(refused.sessions.calls.length, 0, args.join(' '));
   }
+});
+
+test('pre-approved witness counts only as a hook refusal in the stream a starter names', async (t) => {
+  // A hook response line in the shape a recorded Claude Code 2.1.322 stream-json run wrote, with only the hook's stderr
+  // and exit code varied.
+  const hookResponse = (stderr, exitCode = 2) => JSON.stringify({ type: 'system', subtype: 'hook_response',
+    hook_id: 'c38d9195-755d-498b-9c42-1335578ca883', hook_name: 'PreToolUse:Bash', hook_event: 'PreToolUse', output: stderr,
+    stdout: '', stderr, exit_code: exitCode, outcome: 'error', uuid: '183006a5-3ada-48b6-9216-a0835a333b59',
+    session_id: 'fa5cbf6d-a66a-44ba-8fb9-e20e765a2150' }) + '\n';
+  const guardRefusal = "Blocked: git commit --no-verify skips the pre-commit gates. Guards Claude's tool calls only; run it in your own terminal if you truly need it.\n";
+  const preApprovedRefusal = 'Blocked: a pre-approved run session does not publish.\n';
+  const assistant = (text) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] },
+    session_id: 'fa5cbf6d-a66a-44ba-8fb9-e20e765a2150' }) + '\n';
+  const result = JSON.stringify({ type: 'result', subtype: 'success', result: 'Run result: stop none: scheduler fixture complete' }) + '\n';
+  // A missing case keeps the fixture's stderr log, which shows both witnesses, so only the named stream can refuse it.
+  const cases = {
+    'both witnesses in the stderr log and no refusal in the stream': { events: assistant('Selecting a job.') + result, missing: 'guard' },
+    'the pre-approved refusal only in assistant text': {
+      events: hookResponse(guardRefusal) + assistant(`${PRE_APPROVED_REFUSAL} does not publish.`) + result, missing: 'publish' },
+    'the guard refusal only in a hook response that exited 0': {
+      events: hookResponse(guardRefusal, 0) + hookResponse(preApprovedRefusal) + result, missing: 'guard' },
+    'both refusals as hook responses and an empty stderr log': {
+      events: hookResponse(guardRefusal) + hookResponse(preApprovedRefusal) + result, stderr: '' },
+  };
+  const create = await schedulerFixture(t);
+  const observed = {};
+  const expected = {};
+  for (const [label, { events, stderr, missing }] of Object.entries(cases)) {
+    const fixture = create({ cards: [], hookStreams: { 'select-1': { events, stderr } } });
+    try {
+      const code = await fixture.start();
+      assert.ok(existsSync(join(fixture.folder, 'select-1.hook-events.jsonl')), `${label}: the starter names its stream`);
+      const { disposition, reason } = JSON.parse(readFileSync(join(fixture.folder, 'select-1.outcome.json'), 'utf8'));
+      observed[label] = { code, sessions: fixture.calls.map(({ name }) => name), disposition,
+        missing: /missing (\S+) refusal/.exec(reason)?.[1], logged: fixture.logged };
+    } finally {
+      await fixture.finish();
+    }
+    // A missing refusal fails the selection and starts no end session, as a stderr log without the witness does.
+    expected[label] = missing
+      ? { code: 1, sessions: ['select-1'], disposition: 'failed', missing, logged: [] }
+      : { code: 0, sessions: ['select-1', 'end'], disposition: 'stopped', missing: undefined, logged: [END_MESSAGE] };
+  }
+  assert.deepEqual(observed, expected);
 });
 
 // Stand-in for `codex` that shows both refusals and logs, as JSON, the two run session marks it was started with.
@@ -4976,8 +5079,9 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates launcher sessions
         return fixture.git(args);
       };
       const inherited = { PRODUCT_MANAGER_RUN_SESSION: process.env.PRODUCT_MANAGER_RUN_SESSION,
-        PRE_APPROVED_RUN_SESSION: process.env.PRE_APPROVED_RUN_SESSION };
+        PRE_APPROVED_RUN_SESSION: process.env.PRE_APPROVED_RUN_SESSION, CLAUDE_CODE_SESSION_ID: process.env.CLAUDE_CODE_SESSION_ID };
       let result;
+      let launches = 0;
       const launch = async () => {
         if (route === '--pre-approved') return runWith([
           preApprovedShown({ message: 'Run result: stop none: no eligible cards' }), preApprovedShown(END_REPLY),
@@ -4985,7 +5089,9 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates launcher sessions
         const calls = [];
         const logged = [];
         const errors = [];
-        const code = await fixture.main(['--claude-card', join(fixture.folder, 'setting-card')], {
+        // Each Claude card launch records its coordinator exclusively, so every launch takes a fresh logs base.
+        launches += 1;
+        const code = await fixture.main(['--claude-card', join(fixture.folder, `setting-card-${scenario.name.replaceAll(' ', '-')}-${launches}`)], {
           git, exec: fixture.exec, startSession: async (call) => { calls.push(call); return { exitCode: 0 }; },
           output: { log: (text) => logged.push(text), error: (text) => errors.push(text) },
         });
@@ -4993,8 +5099,10 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates launcher sessions
       };
       try {
         delete process.env.PRODUCT_MANAGER_RUN_SESSION;
-        if (route === '--claude-card') process.env.PRE_APPROVED_RUN_SESSION = '2026-11-05T10:00:00Z';
-        else delete process.env.PRE_APPROVED_RUN_SESSION;
+        if (route === '--claude-card') {
+          process.env.PRE_APPROVED_RUN_SESSION = '2026-11-05T10:00:00Z';
+          process.env.CLAUDE_CODE_SESSION_ID = CLAUDE_SESSION;
+        } else delete process.env.PRE_APPROVED_RUN_SESSION;
         result = await launch();
         t.diagnostic(`exit=${result.code}; children=${result.sessions.calls.length}; errors=${JSON.stringify(result.errors)}`);
         assert.equal(result.code, scenario.code ?? 1);

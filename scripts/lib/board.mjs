@@ -14,6 +14,7 @@
 // not scarce. Server-side filtering is not a reason either: ProjectV2.items
 // takes the same `query` argument REST exposes as `q`.
 
+import { join } from 'node:path';
 import {
   BOARD_OWNER,
   BOARD_OWNER_TYPE,
@@ -27,7 +28,7 @@ import {
 } from './board-config.mjs';
 import { rejectUnknownArgs } from './cli-flags.mjs';
 import { GhOutputTooLargeError } from './gh-exec.mjs';
-import { cardRef, compareCardIds, kindTypesOf } from './tracker.mjs';
+import { LINEAR_IDENTIFIER, cardRef, compareCardIds, kindTypesOf } from './tracker.mjs';
 // A namespace import, because board-config.mjs is the adopter's file and an update never touches
 // it: a named import of KIND_TYPES would stop every board tool at link time where it is absent.
 import * as boardConfig from './board-config.mjs';
@@ -40,7 +41,7 @@ export const KIND_TYPES = kindTypesOf(boardConfig);
 // operator never asked — and --closeout's exit code is a proof contract, so an
 // unrecognised argument stops the command here rather than certifying a board nobody
 // asked about (the #598 silent-substitution defect class).
-const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake | --approval check <card>... | --help';
+const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake <folder> | --approval check <card>... | --help';
 
 // Every flag the parser accepts, `--status=` as the prefix of its value form. The parser builds its
 // accepted-flag map from this list and BOARD_HELP must mention each one, which a test pins.
@@ -56,7 +57,7 @@ export const BOARD_HELP = [
   `  --status=<Column>           one column, exactly one of ${STATUS_OPTIONS.join(', ')}`,
   '  --json                      the normalized selection on stdout, the scan on stderr',
   '  --closeout                  the strict proof gate: the scan alone',
-  '  --intake                    the intake document on stdout, the outcome on stderr',
+  '  --intake <folder>           the pick summary on stdout, each card\'s full text in <folder>, the outcome on stderr',
   "  --approval check <card>...  each card's advance approval line, with no board read",
   '  --help                      this text, with no board read',
 ].join('\n');
@@ -76,6 +77,16 @@ export function parseBoardArgs(argv) {
     }
     return { approval: cards.map(Number) };
   }
+  // --intake writes into one folder and prints one fixed summary, so it stands first with
+  // exactly that value: a selection or format flag beside it would promise a listing it never
+  // prints, --closeout a gate it never is, a value that looks like a flag is a typo for one, and a
+  // line break in the folder would forge a line of the summary that names it.
+  if (argv.includes('--intake')) {
+    if (argv.length !== 2 || argv[0] !== '--intake' || argv[1] === '' || argv[1].startsWith('-') || /[\r\n]/.test(argv[1])) {
+      throw new Error(`--intake takes one folder and no other argument — ${BOARD_USAGE}`);
+    }
+    return { all: false, status: null, json: false, closeout: false, intake: argv[1] };
+  }
   // Checked before rejectUnknownArgs, which knows `--status=` as ONE positional and would
   // report a second as merely unrecognised: a repeat silently keeping the first is the same
   // wrong-question defect and earns its own sentence.
@@ -84,8 +95,8 @@ export function parseBoardArgs(argv) {
     throw new Error(`only one --status= filter is allowed, got ${statusFlags.join(' ')} — ${BOARD_USAGE}`);
   }
   rejectUnknownArgs(argv, {
-    // --status= is the positional below, and --approval and --help were handled above.
-    flags: new Map(BOARD_FLAGS.filter((flag) => !['--status=', '--approval', '--help'].includes(flag)).map((flag) => [flag, 0])),
+    // --status= is the positional below, and --approval, --intake and --help were handled above.
+    flags: new Map(BOARD_FLAGS.filter((flag) => !['--status=', '--approval', '--intake', '--help'].includes(flag)).map((flag) => [flag, 0])),
     // An empty `--status=` names no column, so it is rejected here rather than degrading
     // into the default selection.
     positionals: [(arg) => /^--status=.+$/.test(arg)],
@@ -94,11 +105,6 @@ export function parseBoardArgs(argv) {
   // --all with --status= selects by --all but would label the header with the status.
   if (argv.includes('--all') && statusFlags.length > 0) {
     throw new Error(`--all and ${statusFlags[0]} are exclusive — ${BOARD_USAGE}`);
-  }
-  // --intake prints one fixed document, so a selection or format flag would promise a
-  // listing it never prints, and --closeout beside it would promise a gate it never is.
-  if (argv.includes('--intake') && argv.length > 1) {
-    throw new Error(`--intake takes no other argument — ${BOARD_USAGE}`);
   }
   // --closeout is the strict proof gate and prints the scan alone, so any companion flag
   // would promise a listing or a JSON document the gate never emits.
@@ -121,7 +127,7 @@ export function parseBoardArgs(argv) {
     status,
     json: argv.includes('--json'),
     closeout: argv.includes('--closeout'),
-    intake: argv.includes('--intake'),
+    intake: null,
   };
 }
 
@@ -956,7 +962,7 @@ const CARD_TEXT_PIECE = 1000;
 // longer than one piece continues on `|+ ` lines: dropping the prefixes and joining the
 // pieces gives the line back exactly. A cut falls after the last space of its piece when
 // the piece has one.
-function foldCardTextLine(line) {
+export function foldCardTextLine(line) {
   if (line === '') return ['|'];
   const pieces = [];
   let rest = [...line];
@@ -971,11 +977,11 @@ function foldCardTextLine(line) {
 
 const cardText = (text) => text.split(LINE_BREAK).flatMap(foldCardTextLine);
 
-const isClaim = (comment) => comment.trimStart().startsWith('Claim:');
+export const isClaim = (comment) => comment.trimStart().startsWith('Claim:');
 
 // The newest Claim comment among those read, which is the latest claim even when older
 // pages failed. With none found, only a complete read may say there is none.
-function claimLines({ comments, commentCount, commentsUnavailable }) {
+export function claimLines({ comments, commentCount, commentsUnavailable }) {
   const index = comments.findLastIndex(isClaim);
   if (index >= 0) {
     const position = commentCount - comments.length + index + 1;
@@ -1005,37 +1011,158 @@ function bodyLines(body) {
   return [`body: ${body.split(LINE_BREAK).length} line(s)`, ...cardText(body)];
 }
 
+// One card's board lines: its heading and routing, then its open blockers and assignees.
+function cardFacts(card) {
+  return {
+    heading: [
+      oneLine(`=== ${cardRef(card.number)} [${card.status}] ${card.title} ===`),
+      ...(ROUTING_FIELD ? [oneLine(`${ROUTING_FIELD}: ${card.routing || 'none'}`)] : []),
+    ],
+    blockers: `open blockers: ${card.openBlockers.length > 0 ? card.openBlockers.map(cardRef).join(', ') : 'none'}`,
+    assignees: oneLine(`assignees: ${card.assignees.length > 0 ? card.assignees.map((login) => `@${login}`).join(', ') : 'none'}`),
+  };
+}
+
+const parentLine = (detail) => `parent: ${detail.parent === null ? 'none' : cardRef(detail.parent)}`;
+
+const claimSection = (detail) => (detail.claim === undefined ? claimLines(detail) : [`claim: ${detail.claim}`]);
+
 // One card's section. A card whose details were not read prints its board lines and the
 // reason and nothing else, so a missing detail never reads as present or empty.
 function cardSection(card, detail) {
-  const heading = [
-    oneLine(`=== ${cardRef(card.number)} [${card.status}] ${card.title} ===`),
-    ...(ROUTING_FIELD ? [oneLine(`${ROUTING_FIELD}: ${card.routing || 'none'}`)] : []),
-  ];
-  const blockers = `open blockers: ${card.openBlockers.length > 0 ? card.openBlockers.map(cardRef).join(', ') : 'none'}`;
-  const assignees = oneLine(`assignees: ${card.assignees.length > 0 ? card.assignees.map((login) => `@${login}`).join(', ') : 'none'}`);
+  const { heading, blockers, assignees } = cardFacts(card);
   if (detail.unavailable !== undefined) return [...heading, blockers, assignees, `details: UNAVAILABLE — ${detail.unavailable}`];
   return [
     ...heading,
-    `parent: ${detail.parent === null ? 'none' : cardRef(detail.parent)}`,
+    parentLine(detail),
     blockers,
     assignees,
-    ...(detail.claim === undefined ? claimLines(detail) : [`claim: ${detail.claim}`]),
+    ...claimSection(detail),
     ...bodyLines(detail.body),
     ...commentLines(detail),
   ];
 }
 
-// Every line of the `--intake` stdout: the pick listing, then one section per card with
-// its details, then the end line that counts every line including itself.
-export function intakeDocument({ listing, candidates, claims, numberless, details }) {
+const CARD_TEXT_LEGEND = 'Lines starting "| " are card text, and "|+ " continues the line above it.';
+
+// The file name of a card's text, or null for an id that is not a safe file name: a positive
+// safe integer or an identifier such as ENG-12, never a path.
+export function intakeCardFileName(id) {
+  const safe = typeof id === 'number' ? Number.isSafeInteger(id) && id > 0 : typeof id === 'string' && LINEAR_IDENTIFIER.test(id);
+  return safe ? `${id}.txt` : null;
+}
+
+// The file of every card whose details were read: its name (null when the id is not a safe file
+// name) and its lines, the legend then the card's whole section.
+export function intakeCardFiles({ candidates, claims, details }) {
+  return [...candidates, ...claims].flatMap((card) => {
+    const detail = details.get(card.number);
+    if (detail.unavailable !== undefined) return [];
+    return [{ number: card.number, name: intakeCardFileName(card.number), lines: [CARD_TEXT_LEGEND, ...cardSection(card, detail)] }];
+  });
+}
+
+// The newest comments read that open with `Needs owner:`, each whole, under a heading that
+// says whether every comment was read. A tracker whose comments carry a metadata line before
+// the text sets `ownerQuestions` to the advisory it prints instead of a count it cannot make.
+function ownerQuestionLines({ comments, commentCount, commentsUnavailable, ownerQuestions }) {
+  if (ownerQuestions !== undefined) return [`owner questions: ${ownerQuestions}`];
+  const found = comments.flatMap((comment, index) => (comment.trimStart().startsWith('Needs owner:') ? [{ comment, index }] : []));
+  const heading = commentsUnavailable === null
+    ? `owner questions: ${found.length}`
+    : `owner questions: ${found.length} in the newest ${comments.length} of ${commentCount} comment(s), UNAVAILABLE before them — ${commentsUnavailable}`;
+  return [
+    heading,
+    ...found.flatMap(({ comment, index }) => [
+      `--- comment ${commentCount - comments.length + index + 1} of ${commentCount} ---`,
+      ...cardText(comment),
+    ]),
+  ];
+}
+
+// CommonMark: an ATX heading has 0 to 3 leading spaces, and a line inside a fenced code block (opened
+// by 3+ backticks or tildes with 0 to 3 leading spaces, closed by a line of the same character at least
+// as long) is never a heading.
+const WHAT_TO_BUILD_HEADING = /^ {0,3}(#{1,6})\s+What to build\s*#*\s*$/i;
+const FENCE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+
+// Whether each line is part of a fenced code block, its fences included, and whether a fence is still open at
+// the end (CommonMark closes it with its container, which a line scan cannot see). A closer holds only spaces
+// or tabs after its run.
+function fencedLines(lines) {
+  let open = null;
+  const fenced = lines.map((line) => {
+    const run = FENCE.exec(line)?.[1];
+    if (open === null) {
+      open = run ?? null;
+      return open !== null;
+    }
+    if (run !== undefined && run[0] === open[0] && run.length >= open.length && new RegExp(`^ {0,3}${run}[ \\t]*$`).test(line)) open = null;
+    return true;
+  });
+  return { fenced, left: open !== null };
+}
+
+const NO_WHAT_TO_BUILD = ['what to build: none in the card text'];
+const FENCE_LEFT_OPEN = ['what to build: a code fence is left open, read the card text'];
+
+// A section's lines without the blank lines around them.
+function sectionLines(section) {
+  const first = section.findIndex((line) => line.trim() !== '');
+  if (first < 0) return NO_WHAT_TO_BUILD;
+  const trimmed = section.slice(first, section.findLastIndex((line) => line.trim() !== '') + 1);
+  return [`what to build: ${trimmed.length} line(s)`, ...trimmed.flatMap(foldCardTextLine)];
+}
+
+// The What to build section: the detail's own `whatToBuild` when its tracker extracts it (a native
+// document has no Markdown headings to find), the advisory in its `whatToBuildUnread` when it cannot, else
+// the body's lines after its heading up to the next heading of the same or a higher level, or the advisory
+// that a fence is left open in the body.
+function whatToBuildLines(detail) {
+  if (Object.hasOwn(detail, 'whatToBuildUnread')) return [`what to build: ${detail.whatToBuildUnread}, read the card text`];
+  if (Object.hasOwn(detail, 'whatToBuild')) return detail.whatToBuild === null ? NO_WHAT_TO_BUILD : sectionLines(detail.whatToBuild.split(LINE_BREAK));
+  if (detail.bodyFormat === 'html') return ['what to build: not extracted from an HTML body, read the card text'];
+  const bodyText = detail.body.split(LINE_BREAK);
+  const { fenced, left } = fencedLines(bodyText);
+  if (left) return FENCE_LEFT_OPEN;
+  const start = bodyText.findIndex((line, index) => !fenced[index] && WHAT_TO_BUILD_HEADING.test(line));
+  if (start < 0) return NO_WHAT_TO_BUILD;
+  const level = WHAT_TO_BUILD_HEADING.exec(bodyText[start])[1].length;
+  const nextHeading = new RegExp(`^ {0,3}#{1,${level}}\\s`);
+  const after = bodyText.slice(start + 1);
+  const end = after.findIndex((line, index) => !fenced[start + 1 + index] && nextHeading.test(line));
+  return sectionLines(end < 0 ? after : after.slice(0, end));
+}
+
+// One card's summary: its facts, claim, owner questions and What to build section, and the file
+// holding the rest. A card whose details were not read keeps the lines its section prints.
+function summarySection(card, detail, file, directory) {
+  if (detail.unavailable !== undefined) return cardSection(card, detail);
+  const { heading, blockers, assignees } = cardFacts(card);
+  return [
+    ...heading,
+    parentLine(detail),
+    blockers,
+    assignees,
+    `proposal: ${typeof card.title === 'string' && card.title.trimStart().startsWith('Proposed: ') ? 'yes' : 'no'}`,
+    ...claimSection(detail),
+    ...ownerQuestionLines(detail),
+    ...whatToBuildLines(detail),
+    `card text: ${join(directory, file.name)}, ${file.lines.length} line(s)`,
+  ];
+}
+
+// Every line of the `--intake` stdout: the pick listing, then one summary per card, then the
+// end line that counts every line including itself. `files` maps each card number to the
+// `{ name, lines }` of its written text file.
+export function intakeSummary({ listing, candidates, claims, numberless, details, directory, files }) {
   const noNumber = numberless > 0 ? ` ${numberless} card(s) with no issue number have no details.` : '';
   const lines = [
     ...listing.split('\n'),
     '',
-    `Card details: ${candidates.length} pickable card(s), then ${claims.length} claimed card(s) with no closing pull request.${noNumber}`,
-    'Lines starting "| " are card text, and "|+ " continues the line above it.',
-    ...[...candidates, ...claims].flatMap((card) => ['', ...cardSection(card, details.get(card.number))]),
+    `Card summaries: ${candidates.length} pickable card(s), then ${claims.length} claimed card(s) with no closing pull request.${noNumber}`,
+    `${CARD_TEXT_LEGEND} Each card's full body and comments are in the file its "card text:" line names.`,
+    ...[...candidates, ...claims].flatMap((card) => ['', ...summarySection(card, details.get(card.number), files.get(card.number), directory)]),
     '',
   ];
   return [...lines, `board intake: end of document, ${lines.length + 1} line(s).`];

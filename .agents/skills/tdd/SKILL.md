@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: The test-first method for building a feature or fixing a bug at our bar: red-green in vertical slices, deterministic where possible, with discrimination evidence selected by the testing strategy, non-tautological, tested at the real interface. The builder reads this before writing tests; invoke "/tdd" to apply it directly.
+description: 'The test-first method for building a feature or fixing a bug at our bar: red-green in vertical slices, deterministic where possible, with discrimination evidence selected by the testing strategy, non-tautological, tested at the real interface. The builder reads this before writing tests; invoke "/tdd" to apply it directly.'
 ---
 
 This is the METHOD; the acceptance BAR lives in `docs/TESTING-STRATEGY.md`, which owns WHICH evidence a claim

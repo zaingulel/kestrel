@@ -9,7 +9,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { requirePreApprovedRun } from './advance-approval.mjs';
 import { blockReason, cleanupPermission } from './unsafe-git.mjs';
 
 const REASON_CREATE = "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
@@ -1441,6 +1443,9 @@ const record = (fields = {}) => ({
   body: 'Approved: card=7 edited=none',
   ...fields,
 });
+// advance-approval.mjs loads in place beside this file, so the checkout holding the running code is read through
+// this directory, never the session checkout.
+const CODE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
 function preApprovedRun({
   start = RUN_START,
@@ -1463,6 +1468,8 @@ function preApprovedRun({
   settingMode = '100644\n',
   settingText = '{"version":1,"preApprovedRun":true}',
   settingError,
+  ancestry,
+  sessionAncestry,
 } = {}) {
   const calls = [];
   const git = (args) => {
@@ -1492,6 +1499,9 @@ function preApprovedRun({
       if (typeof mergeBase === 'string') return mergeBase;
       throw Object.assign(new Error(mergeBase.message), { status: mergeBase.status });
     }
+    // The answer of the code checkout and that of the session checkout, so a read in the wrong checkout gets the wrong one.
+    if (ancestry !== undefined && call === `git -C ${CODE_DIRECTORY} rev-list --left-right --count HEAD...${settingOid}`) return ancestry;
+    if (sessionAncestry !== undefined && call === `git rev-list --left-right --count HEAD...${settingOid}`) return sessionAncestry;
     throw new Error(`unexpected read: ${call}`);
   };
   const exec = (args) => {
@@ -1783,7 +1793,7 @@ test('a pre-approved run session refuses a command holding -C, --git-dir or --wo
   }
 });
 
-test('ANTI-REGRESSION: a run session refuses any command that writes or quotes an advance approval record, and without a mark nothing changes', () => {
+test('ANTI-REGRESSION: every agent session refuses any command that writes or quotes an advance approval record, and a run session keeps its own refusal', () => {
   const quoting = [
     'gh issue comment 7 --body "Approved: card=7 edited=none"',
     "gh issue comment 7 --body-file - <<'EOF'\nApproved: card=7 edited=none\nEOF",
@@ -1796,16 +1806,21 @@ test('ANTI-REGRESSION: a run session refuses any command that writes or quotes a
     const { reason, calls } = judged(command);
     assert.ok(reason.startsWith(PRE_APPROVED), `${command}: ${JSON.stringify(reason)}`);
     assert.deepEqual(calls, [], command);
-    assert.equal(blockReason(command, inJob), '', command);
-    assert.equal(blockReason(command, inJob, { runSession: false }), '', command);
+    const ordinary = blockReason(command, inJob);
+    assert.ok(ordinary.startsWith('an agent session does not write or quote an advance approval record'), `${command}: ${JSON.stringify(ordinary)}`);
+    const unmarked = blockReason(command, inJob, { runSession: false });
+    assert.ok(unmarked.startsWith('an agent session does not write or quote an advance approval record'), `${command}: ${JSON.stringify(unmarked)}`);
   }
-  // The marks take nothing else: an ordinary command and the approval check itself pass.
+  // The rule takes nothing else: an ordinary command and the approval check itself pass in every session.
   for (const command of ['git status', 'node scripts/board.mjs --approval check 7']) {
+    assert.equal(blockReason(command, inJob), '', command);
     assert.equal(blockReason(command, inJob, { runSession: true }), '', command);
     const { reason, calls } = judged(command);
     assert.equal(reason, '', command);
     assert.deepEqual(calls, [], command);
   }
+  // The Summary's `Approved in advance:` line is not a record.
+  assert.equal(blockReason('gh pr create --draft --title t --body "Approved in advance: https://github.com/o/r/issues/7#issuecomment-1"', inJob), '');
 });
 
 test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin repository and only where the tracker is GitHub issues', () => {
@@ -2004,13 +2019,58 @@ test('a pre-approved run session may take its own job pull request back to draft
   }
 });
 
+// ── carried push yes session ────────────────────────────────────────────────
+// The owner's yes the coordinator carried to the session of one card: its mark is that card alone, with the same
+// runner injections and no run start or tracker. The expected outcomes come from the pre-approved delivery forms
+// above, the direct-route push deliver.md names and card #596's exact-card criterion.
+
+const CARRIED = 'a carried push yes session ';
+const carriedJudged = (command, fixture, carried = '7') => {
+  const run = preApprovedRun(fixture);
+  const { env, exec, git, platform } = run.preApproved;
+  return { reason: blockReason(command, inJob, { carriedYes: { carried, env, exec, git, platform } }), calls: run.calls };
+};
+
+test('ANTI-REGRESSION: a carried push yes session publishes only the delivery forms of its own card without an approval record, and refuses every other publish and any approval text', () => {
+  for (const command of [...DELIVERY, 'git push --force-with-lease origin job/7']) {
+    const { reason, calls } = carriedJudged(command, { comments: [] });
+    assert.equal(reason, '', command);
+    assert.deepEqual(calls.filter(isGraphql), [], `${command} reads no approval record`);
+  }
+  const toMain = carriedJudged('git push origin HEAD:main');
+  assert.equal(toMain.reason, `${CARRIED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`);
+  assert.deepEqual(toMain.calls.filter(isGh), []);
+  const otherCard = carriedJudged('git push -u origin job/8', { branch: 'job/8' });
+  assert.equal(otherCard.reason, `${CARRIED}publishes only its carried card`);
+  assert.deepEqual(otherCard.calls.filter(isGh), []);
+  for (const command of [READY, MERGE]) {
+    const otherPullRequest = carriedJudged(command, { pullRequest: { headRefName: 'job/8' } }).reason;
+    assert.ok(otherPullRequest.startsWith(CARRIED), `${command}, head job/8: ${JSON.stringify(otherPullRequest)}`);
+  }
+  const malformed = carriedJudged(PUSH, {}, '07').reason;
+  assert.ok(malformed.startsWith(CARRIED), `mark "07": ${JSON.stringify(malformed)}`);
+  const quoting = carriedJudged('gh issue comment 7 --body "Approved: card=7 edited=none"');
+  assert.ok(quoting.reason.startsWith('a carried push yes '), JSON.stringify(quoting.reason));
+  assert.deepEqual(quoting.calls, []);
+  assert.equal(carriedJudged('git status').reason, '');
+  // Each mark alone admits this push; the two together publish nothing.
+  const run = preApprovedRun();
+  const { env, exec, git, platform } = run.preApproved;
+  const carriedYes = { carried: '7', env, exec, git, platform };
+  assert.equal(blockReason(PUSH, inJob, { preApproved: run.preApproved }), '');
+  assert.equal(blockReason(PUSH, inJob, { carriedYes }), '');
+  const both = blockReason(PUSH, inJob, { preApproved: run.preApproved, carriedYes });
+  assert.match(both, /^a (?:carried push yes|pre-approved run) session /);
+});
 
 // The launcher repeats this matrix to protect its separate wire.
 test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', async (t) => {
   const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
   const unavailable = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
+  const behind = `pre-approved run setting unreadable by the checkout at ${dirname(dirname(CODE_DIRECTORY))}, which is older than fetched main; bring that checkout up to date with fetched main, then retry`;
   const enabled = '{"version":1,"preApprovedRun":true}';
   const off = '{"version":1,"preApprovedRun":false}';
+  const newerKey = '{"version":1,"preApprovedRun":true,"synthetic-setting-secret":true}';
   const cases = [
     { name: '40-digit OID true', fixture: {} },
     { name: '64-digit OID true', fixture: { settingOid: 'c'.repeat(64) } },
@@ -2030,6 +2090,9 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', asy
     { name: 'wrong value', fixture: { settingText: '{"version":1,"preApprovedRun":"synthetic-setting-secret"}' }, error: unavailable },
     { name: 'near key', fixture: { settingText: '{"version":1,"preApprovedRuns":true}' }, error: unavailable },
     { name: 'invalid schema', fixture: { settingText: '{"version":2,"preApprovedRun":true}' }, error: unavailable },
+    // The guard runs the code of the root checkout from a job worktree whose branch is ahead of fetched main.
+    { name: 'newer key, code checkout behind, session checkout ahead', fixture: { settingText: newerKey, ancestry: '0\t3\n', sessionAncestry: '1\t0\n' }, error: behind },
+    { name: 'newer key, code checkout current, session checkout behind', fixture: { settingText: newerKey, ancestry: '0\t0\n', sessionAncestry: '0\t3\n' }, error: unavailable },
   ];
   for (const command of DELIVERY) {
     for (const scenario of cases) await t.test(`${command}: ${scenario.name}`, () => {
@@ -2105,4 +2168,12 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', asy
       assert.equal(judged(command, { settingError: 'ref' }, { runSession: true }).reason, REASON_RUN_SESSION);
     }
   });
+});
+
+test('the pre-approved setting check can require the Herdr add-on', () => {
+  const check = (settingText, options = {}) => () => requirePreApprovedRun({ git: preApprovedRun({ settingText }).preApproved.git, ...options });
+  assert.throws(check('{"version":1,"preApprovedRun":true}', { herdr: true }), { message: /\bherdr\b/ }, 'absent herdr key');
+  assert.throws(check('{"version":1,"preApprovedRun":true,"herdr":false}', { herdr: true }), { message: /\bherdr\b/ }, 'herdr false');
+  assert.doesNotThrow(check('{"version":1,"preApprovedRun":true,"herdr":true}', { herdr: true }), 'herdr true');
+  assert.doesNotThrow(check('{"version":1,"preApprovedRun":true}'), 'no herdr option');
 });

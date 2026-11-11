@@ -1,5 +1,5 @@
-// board-linear.mjs — the Linear tracker's board reader: a Linear team read as the same raw board items
-// the GitHub tracker feeds the board rules, and the card details the intake document prints.
+// board-linear.mjs — the Linear tracker's board reader: a Linear team read as the same raw board items the GitHub
+// tracker feeds the board rules, and the card details the intake prints.
 //
 // A card is identified by its Linear identifier (ENG-123), so every field the other trackers call a
 // number carries that string. The team's states map onto the board's columns through

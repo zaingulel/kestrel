@@ -3,16 +3,21 @@
 // that card without a fresh yes only with explicit fetched-main preApprovedRun true. The board command's
 // approval mode prints approvalReport's lines; the guard's publishCheck admits a pre-approved run session's
 // push, create, ready or merge only for its own card in its own origin repository. GitHub issues only.
+// A carried push yes session, holding the owner's yes for one card, passes the same checks for that card
+// and reads no approval record.
 //
 // Every read goes through one of two runners, each taking an argument list and returning stdout or
 // throwing an error that carries the exit `status`: `git`, and `exec` for gh. The default runners
 // spawn the executables gitExecutable and ghExecutable locate, with a 15 s timeout per read. A publish
-// check makes at most ten reads, including three for the fetched-main setting, plus one to verify a native
-// app job's worktree. Imports are Node built-ins, posix-shell.mjs and the leaf settings validator
-// runtimes.mjs; loading them performs no settings read.
+// check makes at most ten reads, including three for the fetched-main setting and, where the validator
+// beside this module refuses those settings, one in the checkout holding this module in place of the
+// approval read, plus one to verify a native app job's worktree. Imports are Node built-ins,
+// posix-shell.mjs and the leaf settings validator runtimes.mjs; loading them performs no settings read.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ghExecutable, gitExecutable } from './posix-shell.mjs';
 import { readSettingsHeader } from './runtimes.mjs';
 
@@ -21,6 +26,7 @@ export const RECORD_LINE = /^Approved: card=(\d+) edited=(\S+)$/;
 export const recordLine = (card, edited) => `Approved: card=${card} edited=${edited}`;
 
 const REFUSAL = 'a pre-approved run session ';
+const CARRIED_REFUSAL = 'a carried push yes session ';
 const RUN_START = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 // One GraphQL reply carries up to 100 comment bodies; Node's 1 MiB default would refuse a valid read.
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -40,23 +46,50 @@ const APPROVAL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   }
 }`;
 
-// Pin one local fetched-main object so a ref moving between reads cannot mix settings versions.
-export function requirePreApprovedRun({ git }) {
-  let enabled = false;
+const CODE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+const SETTING_UNAVAILABLE = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
+const CHECKOUT_BEHIND = `pre-approved run setting unreadable by the checkout at ${dirname(dirname(CODE_DIRECTORY))}, which is older than fetched main; bring that checkout up to date with fetched main, then retry`;
+
+// Whether HEAD of the checkout holding this module, whose validator refused, is strictly behind `oid`: no commit of
+// its own and at least one that only oid reaches. That checkout supplies the running code, and the guard runs the
+// code of the root checkout from a job worktree. A failed read or any other reply, a missing object, a directory
+// outside a repository and unrelated history included, is not behind, and its text is dropped.
+function checkoutBehind(git, oid) {
   try {
-    const oid = git(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}']).trim();
+    return /^0\t[1-9]\d*$/.test(git(['-C', CODE_DIRECTORY, 'rev-list', '--left-right', '--count', `HEAD...${oid}`]).trim());
+  } catch {
+    return false;
+  }
+}
+
+// Pin one local fetched-main object so a ref moving between reads cannot mix settings versions. With `herdr`, the
+// same settings must also turn the Herdr add-on on.
+export function requirePreApprovedRun({ git, herdr = false }) {
+  let oid;
+  let text;
+  try {
+    oid = git(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}']).trim();
     if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) throw new Error('invalid fetched-main object');
     const mode = git(['ls-tree', '--full-tree', '--format=%(objectmode)', oid, '--', '.agents/factory-settings.json']).trim();
     if (mode) {
       if (mode !== '100644' && mode !== '100755') throw new Error('nonregular settings entry');
-      const text = git(['show', `${oid}:.agents/factory-settings.json`]);
-      enabled = readSettingsHeader(text, '.agents/factory-settings.json').settings.preApprovedRun === true;
+      text = git(['show', `${oid}:.agents/factory-settings.json`]);
     }
   } catch {
-    // Child errors and validator refusals can contain credentials or untrusted settings values.
-    throw new Error('pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main');
+    // Child errors can contain credentials.
+    throw new Error(SETTING_UNAVAILABLE);
   }
-  if (!enabled) throw Object.assign(new Error('pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main'), { code: 'PRE_APPROVED_RUN_DISABLED' });
+  let settings = {};
+  if (text !== undefined) {
+    try {
+      ({ settings } = readSettingsHeader(text, '.agents/factory-settings.json'));
+    } catch {
+      // Refusals can carry untrusted settings values; code older than fetched main refuses settings it does not know.
+      throw new Error(checkoutBehind(git, oid) ? CHECKOUT_BEHIND : SETTING_UNAVAILABLE);
+    }
+  }
+  if (settings.preApprovedRun !== true) throw Object.assign(new Error('pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main'), { code: 'PRE_APPROVED_RUN_DISABLED' });
+  if (herdr && settings.herdr !== true) throw Object.assign(new Error('Herdr add-on off on fetched main; herdr must be true in .agents/factory-settings.json on main'), { code: 'HERDR_OFF' });
 }
 
 const trackerLine = (tracker) => `advance approval needs GitHub issues; this repository's tracker is ${tracker}`;
@@ -173,7 +206,8 @@ export function approvalReport(cards, { exec, git, before, run, tracker, reposit
   }
   const lines = cards.map((card) => {
     try {
-      return judgeApproval(card, readApproval(card, { exec: runners.exec, repository: origin }), { before, run });
+      const read = readApproval(card, { exec: runners.exec, repository: origin });
+      return judgeApproval(card, read, { before, run });
     } catch (error) {
       return `unavailable ${card}: ${error.message}`;
     }
@@ -181,15 +215,19 @@ export function approvalReport(cards, { exec, git, before, run, tracker, reposit
   return { lines, exitCode: lines.some((line) => line.startsWith('unavailable ')) ? 2 : 0 };
 }
 
-// The guard's judgement of one publish segment in a pre-approved run session, after its own
-// refusals: '' admits it, so the guard's other rules still judge it, and any other string refuses.
-// `kind` is push, create, ready or merge, and a ready or merge segment is already its delivery form.
-export function publishCheck(kind, segment, { start, tracker, appJob, env = process.env, exec, git, platform = process.platform, exists = existsSync, cwd }) {
-  const refuse = (why) => `${REFUSAL}${why}`;
-  if (tracker !== 'github') return refuse(`publishes nothing: ${trackerLine(tracker)}`);
+// The guard's judgement of one publish segment in a pre-approved run session (`start`, `tracker`) or a carried
+// push yes session (`carried`, the card the owner's carried yes names), after its own refusals: '' admits it, so
+// the guard's other rules still judge it, and any other string refuses. `kind` is push, create, ready or merge,
+// and a ready or merge segment is already its delivery form. A carried yes is the owner's own yes for its card,
+// so it needs no approval record and no run start.
+export function publishCheck(kind, segment, { start, carried, tracker, appJob, env = process.env, exec, git, platform = process.platform, exists = existsSync, cwd }) {
+  const refuse = (why) => `${carried === undefined ? REFUSAL : CARRIED_REFUSAL}${why}`;
+  if (carried === undefined && tracker !== 'github') return refuse(`publishes nothing: ${trackerLine(tracker)}`);
   const named = ['GH_REPO', 'GH_HOST'].find((name) => env[name] !== undefined);
   if (named) return refuse(`publishes nothing with ${named} set: gh would act on what it names, not on origin`);
-  if (!RUN_START.test(start) || Number.isNaN(Date.parse(start))) {
+  if (carried !== undefined) {
+    if (!/^[1-9]\d*$/.test(carried)) return refuse(`publishes nothing: its mark ${JSON.stringify(carried)} is not a card number`);
+  } else if (!RUN_START.test(start) || Number.isNaN(Date.parse(start))) {
     return refuse(`publishes nothing: its mark ${JSON.stringify(start)} is not a run start written YYYY-MM-DDTHH:MM:SSZ`);
   }
   try {
@@ -200,6 +238,7 @@ export function publishCheck(kind, segment, { start, tracker, appJob, env = proc
     };
     const head = runners.git(appJob ? ['symbolic-ref', '--quiet', 'HEAD'] : ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim();
     if (appJob && head !== `refs/heads/job/${appJob.card}`) return refuse('publishes only its bound card');
+    if (carried !== undefined && head !== `job/${carried}`) return refuse('publishes only its carried card');
     const card = appJob ? String(appJob.card) : /^job\/([1-9]\d*)$/.exec(head)?.[1];
     if (!card) return refuse(`publishes only from a job branch, and HEAD is ${JSON.stringify(head)}`);
     const pushes = [`git push -u origin job/${card}`, `git push --force-with-lease origin job/${card}`];
@@ -247,6 +286,7 @@ export function publishCheck(kind, segment, { start, tracker, appJob, env = proc
       // Taking its own pull request back to draft needs no record, so a revoked record can still stop it.
       if (/(?:^|\s)--undo(?:\s|$)/.test(segment)) return '';
     }
+    if (carried !== undefined) return '';
     const report = approvalReport([card], { exec: runners.exec, git: runners.git, before: start, run: true, tracker, repository: origin });
     if (report.settingRefusal) return refuse(`publishes nothing: ${report.settingRefusal}`);
     if (report.exitCode === 0 && report.lines[0].startsWith('approved ')) return '';

@@ -21,10 +21,10 @@
 // each seat setting its repository overrides, in the nested form of the settings file's `seats` and naming only
 // seat files the same manifest lists.
 //
-// A tree's settings file may name the runtimes it runs, may turn the Greptile add-on on and may turn the documentation
-// sweep off; leftOutCause in runtimes.mjs is the one answer to which entries those settings leave out of the tree, and
-// the check and the render both ask it, each from the settings file's text. Every manifest keeps every entry, and the
-// path of a left-out entry must hold nothing.
+// A tree's settings file may name the runtimes it runs, may turn the Greptile add-on on, may turn the Herdr add-on on
+// and may turn the documentation sweep off; leftOutCause in runtimes.mjs is the one answer to which entries those
+// settings leave out of the tree, and the check and the render both ask it, each from the settings file's text. Every
+// manifest keeps every entry, and the path of a left-out entry must hold nothing.
 //
 // verifyManifest reports anything a left-out entry's path holds, whatever its bytes, and nothing where it holds
 // nothing. It holds every other entry to its record, with one exception: a seat the tree's settings file or the

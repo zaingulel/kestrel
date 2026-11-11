@@ -37,12 +37,12 @@ environment or setting and no session except by starting, messaging and archivin
 authorisation answers no permission prompt or safety check from the runtime: each still stands and goes to the owner.
 
 1. **Start, locally.** The owner picks the card and asks for a cloud build. Where the card's outcome is a change the
-   direct route admits, the session tells the owner the card is built locally. Otherwise a local session runs "3. Start
-   the job" up to and including the card read straight after the claim, with `Claude Code cloud` as the claim's runtime,
-   and creates no worktree or branch. Once that read shows the session's own claim holds the card, the card's start
-   message is
+   direct route admits, the session tells the owner the card is built locally. Otherwise a local session runs the claim command of "3. Start
+   the job", `node scripts/board-claim.mjs <issue> --intake <scratch>/board-intake.txt --runtime "Claude Code cloud"`,
+   and creates no worktree or branch. Once that command exits 0, which shows the session's own claim holds the card, the
+   card's start message is
    `Build #<issue> in the cloud under the claim <claim address>, push job/<issue> and open its draft pull request, as the resume skill says under "Cloud build".`,
-   with the address the claim command printed. It is the first message of a cloud session on the repository's `main`, in
+   with the address on the command's `wrote:` line of the claim. It is the first message of a cloud session on the repository's `main`, in
    auto mode and never Accept edits, in an environment that holds no environment variables, no network secrets and no
    credential in its setup script. A local session in the Claude desktop app starts that cloud session itself, from the
    app's built-in browser, under "Cloud session control" above. It opens `https://claude.ai/code` and starts a new

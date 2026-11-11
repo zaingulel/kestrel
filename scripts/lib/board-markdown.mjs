@@ -387,8 +387,8 @@ const claimOf = (number, refs) => {
   return `branch job/${number} (${local && remote ? 'local and origin' : local ? 'local' : 'origin'})`;
 };
 
-// The card details the intake document prints, in the shape fetchCardDetails gives for GitHub cards,
-// plus `claim`: the branch that claims the card.
+// The card details the intake prints, in the shape fetchCardDetails gives for GitHub cards, plus `claim`: the branch
+// that claims the card.
 export function markdownCardDetails(cards, numbers, refs) {
   return new Map(numbers.map((number) => {
     const card = cards.get(number);
