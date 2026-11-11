@@ -1,8 +1,11 @@
 <!--
-Builder handoff template. Everything ABOVE the ---8<--- line is documentation; the prompt handed to the
-`builder` (or `builder-max` / `builder-lite`) agent is everything BELOW it, every {{SLOT}} filled. The PreToolUse hook
-(.claude/hooks/check-builder-handoff.mjs, .codex/hooks/check-builder-handoff.mjs) blocks a handoff that
-drops the contract, whether or not this template was used.
+Builder handoff template. Everything ABOVE the ---8<--- line is documentation; the prompt handed to the `builder` (or
+`builder-max` / `builder-lite`) agent is everything BELOW it, every {{SLOT}} filled. On Claude Code the PreToolUse hook
+.claude/hooks/check-builder-handoff.mjs blocks a handoff that drops the contract, whether or not this template was used.
+Codex encrypts the dispatched prompt, so on Codex the coordinator saves the filled handoff as
+.claude/worklog/handoffs/<task_name>.md in the job worktree and dispatches with that task_name; the hook
+.codex/hooks/check-builder-handoff.mjs refuses the dispatch unless that file passes the same check, hands it to the
+builder when the builder starts, and refuses every tool call of a builder thread it handed none to.
 
 Why each line is load-bearing:
 - Builders are capped at their turn budget with NO warning, so each handoff carries one coherent,
@@ -18,8 +21,8 @@ Why each line is load-bearing:
 - A builder that hits consequential judgment mid-build STOPS AND ASKS instead of guessing.
 - The stop condition never carries a line count: a builder stops for a file or step the plan did not name, never
   for size.
-- The builder checks that every labelled line below is present and filled before it edits, because no hook sees
-  a Codex handoff.
+- The builder checks that every labelled line below is present and filled before it edits, because a hook that is not
+  trusted or cannot start does not run.
 
 Each labelled value sits on its label's line. `Construction mode:` holds exactly one of `strict-tdd`,
 `evidence-required` or `preservation` and nothing else: the reasoning belongs in the plan, and a slice that needs

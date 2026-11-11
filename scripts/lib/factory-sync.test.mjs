@@ -582,6 +582,60 @@ test('ANTI-REGRESSION: a tree that does not turn the Greptile add-on on verifies
   }
 });
 
+// The Herdr add-on's two paths, written out by hand, and the bytes these tests put there. The hash was computed by
+// `printf '<bytes>' | shasum -a 256`, never by the code under test.
+const HERDR_SKILL = '.agents/skills/herdr-setup/SKILL.md';
+const HERDR_SKILL_COPY = '.claude/skills/herdr-setup/SKILL.md';
+const HERDR_TEXT = 'herdr-setup skill\n';
+const HERDR_SHA256 = 'cd43db1c75e62d163ee5bda1e90d7cc5c9cee3c972b943a827624e61a0daa151';
+const HERDR_FILES = [HERDR_SKILL, HERDR_SKILL_COPY];
+const HERDR_OFF_CAUSE = 'absent (the settings file does not turn the Herdr add-on on)';
+
+test('ANTI-REGRESSION: a tree that does not turn the Herdr add-on on verifies without its files and refuses anything at their paths, and a tree that turns it on still refuses a missing or changed add-on file', (t) => {
+  const tree = (settings) => featureTree(t, HERDR_FILES.map((path) => ({ path, sha256: HERDR_SHA256 })), settings);
+
+  for (const [name, settings] of [
+    ['no settings file', undefined],
+    ['herdr false', { version: 1, seats: {}, herdr: false }],
+    ['no herdr key', { version: 1, seats: {} }],
+  ]) {
+    const root = tree(settings);
+    assert.deepEqual(verifyManifest(root), [], `${name}: none of the add-on's files`);
+    for (const path of HERDR_FILES) {
+      put(root, path, HERDR_TEXT);
+      assert.deepEqual(verifyManifest(root), [{ path, expected: HERDR_OFF_CAUSE, actual: HERDR_SHA256 }], `${name}: the recorded bytes at ${path}`);
+      put(root, path, OTHER_TEXT);
+      assert.deepEqual(verifyManifest(root), [{ path, expected: HERDR_OFF_CAUSE, actual: OTHER_SHA256 }], `${name}: other bytes at ${path}`);
+      rmSync(join(root, path));
+    }
+    rmSync(join(root, 'docs/a.txt'));
+    assert.deepEqual(verifyManifest(root), [{ path: 'docs/a.txt', expected: HELLO_SHA256, actual: 'missing' }], `${name}: a missing file of every install`);
+  }
+
+  const on = tree({ version: 1, seats: {}, herdr: true });
+  for (const path of HERDR_FILES) put(on, path, HERDR_TEXT);
+  assert.deepEqual(verifyManifest(on), [], 'the add-on on, both copies present');
+  for (const path of HERDR_FILES) {
+    rmSync(join(on, path));
+    assert.deepEqual(verifyManifest(on), [{ path, expected: HERDR_SHA256, actual: 'missing' }], `the add-on on: ${path} missing`);
+    put(on, path, OTHER_TEXT);
+    assert.deepEqual(verifyManifest(on), [{ path, expected: HERDR_SHA256, actual: OTHER_SHA256 }], `the add-on on: ${path} changed`);
+    put(on, path, HERDR_TEXT);
+  }
+
+  for (const herdr of [true, false]) {
+    const codexOnly = tree({ version: 1, runtimes: ['codex'], seats: {}, herdr });
+    if (herdr) put(codexOnly, HERDR_SKILL, HERDR_TEXT);
+    assert.deepEqual(verifyManifest(codexOnly), [], `codex alone, herdr ${herdr}: no Claude copy`);
+    put(codexOnly, HERDR_SKILL_COPY, HERDR_TEXT);
+    assert.deepEqual(
+      verifyManifest(codexOnly),
+      [{ path: HERDR_SKILL_COPY, expected: absentFor('claude'), actual: HERDR_SHA256 }],
+      `codex alone, herdr ${herdr}: the runtime is the cause at the Claude copy`,
+    );
+  }
+});
+
 // The documentation sweep's six shared paths and the documentation standard, written out by hand; each fixture file
 // holds hello, so no hash is computed by the code under test.
 const SWEEP_PATHS = [

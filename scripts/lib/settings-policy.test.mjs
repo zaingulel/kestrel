@@ -51,6 +51,11 @@ test('the hook set is exactly the documented guards', { skip: without('claude') 
 });
 
 test('the Codex hook set is exact and cannot be widened or deleted silently', { skip: without('codex') }, () => {
+  const HANDOFF_HOOK = {
+    type: 'command',
+    command: 'node "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.codex/hooks/check-builder-handoff.mjs"',
+    commandWindows: '$r = Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir); if (-not $r) { $r = \'.\' }; $h = "$r/.codex/hooks/check-builder-handoff.mjs"; $LASTEXITCODE = 1; node $h; exit $LASTEXITCODE',
+  };
   assert.deepEqual(readJson('.codex/hooks.json'), {
     hooks: {
       PreToolUse: [
@@ -62,15 +67,9 @@ test('the Codex hook set is exact and cannot be widened or deleted silently', { 
             commandWindows: '$r = Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir); if (-not $r) { $r = \'.\' }; $h = "$r/.codex/hooks/block-unsafe-git.mjs"; $LASTEXITCODE = 1; node $h; exit $LASTEXITCODE',
           }],
         },
-        {
-          matcher: 'collaborationspawn_agent',
-          hooks: [{
-            type: 'command',
-            command: 'node "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.codex/hooks/check-builder-handoff.mjs"',
-            commandWindows: '$r = Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir); if (-not $r) { $r = \'.\' }; $h = "$r/.codex/hooks/check-builder-handoff.mjs"; $LASTEXITCODE = 1; node $h; exit $LASTEXITCODE',
-          }],
-        },
+        { hooks: [HANDOFF_HOOK] },
       ],
+      SubagentStart: [{ hooks: [{ ...HANDOFF_HOOK, additionalContextLimit: 0 }] }],
       Stop: [{
         hooks: [{
           type: 'command',

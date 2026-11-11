@@ -10,6 +10,7 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
@@ -24,7 +25,7 @@ const {
   WAIT_STATUSES,
 } = await toolkit.load('lib/board-config.mjs');
 const { leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
-const { formatList, intakeDocument, normalizeItem, parseBoardPage } = await toolkit.load('lib/board.mjs');
+const { formatList, intakeCardFiles, intakeSummary, normalizeItem, parseBoardPage } = await toolkit.load('lib/board.mjs');
 const {
   blockedClaimDrift,
   formatDrift,
@@ -699,7 +700,7 @@ test('ANTI-REGRESSION: intakeCards keeps every numbered pickable card and every 
 // A Linear card's number is its identifier string. The board read of the GitHub fixtures cannot carry one,
 // so these are raw items as the Linear reader will hand them over. Every expected line is written by hand
 // from the identifier forms and the team-then-number order.
-test('a Linear card prints by its identifier in rows, drift lines, blockers and the intake section, ordered by team then number', () => {
+test('a Linear card prints by its identifier in rows, drift lines, blockers and the intake summary and files, ordered by team then number', () => {
   const raw = (number, status, extra = {}) => ({
     content: { number, state: 'OPEN' }, status, title: `t ${number}`, routing: null, labels: [], assignees: [], blockers: [], closingPullRequests: [], ...extra,
   });
@@ -731,13 +732,17 @@ test('a Linear card prints by its identifier in rows, drift lines, blockers and 
 
   const read = { body: 'b', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
   const details = new Map([...candidates, ...claims].map(({ number }) => [number, { ...read, number, ...(number === 'ENG-9' ? { parent: 'ENG-1' } : {}) }]));
-  const document = intakeDocument({ listing: 'listing', candidates, claims, numberless, details });
+  const files = new Map(intakeCardFiles({ candidates, claims, details }).map((file) => [file.number, file]));
+  assert.deepEqual([...files.values()].map(({ name }) => name), ['ENG-9.txt', 'ENG-10.txt', 'FAB-1.txt', 'ENG-2.txt', 'ENG-4.txt', 'ENG-30.txt']);
+  const document = intakeSummary({ listing: 'listing', candidates, claims, numberless, details, directory: 'out', files });
   assert.deepEqual(document.filter((line) => line.startsWith('===')), [
     '=== ENG-9 [Ready] t ENG-9 ===', '=== ENG-10 [Ready] t ENG-10 ===', '=== FAB-1 [Ready] t FAB-1 ===',
     '=== ENG-2 [Backlog] t ENG-2 ===', '=== ENG-4 [In progress] t ENG-4 ===', '=== ENG-30 [In progress] t ENG-30 ===',
   ]);
   assert.ok(document.includes('open blockers: FAB-3, ENG-12'));
   assert.ok(document.includes('parent: ENG-1'));
+  assert.ok(document.includes(`card text: ${join('out', 'ENG-9.txt')}, ${files.get('ENG-9').lines.length} line(s)`));
+  assert.ok(files.get('ENG-9').lines.includes('open blockers: FAB-3, ENG-12'));
 
   details.set('ENG-10', { number: 'ENG-10', unavailable: 'gh: timed out' });
   assert.equal(

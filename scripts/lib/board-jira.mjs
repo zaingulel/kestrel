@@ -284,6 +284,29 @@ export function adfText(document) {
   return walk(document);
 }
 
+// The detail fields for the description's What to build section: `whatToBuild`, the text under the top-level
+// What to build heading up to the next heading of its level or higher (null when blank). Without such a heading,
+// no field when every top-level node is a paragraph or the description is null (the intake then reads a literal
+// Markdown section from the body text, as jira-card.mjs writes it), else `whatToBuildUnread`, because other
+// native nodes hold Markdown-looking text that is no section. adfText drops heading markers, so the section is
+// found in the ADF nodes, whose compared heading levels must be integers 1 to 6.
+function whatToBuildOf(description) {
+  const textOf = (nodes) => adfText({ type: 'doc', version: 1, content: nodes });
+  const levelOf = (heading) => {
+    const level = heading.attrs?.level;
+    if (!Number.isInteger(level) || level < 1 || level > 6) throw problem('ADF heading level is malformed');
+    return level;
+  };
+  const nodes = description?.content ?? [];
+  const start = nodes.findIndex((node) => node.type === 'heading' && textOf([node]).trim().toLowerCase() === 'what to build');
+  if (start < 0) return nodes.every((node) => node.type === 'paragraph') ? {} : { whatToBuildUnread: 'not extracted from a native Jira body without a What to build heading' };
+  const level = levelOf(nodes[start]);
+  const after = nodes.slice(start + 1);
+  const end = after.findIndex((node) => node.type === 'heading' && levelOf(node) <= level);
+  const text = textOf(end < 0 ? after : after.slice(0, end));
+  return { whatToBuild: text.trim() === '' ? null : text };
+}
+
 function commentsOf(issue, project, exec) {
   const comments = [];
   const given = new Set();
@@ -328,7 +351,7 @@ export function jiraCardDetails(exec, ids) {
       const parent = parentOf(issue, project, exec);
       const body = adfText(issue.fields.description);
       const comments = commentsOf(issue, project, exec);
-      return [number, { number, body, parent, comments: comments.map((comment) => comment.body), commentCount: comments.length, commentsUnavailable: null }];
+      return [number, { number, body, ...whatToBuildOf(issue.fields.description), parent, comments: comments.map((comment) => comment.body), commentCount: comments.length, commentsUnavailable: null }];
     } catch (error) {
       if (error.rateLimited) rateLimit = error;
       return [number, { number, unavailable: error.message }];

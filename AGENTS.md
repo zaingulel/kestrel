@@ -80,10 +80,14 @@ Every rule this file does not hold in full has one home:
 | Advance approval and the pre-approved run | [`resume`](.agents/skills/resume/SKILL.md), "2. Work-pick" |
 | Builder seat choice; the machinery admissions, the friction route and how machinery leaves; what a plan for an interface change carries, and who decides where the `frontend-design` skill and the design system disagree; plan approval's steps | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
-| The decision card and saved write-up; batch review of a run's waiting jobs, its verdicts and the stage 2 measures | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
+| The decision card and saved write-up; batch review of a run's waiting jobs, its verdicts, how an owner answer reaches a job from the coordinator's chat and the stage 2 measures | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
 | Review tiers, their two questions and the guard rule; the setting-only seat change; the cross-family route, its authorization and its single-family, cloud-build and unreachable-seat forms; when `security-reviewer` and the external review add-on run; driving visual work, its views and its accessibility audit | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
 | Every other external review rule where that add-on is on: its metering and allowance, settling threads, rebases and provider unavailability | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
-| Fingerprints, pinning, real files and vendored copies; seat overrides and their limits; runtimes and their files; switching the external review add-on and the documentation sweep; the settings file's other keys; what a repository needs before running the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
+| Routine board updates: the coordinating session's standing authorisation for the board bookkeeping, comments and card filings the workflow prescribes | [`closeout`](.agents/skills/closeout/SKILL.md), "Routine board updates" |
+| Disposable job cleanup: removing without further approval what a session made for its own job, and any file, folder, worktree or branch the workflow made that a session, in a job or not, finds: read before reporting, deleting or leaving one | [`closeout`](.agents/skills/closeout/SKILL.md), "Disposable job cleanup" |
+| Fingerprints, pinning, real files and vendored copies; seat overrides and their limits; runtimes and their files; switching the external review add-on, the Herdr add-on and the documentation sweep; the settings file's other keys; what a repository needs before running the workflow | The [`shared-files`](.agents/skills/shared-files/SKILL.md) skill |
+| Administrator bypass: who may hold the bypass of the required check on `main`, write deploy keys included | [`shared-files`](.agents/skills/shared-files/SKILL.md), "Administrator bypass" |
+| Guard and capability activation: the git guard and permission allow list a Claude Code session in a job worktree runs under, and activating a card or release that carries a guard with the capability it bounds | [`shared-files`](.agents/skills/shared-files/SKILL.md), "Guard and capability activation" |
 | The tracker and triage vocabulary the vendored skills expect | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
 | What to ask the owner and what agents decide when `to-spec` or an interview for it shapes a specification: read before asking anything | [`to-issues`](.agents/skills/to-issues/SKILL.md), "Specification entry" |
 | The vendored skills' count, upstream repositories and commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
@@ -107,27 +111,20 @@ Every rule this file does not hold in full has one home:
    that yes. It approves the card and covers the whole deliver sequence in the `resume` skill, push to auto-squash
    merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. An advance
    approval is this yes only where fetched `main` settings explicitly hold `"preApprovedRun": true` at push and no
-   stop holds. `closeout` follows the merge unasked.
+   stop holds. On Claude Code the yes also holds in the job session of that card when the coordinator carries it as
+   `resume` says under "7. Push authorisation", only for the decision card the owner was shown. `closeout` follows the
+   merge unasked.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
    is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
    to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
    presented again before that yes. Any plan review the card requires stays the agents' own review and no part of this
    gate, and both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
 4. **Advance approval** is the owner's yes to a card through merge, given ahead of the work as an `Approved:` card
-   comment posted only on the owner's own message. It replaces the pick or push yes only where fetched `main`
-   settings explicitly hold `"preApprovedRun": true`; an absent file or key, or `false`, leaves both approvals with
-   the owner. With that setting a pre-approved run merges recorded cards, its publishing held by the git guard;
-   `resume` owns the steps under "2. Work-pick" and the stops under "7. Push authorisation".
-
-**Routine board updates.** For an owner-approved job, the coordinating session has the owner's standing
-authorisation for the board status and routing updates, job assignment and claim bookkeeping prescribed by this
-workflow, including moving the card to `Awaiting push` before requesting push authorisation. The workflow's
-eligibility, ownership and evidence checks and all owner gates still apply. This authorises board bookkeeping only,
-with no permission to publish code. In a product manager or pre-approved run it also covers the `Needs owner` comment
-and move to `Backlog` that `resume` prescribes, and filing the suggested cards and split children it prescribes. It also covers
-the `Verdict:` comment `resume` prescribes when the owner answers a run's job, and the `Needs owner` comment and move
-to `Backlog` a no prescribes. A session the owner starts or reopens may rewrite that comment to `Returned:`, only on
-the owner's own message; a run never does.
+   comment the owner posts outside any agent session; the git guard refuses every agent session a shell command holding
+   `Approved:` that its hook sees. It replaces the pick or push yes only where fetched `main` settings explicitly hold
+   `"preApprovedRun": true`; an absent file or key, or `false`, leaves both approvals with the owner. With that setting
+   a pre-approved run merges recorded cards, its publishing held by the git guard; `resume` owns the steps under "2.
+   Work-pick" and the stops under "7. Push authorisation".
 
 A material change to the approved outcome, product meaning, or a trade-off goes back to the owner as a
 plain-language decision before it is built; a parser, state machine, or framework the outcome did not name is
@@ -135,27 +132,10 @@ such a change. Anything short of that which the job surfaces and can sensibly fi
 same files under the same tests, rides along and is named in the pull request body; a follow-up card is filed,
 without asking, only for work that genuinely cannot; in a product manager run it is a suggested card, as `resume` says.
 
-**Disposable job cleanup.** The session must remove verified disposable, inactive files and folders it created
-for its own approved job, inside or outside the job worktree, without further approval and whether or not a
-verifier reported them. This project rule overrides the general machine rule requiring deletion approval only
-for this exception and the leftovers it covers below. Session creation evidence must establish the exact path and
-ownership; a name pattern, memory, summary or previous session alone does not establish either. Disposable
-excludes owner files, tracked deliverables, and evidence or plans still needed for unfinished work or handoff;
-another job's artifacts are leftovers. Verify inactive use and follow
-[closeout's cleanup steps](.agents/skills/closeout/SKILL.md); existing worktree, branch, server and container
-safeguards remain.
-
-The same rule covers leftovers. Any session, in a job or not, that finds a file, folder, worktree or branch the
-workflow made and the paragraph above does not settle reads
-[Leftover rule](.agents/skills/closeout/SKILL.md#leftover-rule) in the `closeout` skill before it reports, deletes
-or leaves it. Only a leftover that investigation shows dead is deleted without further approval. A safeguard's refusal
-keeps the target and is reported with the evidence, except for the two verified branch exceptions that
-[closeout step 5](.agents/skills/closeout/SKILL.md) owns. This grants no general deletion or publication authority;
-other destructive actions keep exact-target approval.
-
 An approval covers only the question it answered. After a context compaction, reread the owner's latest messages
 before acting on one; an approval whose question is no longer in view is asked again. A memory, summary or earlier
-session never grants approval, except the start message gate one names and gate four's record.
+session never grants approval, except the start message gate one names, gate four's record and the carried yes gate two
+names.
 
 ## Compact instructions
 
@@ -185,11 +165,11 @@ chat; push authorisation waits for that image.
 
 Push only with owner authorisation, through a draft pull request. A change the repository's
 `scripts/gates/pre-push-main` admits whole is instead pushed, on the same authorisation, as a fast-forward of `main`
-from the job worktree (`git push origin HEAD:main`), its commit carrying `Closes #<issue>`; no pull request opens and no
-workflow runs. The gate alone decides what qualifies: documentation by its path and, where the gate judges changed
-lines, a setting-only seat change. The push is judged by the gate as it stands on the remote's `main`, never by the
-pushed checkout's copy, so a commit cannot admit itself by changing the gate or a file it loads. A repository without
-that gate on `main` has no direct route.
+from the job worktree (`git push origin HEAD:main`), its commit carrying `Closes #<issue>`; no pull request opens, and
+only a workflow the repository triggers on a push to `main` runs. The gate alone decides what qualifies: documentation
+by its path and, where the gate judges changed lines, a setting-only seat change. The push is judged by the gate as it
+stands on the remote's `main`, never by the pushed checkout's copy, so a commit cannot admit itself by changing the gate
+or a file it loads. A repository without that gate on `main` has no direct route.
 
 New executable machinery in the workflow itself, or an addition to existing machinery, needs an admission the `resume`
 skill's machinery rule lists under "4. Plan". Prefer a native feature over custom code, a hook over a script, and a
@@ -208,25 +188,11 @@ and reaches any other repository only through the manifest: by an install, which
 and leaves an identical one as it is, or by an update to a named release of the canonical repository through its
 verified manifest. An adopter's copy of a shared file differs from the canonical bytes only in the value of a seat's
 model, effort or turn-limit line that the adopter's own committed seat settings file names. An adopter carries no file
-of a runtime its settings file does not name, of the external review add-on unless that file turns it on, or of the
-documentation sweep's shared files where that file turns it off, and a file at one of those paths is refused like a
-changed byte. A shared change reaches adopters when the owner publishes a release and each adopter applies it on an
-update card; an urgent fix is authored in the canonical repository, released, and applied on the owner's decision.
-
-Whoever can use the administrator bypass of the required check on `main` can put any commit on `main` when the local
-hook is skipped: the holders of that role and every write deploy key, which GitHub admits by the same bypass, so the
-repository keeps the role to the owner and carries no write deploy key.
-
-A Claude Code session started in the root checkout keeps that checkout's git guard after it enters a job worktree,
-while it reads the permission allow list from the worktree. A card or release may carry both a guard and the
-capability it bounds. Activate that combined update independently in each affected repository: stop its old Claude
-Code sessions before applying it; merge and check the reviewed change in the canonical repository, or apply and
-check the reviewed named release in an adopter; advance the operating root to the reviewed state; then start fresh
-sessions, review and trust the current hooks, and verify matching guard and
-permission configuration before expanded use. Updating a job alone leaves its operating root unchanged. An
-incomplete update, stale root or unavailable activation keeps expanded use unavailable: report the cause and use
-the update's existing recovery, preserving intentional edits and restoring the trusted baseline before retrying an
-incomplete update. An intentional adopter exception needs owner agreement and lives outside the shared files.
+of a runtime its settings file does not name, of the external review add-on unless that file turns it on, of the Herdr
+add-on unless that file turns it on, or of the documentation sweep's shared files where that file turns it off, and a
+file at one of those paths is refused like a changed byte. A shared change reaches adopters when the owner publishes a
+release and each adopter applies it on an update card; an urgent fix is authored in the canonical repository, released,
+and applied on the owner's decision.
 
 <!-- factory-shared:end -->
 

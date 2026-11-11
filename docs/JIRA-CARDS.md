@@ -21,8 +21,8 @@ has accepted writes. Synthetic command workflows and read-only connection checks
    describe those replies.
 3. Supply only the nonsecret mappings below to init. Save the credential file privately as [Credentials](#credentials)
    says. Init makes no Jira request and asks for no email address or token.
-4. Run `node scripts/board.mjs --intake`. Correct metadata or visibility refusals before picking work. A read-only
-   account can check connection and reads; it cannot establish that creating, assigning or moving will work.
+4. Run `node scripts/board.mjs --intake <folder>`. Correct metadata or visibility refusals before picking work. A
+   read-only account can check connection and reads; it cannot establish that creating, assigning or moving will work.
 
 ### Configuration
 
@@ -112,10 +112,11 @@ The board recognizes closing pull requests only from the configured repository t
 exact head `job/<KEY>` and that standalone body line. Open pull requests, including drafts, and merged pull requests
 qualify as evidence; abandoned, closed-unmerged pull requests, forks, other bases and mere mentions do not.
 
-`node scripts/board.mjs` reads the pick view, `--json` its normalized data, `--intake` the intake document and
-`--closeout` the strict scan. The intake header is `Board jira project <KEY> at <site>`. A genuinely empty Jira board
-is valid. Failed board reads exit 1, or 2 under intake. Unavailable card details are labelled `UNAVAILABLE`, never
-silently replaced with empty text. See the command's [implementation](../scripts/board.mjs).
+`node scripts/board.mjs` reads the pick view, `--json` its normalized data, `--intake <folder>` the intake summary, each
+card's full text in that folder, and `--closeout` the strict scan. The intake header is
+`Board jira project <KEY> at <site>`. A genuinely empty Jira board is valid. Failed board reads exit 1, or 2 under
+intake. Unavailable card details are labelled `UNAVAILABLE`, never silently replaced with empty text. See the command's
+[implementation](../scripts/board.mjs).
 
 The reader validates native issue ID, exact requested key and project ID, not just a key prefix. A missing, blank or
 non-string summary, missing description or missing required document content is unavailable evidence, not empty card
@@ -160,7 +161,8 @@ ENG-1 as its inward blocker under the configured link type. Open blockers affect
 
 ## Claims and withdrawal
 
-Apply the free-card, race and claim rules of [resume](../.agents/skills/resume/SKILL.md#3-start-the-job) using these rows.
+Apply the free-card, race and claim rules of [resume's claim reads](../.agents/skills/resume/references/claim-reads.md)
+using these rows.
 A complete card read has exit 0, one state, one assignee set, one viewer and comments last, after all pages. Compare
 assignees and claim authors by exact `accountId`, never display name. The board row must identify `jira`, the configured
 project and the intake heading's column; compare the configured site with the intake header as well.
@@ -196,7 +198,8 @@ remain in their authoritative skills. This table also replaces Linear-specific a
 
 | Step | Jira action |
 |---|---|
-| Intake and card context | `board.mjs --intake`, then `jira-card.mjs text <KEY>`; use the key without `#` |
+| Intake and card context | `board.mjs --intake <folder>`, then `jira-card.mjs text <KEY>`; use the key without `#` |
+| Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses a Jira install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the rows of this table |
 | Free-card and claim reads | `jira-card.mjs view <KEY>` and `view <KEY> --board`, with completeness and identity checks above |
 | Assign, claim or withdraw | The account-ID operations in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs <KEY> "Awaiting push"` before requesting push authorization |

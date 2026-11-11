@@ -10,11 +10,12 @@
 // The two answers are separate questions, and neither stands in for the other:
 // leftOutCause: why a tree with these settings must hold nothing at a path, or null where the tree installs it. The
 // path's runtime is not named or, failing that, it is the Greptile add-on's and the add-on is off or, failing that, it
-// is one of the documentation sweep's six files or the documentation standard and the sweep is off.
+// is the Herdr add-on's and that add-on is off or, failing that, it is one of the documentation sweep's six files or
+// the documentation standard and the sweep is off.
 // needNotResolveCause: why a reference to a path need not resolve in a tree with these settings, or null where it
 // must. The path's runtime is not named or, failing that, it is one of the sweep's six files, the documentation
 // standard or the two manuals and the sweep is off or, failing that, it is the direction page, whatever the settings.
-// Never the add-on.
+// Never either add-on.
 // Both take the settings readSettingsHeader returns, which reach it only as settings-file text; a tree with no file is
 // judged as the text NO_SETTINGS_FILE, so what an absent key means is written once (treeSettings).
 //
@@ -25,6 +26,10 @@
 // every install (null). A shared file of every install never imports one of those five script files.
 // isGreptilePath: the Greptile add-on's files are everything under .agents/skills/greptile/, .claude/skills/greptile/
 // and .greptile/. A tree installs them only where its settings file holds `"greptile": true`.
+// isHerdrPath: the Herdr add-on's files are everything under .agents/herdr/, .agents/skills/herdr-setup/ and
+// .claude/skills/herdr-setup/, the owner-queue scripts and tests named in HERDR_PATHS, and the lead: scripts/lead.mjs,
+// scripts/lib/lead.mjs and scripts/lib/lead.test.mjs. A tree installs them only where its settings file holds
+// `"herdr": true`.
 // The settings file's `docSweep` key turns the documentation sweep's files off with `false`; with no key it is on. The
 // sweep's shared files are the six the sweep-scope check owns (SWEEP_PATHS) and the documentation standard
 // (SWEEP_STANDARD). A tree whose sweep is off leaves them out; a reference to one of them, or to one of the two manuals
@@ -63,6 +68,22 @@ const GREPTILE_FOLDERS = ['.agents/skills/greptile/', '.claude/skills/greptile/'
 /** Whether a shared path is one of the Greptile add-on's files. Exact string comparison. */
 export const isGreptilePath = (path) => GREPTILE_FOLDERS.some((folder) => path.startsWith(folder));
 
+const HERDR_PATHS = [
+  '.agents/herdr/',
+  '.agents/skills/herdr-setup/',
+  '.claude/skills/herdr-setup/',
+  'scripts/owner-queue.mjs',
+  'scripts/lib/owner-queue.mjs',
+  'scripts/lib/owner-queue.test.mjs',
+  'scripts/lib/herdr-queue.test.mjs',
+  'scripts/lead.mjs',
+  'scripts/lib/lead.mjs',
+  'scripts/lib/lead.test.mjs',
+];
+
+/** Whether a shared path is one of the Herdr add-on's files: an entry ending in / owns everything under it, any other entry only itself. Exact string comparison. */
+export const isHerdrPath = (path) => HERDR_PATHS.some((entry) => (entry.endsWith('/') ? path.startsWith(entry) : path === entry));
+
 const SWEEP_PATHS = new Set([
   '.github/workflows/sweep-scope.yml',
   'scripts/lib/sweep-scope-corpus.mjs',
@@ -84,9 +105,10 @@ const DIRECTION_PAGE = 'docs/PRODUCT-DIRECTION.md';
 const DIRECTION_PAGE_CAUSE = "the direction page is the owner's own and a repository may hold none";
 
 /** Why a tree with these settings must hold nothing at the path, or null where it installs the path. */
-export function leftOutCause({ runtimes, greptile, docSweep }, path) {
+export function leftOutCause({ runtimes, greptile, herdr, docSweep }, path) {
   if (!installs(runtimes, path)) return runtimeCause(path);
   if (!greptile && isGreptilePath(path)) return 'the settings file does not turn the Greptile add-on on';
+  if (!herdr && isHerdrPath(path)) return 'the settings file does not turn the Herdr add-on on';
   return !docSweep && SWEEP_SHARED.has(path) ? SWEEP_OFF_CAUSE : null;
 }
 
@@ -146,10 +168,13 @@ export function checkContained(root, path) {
   }
 }
 
+// The top-level keys of the settings file, in the order its reader names them.
+export const SETTINGS_KEYS = Object.freeze(['version', 'runtimes', 'seats', 'planApproval', 'greptile', 'herdr', 'docSweep', 'crossFamilyReview', 'productManager', 'preApprovedRun']);
+
 // What a tree with no settings file is judged as.
 const NO_SETTINGS_FILE = '{"version":1,"seats":{}}';
 
-/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun, a valid `runtimes` value, a `planApproval`, a `greptile`, a `docSweep`, a `productManager` and a `preApprovedRun` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
+/** The settings file's parsed object, the runtimes it names, whether it turns the Greptile add-on on, whether it turns the Herdr add-on on and whether it leaves the documentation sweep on and whether it records the owner's authorization of cross-family review, once its top-level shape holds: one JSON object, version 1, no key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun, a valid `runtimes` value, a `planApproval`, a `greptile`, a `herdr`, a `docSweep`, a `productManager` and a `preApprovedRun` that are each true or false when present, and a `crossFamilyReview` that is true when present and only where both runtimes are named. An undefined `text`, which is what readSettingsFile gives for a tree with no file, is judged as NO_SETTINGS_FILE. Throws a refusal naming `label`. */
 export function readSettingsHeader(text, label) {
   let settings;
   try {
@@ -160,17 +185,18 @@ export function readSettingsHeader(text, label) {
   if (!isRecord(settings)) throw refusal(label, 'file', 'must hold one JSON object', settings);
   if (settings.version !== 1) throw refusal(label, 'version', 'is unsupported by this copy of the shared workflow (only 1)', settings.version, true);
   for (const key of Object.keys(settings)) {
-    if (key !== 'version' && key !== 'runtimes' && key !== 'seats' && key !== 'planApproval' && key !== 'greptile' && key !== 'docSweep' && key !== 'crossFamilyReview' && key !== 'productManager' && key !== 'preApprovedRun') throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun', key, true);
+    if (!SETTINGS_KEYS.includes(key)) throw refusal(label, 'file', 'holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun', key, true);
   }
   if (settings.planApproval !== undefined && typeof settings.planApproval !== 'boolean') throw refusal(label, 'planApproval', 'must be true or false', settings.planApproval);
   if (settings.greptile !== undefined && typeof settings.greptile !== 'boolean') throw refusal(label, 'greptile', 'must be true or false', settings.greptile);
+  if (settings.herdr !== undefined && typeof settings.herdr !== 'boolean') throw refusal(label, 'herdr', 'must be true or false', settings.herdr);
   if (settings.docSweep !== undefined && typeof settings.docSweep !== 'boolean') throw refusal(label, 'docSweep', 'must be true or false', settings.docSweep);
   if (settings.productManager !== undefined && typeof settings.productManager !== 'boolean') throw refusal(label, 'productManager', 'must be true or false', settings.productManager);
   if (settings.preApprovedRun !== undefined && typeof settings.preApprovedRun !== 'boolean') throw refusal(label, 'preApprovedRun', 'must be true or false', settings.preApprovedRun);
   if (settings.crossFamilyReview !== undefined && settings.crossFamilyReview !== true) throw refusal(label, 'crossFamilyReview', 'must be true, or left out to record no authorization', settings.crossFamilyReview);
   const runtimes = readRuntimes(settings.runtimes, label);
   if (settings.crossFamilyReview === true && runtimes.length < RUNTIMES.length) throw refusal(label, 'crossFamilyReview', 'is refused where runtimes names one runtime', settings.crossFamilyReview);
-  return { settings, runtimes, greptile: settings.greptile === true, docSweep: settings.docSweep !== false, crossFamilyReview: settings.crossFamilyReview === true };
+  return { settings, runtimes, greptile: settings.greptile === true, herdr: settings.herdr === true, docSweep: settings.docSweep !== false, crossFamilyReview: settings.crossFamilyReview === true };
 }
 
 /** The text of the settings file of the tree at `root`, or undefined when the tree has none. Refuses one under a symlinked directory or one that is not a regular file, before any read. */

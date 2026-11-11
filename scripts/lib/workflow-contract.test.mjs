@@ -16,7 +16,10 @@ const SETTINGS = treeSettings(ROOT);
 const PRESENT = SETTINGS.runtimes;
 const without = (runtime) => !PRESENT.includes(runtime) && `the settings file names no ${runtime} runtime`;
 const RESUME = readFileSync(resolve(ROOT, '.agents/skills/resume/SKILL.md'), 'utf8');
-const RUNS = readFileSync(resolve(ROOT, '.agents/skills/resume/references/runs.md'), 'utf8');
+const PRODUCT_MANAGER_RUN = readFileSync(resolve(ROOT, '.agents/skills/resume/references/product-manager-run.md'), 'utf8');
+// The main file and every reference, for a rule that may sit in any of them. A test of text that stays in the main file reads RESUME.
+const RESUME_REFERENCES = '.agents/skills/resume/references';
+const RESUME_CORPUS = [RESUME, ...readdirSync(resolve(ROOT, RESUME_REFERENCES)).sort().map((name) => readFileSync(resolve(ROOT, RESUME_REFERENCES, name), 'utf8'))].join('\n');
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // The independent oracle is the root-only cleanup contract and native hook exit protocol.
@@ -34,6 +37,7 @@ test('ANTI-REGRESSION: cleanup approval is bound to the trusted root hook', { sk
     ...gitEnvironment(),
     PRODUCT_MANAGER_RUN_SESSION: undefined,
     PRE_APPROVED_RUN_SESSION: undefined,
+    CARRIED_PUSH_YES: undefined,
     GIT_CONFIG_GLOBAL: join(fixture, 'no-global-config'),
     GIT_CONFIG_NOSYSTEM: '1',
   };
@@ -169,7 +173,7 @@ const GUARD_MODULES = [
   'scripts/lib/runtimes.mjs',
 ];
 // An undefined value leaves a variable out of the hook's environment, whatever session runs the suite.
-const MARKS_OFF = { GH_REPO: undefined, GH_HOST: undefined, PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined, CLAUDE_CODE_ENTRYPOINT: undefined };
+const MARKS_OFF = { GH_REPO: undefined, GH_HOST: undefined, PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined, CARRIED_PUSH_YES: undefined, CLAUDE_CODE_ENTRYPOINT: undefined };
 const RUN_START = '2026-11-04T12:00:00Z';
 const withoutStandInGh = process.platform === 'win32' && 'a stand-in gh.exe cannot be a script';
 
@@ -367,6 +371,34 @@ test('ANTI-REGRESSION: the real Claude hook admits a marked delivery push for it
 
 test('ANTI-REGRESSION: the real Codex hook admits a marked delivery push for its own card with a valid advance approval', { skip: without('codex') || withoutStandInGh }, (t) => {
   assertAdmitsMarkedDeliveryPush(t, 'codex');
+});
+
+// A carried push yes needs no approval record, so the stand-in gh holds none and the push must not read one.
+test('ANTI-REGRESSION: the Claude guard bounds a carried push yes session to its own card and refuses an unreadable payload under its mark', { skip: without('claude') || withoutStandInGh }, (t) => {
+  const { dir, git, hook, hookRaw } = guardFixture(t, 'claude', 'job/7');
+  git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
+  const gh = standInGh(dir, { approved: false });
+  const marked = (card) => ({ PATH: `${gh.bin}${delimiter}${process.env.PATH}`, CARRIED_PUSH_YES: card });
+
+  const delivery = hook('git push -u origin job/7', marked('7'));
+  assert.equal(delivery.status, 0, delivery.stderr);
+  assert.equal(delivery.stderr, '');
+  assert.ok(!gh.calls().some(([api, graphql]) => api === 'api' && graphql === 'graphql'), 'a carried push yes reads no advance approval');
+
+  const toMain = hook('git push origin HEAD:main', marked('7'));
+  assert.equal(toMain.status, 2, toMain.stderr);
+  assert.ok(toMain.stderr.includes('a carried push yes session pushes only its own branch'), toMain.stderr);
+
+  const otherCard = hook('git push -u origin job/7', marked('8'));
+  assert.equal(otherCard.status, 2, otherCard.stderr);
+  assert.ok(otherCard.stderr.includes('a carried push yes session publishes only its carried card'), otherCard.stderr);
+
+  const noCommand = JSON.stringify({ cwd: join(dir, 'repo'), tool_input: {} });
+  for (const input of ['this is not json', noCommand]) {
+    const unreadable = hookRaw(input, marked('7'));
+    assert.equal(unreadable.status, 2, `${input}: ${unreadable.stderr}`);
+    assert.ok(unreadable.stderr.includes('a carried push yes session'), unreadable.stderr);
+  }
 });
 
 function nativeRunFixture(dir, git, hookRaw, kind) {
@@ -849,7 +881,7 @@ test('the resume skill with its references, and the cross-review and to-issues s
   const refuse = (path, markdown) => {
     for (const { where, body, shapes } of skillShapeFindings(markdown)) {
       // This Codex invocation is outside Claude Code's single-command restriction.
-      if (path === '.agents/skills/resume/SKILL.md' && body === 'cd "<absolute-job-worktree>" && <command>') continue;
+      if (path === '.agents/skills/resume/references/codex.md' && body === 'cd "<absolute-job-worktree>" && <command>') continue;
       assert.fail(`${path}, ${where}, must be one plain command, but has ${shapes.join(', ')}:\n${body}`);
     }
   };
@@ -872,22 +904,21 @@ test('ANTI-REGRESSION: the resume skill reads the plan approval setting with a c
 });
 
 test('ANTI-REGRESSION: the resume skill reads the direction page only from the fetched main', () => {
-  assert.deepEqual((RESUME + '\n' + RUNS).match(/git show\s+[^\s`]*PRODUCT-DIRECTION\.md[^\s`]*/g), [
+  assert.deepEqual(RESUME_CORPUS.match(/git show\s+[^\s`]*PRODUCT-DIRECTION\.md[^\s`]*/g), [
     'git show origin/main:docs/PRODUCT-DIRECTION.md',
   ]);
 });
 
 test('ANTI-REGRESSION: the resume skill reads the settings file only from the fetched main', () => {
-  const reads = (RESUME + '\n' + RUNS).match(/git show\s+[^\s`]*factory-settings\.json[^\s`]*/g) ?? [];
+  const reads = RESUME_CORPUS.match(/git show\s+[^\s`]*factory-settings\.json[^\s`]*/g) ?? [];
   assert.ok(reads.length > 0, 'the resume skill reads the settings file with git show');
   for (const read of reads) assert.equal(read, 'git show origin/main:.agents/factory-settings.json');
 });
 
-// Both runs judge a waiting job's overlap by this one listing, the pre-approved run through the product manager run's
-// step 5. The manifest is left out because each entry changes only with the shared file it fingerprints, which the
+// The product manager run judges a waiting job's overlap by this one listing. The manifest is left out because each entry changes only with the shared file it fingerprints, which the
 // listing keeps. Recurring cost: one scan of text this file already reads.
-test('both runs list the files of a waiting job with one command that leaves out only the manifest', () => {
-  const listings = inlineSpans(splitMarkdown(RESUME + '\n' + RUNS).prose)
+test('the product manager run lists the files of a waiting job with one command that leaves out only the manifest', () => {
+  const listings = inlineSpans(splitMarkdown(RESUME_CORPUS).prose)
     .map((span) => span.body.replace(/\s+/g, ' '))
     .filter((body) => body.includes('origin/main...job/'));
   assert.deepEqual(listings, [`git diff --name-only --no-renames origin/main...job/<card> -- ':(top,exclude)${MANIFEST_PATH}'`]);
@@ -896,17 +927,19 @@ test('both runs list the files of a waiting job with one command that leaves out
 // A leading environment assignment is captured, so a wrapper launch that loses its run mark fails here.
 // Actual Claude deny arguments are protected by the executable launcher wire test.
 // Recurring cost: one match over text this file already reads; update only after reviewing a launch change.
-test('ANTI-REGRESSION: each run starts its Claude card sessions only with its one pinned launch: a product manager run marked and refusing push and merge, a pre-approved run marked with its run start', () => {
-  assert.deepEqual((RESUME + '\n' + RUNS).replace(/\\\n\s*/g, ' ').match(/(?:\b[A-Z_]+=\S+ )?\b(?:claude\b[^`\n]*\s(?:-p|--print)\b|node scripts\/product-manager-run\.mjs --claude-card\b)[^`\n]*|\bcodex exec\b[^`\n]*/g), [
-    'PRODUCT_MANAGER_RUN_SESSION=1 node scripts/product-manager-run.mjs --claude-card <absolute-logs-base>',
+test('ANTI-REGRESSION: each run starts its Claude card sessions only with its pinned launches: a product manager run marked and refusing push and merge, a pre-approved run marked with its run start, each also carrying an owner answer', () => {
+  assert.deepEqual(RESUME_CORPUS.replace(/\\\n\s*/g, ' ').match(/(?:\b[A-Z_]+=\S+ )?\b(?:claude\b[^`\n]*\s(?:-p|--print)\b|node scripts\/product-manager-run\.mjs --claude-card\b)[^`\n]*|\bcodex exec\b[^`\n]*/g), [
     'PRE_APPROVED_RUN_SESSION=<run-start> node scripts/product-manager-run.mjs --claude-card <absolute-logs-base>',
     'PRE_APPROVED_RUN_SESSION=<run-start> node scripts/product-manager-run.mjs --claude-card <phase-log-base> --prepared-context <context-file>',
+    'PRODUCT_MANAGER_RUN_SESSION=1 node scripts/product-manager-run.mjs --claude-card <absolute-logs-base>',
+    'PRODUCT_MANAGER_RUN_SESSION=1 node scripts/product-manager-run.mjs --claude-card <absolute-logs-base> --carry <absolute-logs-base>.answer.json',
+    'PRE_APPROVED_RUN_SESSION=<run-start> node scripts/product-manager-run.mjs --claude-card <absolute-logs-base> --carry <absolute-logs-base>.answer.json',
   ]);
 });
 
 // Recurring cost: one read of the run reference.
 test('ANTI-REGRESSION: a suggested card carries its hold in the one call that creates it', () => {
-  const step = RUNS.slice(RUNS.indexOf('10. **Suggested cards.**'), RUNS.indexOf('11. **Splitting a card.**'));
+  const step = PRODUCT_MANAGER_RUN.slice(PRODUCT_MANAGER_RUN.indexOf('10. **Suggested cards.**'), PRODUCT_MANAGER_RUN.indexOf('11. **Splitting a card.**'));
   const creates = step.match(/gh issue create[^`]*/g) ?? [];
   assert.equal(creates.length, 1, 'step 10 must give exactly one create command');
   assert.ok(creates[0].startsWith("gh issue create --title 'Proposed: "), `the create command must set the hold: ${creates[0]}`);
@@ -1071,6 +1104,13 @@ test('npm install activates the git hooks through the prepare script', (t) => {
   );
 });
 
+// Machinery admission: the friction route. The placement sentence did not hold the main resume skill's size through
+// three growth periods, so a measured limit replaces it. Recurring cost: none beyond the existing RESUME read.
+test('the main resume skill stays within 40,000 bytes', () => {
+  const bytes = Buffer.byteLength(RESUME, 'utf8');
+  assert.ok(bytes <= 40000, `.agents/skills/resume/SKILL.md is ${bytes} bytes, over the 40,000-byte limit. Keep intake through build in it; text for a later step, an exception, a held card, advance approval, batch review, a run or one runtime only belongs in a reference under .agents/skills/resume/references/, read through a pointer sentence where its step or case is reached.`);
+});
+
 // The resume skill reads one result as "the hooks are running": a guard hook refusing this command in these words.
 // Every installed real hook runs, because the words are theirs, and the rule is judged in both kinds of checkout,
 // because the suite runs in only one. Recurring cost: one Node start per installed runtime.
@@ -1082,7 +1122,7 @@ test('ANTI-REGRESSION: every installed git guard hook refuses the hook check the
   }
   const input = JSON.stringify({ cwd: ROOT, tool_input: { command: HOOK_CHECK } });
   for (const hook of PRESENT.map((runtime) => `.${runtime}/hooks/block-unsafe-git.mjs`)) {
-    const run = spawnSync(process.execPath, [resolve(ROOT, hook)], { input, encoding: 'utf8', env: { ...gitEnvironment(), PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined } });
+    const run = spawnSync(process.execPath, [resolve(ROOT, hook)], { input, encoding: 'utf8', env: { ...gitEnvironment(), PRODUCT_MANAGER_RUN_SESSION: undefined, PRE_APPROVED_RUN_SESSION: undefined, CARRIED_PUSH_YES: undefined } });
     assert.equal(run.status, 2, `${hook} must refuse the hook check before git runs: ${run.stderr}`);
     assert.ok(run.stderr.includes(REFUSAL), `${hook} must refuse in the words the skill reads: ${run.stderr}`);
   }
@@ -1094,7 +1134,7 @@ test('ANTI-REGRESSION: every installed git guard hook refuses the hook check the
 
 test('the review line has two specified forms, and the template and skills point at them', () => {
   // Hand-written from the owner-approved forms, never extracted from a repo file, so
-  // a drift in the manual's examples or the template cannot silently redefine what the test accepts.
+  // a drift in the template's examples cannot silently redefine what the test accepts.
   const BASE_LINE =
     /^Review: tier=(document|code|sign-off) rounds=([1-9]\d*) raised=(0|[1-9]\d*) fixed=(0|[1-9]\d*) dismissed=(0|[1-9]\d*) deferred=(0|[1-9]\d*)\s*$/;
   const ADD_ON_LINE =
@@ -1155,41 +1195,40 @@ test('the review line has two specified forms, and the template and skills point
     assert.throws(() => assertValidLine(broken, 'fixture'), message, `${broken} was accepted`);
   }
 
-  const manual = readFileSync(resolve(ROOT, 'docs/AI-WORKFLOW.md'), 'utf8').split('\n');
-  const heading = manual.indexOf('## The review line');
-  assert.ok(heading >= 0, 'docs/AI-WORKFLOW.md lost its "## The review line" section');
-  const next = manual.findIndex((l, i) => i > heading && l.startsWith('## '));
-  const section = manual.slice(heading, next === -1 ? undefined : next);
+  const template = readFileSync(resolve(ROOT, '.github/pull_request_template.md'), 'utf8');
+  const lines = template.split('\n');
+  const heading = lines.indexOf('## Review');
+  assert.ok(heading >= 0, '.github/pull_request_template.md lost its "## Review" section');
+  const next = lines.findIndex((l, i) => i > heading && l.startsWith('<details>'));
+  const section = lines.slice(heading, next === -1 ? undefined : next);
   const fences = section.flatMap((l, i) => (l.startsWith('```') ? [i] : []));
   assert.equal(
     fences.length,
     4,
-    'the review line section in docs/AI-WORKFLOW.md must hold exactly two fenced examples, the base form then the add-on form',
+    'the Review section of .github/pull_request_template.md must hold exactly two fenced examples, the base form then the add-on form',
   );
   const [base, addOn] = [section[fences[0] + 1], section[fences[2] + 1]];
-  assertValidLine(base, 'docs/AI-WORKFLOW.md base example');
-  assert.ok(BASE_LINE.test(base), 'the first fenced example in docs/AI-WORKFLOW.md is not the base form');
-  assertValidLine(addOn, 'docs/AI-WORKFLOW.md add-on example');
-  assert.ok(ADD_ON_LINE.test(addOn), 'the second fenced example in docs/AI-WORKFLOW.md is not the add-on form');
+  assertValidLine(base, '.github/pull_request_template.md base example');
+  assert.ok(BASE_LINE.test(base), 'the first fenced example in .github/pull_request_template.md is not the base form');
+  assertValidLine(addOn, '.github/pull_request_template.md add-on example');
+  assert.ok(ADD_ON_LINE.test(addOn), 'the second fenced example in .github/pull_request_template.md is not the add-on form');
 
-  const template = readFileSync(resolve(ROOT, '.github/pull_request_template.md'), 'utf8');
   const example = /for example `([^`]*)`/.exec(template)?.[1];
   assertValidLine(example, '.github/pull_request_template.md');
   assert.ok(BASE_LINE.test(example), 'the pull request template example is not the base form');
   assert.deepEqual(
-    template.split('\n').filter((l) => BASE_LINE.test(l) || ADD_ON_LINE.test(l)),
+    template
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .split('\n')
+      .filter((l) => BASE_LINE.test(l) || ADD_ON_LINE.test(l)),
     [],
-    'the pull request template has a line a parser would read as a real review line',
-  );
-  assert.ok(
-    template.includes('docs/AI-WORKFLOW.md'),
-    'the pull request template no longer names docs/AI-WORKFLOW.md for the review line format',
+    'the pull request template has a line outside an HTML comment that a parser would read as a real review line',
   );
 
-  for (const skill of ['.agents/skills/resume/SKILL.md', '.agents/skills/closeout/SKILL.md']) {
+  for (const [skill, text] of [['.agents/skills/resume', RESUME_CORPUS], ['.agents/skills/closeout/SKILL.md', readFileSync(resolve(ROOT, '.agents/skills/closeout/SKILL.md'), 'utf8')]]) {
     assert.ok(
-      readFileSync(resolve(ROOT, skill), 'utf8').includes('docs/AI-WORKFLOW.md#the-review-line'),
-      `${skill} no longer links to docs/AI-WORKFLOW.md#the-review-line`,
+      text.includes('.github/pull_request_template.md'),
+      `${skill} no longer links to .github/pull_request_template.md`,
     );
   }
 });

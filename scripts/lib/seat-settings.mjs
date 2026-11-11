@@ -14,7 +14,7 @@
 //   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
-//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `docSweep`, `crossFamilyReview`, `productManager` and `preApprovedRun`.
+//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `herdr`, `docSweep`, `crossFamilyReview`, `productManager` and `preApprovedRun`.
 //     `version` is exactly 1; any other version is refused as unsupported by this copy, with the recovery. Another
 //     key is refused with the recovery.
 //  2. `seats` is an object whose only keys are `claude` and `codex`, each an object from seat name to an object of
@@ -46,21 +46,24 @@
 // 11. `greptile`, when present, is `true` or `false`; with no key, as with `false`, the Greptile add-on is off.
 //     Anything else is refused. The release update and the manifest check act on the value: runtimes.mjs names the add-on's
 //     paths, which a tree installs only where the value is `true`.
-// 12. `docSweep`, when present, is `true` or `false`; with no key, as with `true`, the documentation sweep is on.
+// 12. `herdr`, when present, is `true` or `false`; with no key, as with `false`, the Herdr add-on is off.
+//     Anything else is refused. The release update and the manifest check act on the value: runtimes.mjs names the add-on's
+//     paths, which a tree installs only where the value is `true`.
+// 13. `docSweep`, when present, is `true` or `false`; with no key, as with `true`, the documentation sweep is on.
 //     Anything else is refused. The release update and the manifest check act on the value.
-// 13. `crossFamilyReview`, when present, is `true`, and only where both runtimes are present; with no key no
+// 14. `crossFamilyReview`, when present, is `true`, and only where both runtimes are present; with no key no
 //     cross-family review is authorized. Anything else is refused. No update or check acts on the value. `fabraik init`
 //     writes it only on a yes to its disclosure, and the session reads it, as the `resume` skill says under
 //     "6. Verify and review".
-// 14. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
+// 15. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
 //     Anything else is refused. No update or check acts on the value; the session reads it on the fetched `main`, as
 //     the `resume` skill says under "2. Work-pick".
-// 15. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off
+// 16. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off
 //     and a record replaces neither the ordinary pick nor push yes. Anything else is refused. The launcher, board
 //     approval check and publication guard enforce explicit fetched-main true, as the `resume` skill says under
 //     "2. Work-pick"; updates leave the value untouched.
 //
-// The JSON half of rule 1, the list half of rule 9 and rules 10 to 15 are readSettingsHeader (runtimes.mjs), which
+// The JSON half of rule 1, the list half of rule 9 and rules 10 to 16 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is
 // substituteSeatSettings; 7 is overrideProblems. The file half of rule 1 belongs to readSettingsFile (runtimes.mjs); rules 3 and 8 belong to factory-sync.mjs.
 
@@ -119,10 +122,10 @@ function readSeats(seats, label, fromFile, runtimes) {
   return byPath;
 }
 
-/** Parse the settings file's text, or undefined for a tree with no settings file, into the runtimes present, whether the Greptile add-on is on, whether the documentation sweep is on, and a Map from seat path to that seat's values. Throws a refusal naming `label`. */
+/** Parse the settings file's text, or undefined for a tree with no settings file, into the runtimes present, whether the Greptile add-on is on, whether the Herdr add-on is on, whether the documentation sweep is on, and a Map from seat path to that seat's values. Throws a refusal naming `label`. */
 export function parseSettings(text, label) {
-  const { settings, runtimes, greptile, docSweep } = readSettingsHeader(text, label);
-  return { runtimes, greptile, docSweep, seats: readSeats(settings.seats, label, true, runtimes) };
+  const { settings, runtimes, greptile, herdr, docSweep } = readSettingsHeader(text, label);
+  return { runtimes, greptile, herdr, docSweep, seats: readSeats(settings.seats, label, true, runtimes) };
 }
 
 /** The same Map for the nested { claude, codex } form alone, as the manifest's seatDefaults holds it. */
@@ -166,30 +169,63 @@ function lineForm(runtime, name) {
     : { mention: new RegExp(`^${name}\\s*=`), plain: new RegExp(`^${name} = "(${value})"$`), render: (v) => `${name} = "${v}"` };
 }
 
-/**
- * Replace the named setting values of one seat file, touching no other byte. Returns the new bytes and the
- * values that were there. Throws when the path is no seat path, the settings block is missing, or a setting is
- * not carried exactly once in its plain form.
- */
-export function substituteSeatSettings(path, data, values) {
+// The seat's runtime, its lines and its settings block. Throws when the path is no seat path or the block is missing.
+function seatFile(path, data) {
   const target = seatOf(path);
   if (!target) throw new Error(`${path}: is not a seat path`);
   // One byte per character, so bytes that are not valid UTF-8 survive the round trip.
   const lines = data.toString('latin1').split('\n');
   const block = settingsBlock(target.runtime, lines);
   if (!block) throw new Error(`${path}: no settings block found`);
+  return { runtime: target.runtime, lines, block };
+}
+
+// The line numbers inside the settings block that mention one setting.
+function mentionsOf(form, lines, block) {
+  const mentions = [];
+  if (form) {
+    for (let i = block[0]; i < block[1]; i++) if (form.mention.test(lines[i])) mentions.push(i);
+  }
+  return mentions;
+}
+
+// The value of a setting carried exactly once in its plain form. Throws when it is not.
+function plainValue(path, name, form, lines, mentions) {
+  const old = mentions.length === 1 ? form.plain.exec(lines[mentions[0]]) : null;
+  if (!old || (name === 'maxTurns' && !Number.isSafeInteger(Number(old[1])))) {
+    throw new Error(`${path}: setting ${name} is not carried exactly once in the plain form inside the settings block`);
+  }
+  return name === 'maxTurns' ? Number(old[1]) : old[1];
+}
+
+/**
+ * The values of the settings one seat file carries, by name, leaving out a setting the file does not mention.
+ * Throws when the path is no seat path, the settings block is missing, or a setting the file mentions is not
+ * carried exactly once in its plain form.
+ */
+export function seatSettingValues(path, data) {
+  const { runtime, lines, block } = seatFile(path, data);
+  const values = {};
+  for (const name of SETTING_NAMES[runtime]) {
+    const form = lineForm(runtime, name);
+    const mentions = mentionsOf(form, lines, block);
+    if (mentions.length > 0) values[name] = plainValue(path, name, form, lines, mentions);
+  }
+  return values;
+}
+
+/**
+ * Replace the named setting values of one seat file, touching no other byte. Returns the new bytes and the
+ * values that were there. Throws when the path is no seat path, the settings block is missing, or a setting is
+ * not carried exactly once in its plain form.
+ */
+export function substituteSeatSettings(path, data, values) {
+  const { runtime, lines, block } = seatFile(path, data);
   const replaced = {};
   for (const [name, value] of Object.entries(values)) {
-    const form = lineForm(target.runtime, name);
-    const mentions = [];
-    if (form) {
-      for (let i = block[0]; i < block[1]; i++) if (form.mention.test(lines[i])) mentions.push(i);
-    }
-    const old = mentions.length === 1 ? form.plain.exec(lines[mentions[0]]) : null;
-    if (!old || (name === 'maxTurns' && !Number.isSafeInteger(Number(old[1])))) {
-      throw new Error(`${path}: setting ${name} is not carried exactly once in the plain form inside the settings block`);
-    }
-    replaced[name] = name === 'maxTurns' ? Number(old[1]) : old[1];
+    const form = lineForm(runtime, name);
+    const mentions = mentionsOf(form, lines, block);
+    replaced[name] = plainValue(path, name, form, lines, mentions);
     lines[mentions[0]] = form.render(value);
   }
   return { data: Buffer.from(lines.join('\n'), 'latin1'), replaced };

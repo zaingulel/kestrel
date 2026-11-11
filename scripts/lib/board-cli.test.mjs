@@ -12,7 +12,9 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { installFakeGh } from './fake-gh.mjs';
@@ -94,8 +96,9 @@ function runBoard(args, page, extraEnv = {}) {
 // arguments and answers as the fake `gh` does — the slurped board walk, the repository issue
 // walk and item reads from `recovery` (by default a walk that finds nothing the listing lacks),
 // and a detail read only when `details` is supplied; anything else throws, as a failing `gh`
-// makes the real executor throw — and an output sink that collects each stream.
-function runBoardInProcess(args, page, details, recovery = {}) {
+// makes the real executor throw — and an output sink that collects each stream. `injected`
+// adds to main's dependencies, for a write or a directory creation that fails.
+function runBoardInProcess(args, page, details, recovery = {}, injected = {}) {
   let stdout = '';
   let stderr = '';
   const { exec: ghExec, calls } = boardReadExec({ board: [page], other: details, ...recovery });
@@ -103,7 +106,7 @@ function runBoardInProcess(args, page, details, recovery = {}) {
     log: (line) => { stdout += `${line}\n`; },
     error: (line) => { stderr += `${line}\n`; },
   };
-  const status = boardMain(args, { ghExec, output });
+  const status = boardMain(args, { ghExec, output, ...injected });
   return { status, stdout, stderr, calls };
 }
 
@@ -260,8 +263,18 @@ const detailsFor = (...cards) => JSON.stringify({
 
 const linesOf = (stream) => stream.slice(0, -1).split('\n');
 
-test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with its true line count, and the scan and outcome on stderr', () => {
-  const run = runBoard(['--intake'], PICKABLE_PAGE, { FAKE_DETAILS: detailsFor([20, 'Outcome line\nsecond line', 'Claim: m, codex, t']) });
+// Each --intake run writes its card files into a fresh folder of its own, removed when the file ends.
+const intakeFolders = [];
+function newIntakeFolder() {
+  const folder = mkdtempSync(join(tmpdir(), 'intake-'));
+  intakeFolders.push(folder);
+  return folder;
+}
+after(() => intakeFolders.forEach((folder) => rmSync(folder, { recursive: true, force: true })));
+
+test('ANTI-REGRESSION: board CLI --intake puts only the summary on stdout with its true line count, writes each card\'s full text to its file, and puts the scan and outcome on stderr', () => {
+  const folder = newIntakeFolder();
+  const run = runBoard(['--intake', folder], PICKABLE_PAGE, { FAKE_DETAILS: detailsFor([20, 'Outcome line\nsecond line', 'Claim: m, codex, t']) });
 
   assert.equal(run.status, 0, run.stderr);
   assert.equal(run.stdout.endsWith('\n'), true);
@@ -270,9 +283,42 @@ test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with 
     document[0],
     new RegExp(`^Board ${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER} — Backlog/Ready: 1 of 1 item\\(s\\)$`),
   );
-  assert.ok(document.includes('=== #20 [Backlog] Pickable card ==='), run.stdout);
-  assert.ok(document.includes('assignees: @dev-one'), run.stdout);
-  assert.ok(document.includes('| Outcome line'), run.stdout);
+  assert.ok(document.includes('Card summaries: 1 pickable card(s), then 0 claimed card(s) with no closing pull request.'), run.stdout);
+  // The card's summary, written by hand: its facts, its claim and the path and length of its file, but not its body.
+  const card = document.indexOf('=== #20 [Backlog] Pickable card ===');
+  assert.deepEqual(document.slice(card, card + 11), [
+    '=== #20 [Backlog] Pickable card ===',
+    'Workstream: Product',
+    'parent: none',
+    'open blockers: none',
+    'assignees: @dev-one',
+    'proposal: no',
+    'claim: comment 1 of 1',
+    '| Claim: m, codex, t',
+    'owner questions: 0',
+    'what to build: none in the card text',
+    `card text: ${join(folder, '20.txt')}, 14 line(s)`,
+  ]);
+  assert.equal(run.stdout.includes('Outcome line'), false, run.stdout);
+  // The file holds the legend and the card's whole section, ending with a newline.
+  assert.equal(readFileSync(join(folder, '20.txt'), 'utf8'), [
+    'Lines starting "| " are card text, and "|+ " continues the line above it.',
+    '=== #20 [Backlog] Pickable card ===',
+    'Workstream: Product',
+    'parent: none',
+    'open blockers: none',
+    'assignees: @dev-one',
+    'claim: comment 1 of 1',
+    '| Claim: m, codex, t',
+    'body: 2 line(s)',
+    '| Outcome line',
+    '| second line',
+    'comments: 1',
+    '--- comment 1 of 1 ---',
+    '| Claim: m, codex, t',
+    '',
+  ].join('\n'));
+  assert.deepEqual(readdirSync(folder), ['20.txt']);
   // The end line counts every line of stdout, itself included, and so does stderr's.
   assert.equal(document.at(-1), `board intake: end of document, ${document.length} line(s).`);
   assert.equal(run.stdout.includes(UNQUALIFIED_CLEAN), false, run.stdout);
@@ -281,7 +327,7 @@ test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with 
     'board intake: details complete for 1 card(s).',
     `board intake: ${document.length} line(s) on stdout.`,
   ]);
-  // The board read, then one detail read: nothing else reached GitHub but the repository issue walk.
+  // The board read, then one detail read: nothing else reached the host but the repository issue walk.
   const kinds = run.calls.map(boardRequestKind);
   assert.equal(kinds.filter((kind) => kind === 'board').length, 1, kinds.join('\n'));
   assert.equal(kinds.filter((kind) => kind === 'other').length, 1, kinds.join('\n'));
@@ -289,28 +335,82 @@ test('ANTI-REGRESSION: board CLI --intake puts only the document on stdout with 
 });
 
 test('ANTI-REGRESSION: an intake board read that failed, drift and an unavailable card detail exit 2, 3 and 4', () => {
-  const failed = runBoardInProcess(['--intake'], cleanPage(2));
+  const failed = runBoardInProcess(['--intake', newIntakeFolder()], cleanPage(2));
 
   assert.equal(failed.status, 2, failed.stderr);
   assert.equal(failed.stdout, '');
   assert.match(failed.stderr, /board: failed to read the GitHub Projects board — incomplete board items read:/);
   assert.match(failed.stderr, /GitHub reported 2 board items but 1 were fetched/);
 
-  const drifted = runBoardInProcess(['--intake'], DRIFTED_PAGE, detailsFor([272, 'CVE body', 'a comment']));
+  const driftFolder = newIntakeFolder();
+  const drifted = runBoardInProcess(['--intake', driftFolder], DRIFTED_PAGE, detailsFor([272, 'CVE body', 'a comment']));
 
   assert.equal(drifted.status, 3, drifted.stderr);
   assert.ok(linesOf(drifted.stdout).includes('=== #272 [Backlog] CVE sweep ==='), drifted.stdout);
+  assert.ok(linesOf(drifted.stdout).includes(`card text: ${join(driftFolder, '272.txt')}, 12 line(s)`), drifted.stdout);
+  assert.match(readFileSync(join(driftFolder, '272.txt'), 'utf8'), /^\| CVE body$/m);
   assert.match(drifted.stderr, /⚠ BOARD DRIFT/);
   assert.match(drifted.stderr, /^board intake: details complete for 1 card\(s\)\.$/m);
 
   // No details supplied: the executor refuses the detail read, so the card's details are unread.
-  const unread = runBoardInProcess(['--intake'], PICKABLE_PAGE);
+  const unreadFolder = newIntakeFolder();
+  const unread = runBoardInProcess(['--intake', unreadFolder], PICKABLE_PAGE);
 
   assert.equal(unread.status, 4, unread.stderr);
   const document = linesOf(unread.stdout);
   assert.ok(document.some((line) => line.startsWith('details: UNAVAILABLE — ')), unread.stdout);
-  assert.equal(document.some((line) => line.startsWith('body:')), false, unread.stdout);
+  assert.equal(document.some((line) => line.startsWith('body:') || line.startsWith('card text:')), false, unread.stdout);
+  assert.deepEqual(readdirSync(unreadFolder), []);
   assert.match(unread.stderr, /^board intake: details UNAVAILABLE in whole or part for 1 of 1 card\(s\): #20\.$/m);
+});
+
+test('ANTI-REGRESSION: an intake card text that cannot be written leaves that card UNAVAILABLE with no file named and exits 4', () => {
+  const recovery = recoveryOf('PVTI_pickable_e2e', 20, RECOVERED_PICKABLE);
+  const details = detailsFor([20, 'Listed outcome', 'a comment'], [21, 'Recovered outcome', 'a comment']);
+  const folder = newIntakeFolder();
+  const writeFile = (path, text) => {
+    if (path.endsWith('21.txt')) throw new Error('no space left on device');
+    writeFileSync(path, text);
+  };
+
+  const run = runBoardInProcess(['--intake', folder], PICKABLE_PAGE, details, recovery, { writeFile });
+
+  assert.equal(run.status, 4, run.stderr);
+  const document = linesOf(run.stdout);
+  const unavailable = document.indexOf('=== #21 [Backlog] Recovered card ===');
+  assert.deepEqual(document.slice(unavailable, unavailable + 5), [
+    '=== #21 [Backlog] Recovered card ===',
+    'Workstream: Product',
+    'open blockers: none',
+    'assignees: none',
+    'details: UNAVAILABLE — could not write the card text: no space left on device',
+  ]);
+  assert.equal(document.filter((line) => line.startsWith('card text: ')).length, 1, run.stdout);
+  assert.ok(document.some((line) => line.startsWith(`card text: ${join(folder, '20.txt')}, `)), run.stdout);
+  assert.equal(document.at(-1), `board intake: end of document, ${document.length} line(s).`);
+  assert.match(run.stderr, /^board intake: details UNAVAILABLE in whole or part for 1 of 2 card\(s\): #21\.$/m);
+  assert.deepEqual(readdirSync(folder), ['20.txt']);
+});
+
+test('ANTI-REGRESSION: an intake folder that cannot be created exits 1 before any board read', () => {
+  const folder = join(tmpdir(), 'intake-never-made');
+  const makeDirectory = () => { throw new Error('read-only file system'); };
+
+  const run = runBoardInProcess(['--intake', folder], PICKABLE_PAGE, undefined, {}, { makeDirectory });
+
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, `board: could not create ${folder}: read-only file system\n`);
+  assert.deepEqual(run.calls, []);
+});
+
+test('board CLI: --intake without a folder is a rejected argument that reads nothing', () => {
+  const run = runBoardInProcess(['--intake'], PICKABLE_PAGE);
+
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^board: --intake takes one folder and no other argument — /);
+  assert.deepEqual(run.calls, []);
 });
 
 // The #504 incident end to end: GitHub's project listing leaves out a card that is on the board,
@@ -348,7 +448,8 @@ test('ANTI-REGRESSION: recovered cards reach intake and closeout', () => {
   const recovery = recoveryOf('PVTI_pickable_e2e', 20, RECOVERED_PICKABLE);
   const details = detailsFor([20, 'Listed outcome', 'a comment'], [21, 'Recovered outcome', 'a comment']);
 
-  const intake = runBoardInProcess(['--intake'], PICKABLE_PAGE, details, recovery);
+  const folder = newIntakeFolder();
+  const intake = runBoardInProcess(['--intake', folder], PICKABLE_PAGE, details, recovery);
 
   assert.equal(intake.status, 0, intake.stderr);
   const document = linesOf(intake.stdout);
@@ -357,7 +458,8 @@ test('ANTI-REGRESSION: recovered cards reach intake and closeout', () => {
     new RegExp(`^Board ${BOARD_OWNER}/${BOARD_REPOSITORY} project ${BOARD_PROJECT_NUMBER} — Backlog/Ready: 2 of 2 item\\(s\\)$`),
   );
   assert.ok(document.includes('=== #21 [Backlog] Recovered card ==='), intake.stdout);
-  assert.ok(document.includes('| Recovered outcome'), intake.stdout);
+  assert.ok(document.includes(`card text: ${join(folder, '21.txt')}, 12 line(s)`), intake.stdout);
+  assert.match(readFileSync(join(folder, '21.txt'), 'utf8'), /^\| Recovered outcome$/m);
   assert.equal(document.at(-1), `board intake: end of document, ${document.length} line(s).`);
   assert.equal(intake.stdout.includes(RECOVERED_PICKABLE.id), false, intake.stdout);
   assertOmissionAdvisory(intake.stderr, RECOVERED_PICKABLE);

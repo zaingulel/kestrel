@@ -27,18 +27,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const LIB = fileURLToPath(new URL('.', import.meta.url));
 const SCRIPTS = fileURLToPath(new URL('..', import.meta.url));
-export const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'verify-issue-publish.mjs', 'linear-card.mjs', 'jira-card.mjs', 'azure-card.mjs'];
+export const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'board-claim.mjs', 'verify-issue-publish.mjs', 'linear-card.mjs', 'jira-card.mjs', 'azure-card.mjs'];
 
 // The transitive closure of relative imports from the CLI entry points above. Copying
 // exactly this set, no more, is the adoption contract itself: a file the toolkit no longer
 // imports must fall out of here or an adopter carries dead weight neither test nor doc admits to.
 export const TOOLKIT_LIB = [
   'board.mjs',
+  'board-read.mjs',
   'board-rules.mjs',
   'board-markdown.mjs',
   'board-config.mjs',
   'board-add.mjs',
   'board-move.mjs',
+  'board-claim.mjs',
   'issue-publish.mjs',
   'gh-exec.mjs',
   'cli-flags.mjs',

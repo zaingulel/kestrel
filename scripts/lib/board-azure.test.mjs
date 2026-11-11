@@ -326,3 +326,16 @@ test('Azure evidence preserves native text and GitHub delivery boundaries', asyn
     assert.throws(() => api.readAzureBoard(data.exec, data.gh), /GitHub|pull|page|duplicate/i);
   }
 });
+
+test('612 fix A: an Azure comment that begins Needs owner: reaches the intake summary as the advisory, never as a zero count', async (t) => {
+  const api = await reader(t);
+  const question = { ...COMMENTS[1], text: 'Needs owner: which of the two?' };
+  const native = provider({ pages: { '': { count: 1, totalCount: 1, comments: [question] } } });
+  const card = api.normalizeItem(api.readAzureBoard(native.exec, native.gh).items[1]);
+  const details = api.azureCardDetails(native.exec, ['AB-299']);
+  const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  assert.deepEqual(summary.filter((line) => line.startsWith('owner questions:')), [
+    'owner questions: review complete native comments for Needs owner: questions',
+  ]);
+});

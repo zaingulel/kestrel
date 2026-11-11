@@ -1,299 +1,316 @@
+---
+description: This page follows one approved card to one commit on main, stage by stage. It shows who acts, what each stage leaves behind and what a machine holds there.
+---
+
 # The life of one change
 
-One card becomes one commit on `main` by the same path every time: an owner pick, an isolated worktree, a plan, bounded
-builds with recorded evidence, a fresh review and an owner yes, then a merge the platform performs or, for a change the
-repository's own gate admits whole, a push straight to `main`. This page follows that path stage by stage. This page is
-part of [the workflow guide](AI-WORKFLOW.md). Related: [The seats](AI-WORKFLOW-seats.md) for who acts at each stage,
-[The board](AI-WORKFLOW-board.md) for the columns a card moves through, [The evidence bar](AI-WORKFLOW-evidence.md) for
-what a build must prove, and [Enforced or instructed](AI-WORKFLOW-enforcement.md) for the guards named below.
+## Summary
+
+A job takes one approved card to one commit on `main`. This page follows that path stage by stage: who acts, what
+each stage leaves behind and what a machine holds there. Read it to understand a job before you run one, or to see
+where a stopped job stands. The exact steps are in the [`resume`](../.agents/skills/resume/SKILL.md) and
+[`closeout`](../.agents/skills/closeout/SKILL.md) skills, and this page owns none of them.
+
+A finished job leaves four things: the approved outcome in git history, a receipt for each check, a recorded review
+and a matching board. Together they form a trail from the card's acceptance criteria to the job branch, its
+receipts and the publication record. That record is the pull request, or the commit message on the direct route. A
+later session reads the trail to tell intended, unfinished and shipped work apart, without the conversation behind it.
 
 ## Mental model
 
-| Stage | What happens | What a machine holds |
-|---|---|---|
-| Job starts | The card gets its own worktree and branch, the root checkout stays on `main`, and the card moves to In progress | Branch work in the root checkout is refused |
-| Build | Bounded slices, every check logging its exit code, and an executed mutation where the testing strategy requires one, before review | An incomplete handoff is refused, and so is a turn that ends on a lint error |
-| Review | One fresh review of the final tree, repairs, and a security review when the trust perimeter widens | Nothing: review is instructed |
-| Deliver | A draft pull request, an external review where the tier requires it and the repository has turned that add-on on, and checks on the merge result; or, for a change the repository's own gate admits whole, a push straight to `main` | A pull request that is not a draft is refused, and so is an unsafe force push; [the head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs) lists the exact forms |
-| Merge | On the pull request route, the platform merges once the required checks are green, squashed, with the branch deleted | A merge command other than the platform's auto-merge is refused, and the branch rules require the checks |
-| After merge | The issue is confirmed closed, the card moves to Done, servers are stopped, the job's containers, scratch, worktree and branch are removed by one command where its checks pass, GitHub issue trackers record remaining cleanup for later resume/closeout, and local `main` advances where that is provably safe | The cleanup command retains whatever its checks or git hold back; that it runs is instructed |
+Every job passes through the same stages in the same order. The session that talks to the owner coordinates each one,
+and [The seats](AI-WORKFLOW-seats.md) shows which agent it hands each piece of work to.
+
+| Stage | Who acts | What it leaves | What a machine holds |
+|---|---|---|---|
+| Start | The owner picks the card; the session confirms it is free and claims it | A worktree on its own branch, a claim comment and the card in In progress | The git guard refuses branching and committing in the root checkout |
+| Plan | The architect or the session, with a plan review where the card needs one | A plan naming each slice's files and claim | The handoff hook refuses an incomplete architect handoff on Claude Code |
+| Build | A builder seat, one slice at a time | A commit for every green slice and a receipt for every check | The handoff hook refuses an incomplete builder handoff, and the green check refuses a turn that ends on a lint error |
+| Review | The reviewer at the tier the change needs, and the security reviewer when the trust perimeter widens | Settled findings and a review line | Nothing: review rests on instruction |
+| Push authorisation | The owner | One yes to the decision card and its screenshot | Nothing: the yes rests on instruction |
+| Delivery | The session, then the platform | A draft pull request, checks on the merge result and a squash merge; or a push straight to `main` | The git guard refuses a pull request that is not a draft, an unsafe force push and every merge form but auto-merge |
+| Closeout | The session | The issue closed, the card in Done and the job's worktree and branch removed where checks pass | The cleanup command keeps every target its checks or git hold back |
+
+Responsibility moves between the owner, the job, git and GitHub as the job runs.
+
+```mermaid
+flowchart LR
+    accTitle: Where each responsibility sits during one job
+    accDescr: The owner approves the work and its publication, the job keeps its changes and evidence on its branch, and GitHub and the local hooks carry an approved push and report back.
+    O[Owner] -->|work-pick and push authorisation| J[Job]
+    J -->|changed files and evidence| B[Branch and worklog]
+    B -->|approved push through the local hooks| G[GitHub]
+    G -->|publication state| J
+    G -->|pull request route only| CI[Continuous integration]
+    CI -->|required check results| G
+    J -.->|where the tier requires it| X[External reviewer]
+    X -.->|review or declared unavailable| J
+```
+
+The preceding diagram shows where each responsibility sits during one job. The owner approves the work and its
+publication. The job keeps its changed files on its branch and its evidence in its worklog. An approved push crosses
+into GitHub through the local hooks. On the pull request route, GitHub runs continuous integration and records the
+required check results. GitHub reports the publication state back to the job. The dotted pair is the external review,
+which runs only where the tier requires it and the repository turns that add-on on. It returns a review or a declared
+unavailable result. Neither arrow style means a machine enforces the step.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    C[Board card in Ready] --> WP[Work-pick: owner picks a card]
+    accTitle: One card from the owner pick to closeout
+    accDescr: A card moves from the owner's pick through a worktree, plan, build, review and push authorisation to a merged change or a direct push, and then closeout.
+    C[Card in Ready] --> WP[Work-pick: the owner picks the card]
     WP --> WT[Worktree on its own branch, card to In progress]
-    WT --> PL[Plan: architect or the session, plan review where the card requires one]
-    PL --> BD[Build in bounded slices, evidence through scripts/run-log.mjs]
-    PL -.->|only where the repository turns plan approval on| AP[Plan approval: the owner says yes to the completed plan]
+    WT --> PL[Plan, with a plan review where the card needs one]
+    PL --> BD[Build in bounded slices, every check logged]
+    PL -.->|plan approval on| AP[The owner approves the completed plan]
     AP -.-> BD
-    BD --> VR[Verify: visual work driven and shown, plus any gate the Surfaces table names]
-    VR --> RV[Fresh review of the final tree, repair, one pass scoped to the repair]
-    RV --> PA[Push authorisation: card to Awaiting push, owner reads the decision card and screenshot]
-    PA --> DR[Draft pull request, card to In review]
-    PA -->|every changed path qualifies| FF[Fast-forward push to main, no pull request or CI]
-    DR -->|document and code tiers, or the add-on off: no external review| RD[Marked ready: CI runs on the merge result]
-    DR -->|sign-off tier, add-on on: external review requested| GR[Review attempt settled, findings resolved]
-    GR --> RD
-    RD -->|required checks green| MG[GitHub auto-merge, squash, branch deleted]
-    MG --> CO[Closeout: issue closed, card to Done, checked cleanup or retained targets]
+    BD --> VR[Verify, then one fresh review of the final tree]
+    VR --> PA[Push authorisation: card to Awaiting push, the owner answers the decision card]
+    PA -->|pull request route| DR[Draft pull request, card to In review]
+    PA -->|direct route: the gate admits the whole change| FF[Push straight to main]
+    DR --> RD[Marked ready: checks run on the merge result]
+    DR -.->|sign-off tier, add-on on| ER[External review settled]
+    ER -.-> RD
+    RD -->|required checks green| MG[Platform auto-merge, squashed, branch deleted]
+    MG --> CO[Closeout: issue closed, card to Done, cleanup checked]
     FF --> CO
 ```
 
-The diagram shows the whole path from a card to a merged commit, including the branch where a qualifying change
-goes straight to `main`. The dotted pair is taken only where the repository has turned plan approval on.
+The preceding diagram follows one card from the owner's pick to closeout. Solid arrows show the usual path. The dotted
+pair after planning applies only where the repository turns plan approval on. The dotted pair after the draft applies
+only to a `sign-off` change where the external review add-on is on. The direct route skips the pull request and joins
+the usual path at closeout.
 
-In words: a card in Ready is picked by the owner, gets a worktree on its own branch and moves to In progress. It
-is planned by an architect or by the session, with a plan review where the card requires one;
-[the `resume` skill](../.agents/skills/resume/SKILL.md) owns that rule under "4. Plan". Where the repository has turned plan approval on, the owner then approves the completed plan before anything is built. It is then built in
-bounded slices with recorded evidence, verified, and given a fresh review of the final tree with repairs. At push
-authorisation the card moves to Awaiting push and the owner reads the decision card lifted from the pull request body. On the owner's yes a
-draft pull request opens and the card moves to In review; a change at the sign-off tier first settles an external
-review where the repository has turned that add-on on, and every draft is then marked ready so the checks run on the merge result. Once the required checks are green
-the platform merges, and closeout confirms the issue closed, moves the card to Done and removes cleanup targets
-where checks pass. GitHub issue trackers record remaining cleanup in issue comments for later resume or closeout;
-Markdown card installations keep their existing publication and Leftover inventory procedures. A change whose every
-path qualifies skips the pull request, is pushed straight to `main`, and is closed out the same way.
+### Starting a job
 
-### Stage by stage
+Intake reads the board, the open pull requests and the local state together, then reconciles them. Its exit status
+separates a failed board read, drift between the stores and a card whose details it could not read. Intake never
+offers such a card as startable, and a failed read stops selection rather than reading as an empty board.
 
-- **Intake.** The hook check, the fetch and the local inventory are issued together; selecting current verifier
-  code follows. The `resume` skill's instruction-reuse rule avoids rereading content whose Git identity and full
-  active context are verified, and proves every path in one command. One board command then reads the board once
-  and prints the pick listing, the drift scan and the full details of every card a session may offer or must
-  show, its latest claim included, while the pull-request read overlaps it; results and
-  failures are collected before reconciliation. Its exit status separates a failed board read, drift and a card
-  whose details could not be read, and such a card is never offered as startable. Pull-request summaries
-  identify which continuation bodies matter, and the captured details serve selection and planning. The skill's
-  Complete reads rule budgets each result and their combined output, recovers missing sections, and reuses
-  complete evidence while its provenance and validity hold. Once every read has returned the session rechecks
-  the verifier checkout: movement or conflicting facts invalidate
-  affected evidence. These reduce hand-composed commands and serial waits while retaining freshness, complete
-  recommendations, claims, triage authority and the owner gates; they establish no total agent-latency
-  guarantee.
-- **Isolation.** Every issue gets its own git worktree on its own branch, so two issues in two terminals never
-  share a working file. A runtime's own subagent worktree is not that worktree: it branches from `main` rather
-  than from the job branch, so builders never run in one. Two slices of one issue with disjoint files can run at
-  once, the second in its own worktree cut from the job branch and merged back into it. A generated artifact the
-  `generated artifacts` row of the Conventions table in `.agents/REPOSITORY.md` names is never hand-merged, and the hooks keep
-  it from landing stale. When a session starts a card it posts a claim comment on the issue, because a job branch
-  stays local until push and the comment is what another machine can see. Where the worktree lives on each
-  runtime, the commands that create it, the slice branch name, the claim format and what happens to an In
-  progress card with nothing behind it are in [the `resume` skill](../.agents/skills/resume/SKILL.md) under
-  "1. Find where things stand" and "3. Start the job".
-- **Plan approval, where the repository turns it on.** The completed plan is presented to the owner after any plan
-  review the card requires, and nothing is built until the owner says yes; a change the owner asks for is made and
-  the plan presented again. The gate is off unless the repository's settings file turns it on, and no guard holds
-  it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the gate under "Owner gates", and
-  [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "4. Plan".
-- **Native Codex run chats.** With the owner's authorization to create managed-worktree chats and send follow-ups,
-  either run can use one visible chat per card. The coordinator verifies setup, binding, guard refusals and actual
-  completion; the existing card approvals, reservations and stops remain. A fresh yes and any required screenshot are
-  handled in an unbound owner session. A remaining managed checkout holds cleanup and its reservation. The
-  [run reference](../.agents/skills/resume/references/runs.md#native-codex-app-run) owns the route and its limits.
-- **Product manager run, where the repository turns it on.** The owner can hand the work-pick to the session instead of
-  choosing a row. On Claude Code the owner launches a session at the repository root, in a terminal or the desktop app,
-  and says `Start a product manager run.`; on Codex the owner may authorize the native route above or run `node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID>` in a terminal outside any session. The selected existing owner chat receives each saved result; the session supplies its UUID from native context when available, otherwise the owner uses supported native chat selection. A run
-  starts only where the git guard is shown running. On Claude Code the owner first turns on
-  "Require trusted devices" in their Claude account and the "Push when Claude decides" and "Push when actions required"
-  notifications; where "Require trusted devices" cannot be on, no Claude Code run starts, and the owner can run it on
-  Codex. On the Codex terminal route the launcher starts every session in the workspace-write sandbox with on-request approvals, and
-  Codex's Auto-review may answer the run's approval requests. The session cannot check the Claude Code settings. The
-  run reads the owner's direction page from the fetched `main` and starts a fresh session for each card on either
-  runtime; the card session, or native coordinator, picks the card the page ranks highest among
-  those it may take, skipping any that touches a waiting job's files other than the manifest, whose fingerprints follow
-  the shared files they record, names the pick and the reason in the table's closing line, and takes it through the
-  usual stages to `Awaiting push`. The run stops once 3 jobs wait or no pickable card is left. On Codex the launcher
-  runs outside any session because Codex's sandbox refuses a session started from inside a session, and it ends the run
-  when a session's runtime log does not show the git guard's refusal, or does not show a publish refusal that only run
-  sessions have. A Codex run session has nobody to answer a prompt, so a prompt Auto-review cannot answer is refused and
-  the run stops and says why. A Claude Code card session starts with flags that refuse pushing and publishing a pull
-  request; this catches mistakes rather than a deliberate workaround, and the session the owner reopens to deliver runs
-  without them. A run session in a terminal and one in the desktop app start each card session with the same command,
-  run in the background, whose finish wakes the run session to read the result and start the next; a card session
-  that ends with no result line stops the run. A card needing owner direction or sign-off, or that cannot be built or
-  decided without the owner's ears or hardware, is not built: the run leaves a comment beginning `Needs owner:` on it
-  and moves it to `Backlog`, where it is held until the owner returns it. A card with fixed criteria whose final proof
-  alone needs listening is built and marked as needing the owner's ears. A question that comes up mid-build parks the
-  job the same way, with its commits kept on the local branch, and the run goes on to the next card. A parked job counts
-  toward the 3 that wait; a held card with no job does not. A run may suggest new cards, at most 3 and fewer while
-  earlier ones wait: each is filed at the end of the run with a title beginning `Proposed: `, which holds it until the
-  owner says yes or no. A card found not free stops the run. Each result reaches the owner coordinator: Claude Code uses background completion and `PushNotification`; the Codex terminal launcher queues a fixed reference to the selected chat, while the active native coordinator observes its chats. The coordinator reads saved evidence, checks the current job and presents the decision card and screenshots or a plain parked or stopped question. The terminal-route Codex coordinator then ends its native turn for the completion notification. A queued update is not proof of phone delivery; [Native phone notifications](AI-WORKFLOW-runtimes.md#native-phone-notifications) explains the capability and evidence limits. Push authorisation stays the owner's yes. The owner can also ask
-  to see what is waiting and answer each job in turn: a yes delivers it, a no parks it with the owner's reason, and each
-  answer leaves a `Verdict:` comment on the card. A run's summary reports the three stage 2 measures from those
-  comments, saying why where one cannot be computed yet. When the run stops, the session the owner launched, on Codex a
-  final end session, says once why and what the owner does next, then gives a summary of what it built, parked, needs
-  from the owner and suggested, and any change it wants to the direction page. Phone arrival and real console delivery require observation in an owner-started run; queuing alone does not establish delivery. A prompt or approval from the runtime waits for the owner's own answer. The mode is off unless the
-  settings file on `main` turns it on, and no guard holds it: it is instructed. [`AGENTS.md`](../AGENTS.md) owns the
-  gate under "Owner gates", and [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps under "2.
-  Work-pick".
-- **Pre-approved run, where the repository turns it on.** The owner can approve cards in advance, one comment on each
-  card that binds the card's text as it then stands, and then say `Start a pre-approved run.` on Claude Code or use the authorized native route above or run
-  `node scripts/product-manager-run.mjs --coordinator <existing-chat-UUID> --pre-approved` on Codex. The run takes only cards with a valid record, the
-  oldest eligible record first, and merges it with no yes at push authorisation. On Linux background Codex, one managed
-  worker owns each whole job, including its reviews and delivery; independent jobs can run concurrently. Claude, the
-  native app and non-Linux routes use serial selection and preparation, concurrent independent builds and serial delivery.
-  Fabraik sets no numeric maximum on independent
-  CLI sessions. Runtime-managed temporary waiting may continue when the runtime resumes it; terminal launch or runtime
-  failures are reported and stop under the existing failure rules, without an automatic retry or a recovery guarantee.
-  Native helper concurrency limits apply within their own sessions, not to these independent processes. Current jobs
-  with unknown reviewed scope block potentially overlapping builds, including an older waiting job; a branch diff
-  cannot establish all planned files or resources. Prepared jobs retain their reservations when the run ends waiting
-  on such a blocker. Whole-job reservations survive until verified settlement; parked files remain protected while
-  proven stopped local resources are released.
-  On the phase routes, a built job keeps its file and exclusive-resource reservation until delivery or disposition. Preparation itself
-  reserves intent: after ownership, accepted review, completed preparation and an empty application delta are verified,
-  a built job can deliver past that inactive intent. Conflicting inactive preparations take turns only when eligible,
-  ordered by original claim time and then card number. An older job blocked by another job cannot hold up its later
-  prerequisite or a job independent of that blocker. Unknown scope or eligibility still holds potentially conflicting
-  work. Job-owned changes are compared with the current main baseline while the originally selected base remains an
-  ancestry anchor.
+The owner's pick approves the card's outcome and acceptance criteria as written. Fresh checks still confirm that the
+card is free before anything starts. Each card then gets its own git worktree on its own branch, and the root checkout
+stays on `main`. Two cards in two terminals never share a working file.
 
-  On the phase routes, the admission command distinguishes the requested build or delivery phase from proof that the phase may start:
-  `--check-admission` returns allow with exit 0, wait with exit 3 or unavailable with exit 1. Those routes retain
-  phase-start context before dispatch and the completed outcome afterward. Claude's `.request.json` is staging input;
-  the executable's `.context.json` records the validated start. Fixed `job-<card>-<phase>` names bind that evidence to
-  one job. A missing expected start record cannot turn a running build back into an inactive plan. Codex keeps its
-  job state; native Claude keeps the highest phase actually dispatched and its task ID. Lost history stays held.
+A job branch stays local until the push, so another machine cannot see it. The session therefore posts a claim comment
+on the issue, which every machine can read. On the GitHub Projects tracker one command, `node scripts/board-claim.mjs`,
+checks that the card is still free and posts the claim. [The `resume` skill](../.agents/skills/resume/SKILL.md#3-start-the-job)
+owns where that command runs and where the worktree lives on each runtime, under "3. Start the job". On another tracker
+the session claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say.
 
-  All routes keep run evidence in temporary results outside every inventory job worktree and the integration checkout,
-  checked against canonical existing roots. Only a root absent with `ENOENT` contains nothing; other read failures
-  leave containment unknown. On the phase routes, plans and reviews stay at their normal job paths, with small same-hash snapshots retained
-  before build and rechecked before delivery. This lets legitimate cleanup finish without erasing the evidence the
-  coordinator still needs; ordinary open jobs still need their original files. The records support execution
-  accounting, without making the filesystem unforgeable.
+### Planning
 
-  On the phase routes, a delivery can close its issue and remove its worktree before the child returns. With retained delivery/build
-  context, completed build, accepted review and snapshots, current ownership and actual closing progress verified,
-  the coordinator waits for that child and its accounting. This wait grants no new authority and preserves the job's
-  identity and scope until delivery verification, outcome storage and attention finish. Missing ownership or corrupt
-  evidence remains unavailable. Independent builds can continue during an ordinary open delivery. A selection already
-  in flight is kept once; after closing clears, its one serial preparation precedes any new selection. The authoritative
-  evidence, precedence and settling rules are in [the `resume` skill](../.agents/skills/resume/SKILL.md) under
-  "2. Work-pick", **Pre-approved run**.
+Every change has a plan. A card on a `plan-first` surface gets an architect's plan and one read-only plan review before
+any build. Another card with design choices still open gets an architect's plan. Every other card gets the session's
+short plan in the pull request body.
 
-  A normal phase stop ends new work, accounts for work already running and produces one end summary; a safety stop
-  ends without one.
-  Jobs and end sessions have no factory expiry. Each phase still revalidates the original claim and its unchanged
-  creation time. A native tool timeout or interruption retains reservations while detached work may remain; a tool
-  timeout does not establish that a signal was delivered or descendants stopped. Each phase's immutable outcome is checked before owner attention; it is evidence, not
-  approval. The end summary is a separate run event, not proof that every job merged or a release of reservations.
-  The run picks and files nothing else, and a split proposal or a question parks the job. Editing the card, editing or deleting the
-  record, or closing the card withdraws the approval, and a record written after the run starts waits for the next
-  run. For a command written plainly, the guard admits the run's push, draft, ready mark and merge only for its own job
-  branch and pull request, in the repository it fetches from and into its default branch, and only while `node scripts/board.mjs --approval check <card>` still prints `approved`; a job that touches an
-  owner-directed or sign-off surface, or whose result shows a failure or an unfixed finding, stops at `Awaiting push`
-  for the owner's yes instead. It works only with GitHub issues, is off unless the settings file on `main` turns it on,
-  and is held by the git guard in its sessions and instructed everywhere else.
-  `<distribution>/docs/INSTALL.md` describes the record and the check, and
-  [the `resume` skill](../.agents/skills/resume/SKILL.md) owns the steps.
-- **Evidence during the build.** Every executed check runs through a logger that writes its real outcome, so the
-  pull request body quotes what a script wrote, not what an agent remembers;
-  [The evidence bar](AI-WORKFLOW-evidence.md) explains the log. Every green slice is committed on the job branch,
-  so a crash costs at most the slice in progress.
-- **Verification before review.** Visual work is driven as the Conventions table's `visual verification` row says
-  and a current screenshot is shown in chat; any further gate the Surfaces table names runs here.
-- **Review in two layers.** One fresh review of the final tree comes before push authorisation, and its depth
-  follows two questions asked of the change, whether it can be undone and how far the damage reaches if it is wrong,
-  which each repository answers in its Surfaces table: the session itself, the model family that did not write the
-  diff, because a writer's own family shares its blind spots, or that pass and, where the repository has turned that add-on on, an external review on the finished
-  draft.
-  [The `resume` skill](../.agents/skills/resume/SKILL.md) owns the two questions, the tiers they choose between,
-  how each is run, what happens when a reviewer cannot be reached, and how repairs are reviewed again, under "5. Build",
-  "6. Verify and review" and "8. Deliver"; in a repository that has turned
-  [the external review add-on](AI-WORKFLOW.md#the-external-review-add-on) on, that add-on's own skill owns how the
-  external review is requested and settled, and when an attempt counts as unavailable.
-- **Delivery by GitHub.** On the pull request route, marking the pull request ready, after any required review
-  attempt has settled, starts continuous integration, and the merge is always queued as a GitHub auto-merge, which
-  GitHub completes only when the checks the repository's branch rules require are green; no agent merges a job's
-  pull request directly. After the merge is queued the session waits on one command that only reads the pull
-  request's state, and closeout follows a merge. A change `scripts/gates/pre-push-main` admits whole skips the
-  pull request and is pushed straight to `main` on the same push authorisation. The gate that judges that push is the
-  copy already on the remote's `main`, so a job that changes the gate takes the pull request route.
-  [The `resume` skill](../.agents/skills/resume/SKILL.md) owns the sequence, the waiting command and the direct
-  route under "8. Deliver", and how a session waits on a long command under "5. Build";
-  [Enforced or instructed](AI-WORKFLOW-enforcement.md) names the checks the branch rules require;
-  [`AGENTS.md`](../AGENTS.md) owns what the direct route admits under "Publication and machinery"; where the documentation
-  routines are active and the settings file does not turn the documentation sweep off, their own merge exception is in
-  [`docs/DOC-SWEEP.md`](DOC-SWEEP.md) and
-  [`docs/SWEEP-TRIAGE.md`](SWEEP-TRIAGE.md).
-- **Closeout.** The moment the merge lands, the same session confirms it, moves the card, updates local `main`, and
-  removes the branch and worktree where checks pass. GitHub issue trackers record remaining cleanup separately
-  from product completion in issue comments for reconsideration on later resume or closeout under
-  [Deferred cleanup](../.agents/skills/closeout/SKILL.md#deferred-cleanup), with fresh safeguards. Markdown card
-  installations use existing card/publication and ordinary Leftover inventory procedures, with no additional
-  guaranteed persistence or discovery. Local `main` advances
-  only by a provably safe fast-forward, and a dirty, active or uncertain checkout is preserved. One command, `scripts/closeout-cleanup.mjs`, removes the job's containers,
-  its named scratch, its worktree and its branch where its checks pass. Failed safety checks retain targets
-  with a reason. The only exception to ordinary not-fully-merged branch refusal is the verified merged-head deletion described by the
-  [closeout skill](../.agents/skills/closeout/SKILL.md).
-  Docker bind paths require the local filesystem proof the `closeout` skill describes.
-  The session keeps the judgment of what is its own scratch and stops a server the
-  command finds serving the worktree only once it is shown to be the session's own. A hold cleanup can wait out,
-  such as the owner's terminal or a running container bound to a parent folder, is reported in one line and left
-  for a later session. The owner is asked only about a file whose owner cannot be established, about unmerged
-  work, or about a permission only the owner can grant. A leftover the session finds, another job's artifact or one it cannot prove it
-  created, is investigated to a conclusion and the owner is told the outcome. `AGENTS.md` owns the authority to delete
-  one, and its limits, under "Owner gates"; the `closeout` skill owns what a leftover is and what each outcome allows
-  under "Leftover rule", and the steps. Rulings the owner made during the session go to the issue or the document that
-  owns the topic, never to a new document.
+A plan names the files each slice changes and the claim each slice proves, never a line estimate. Size is the owner's
+judgment before work-pick, so no seat splits or replans a job for its size afterwards. A card that holds more than one
+independently demonstrable outcome goes back to the owner as a split proposal. Each claim also gets a fixed observer,
+an expected result grounded outside the code and a construction mode, as [The evidence bar](AI-WORKFLOW-evidence.md)
+explains.
+
+Where the repository turns plan approval on, the session presents the completed plan after any plan review. The agents
+build nothing until the owner says yes. The session makes any change the owner asks for and presents the plan again.
+No guard holds this gate.
+[The `resume` skill](../.agents/skills/resume/SKILL.md#4-plan) owns planning and the gate's steps, under "4. Plan".
+
+### Building
+
+Builder seats build one slice at a time from a filled handoff, and the session never edits. Two slices with disjoint
+files may run at once. The second runs in its own worktree cut from the job branch and merged back into it. A runtime's
+own subagent worktree branches from `main` rather than the job branch, so no builder runs in one.
+
+Every check runs through a logger, `scripts/run-log.mjs`, which writes its real exit code to the job's worklog. The pull
+request body then quotes what a script wrote, not what an agent remembers. The worklog stays on the machine that ran
+the job and does not travel with git.
+
+The session commits every green slice on the job branch, so a crash costs at most the slice in progress. A builder
+regenerates any artifact the `generated artifacts` row of the Conventions table in
+[`.agents/REPOSITORY.md`](../.agents/REPOSITORY.md) names, and the session commits it with its source. Nobody merges
+such an artifact by hand, and the hooks keep it from landing stale.
+[The `resume` skill](../.agents/skills/resume/SKILL.md#5-build) owns the build steps under "5. Build".
+
+### Verifying and reviewing
+
+Before review, the session drives visual work and shows a current screenshot in chat. Any further check the Surfaces
+table names for a touched surface runs here too.
+
+Then one fresh review reads the final tree. Its depth follows two questions: can the change be undone, and how far
+does the damage reach if it is wrong. The answers choose the `document`, `code` or `sign-off` tier that
+[the review line](AI-WORKFLOW.md#the-review-line) records. A builder repairs a true finding, the session verifies it
+again, and a pass scoped to the repair reviews it. The session dismisses a false finding with a reason.
+[The `resume` skill](../.agents/skills/resume/SKILL.md#6-verify-and-review) owns the tiers, the reviewer routes and the
+repair rounds, under "6. Verify and review".
+
+### An example journey
+
+Suppose a card asks a board tool to refuse a malformed argument before it does any external work. Valid arguments must
+still behave as before. This example is hypothetical: it names no real card, executed test or achieved result.
+
+The plan's claim is that the tool refuses invalid input before any external call and still accepts valid input. The
+checks would observe the refusal message and exit status, that no external call happened, and a valid case. Passing
+checks that never observe the external call would leave that part of acceptance unproved.
+
+Suppose the reviewer finds that the refusal appears only after the external call. The message looks right, but the
+change breaks acceptance. The repair moves the refusal before the call, strengthens the observation and verifies all
+three behaviours again. The decision card then cites the checks that ran, not the ones the plan proposed.
+
+### Push authorisation and delivery
+
+At push authorisation the card moves to Awaiting push, and the owner reads a decision card lifted from the pull request
+body. The owner's yes covers the whole delivery sequence, repairs and rebases within its scope included.
+[`AGENTS.md`](../AGENTS.md#owner-gates) owns what that yes approves, under "Owner gates".
+
+On the pull request route, the session rebases onto `main`, pushes the branch and opens a draft. A `sign-off` change
+settles the external review on the draft where that add-on is on. Marking the draft ready starts continuous integration
+on the merge result. The session always queues the merge as the platform's squashed auto-merge, which completes only
+once the required checks pass.
+
+A queued merge is not a merge. After queuing it the session waits on one command, `scripts/merge-watch.mjs`, which only
+reads GitHub. It exits 0 only when the pull request has merged, and otherwise ends with its reason. A failed read is
+neither a merge nor a failure of the code.
+
+The direct route sends a qualifying change straight to `main`, with no pull request or hosted checks. Only
+documentation and a setting-only seat change can qualify, and the repository's gate decides whether the whole change
+does. A documentation file beside code never makes the code eligible. The gate judges every pushed commit, so a change
+made and later undone within the push still counts.
+
+The local hook runs the gate as it stands on the remote's `main`, so an edited gate cannot admit itself.
+[The hooks manual](../.githooks/README.md#what-the-main-gate-may-rely-on) owns that boundary. The direct route still
+needs local verification, the review and the owner's yes. Its commit message carries the approved body and the
+receipts.
+
+The direct route spares a qualifying change the pull request and hosted checks, while the local checks, review and
+owner's yes still hold. [`AGENTS.md`](../AGENTS.md#publication-and-machinery) owns
+both routes, under "Publication and machinery", and
+[the delivery reference](../.agents/skills/resume/references/deliver.md) owns the sequence. Where the documentation
+sweep runs, its own landing rule in `docs/DOC-SWEEP.md` and `docs/SWEEP-TRIAGE.md` lets it merge its own pull requests.
+
+A merge on `main` in the canonical repository does not change any adopting repository. Each adopter keeps its copy
+until it applies a release update, as [`AGENTS.md`](../AGENTS.md#shared-workflow-adoption) says under "Shared workflow
+adoption".
+
+### Closeout
+
+Closeout starts from proof, not from a queued merge. On the pull request route that proof is the merged state and its
+review record. On the direct route it is the fetched history and the pushed tree matching the receipts.
+
+The same session then confirms the issue closed, moves the card to Done and advances local `main` only by a provably
+safe fast-forward. It leaves a dirty, active or uncertain checkout untouched. One command,
+`scripts/closeout-cleanup.mjs`, removes the job's containers, named scratch, worktree and branch where its checks pass.
+It keeps every other target and reports why.
+
+The session judges what is its own scratch, and stops a server only once it shows the server is its own. It reports a
+hold that cleanup can wait out, such as an open terminal, in one line and leaves it for a later session. The session
+asks the owner only about a file with no provable owner, unmerged work or a permission only the owner can grant.
+Rulings the owner made during the job go to the issue or the document that owns the topic.
+
+The session investigates a leftover from another job, or one it cannot prove it made, to a conclusion and reports the
+outcome. [The `closeout` skill](../.agents/skills/closeout/SKILL.md) owns the steps, its
+[Deferred cleanup](../.agents/skills/closeout/SKILL.md#deferred-cleanup) and its
+[Leftover rule](../.agents/skills/closeout/SKILL.md#leftover-rule). The skill's
+[Disposable job cleanup](../.agents/skills/closeout/SKILL.md#disposable-job-cleanup) section owns the authority to delete.
+
+### Parking a job
+
+Only the owner starts the `handoff` skill, which parks a job left unfinished at the end of a session. A bare
+request to park authorizes local preparation only: committing what exists and drafting the pull request body.
+Publishing the branch or a draft needs the separate authorization that skill names. The next session finds the job
+through git and the handoff, and checks which receipts still hold on the current head.
+[The `resume` skill](../.agents/skills/resume/SKILL.md) owns the route under "Parking".
+
+### Runs without a pick
+
+Two optional modes let a run take cards without a pick for each one. Each is off unless the settings file on the
+fetched `main` turns it on. No guard holds either mode, except the git guard inside a run's own sessions.
+
+- **Product manager run.** The owner hands each work-pick to a run, which starts a fresh session for each card and
+  builds it to Awaiting push. This matters to the owner because push authorisation stays the owner's yes for every
+  job, so a run never ships work alone. A card that needs the owner goes back to Backlog, and a card the run suggests
+  waits for the owner's answer.
+- **Pre-approved run.** The owner approves cards ahead of the work, one record on each card, and the run merges each
+  with no yes at push. This matters because the record is the only approval, so editing the card or its record
+  withdraws it. A job that touches an owner-directed or sign-off surface, or shows a failure or an unfixed finding,
+  still stops for the owner.
+
+[The run reference](../.agents/skills/resume/references/runs.md) owns both runs: the
+[product manager run](../.agents/skills/resume/references/product-manager-run.md), the
+[pre-approved run](../.agents/skills/resume/references/pre-approved-run.md), the
+[stage 2 measures](../.agents/skills/resume/references/runs.md#stage-2-evidence) and the
+[native Codex app route](../.agents/skills/resume/references/runs.md#native-codex-app-run).
+[Two runtimes, one contract](AI-WORKFLOW-runtimes.md) explains what changes in native run chats, for phone
+notifications and in a cloud build.
 
 ## Where the rules live
 
-- [The `resume` skill](../.agents/skills/resume/SKILL.md): every step from intake to the queued merge, in the order a
-  session runs them, the review tiers and when the external review runs included.
-- The external review add-on's own skill, in a repository that has turned
-  [the add-on](AI-WORKFLOW.md#the-external-review-add-on) on: how the external review is run: the shared pool it is
-  metered from, the allowance read before a request, the request, how each finding is settled, whether a settled review
-  still stands after a rebase, and when an attempt counts as unavailable.
-- [The `closeout` skill](../.agents/skills/closeout/SKILL.md): every step after the merge, and under "Leftover rule"
-  what a leftover is and what each outcome of investigating one allows.
-- [`AGENTS.md`](../AGENTS.md) under "Owner gates": what work-pick, push authorisation and the optional plan approval approve, and the
-  cleanup rule.
-- [`AGENTS.md`](../AGENTS.md) under "Review and visual verification": the one fresh review before the pull request
-  opens, and the visual check.
-- [`AGENTS.md`](../AGENTS.md) under "Publication and machinery": the pull request route and the direct route.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md): every step from intake to the queued merge, the review tiers
+  and parking.
+- [The delivery reference](../.agents/skills/resume/references/deliver.md): both delivery routes, receipt reuse and the
+  merge watch.
+- [The run reference](../.agents/skills/resume/references/runs.md): product manager and pre-approved runs.
+- [The `closeout` skill](../.agents/skills/closeout/SKILL.md): every step after the merge, deferred cleanup, the
+  cleanup authority and the Leftover rule.
+- [`AGENTS.md`](../AGENTS.md#owner-gates) under "Owner gates": what each owner decision approves.
+- [`AGENTS.md`](../AGENTS.md#review-and-visual-verification) under "Review and visual verification": the one fresh
+  review and the visual check.
+- [`AGENTS.md`](../AGENTS.md#publication-and-machinery) under "Publication and machinery": the pull request route and
+  the direct route.
 - The Surfaces table in [`AGENTS.md`](../AGENTS.md) and the Conventions table in
-  [`.agents/REPOSITORY.md`](../.agents/REPOSITORY.md): the repository's own gates, its answers to the two review
-  questions, generated artifacts and visual verification.
-- [The head of `scripts/lib/unsafe-git.mjs`](../scripts/lib/unsafe-git.mjs): the exact command forms the git guard
-  refuses at each stage.
+  [`.agents/REPOSITORY.md`](../.agents/REPOSITORY.md): the repository's own gates, review answers, generated artifacts
+  and visual verification.
+- The head of `scripts/lib/unsafe-git.mjs`: the exact command forms the git guard refuses.
 
 ## Failure modes
 
-- **A session stops mid-build.** Every green slice is already committed on the job branch, so at most the slice in
-  progress is lost.
-- **A session stops while a plan awaits the owner's approval.** Nothing has been built, so nothing is handed off:
-  the job branch, the claim on the card and the saved plan stay on the machine that made them. A session that
-  continues the job there presents the plan and asks again, and an approval given to an earlier session does not
-  carry over ([the `resume` skill](../.agents/skills/resume/SKILL.md), under "4. Plan"). From another machine the
-  card is the In progress card with no branch or pull request behind it, below.
-- **A reviewer cannot be reached.** [The `resume` skill](../.agents/skills/resume/SKILL.md) owns the substitution
-  route and the declaration it requires, under "6. Verify and review".
-- **Two repair rounds still produce true findings.** [The `resume` skill](../.agents/skills/resume/SKILL.md)
-  decides between one more round and an owner decision, under "5. Build".
-- **A required check fails, or the pull request is blocked or closed.** The waiting command ends with its reason,
-  and the session reports it and repairs on the draft, as [the `resume` skill](../.agents/skills/resume/SKILL.md)
-  sets out under "8. Deliver".
-- **Cleanup is retained after delivery.** Product completion does not mean every target was removed. The
-  [Deferred cleanup procedure](../.agents/skills/closeout/SKILL.md#deferred-cleanup) uses issue comments for
-  GitHub issue trackers to record pending targets and rediscover them on later resume/closeout. Markdown card
-  installations rely on existing card/publication and ordinary Leftover inventory, without an added persistence
-  or discovery guarantee. Fresh ownership and safety evidence is required; live or uncertain targets stay
-  retained. Existing authorization avoids identical permission questions but guarantees neither immediate
-  removal nor promptless runtime approval.
-- **An In progress card has no branch or pull request behind it.** It is shown to the owner with its latest claim
-  and returned to Ready only on the owner's say ([the `resume` skill](../.agents/skills/resume/SKILL.md), under
-  "1. Find where things stand").
+When progress stops, a refusal and its remedy are different things. A script may stop an operation, but an instruction
+says what the session investigates or does next. [Enforcement and instruction](AI-WORKFLOW-enforcement.md) separates
+the two.
+
+| Situation | What shows it | What happens next |
+|---|---|---|
+| Intake cannot be read | The board command's exit status names a failed or incomplete read | Selection stops and the session reports the read; a failed read is never an empty board |
+| The session cannot confirm the card is free | Start checks are incomplete or disagree with intake | Nothing starts; an earlier pick never proves the card is still free |
+| The session stops mid-build | The job branch holds a commit for every green slice | The stop loses at most the slice in progress; the next session resumes from the branch |
+| The session stops while a plan awaits approval | The agents have built nothing; the branch, claim and plan stay on that machine | A later session there presents the plan and asks again; an earlier approval does not carry over |
+| A check passes but misses part of the claim | The receipt is green, yet the check never observes that part | That part of acceptance stays unproved; a receipt cannot show that the session chose the right command |
+| A review finding is true | The reviewer names a real defect or gap | A builder repairs it and the session verifies it, or the session takes it to the owner where judgment remains |
+| Two repair rounds still raise true findings | The repair review still raises findings | The session runs one more round or brings the owner a decision |
+| A reviewer is unreachable | A usage, sign-in or provider failure | The substitution route runs and the pull request body declares it; unavailable is never a clean review |
+| `main` moves during delivery | The job's base and the remote history differ | The session rebases while draft, and receipt reuse decides which checks run again |
+| A required check fails, or the pull request is blocked or closed | The merge watch ends with its reason | The session reports it and returns the pull request to draft before pushing a repair |
+| The merge watch cannot read GitHub | The watch ends on a failed read | The watch confirms nothing either way, and a failed read is not a merge. An unconfirmed merge returns the session to [delivery](../.agents/skills/resume/references/deliver.md), and closeout does not start |
+| Cleanup ownership is uncertain | Ownership, live use or unmerged work stays unsettled | Cleanup keeps the target, and the session investigates and reports it; uncertainty never authorizes deletion |
+| An In progress card has no branch or pull request | Intake shows the card with its newest claim | It returns to Ready only on the owner's say |
+
+Closeout does not lose the cleanup it kept after delivery. Where the board is GitHub issues, an issue comment records
+each kept target for a later resume or closeout to reconsider. A Markdown card board relies on its ordinary publication
+and the Leftover rule instead, with no added guarantee. Each later attempt needs fresh ownership and safety evidence.
+
+The local hooks guard publication only when they run. Whoever holds GitHub's administrator bypass can still put a
+commit on `main`, as [the `shared-files` skill](../.agents/skills/shared-files/SKILL.md#administrator-bypass) says. So no rule promises that every refused
+publication is impossible.
+
+Isolation has a cost too. Each job keeps its own state apart, but the session must track its claims, branches and
+cleanup and retire them safely. No workflow document measures what isolation gains in speed or output. Equally, the
+example journey on this page is not achieved work: only real receipts, settled reviews and an observed merge show a job
+succeeded.
 
 ## Key files
 
 - `.agents/skills/resume/SKILL.md` and `.agents/skills/closeout/SKILL.md`: the steps.
-- The external review add-on's skill and reviewer configuration, in a repository that has turned
-  [the add-on](AI-WORKFLOW.md#the-external-review-add-on) on.
-- `.github/pull_request_template.md`: the pull request body the owner's decision card is lifted from.
+- `.agents/skills/resume/references/deliver.md` and `.agents/skills/resume/references/runs.md`: delivery and runs.
+- `.github/pull_request_template.md`: the pull request body the decision card comes from.
 - `scripts/run-log.mjs`: the logger every check runs through.
-- `scripts/merge-watch.mjs`: the one waiting command after the merge is queued.
-- `scripts/closeout-cleanup.mjs`: the one cleanup command closeout runs after the merge.
+- `scripts/merge-watch.mjs`: the one waiting command after the session queues the merge.
+- `scripts/closeout-cleanup.mjs`: the one cleanup command after the merge.
 - `scripts/gates/pre-push-main`: the repository's own gate for the direct route, where it supplies one.
+- The external review add-on's skill and reviewer configuration, where
+  [the add-on](AI-WORKFLOW.md#the-external-review-add-on) is on.
+
+## Where to go next
+
+- [The seats](AI-WORKFLOW-seats.md) shows who acts at each stage, and how work passes between them.
+- [The evidence bar](AI-WORKFLOW-evidence.md) explains what a check proves and what a receipt shows.
+- [The board](AI-WORKFLOW-board.md) explains the columns a card moves through.

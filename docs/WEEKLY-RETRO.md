@@ -19,7 +19,7 @@ proposal is never agreed work: the owner decides each one. A local session can r
 - this manual;
 - the retro entry in `docs/ISSUE-TRACKER.md`;
 - step 3 of `.agents/skills/retro/SKILL.md`;
-- the review line format in `docs/AI-WORKFLOW.md`, under "The review line";
+- the review line format in the Review section of `.github/pull_request_template.md`;
 - the place of the Review section in `.github/pull_request_template.md`;
 - `AGENTS.md`, `docs/CODING-STANDARDS.md` and the check scripts in `package.json`, only to name where a fix would
   live and to confirm it does not already exist;

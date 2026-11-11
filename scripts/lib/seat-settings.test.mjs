@@ -1,12 +1,12 @@
 // seat-settings.test.mjs — the substitution of a seat's setting values and the settings schema.
-// Seat texts and refusal causes are written out by hand; only the last test reads the live seat files.
+// Seat texts and refusal causes are written out by hand; only the test that checks every seat in this repository reads the live seat files.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { presentRuntimes } from './runtimes.mjs';
-import { overrideProblems, parseSettings, seatsByPath, seatsRecord, substituteSeatSettings } from './seat-settings.mjs';
+import { overrideProblems, parseSettings, seatSettingValues, seatsByPath, seatsRecord, substituteSeatSettings } from './seat-settings.mjs';
 
 const PRESENT = presentRuntimes('.');
 
@@ -108,7 +108,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     ['[]', `${label}: file: must hold one JSON object; found []`],
     ['{"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],
     [withRuntimes(['gemini']), `${label}: ${runtimesRule}; found ["gemini"]`],
@@ -149,8 +149,9 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     '{"claude":{"builder":{"model":"opus","effort":"high"},"reviewer":{"model":"opus","maxTurns":90}},"codex":{"reviewer":{"model_reasoning_effort":"high"}}}',
   );
   assert.deepEqual(seatsRecord(new Map()), {});
-  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], greptile: false, docSweep: true, seats: new Map() });
+  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], greptile: false, herdr: false, docSweep: true, seats: new Map() });
   assert.equal(parseSettings('{"version":1,"seats":{},"greptile":true}', label).greptile, true);
+  assert.equal(parseSettings('{"version":1,"seats":{},"herdr":true}', label).herdr, true);
   assert.equal(parseSettings('{"version":1,"seats":{},"docSweep":false}', label).docSweep, false);
 
   const claudeOnly = { claude: { builder: { model: 'opus' } } };
@@ -246,46 +247,79 @@ test('a problem the shared bytes already have is not charged to the override', (
   assert.match(another[0], /^reviewer\.toml: unknown model `example-other-model`/);
 });
 
+test('seat setting values are read from the plain form and a damaged seat is refused by name', async () => {
+  const { seatSettingValues } = await import('./seat-settings.mjs');
+  const claude = claudeSeat('builder', 'opus', 'high', 40);
+  assert.deepEqual(seatSettingValues(CLAUDE_PATH, buffer(claude)), { model: 'opus', effort: 'high', maxTurns: 40 });
+  assert.deepEqual(seatSettingValues(CODEX_PATH, buffer(codexSeat('builder', 'gpt-5', 'high'))), { model: 'gpt-5', model_reasoning_effort: 'high' });
+  const withoutTurns = seatSettingValues(CLAUDE_PATH, buffer(claude.replace('maxTurns: 40\n', '')));
+  assert.deepEqual(withoutTurns, { model: 'opus', effort: 'high' });
+  assert.equal(Object.hasOwn(withoutTurns, 'maxTurns'), false);
+
+  assert.throws(() => seatSettingValues(CLAUDE_PATH, buffer(claude.replace('model: opus\n', 'model: opus\nmodel: haiku\n'))),
+    { message: `${CLAUDE_PATH}: setting model is not carried exactly once in the plain form inside the settings block` });
+  assert.throws(() => seatSettingValues('notes/example.txt', buffer(claude)), { message: 'notes/example.txt: is not a seat path' });
+  assert.throws(() => seatSettingValues(CLAUDE_PATH, buffer('The charter body.\nmodel: haiku\n')), { message: `${CLAUDE_PATH}: no settings block found` });
+});
+
+// The expected line for a changed value is formatted here, not by the module.
+const runtimes = [
+  { runtime: 'claude', required: ['oracle.md', 'security-reviewer.md'],
+    dir: '.claude/agents', extension: '.md', names: ['model', 'effort', 'maxTurns'], line: /^(model|effort|maxTurns):/,
+    block: (lines) => [1, lines.indexOf('---', 1)], changed: { model: 'example-other-model', effort: 'example-other-effort' },
+    formatted: (name, value) => `${name}: ${value}` },
+  { runtime: 'codex', required: ['oracle.toml', 'security-reviewer.toml', 'architect.toml'],
+    dir: '.codex/agents', extension: '.toml', names: ['model', 'model_reasoning_effort'], line: /^(model|model_reasoning_effort) =/,
+    block: (lines) => [0, lines.findIndex((line) => line.startsWith('developer_instructions'))],
+    changed: { model: 'example-other-model', model_reasoning_effort: 'example-other-effort' },
+    formatted: (name, value) => `${name} = "${value}"` },
+];
+
+function assertSubstitutionForm(path, original, { names, line, block, changed, formatted, extension }) {
+  const lines = original.toString('latin1').split('\n');
+  const [start, end] = block(lines);
+  const settingLines = [];
+  for (let i = start; i < end; i++) if (line.test(lines[i])) settingLines.push(i);
+  assert.equal(settingLines.length, names.length, `${path}: expected one line for each of ${names.join(', ')} in its settings block`);
+  if (extension === '.toml') {
+    assert.ok(!lines.slice(start, end).some((text) => /^max_?turns/i.test(text)), `${path}: a Codex seat has no turn-limit slot`);
+  }
+
+  // The turn-limit stand-in differs from the seat's own value, so its line is rewritten whatever the seat carries.
+  const values = { ...changed };
+  if (names.includes('maxTurns')) {
+    const current = seatSettingValues(path, original).maxTurns;
+    values.maxTurns = current > 1 ? current - 1 : 2;
+  }
+
+  const result = substituteSeatSettings(path, original, values);
+  const after = result.data.toString('latin1').split('\n');
+  assert.equal(after.length, lines.length);
+  const differing = lines.map((_, i) => i).filter((i) => after[i] !== lines[i]);
+  assert.deepEqual(differing, settingLines, `${path}: the substitution changed lines besides its setting lines`);
+  for (const name of names) assert.ok(after.includes(formatted(name, values[name])), `${path}: ${name} was not written as ${formatted(name, values[name])}`);
+
+  const restored = substituteSeatSettings(path, result.data, result.replaced);
+  assert.ok(restored.data.equals(original), `${path}: not restored byte for byte`);
+}
+
 test('every seat in this repository carries its settings in the form the substitution addresses', () => {
   const read = [];
-  const runtimes = [
-    // The expected line for a changed value is formatted here, not by the module.
-    { runtime: 'claude', required: ['oracle.md', 'security-reviewer.md'],
-      dir: '.claude/agents', extension: '.md', names: ['model', 'effort', 'maxTurns'], line: /^(model|effort|maxTurns):/,
-      block: (lines) => [1, lines.indexOf('---', 1)], changed: { model: 'example-other-model', effort: 'example-other-effort', maxTurns: 7 },
-      formatted: (name, value) => `${name}: ${value}` },
-    { runtime: 'codex', required: ['oracle.toml', 'security-reviewer.toml', 'architect.toml'],
-      dir: '.codex/agents', extension: '.toml', names: ['model', 'model_reasoning_effort'], line: /^(model|model_reasoning_effort) =/,
-      block: (lines) => [0, lines.findIndex((line) => line.startsWith('developer_instructions'))],
-      changed: { model: 'example-other-model', model_reasoning_effort: 'example-other-effort' },
-      formatted: (name, value) => `${name} = "${value}"` },
-  ];
   const installed = runtimes.filter(({ runtime }) => PRESENT.includes(runtime));
-  for (const { dir, extension, names, line, block, changed, formatted } of installed) {
-    for (const file of readdirSync(dir).filter((name) => name.endsWith(extension))) {
+  for (const spec of installed) {
+    for (const file of readdirSync(spec.dir).filter((name) => name.endsWith(spec.extension))) {
       read.push(file);
-      const original = readFileSync(join(dir, file));
-      const lines = original.toString('latin1').split('\n');
-      const [start, end] = block(lines);
-      const settingLines = [];
-      for (let i = start; i < end; i++) if (line.test(lines[i])) settingLines.push(i);
-      assert.equal(settingLines.length, names.length, `${dir}/${file}: expected one line for each of ${names.join(', ')} in its settings block`);
-      if (extension === '.toml') {
-        assert.ok(!lines.slice(start, end).some((text) => /^max_?turns/i.test(text)), `${dir}/${file}: a Codex seat has no turn-limit slot`);
-      }
-
-      const result = substituteSeatSettings(`${dir}/${file}`, original, changed);
-      const after = result.data.toString('latin1').split('\n');
-      assert.equal(after.length, lines.length);
-      const differing = lines.map((_, i) => i).filter((i) => after[i] !== lines[i]);
-      assert.deepEqual(differing, settingLines, `${dir}/${file}: the substitution changed lines besides its setting lines`);
-      for (const name of names) assert.ok(after.includes(formatted(name, changed[name])), `${dir}/${file}: ${name} was not written as ${formatted(name, changed[name])}`);
-
-      const restored = substituteSeatSettings(`${dir}/${file}`, result.data, result.replaced);
-      assert.ok(restored.data.equals(original), `${dir}/${file}: not restored byte for byte`);
+      assertSubstitutionForm(`${spec.dir}/${file}`, readFileSync(join(spec.dir, file)), spec);
     }
   }
   for (const file of installed.flatMap(({ required }) => required)) {
     assert.ok(read.includes(file), `${file} was not read — an empty directory would prove nothing`);
+  }
+});
+
+test('the settings-form check passes for a Claude seat whose maxTurns already equals any stand-in value', () => {
+  const claude = runtimes.find(({ runtime }) => runtime === 'claude');
+  for (const maxTurns of [7, 1]) {
+    assertSubstitutionForm(CLAUDE_PATH, buffer(claudeSeat('builder', 'sonnet', 'high', maxTurns)), claude);
   }
 });

@@ -1,9 +1,16 @@
 // unsafe-git.mjs: Git refusals shared by the Claude and Codex PreToolUse(Bash) guards, plus
 // cleanup-specific permission for the Claude root hook. The hooks supply checkout facts; direct unit
 // tests cover the policy and subprocess tests cover its wiring. The rules read nothing, except that a
-// pre-approved run session's publish is judged on git and GitHub reads (advance-approval.mjs).
+// pre-approved run or carried push yes session's publish is judged on git and GitHub reads (advance-approval.mjs).
 //
-// Fifteen plain rules, judged on the actual command segments of an agent's shell call:
+// Seventeen plain rules, judged on the actual command segments of an agent's shell call:
+//   a command holding `Approved:`, in every session
+//                            -> no agent session writes or quotes an advance approval record, so
+//                                nothing an agent types can become one: only the owner posts one,
+//                                outside any agent session. The text is read anywhere in the raw
+//                                command, quoted spans and heredoc bodies included, so a record in
+//                                a body file another tool wrote, or one the shell assembles from
+//                                pieces, is not seen
 //   git push / gh pr create / ready / merge in a product manager run session
 //                            -> a run session does not publish, whatever the form; judged only when
 //                                the hook passes `{ runSession: true }`, which both hooks do for a
@@ -15,8 +22,12 @@
 //                                own job pull request back to draft needs no approval. Judged only
 //                                when the hook passes `{ preApproved }`; when both marks are set the
 //                                run session rule wins.
-//                                In either run session a command holding `Approved:` is refused, so
-//                                nothing a run types can become a record
+//   git push / gh pr create / ready / merge in a carried push yes session
+//                            -> admitted only as the same delivery forms, for the one card the owner's
+//                                carried yes names, from its job/<n> branch and with no approval
+//                                record; a push to main is refused. Judged only when the hook passes
+//                                `{ carriedYes }`; with the pre-approved mark as well every publish is
+//                                refused
 //   git commit --no-verify   -> skips the pre-commit gates
 //   git push --no-verify     -> skips the lint pre-push hook
 //   git -c core.hooksPath=… / git --config-env core.hooksPath=… /
@@ -233,17 +244,19 @@ import { publishCheck } from './advance-approval.mjs';
 // path rules the walk resolves with; without it the root-checkout rule is not judged, and every other
 // rule is unchanged. `runSession` identifies a product manager run. `preApproved`, `{ start, tracker }`
 // plus the optional `appJob` and runner injections publishCheck takes, identifies a pre-approved run.
+// `carriedYes`, `{ carried }` plus the same runner injections, identifies a carried push yes session.
 // `appRun` marks an enrolled native session; `runUnavailable` is a refusal used for publication and
 // approval records when native classification failed. Either protects the reserved metadata name.
-export function blockReason(cmd, checkout, { runSession = false, preApproved = null, appRun = false, runUnavailable = '' } = {}) {
+export function blockReason(cmd, checkout, { runSession = false, preApproved = null, carriedYes = null, appRun = false, runUnavailable = '' } = {}) {
   cmd = cmd ?? "";
   // Check submitted text, including quoted paths, without importing the Git-spawning checkout module.
   if ((appRun || runUnavailable) && cmd.includes('fabraik-app-run')) {
     return 'a native app run session must leave its binding metadata to the coordinator';
   }
-  // A run writes no approval record and quotes none, so nothing it types can become one.
-  if ((runSession || preApproved || runUnavailable) && cmd.includes('Approved:')) {
-    return runUnavailable || `${runSession ? 'a product manager' : 'a pre-approved'} run session does not write or quote an advance approval record: only the owner's own session posts one, so a command holding \`Approved:\` is refused`;
+  // No agent session writes or quotes an approval record, so nothing an agent types can become one.
+  if (cmd.includes('Approved:')) {
+    const session = runSession ? 'a product manager run session' : preApproved ? 'a pre-approved run session' : carriedYes ? 'a carried push yes session' : 'an agent session';
+    return runUnavailable || `${session} does not write or quote an advance approval record: only the owner posts one, outside any agent session, so a command holding \`Approved:\` is refused`;
   }
   // Widen each letter of a name to its own class rather than using a regex `i` flag, which would
   // also loosen every option match in the same expression (`-F` for `-f`, `-D` for `-d`).
@@ -565,11 +578,13 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     const passedOver = [...text.matchAll(WORKTREE_PROCESS_SUBSTITUTION)].map((substitution) => worktreeReason(substitution[1]));
     return [...reasons, ...passedOver].find(Boolean) ?? '';
   };
-  // A pre-approved run session publishes only a plain delivery form, as the whole command, from its own
-  // working directory.
-  // These refusals read nothing; publishCheck then reads the branch, origin and the approval.
-  const preApprovedReason = (s, raw) => {
-    const refuse = (why) => `a pre-approved run session ${why}`;
+  // A pre-approved run or carried push yes session publishes only a plain delivery form, as the whole command,
+  // from its own working directory.
+  // These refusals read nothing; publishCheck then reads the branch, origin and, for a run, the approval.
+  const boundedReason = (s, raw) => {
+    const refuse = (why) => `${carriedYes ? 'a carried push yes' : 'a pre-approved run'} session ${why}`;
+    // The launcher sets at most one publishing mark, so a session holding both is refused, not judged by either.
+    if (preApproved && carriedYes) return refuse('publishes nothing while the pre-approved run mark is also set');
     const kind = GIT_PUSH.test(s) ? 'push' : GH_PR_CREATE.test(s) ? 'create' : GH_PR_READY.test(raw) ? 'ready' : 'merge';
     // Git for Windows reads an environment variable name in any letter case.
     const named = /\b(?:GH_REPO|GH_HOST|GIT_DIR|GIT_WORK_TREE)\b/i.exec(cmd)?.[0];
@@ -587,7 +602,7 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     if (/(?:^|\s)(?:-C|--git-dir|--work-tree)/.test(s)) return refuse('publishes nothing from a command holding -C, --git-dir or --work-tree, which can move it out of its own working directory');
     if (kind === 'ready' && !DELIVERY_READY.test(raw)) return refuse('marks ready only with `gh pr ready <number>`, with or without --undo');
     if (kind === 'merge' && !DELIVERY_MERGE.test(raw)) return refuse('merges only with `gh pr merge --auto --squash --delete-branch <number>`');
-    return publishCheck(kind, raw, { ...preApproved, cwd: checkout.cwd });
+    return publishCheck(kind, raw, { ...(preApproved ?? carriedYes), cwd: checkout.cwd });
   };
   const ruleReason = (s, raw) => {
     const publishes = GIT_PUSH.test(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(raw) || GH_PR_READY.test(raw);
@@ -595,8 +610,8 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
       return "a product manager run session does not publish: a built job waits for the owner's yes to push";
     }
     // An admitted publish still meets every rule below.
-    const preApprovedRefusal = preApproved && publishes ? preApprovedReason(s, raw) : '';
-    if (preApprovedRefusal) return preApprovedRefusal;
+    const boundedRefusal = (preApproved || carriedYes) && publishes ? boundedReason(s, raw) : '';
+    if (boundedRefusal) return boundedRefusal;
     if (GIT_COMMIT.test(s) && NO_VERIFY.test(s)) {
       return "git commit --no-verify skips the pre-commit gates";
     }

@@ -30,6 +30,7 @@ export const BUILDER_REQUIREMENTS = [
   "Working directory",
 ];
 export const ARCHITECT_REQUIREMENTS = ["Decision", "Scope", "Discovery", "Judgment", "Deliverable", "Stop condition"];
+export const BUILDER_SEATS = Object.freeze(["builder", "builder-max", "builder-lite"]);
 
 function requirementValue(prompt, requirement) {
   const prefix = `${requirement}:`;
@@ -67,20 +68,27 @@ function rejection(kind, problems, template) {
     : { ok: false, reason: `${kind} handoff ${problems.join("; ")}: fill ${template} instead of hand-writing the handoff` };
 }
 
-export function checkHandoff(toolInput, callerContext = {}) {
-  const callerType = callerContext.callerType;
+// The calling-seat identity rule both runtimes' handoff hooks share: why the identity is unreadable, or null.
+export function callerIdentityProblem({ callerType, hasCallerId }) {
   const callerAbsent = callerType === undefined || callerType === "";
-  if ((callerAbsent && callerContext.hasCallerId)
+  if ((callerAbsent && hasCallerId)
     || (!callerAbsent && (typeof callerType !== "string" || callerType !== callerType.trim()))) {
-    return { ok: false, reason: "agent handoff requires a readable calling-seat identity" };
+    return "agent handoff requires a readable calling-seat identity";
   }
+  return null;
+}
+
+export function checkHandoff(toolInput, callerContext = {}) {
+  const identityProblem = callerIdentityProblem(callerContext);
+  if (identityProblem) return { ok: false, reason: identityProblem };
+  const callerType = callerContext.callerType;
   const type = toolInput?.subagent_type;
   if (["architect", "oracle", "security-reviewer"].includes(callerType) && type !== "explorer") {
     return { ok: false, reason: `${callerType} may start only explorer helpers` };
   }
   const prompt = typeof toolInput?.prompt === "string" ? toolInput.prompt : "";
 
-  if (type === "builder" || type === "builder-max" || type === "builder-lite") {
+  if (BUILDER_SEATS.includes(type)) {
     const problems = [];
     if (SELF_MUTATION_RE.test(prompt)) {
       problems.push("instructs self-mutation-testing (the revert cycle is the orchestrator's convergence step)");

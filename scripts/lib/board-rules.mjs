@@ -381,13 +381,18 @@ export function scanOutcome({ drifted, unreadable, closeout }) {
   return { lines, exitCode: 0 };
 }
 
+// A detail entry is unread when the card's details failed or some of its comments were not read.
+export function detailUnread(entry) {
+  return entry.unavailable !== undefined || entry.commentsUnavailable !== null;
+}
+
 // What `--intake` prints on stderr after its document, and what it exits with. Drift alone
 // is 3 and a read that stopped short alone is 4: a card whose details (or some of its
 // comments) were not read, or a card the board could not read. Only a clean scan with
 // every detail read is 0. The scan lines are the ordinary scan's own, so the wording of
 // a drift row or an unread card has one home.
 export function intakeOutcome({ drifted, unreadable, details }) {
-  const unread = [...details.values()].filter((entry) => entry.unavailable !== undefined || entry.commentsUnavailable !== null);
+  const unread = [...details.values()].filter(detailUnread);
   const drift = drifted.length > 0;
   const incomplete = unread.length > 0 || unreadable.length > 0;
   let exitCode = INTAKE_EXIT.complete;

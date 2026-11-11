@@ -1,8 +1,9 @@
 <!--
 Planner handoff template. Everything below the ---8<--- line is the shared prompt for
-architect dispatches. Fill every {{SLOT}} before dispatch; the prompt-side handoff
-checker rejects an incomplete contract. Discovery supplies completed findings or, on
-Claude Code, a bounded unresolved lookup for the architect's explorer-only discovery branch.
+architect dispatches. Fill every {{SLOT}} before dispatch; on Claude Code the prompt-side
+handoff checker rejects an incomplete contract, and on Codex no hook reads an architect
+dispatch. Discovery supplies completed findings or, on Claude Code, a bounded unresolved
+lookup for the architect's explorer-only discovery branch.
 
 The `Deliverable:` line names the plan file; the `resume` skill under "4. Plan" says which file that is and what
 the coordinating session does with an architect reply that lacks `plan delivered in full`.

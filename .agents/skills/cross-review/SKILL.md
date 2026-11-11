@@ -28,9 +28,10 @@ route's existing output file and redirection.
 Dispatch the other family only where the `resume` skill, under "6. Verify and review", finds cross-family review
 authorized or the owner has said yes for this job.
 
-Read the seat file and pass its settings unchanged; `AGENTS.md`'s model routing rule forbids raising or lowering
-them. The read-only sandbox has no network, so the prompt carries the card, body and comments, that the charter's spec lens needs,
-and the charter's own `gh` and web calls fail harmlessly. `<out>` is a directory outside the worktree.
+Read the seat file and pass its settings unchanged; `AGENTS.md`'s model routing rule forbids raising or lowering them.
+The read-only sandbox has no network, so the prompt carries the card, body and comments, that the charter's spec lens
+needs, and the charter's own `gh` and web calls fail harmlessly. `<out>` is `.claude/worklog/<branch>-cross-review/` in
+the job worktree, the job's own ignored folder.
 
 `<pending>` names every check and review still running or already scheduled for this branch, the full suite, a
 convergence check, `security-reviewer` or the external review among them, or reads `none`. Every reviewer dispatch carries it,

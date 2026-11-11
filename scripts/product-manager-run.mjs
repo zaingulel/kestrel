@@ -10,7 +10,12 @@
 // marks every session PRE_APPROVED_RUN_SESSION=<that time>, with no product manager mark.
 // Run: node scripts/product-manager-run.mjs --coordinator <chat UUID> [--pre-approved]
 // Or --claude-card <absolute logs base> for one Claude child carrying exactly one inherited run mark. Its stdout/stderr
-// stay in .json/.stderr.log; cancellation/spawn failure exits 1, ordinary numeric child status is unchanged.
+// stay in .json/.stderr.log; cancellation/spawn failure exits 1, ordinary numeric child status is unchanged. The launch
+// requires CLAUDE_CODE_SESSION_ID, the launching Claude Code session, and records it in .coordinator before the child.
+// With --carry <logs base>.answer.json it instead resumes the ended card session the answer names, with the owner's
+// words, only for the session recorded as that card's coordinator; a refused carry exits 2 and starts no session.
+// An answer that also holds `shown` is a push yes for the decision card shown: it resumes only that card's built session
+// while its clean job/<card> worktree still holds that card, marked only CARRIED_PUSH_YES=<card> and with no deny rules.
 // Or --check-admission <absolute request file> to judge one pre-approved admission request without starting a session:
 // it prints one JSON decision and exits 0 for allow, 3 for wait and 1 for unavailable; malformed arguments exit 2.
 // Or --bind-app-job <absolute request file> to bind a verified detached checkout without starting a session:
@@ -18,6 +23,8 @@
 // Or --prepare-app-phase <absolute phase-log-base> <ready-session-uuid> <original-claim-created-at>
 // [<absolute admission-request-file>] to retain an admitted native phase and return its prompt without dispatch.
 // It exits 0 for allow, 3 for wait, 1 for unavailable or 2 for invalid arguments.
+// The Herdr lead (scripts/lead.mjs) starts its Claude sessions through the same managed launcher under the lead profile;
+// each lead unit's observers run this script with --observe-lead-phase=<slot>.
 
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -31,9 +38,9 @@ import { ghExec } from './lib/gh-exec.mjs';
 import { requirePreApprovedRun } from './lib/advance-approval.mjs';
 import { gitExecutable } from './lib/posix-shell.mjs';
 import { codexAppRunBindingPath, codexAppRunDesignationPath, isCodexAppRunRecord, readAppRunConnection, resolveCodexAppWorktree } from './lib/checkout-context.mjs';
-import { cancellationReason, CARD_PROMPT, PRE_APPROVED_CARD_PROMPT, admitWholeJob, inspectAdmission, prepareAppPhase, readWorktreeInventory, retainPreparedContext, runRun, runWholeJobs, verifyPreparedContext } from './lib/product-manager-run.mjs';
+import { cancellationReason, CARD_PROMPT, PRE_APPROVED_CARD_PROMPT, SESSION_ID, admitWholeJob, inspectAdmission, prepareAppPhase, readWorktreeInventory, retainPreparedContext, runRun, runWholeJobs, verifyCarriedAnswer, verifyPreparedContext } from './lib/product-manager-run.mjs';
 
-const USAGE = 'usage: node scripts/product-manager-run.mjs --coordinator <chat UUID> [--pre-approved [--continue-card <card>]] | --admit-job build|deliver <absolute request file> | --claude-card <absolute logs base> [--prepared-context <absolute context file>] | --check-admission <absolute request file> | --bind-app-job <absolute request file> | --prepare-app-phase <absolute phase-log-base> <ready-session-uuid> <original-claim-created-at> [<absolute admission-request-file>]';
+const USAGE = 'usage: node scripts/product-manager-run.mjs --coordinator <chat UUID> [--pre-approved [--continue-card <card>]] | --admit-job build|deliver <absolute request file> | --claude-card <absolute logs base> [--prepared-context <absolute context file> | --carry <absolute logs base>.answer.json] | --check-admission <absolute request file> | --bind-app-job <absolute request file> | --prepare-app-phase <absolute phase-log-base> <ready-session-uuid> <original-claim-created-at> [<absolute admission-request-file>]';
 const RUN_START = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 // Argument validation stays local to the CLI; the library policy remains private.
 const CONTROL = /[\p{Cc}\u2028\u2029]/u;
@@ -41,7 +48,7 @@ const MAX_BIND_REQUEST_BYTES = 16 * 1024;
 const ADMISSION_EXIT = { allow: 0, wait: 3, unavailable: 1 };
 
 // The root the way .codex/hooks.json works it out: the parent of the absolute common directory.
-function repositoryRoot(git = (args) => execFileSync('git', args, { encoding: 'utf8', env: gitEnvironment(), stdio: 'pipe' })) {
+export function repositoryRoot(git = (args) => execFileSync('git', args, { encoding: 'utf8', env: gitEnvironment(), stdio: 'pipe' })) {
   const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
   return dirname(common.trim());
 }
@@ -141,7 +148,7 @@ function runAppPhase(args, dependencies, output) {
   const paths = admissionFile === undefined ? [logBase] : [logBase, admissionFile];
   const claimCreatedAt = Date.parse(claimTime);
   if (args.length < 3 || args.length > 4 || paths.some((path) => !isAbsolute(path) || normalize(path) !== path || CONTROL.test(path))
-    || sessionId.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sessionId)
+    || sessionId.length !== 36 || !SESSION_ID.test(sessionId)
     || !RUN_START.test(claimTime) || !Number.isFinite(claimCreatedAt) || new Date(claimCreatedAt).toISOString() !== `${claimTime.slice(0, -1)}.000Z`) {
     output.error(USAGE);
     return 2;
@@ -169,6 +176,8 @@ function runAppPhase(args, dependencies, output) {
 }
 
 const CLEANUP_WINDOW_MS = 5000;
+// A child takes only the mark its launcher gives it, never an identity or mark inherited from the launching session.
+const INHERITED_SESSION_ENVIRONMENT = ['PRODUCT_MANAGER_RUN_SESSION', 'PRE_APPROVED_RUN_SESSION', 'CARRIED_PUSH_YES', 'CLAUDE_CODE_SESSION_ID'];
 
 // The legacy Unix route owns only the model's process group.
 function sessionStarter(command, mark, {
@@ -176,6 +185,8 @@ function sessionStarter(command, mark, {
   terminationCommand = ['taskkill'],
 }, { stdoutSuffix = '.jsonl', openFlags = 'w' } = {}) {
   return ({ argv, root, logs }) => {
+    const env = { ...process.env };
+    for (const key of INHERITED_SESSION_ENVIRONMENT) delete env[key];
     const out = openSync(`${logs}${stdoutSuffix}`, openFlags);
     let err;
     try {
@@ -187,7 +198,7 @@ function sessionStarter(command, mark, {
     return new Promise((done) => {
       const child = spawn(command[0], [...command.slice(1), ...argv], {
         cwd: root, stdio: ['ignore', out, err], detached: process.platform !== 'win32',
-        env: { ...process.env, ...mark, RUN_CARD_FILE: `${logs}.card` },
+        env: { ...env, ...mark, RUN_CARD_FILE: `${logs}.card` },
       });
       let noteClosed;
       const closed = new Promise((resolve) => { noteClosed = resolve; });
@@ -295,14 +306,54 @@ function sessionStarter(command, mark, {
   };
 }
 
-const CODEX_OBSERVER = '--observe-codex-phase';
 const PHASE_ID = /^[0-9a-f]{32}$/;
-const PHASE_NAME = /^(?:job-[1-9]\d*|end)$/;
 const WHOLE_JOB_NAME = /^job-([1-9]\d*)$/;
 const GIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const RECORD_LIMIT = 16 * 1024;
 const CGROUP_ROOT = '/sys/fs/cgroup';
-const CODEX_ENVIRONMENT = ['HOME', 'PATH', 'CODEX_HOME', 'GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'SSH_AUTH_SOCK'];
+// What one kind of managed session differs by; the unit's stop proof is shared by every profile.
+export const CODEX_PROFILE = {
+  label: 'Codex',
+  observer: '--observe-codex-phase',
+  unit: (phaseId) => `fabraik-codex-${phaseId}.service`,
+  phaseName: /^(?:job-[1-9]\d*|end)$/,
+  markers: { managed: 'FABRAIK_CODEX_MANAGED', folder: 'FABRAIK_CODEX_INVOCATION_FOLDER' },
+  environment: ['HOME', 'PATH', 'CODEX_HOME', 'GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'SSH_AUTH_SOCK'],
+  resultsFolder: (folder) => dirname(folder) === realpathSync(tmpdir()) && /^product-manager-run-[a-zA-Z0-9]{6}$/.test(basename(folder)),
+  seals: { hiddenBus: true, readOnlyControlGroups: true, busProxy: true },
+};
+// The variables a lead session takes from the lead's environment where set, with every LC_ variable.
+const LEAD_ENVIRONMENT = ['HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'LANG', 'TERM', 'TZ', 'XDG_RUNTIME_DIR', 'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'DBUS_SESSION_BUS_ADDRESS', 'SSH_AUTH_SOCK', 'GH_CONFIG_DIR', 'WAYLAND_DISPLAY', 'DISPLAY',
+  'HYPRLAND_INSTANCE_SIGNATURE'];
+const LEAD_MARKERS = { managed: 'FABRAIK_LEAD_MANAGED', folder: 'FABRAIK_LEAD_INVOCATION_FOLDER' };
+const LEAD_OBSERVER = /^--observe-lead-phase=([1-9]\d*)$/;
+
+// The start of every unit name of the lead whose canonical state folder is `state`, so one lead never counts or stops
+// another's units.
+export function leadUnitPrefix(state) {
+  return `fabraik-lead-${createHash('sha256').update(state).digest('hex').slice(0, 8)}-`;
+}
+
+// A lead session on running place `slot`: its results lie under <state>/runs/, its command sees only the allowlist, the
+// run markers and `settings`, the name and value pairs the lead gives every session; nothing else is sealed, so the
+// session reaches what the lead's user reaches. A hangup stops its unit as SIGINT and SIGTERM do, since the lead stops
+// on all three. A lead observer, which needs no settings, takes its slot from its flag.
+export function leadProfile(state, slot, settings = []) {
+  return {
+    label: 'lead',
+    observer: `--observe-lead-phase=${slot}`,
+    unit: (phaseId) => `${leadUnitPrefix(state)}slot${slot}-${phaseId}.service`,
+    phaseName: /^(?:select-[1-9]\d*|job-[1-9]\d*-(?:prepare|build|deliver)|end)$/,
+    markers: LEAD_MARKERS,
+    environment: [...LEAD_ENVIRONMENT, ...Object.keys(process.env).filter((name) => name.startsWith('LC_'))],
+    settings,
+    resultsFolder: (folder) => dirname(folder) === join(state, 'runs') && /^\d{4}-\d{2}-\d{2}T\d{6}Z-[a-zA-Z0-9]{6}$/.test(basename(folder)),
+    seals: { hiddenBus: false, readOnlyControlGroups: false, busProxy: false },
+    sealed: true,
+    stopSignals: ['SIGINT', 'SIGTERM', 'SIGHUP'],
+  };
+}
 
 function managedPath(path) {
   return typeof path === 'string' && isAbsolute(path) && normalize(path) === path && !CONTROL.test(path);
@@ -323,8 +374,8 @@ function verifyOutsideCheckouts(path, root) {
   }
 }
 
-function verifyInvocationFolder(folder, root) {
-  if (!managedPath(folder) || dirname(folder) !== realpathSync(tmpdir()) || !/^product-manager-run-[a-zA-Z0-9]{6}$/.test(basename(folder))) {
+function verifyInvocationFolder(profile, folder, root) {
+  if (!managedPath(folder) || !profile.resultsFolder(folder)) {
     throw new Error('managed invocation is outside the canonical temporary results root');
   }
   managedDirectory(folder, true);
@@ -387,16 +438,12 @@ function nativeStartTicks(pid) {
   return fields[19];
 }
 
-function managedUnit(phaseId) {
-  return `fabraik-codex-${phaseId}.service`;
-}
-
-function verifyManagedIntent(intent, { phaseId, phase, root, runStart }) {
+function verifyManagedIntent(profile, intent, { phaseId, phase, root, runStart }) {
   const { controllerPid, controllerStartTicks, card, priorClaimUrls, base } = intent;
-  const expected = { phaseId, phase, unit: managedUnit(phaseId), bootId: nativeBootId(), root, runStart, controllerPid, controllerStartTicks };
+  const expected = { phaseId, phase, unit: profile.unit(phaseId), bootId: nativeBootId(), root, runStart, controllerPid, controllerStartTicks };
   const whole = WHOLE_JOB_NAME.exec(phase);
   if (whole) Object.assign(expected, { card, priorClaimUrls, base });
-  if (!PHASE_ID.test(phaseId) || typeof phase !== 'string' || !PHASE_NAME.test(phase)
+  if (!PHASE_ID.test(phaseId) || typeof phase !== 'string' || !profile.phaseName.test(phase)
     || typeof runStart !== 'string' || !RUN_START.test(runStart) || Number.isNaN(Date.parse(runStart))
     || !Number.isSafeInteger(controllerPid) || controllerPid < 1
     || typeof controllerStartTicks !== 'string' || !/^[1-9]\d*$/.test(controllerStartTicks)
@@ -407,9 +454,9 @@ function verifyManagedIntent(intent, { phaseId, phase, root, runStart }) {
   return intent;
 }
 
-function createManagedIntent(folder, phase, root, runStart, job) {
+function createManagedIntent(profile, folder, phase, root, runStart, job) {
   const phaseId = randomBytes(16).toString('hex');
-  const intent = { phaseId, phase, unit: managedUnit(phaseId), bootId: nativeBootId(), root, runStart,
+  const intent = { phaseId, phase, unit: profile.unit(phaseId), bootId: nativeBootId(), root, runStart,
     controllerPid: process.pid, controllerStartTicks: nativeStartTicks(process.pid), ...job };
   mkdirSync(join(folder, 'units', phaseId), { mode: 0o700 });
   const directory = phaseDirectory(folder, phaseId);
@@ -417,14 +464,14 @@ function createManagedIntent(folder, phase, root, runStart, job) {
   return { intent, intentPath: join(directory, 'intent.json') };
 }
 
-function readWholeIntent(path, root) {
+function readWholeIntent(profile, path, root) {
   if (!managedPath(path) || basename(path) !== 'intent.json') throw new Error('whole job intent path is invalid');
   const phaseId = basename(dirname(path));
   const folder = dirname(dirname(dirname(path)));
   if (!PHASE_ID.test(phaseId) || dirname(dirname(path)) !== join(folder, 'units')) throw new Error('whole job intent path is invalid');
   const intent = readManagedRecord(join(phaseDirectory(folder, phaseId), 'intent.json'));
   if (!WHOLE_JOB_NAME.test(intent.phase)) throw new Error('whole job intent phase is invalid');
-  return { folder, intent: verifyManagedIntent(intent, { phaseId, phase: intent.phase, root, runStart: intent.runStart }) };
+  return { folder, intent: verifyManagedIntent(profile, intent, { phaseId, phase: intent.phase, root, runStart: intent.runStart }) };
 }
 
 function readWorkerIdentity() {
@@ -449,6 +496,17 @@ function readManagedReceipt(folder, intent, role) {
     throw new Error(`${role} receipt identity mismatch`);
   }
   return receipt;
+}
+
+// Locks the open file `fd` exclusively through /usr/bin/flock, waiting up to `seconds` or, at 0, trying once. Resolves
+// to flock's exit status: 0 when locked, 75 when another open file holds the lock.
+export function flockDescriptor(fd, seconds = 5) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('/usr/bin/flock', ['-x', ...(seconds ? ['-w', String(seconds)] : ['-n']), '-E', '75', '3'],
+      { stdio: ['ignore', 'ignore', 'ignore', fd] });
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
 }
 
 function openWholeJobStore(commonDir, root) {
@@ -477,11 +535,7 @@ function openWholeJobStore(commonDir, root) {
       const fd = openSync(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
       try {
         verifyLock(fd);
-        const status = await new Promise((resolve, reject) => {
-          const child = spawn('/usr/bin/flock', ['-x', '-w', '5', '-E', '75', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd] });
-          child.once('error', reject);
-          child.once('close', resolve);
-        });
+        const status = await flockDescriptor(fd);
         if (status === 75) throw Object.assign(new Error('whole-job admission lock contention'), { code: 'WHOLE_JOB_LOCK_BUSY' });
         if (status !== 0) throw new Error('whole-job admission lock is unavailable');
         verifyLock(fd);
@@ -506,7 +560,7 @@ function openWholeJobStore(commonDir, root) {
     remove(card) { unlinkSync(recordPath(card)); },
     watch(change) { return watch(directory, change); },
     attempt(intentPath) {
-      const { intent, folder } = readWholeIntent(intentPath, root);
+      const { intent, folder } = readWholeIntent(CODEX_PROFILE, intentPath, root);
       function receipt(role) {
         try { return readManagedReceipt(folder, intent, role); }
         catch (error) { if (error.cause?.code !== 'ENOENT') throw error; }
@@ -524,24 +578,25 @@ function wholeJobStore(root) {
 
 function cgroupOnlyObserver(root) {
   const members = readFileSync(join(root, 'cgroup.procs'), 'utf8').trim().split(/\s+/);
-  // Delegate=no and the read-only cgroup mount prohibit the worker from creating subgroups.
+  // Delegate=no and, where the profile seals it, the read-only cgroup mount prohibit the worker from creating subgroups;
+  // a subgroup a lead session makes fails this check, so its stop stays unproven.
   return members.length === 1 && members[0] === String(process.pid)
     && !readdirSync(root, { withFileTypes: true }).some((entry) => entry.isDirectory());
 }
 
-function runManagedObserver(args, output) {
+function runManagedObserver(profile, args, output) {
   const [, role, phaseId] = args;
   if (process.platform !== 'linux' || args.length !== 3 || !['start', 'stop'].includes(role) || !PHASE_ID.test(phaseId)) return 2;
   try {
     const root = process.cwd();
-    const folder = process.env.FABRAIK_CODEX_INVOCATION_FOLDER;
+    const folder = process.env[profile.markers.folder];
     if (root !== realpathSync(repositoryRoot())) throw new Error('managed observer is outside its operating root');
-    verifyInvocationFolder(folder, root);
+    verifyInvocationFolder(profile, folder, root);
     const directory = phaseDirectory(folder, phaseId);
     const intent = readManagedRecord(join(directory, 'intent.json'));
     const { phase, runStart, controllerPid, controllerStartTicks } = intent;
-    verifyManagedIntent(intent, { phaseId, phase, root, runStart });
-    if (process.env.FABRAIK_CODEX_MANAGED !== '1' || process.env.PRE_APPROVED_RUN_SESSION !== runStart
+    verifyManagedIntent(profile, intent, { phaseId, phase, root, runStart });
+    if (process.env[profile.markers.managed] !== '1' || process.env.PRE_APPROVED_RUN_SESSION !== runStart
       || process.env.PRODUCT_MANAGER_RUN_SESSION !== undefined || process.env.RUN_CARD_FILE !== join(folder, `${phase}.card`)) {
       throw new Error('managed observer intent identity mismatch');
     }
@@ -558,7 +613,7 @@ function runManagedObserver(args, output) {
     writeManagedRecord(directory, `${role}.json`, receipt);
     return 0;
   } catch (error) {
-    output.error(`Managed Codex ${role} observer refused: ${error.message}`);
+    output.error(`Managed ${profile.label} ${role} observer refused: ${error.message}`);
     return 1;
   }
 }
@@ -695,7 +750,10 @@ function systemdLiteral(path) {
   return `"${path.replace(/["\\]/g, '\\$&').replaceAll('$', () => '$$')}"`;
 }
 
-async function runManagedClient(args, { root, logs, folder, intent, proxy }) {
+// The signals that stop a managed unit unless its profile names its own.
+const MANAGED_STOP_SIGNALS = ['SIGINT', 'SIGTERM'];
+
+async function runManagedClient(args, { root, logs, folder, intent, proxy, stopSignals }) {
   let out;
   let err;
   try {
@@ -729,29 +787,26 @@ async function runManagedClient(args, { root, logs, folder, intent, proxy }) {
       })();
       finishStop(stopping);
     }
-    const onInterrupt = () => requestStop('SIGINT');
-    const onTerminate = () => requestStop('SIGTERM');
+    const onSignal = (signal) => requestStop(signal);
     const onProxyLoss = () => requestStop();
-    process.on('SIGINT', onInterrupt);
-    process.on('SIGTERM', onTerminate);
-    proxy.signal.addEventListener('abort', onProxyLoss, { once: true });
+    for (const signal of stopSignals) process.on(signal, onSignal);
+    proxy?.signal.addEventListener('abort', onProxyLoss, { once: true });
     try {
-      if (proxy.signal.aborted) onProxyLoss();
+      if (proxy?.signal.aborted) onProxyLoss();
       const result = await Promise.race([closed, stopRequested]);
       const settled = stopping ? await stopping : result;
       const intentPath = join(folder, 'units', intent.phaseId, 'intent.json');
       try {
         if (settled.stopFailure || settled.spawnError) throw new Error(settled.stopFailure ?? settled.spawnError);
         const proof = await confirmManagedStop(folder, intent);
-        return { ...settled, interrupted, managedFailure: proxy.signal.reason?.message, managedStop: { disposition: 'verified-local', proof, intentPath } };
+        return { ...settled, interrupted, managedFailure: proxy?.signal.reason?.message, managedStop: { disposition: 'verified-local', proof, intentPath } };
       } catch (error) {
         const reason = `managed local stop proof unavailable: ${error.message}`;
         return { interrupted, managedFailure: reason, managedStop: { disposition: 'unverified', reason, intentPath } };
       }
     } finally {
-      process.off('SIGINT', onInterrupt);
-      process.off('SIGTERM', onTerminate);
-      proxy.signal.removeEventListener('abort', onProxyLoss);
+      for (const signal of stopSignals) process.off(signal, onSignal);
+      proxy?.signal.removeEventListener('abort', onProxyLoss);
     }
   } finally {
     if (out !== undefined) closeSync(out);
@@ -759,48 +814,59 @@ async function runManagedClient(args, { root, logs, folder, intent, proxy }) {
   }
 }
 
-async function managedCodex({ folder, root, runStart, command }) {
-  if (process.platform !== 'linux') throw new Error('managed Codex requires a Linux user service manager');
+export async function managedSession(profile, { folder, root, runStart, command }) {
+  if (process.platform !== 'linux') throw new Error(`managed ${profile.label} requires a Linux user service manager`);
   managedDirectory(folder, true);
-  const runtimeDir = nativeRuntimeDirectory();
-  const observer = `${systemdLiteral(process.execPath)} ${systemdLiteral(fileURLToPath(import.meta.url))} ${CODEX_OBSERVER}`;
-  const proxy = await openManagedProxy(folder, runtimeDir);
+  const { hiddenBus, readOnlyControlGroups, busProxy } = profile.seals;
+  const runtimeDir = hiddenBus || busProxy ? nativeRuntimeDirectory() : undefined;
+  const observer = `${systemdLiteral(process.execPath)} ${systemdLiteral(fileURLToPath(import.meta.url))} ${profile.observer}`;
+  const proxy = busProxy ? await openManagedProxy(folder, runtimeDir) : undefined;
   return {
-    close: proxy.close,
-    signal: proxy.signal,
+    close: async () => { await proxy?.close(); },
+    signal: proxy?.signal,
     async startSession({ argv, logs, intentPath }) {
       try {
-        proxy.signal.throwIfAborted();
+        proxy?.signal.throwIfAborted();
         const phase = basename(logs);
-        if (dirname(logs) !== folder || !PHASE_NAME.test(phase)) throw new Error('managed phase log identity is invalid');
+        if (dirname(logs) !== folder || !profile.phaseName.test(phase)) throw new Error('managed phase log identity is invalid');
         let intent;
         if (WHOLE_JOB_NAME.test(phase)) {
-          const registered = readWholeIntent(intentPath, root);
+          const registered = readWholeIntent(profile, intentPath, root);
           intent = registered.intent;
           if (registered.folder !== folder || intent.phase !== phase || intent.controllerPid !== process.pid
             || intent.controllerStartTicks !== nativeStartTicks(process.pid)) throw new Error('managed launch intent differs from registration');
         } else {
-          ({ intent, intentPath } = createManagedIntent(folder, phase, root, runStart));
+          ({ intent, intentPath } = createManagedIntent(profile, folder, phase, root, runStart));
         }
         const { phaseId } = intent;
+        const variables = [['PRE_APPROVED_RUN_SESSION', intent.runStart], ['RUN_CARD_FILE', `${logs}.card`],
+          [profile.markers.folder, folder], [profile.markers.managed, '1'],
+          ...proxy ? [['DBUS_SESSION_BUS_ADDRESS', proxy.address]] : [],
+          ...profile.environment.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]),
+          ...profile.settings ?? []];
         const args = ['--user', '--wait', '--pipe', '--quiet', '--expand-environment=no', `--unit=${intent.unit}`,
           '--property=Type=exec', '--property=ExitType=main', '--property=KillMode=control-group', '--property=Restart=no',
           '--property=TimeoutStopSec=2s', '--property=Delegate=no', `--working-directory=${root}`,
           `--property=ExecStartPre=${observer} start ${phaseId}`, `--property=ExecStopPost=${observer} stop ${phaseId}`,
-          `--property=InaccessiblePaths=-${runtimeDir}/bus -${runtimeDir}/systemd/private -/run/dbus/system_bus_socket`,
-          `--property=ReadOnlyPaths=${CGROUP_ROOT}`, '--property=UnsetEnvironment=PRODUCT_MANAGER_RUN_SESSION',
-          `--setenv=PRE_APPROVED_RUN_SESSION=${intent.runStart}`, `--setenv=RUN_CARD_FILE=${logs}.card`,
-          `--setenv=FABRAIK_CODEX_INVOCATION_FOLDER=${folder}`, '--setenv=FABRAIK_CODEX_MANAGED=1',
-          `--setenv=DBUS_SESSION_BUS_ADDRESS=${proxy.address}`,
-          ...CODEX_ENVIRONMENT.filter((key) => process.env[key] !== undefined).map((key) => `--setenv=${key}=${process.env[key]}`),
+          ...hiddenBus ? [`--property=InaccessiblePaths=-${runtimeDir}/bus -${runtimeDir}/systemd/private -/run/dbus/system_bus_socket`] : [],
+          ...readOnlyControlGroups ? [`--property=ReadOnlyPaths=${CGROUP_ROOT}`] : [],
+          '--property=UnsetEnvironment=PRODUCT_MANAGER_RUN_SESSION',
+          ...variables.map(([key, value]) => `--setenv=${key}=${value}`),
+          // A sealed command drops the manager's block; its values travel in the unit's command line, so a sealed
+          // profile's environment list must name no secret.
+          ...profile.sealed ? ['/usr/bin/env', '-i', ...variables.map(([key, value]) => `${key}=${value}`)] : [],
           ...command, ...argv];
-        return await runManagedClient(args, { root, logs, folder, intent, proxy });
+        return await runManagedClient(args, { root, logs, folder, intent, proxy, stopSignals: profile.stopSignals ?? MANAGED_STOP_SIGNALS });
       } catch (error) {
-        const reason = `managed Codex phase unavailable: ${error.message}`;
+        const reason = `managed ${profile.label} phase unavailable: ${error.message}`;
         return { managedFailure: reason, managedStop: { disposition: 'unverified', reason, intentPath } };
       }
     },
   };
+}
+
+function managedCodex(options) {
+  return managedSession(CODEX_PROFILE, options);
 }
 
 // A pre-approved run can queue to its active coordinator despite this exact resume warning.
@@ -822,9 +888,24 @@ function attentionSender(command, coordinator, root, preApproved) {
   });
 }
 
-async function runClaudeCard(base, root, mark, dependencies, output, preparedContext) {
+// A carried answer is the result of verifyCarriedAnswer for an answer file that is exactly `<base>.answer.json`.
+function readCarriedAnswer(file, base, caller, git) {
+  if (file !== `${base}.answer.json`) throw new Error(`the answer file must be ${base}.answer.json`);
+  const stat = lstatSync(file, { throwIfNoEntry: false });
+  if (!stat?.isFile()) throw new Error(`${file} must be a regular unlinked file`);
+  let answer;
+  try {
+    answer = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new Error(`${file} is not readable JSON (${error.message})`);
+  }
+  return verifyCarriedAnswer(answer, { caller, readFile: (path) => readFileSync(path, 'utf8'), listFolder: (path) => readdirSync(path), git });
+}
+
+async function runClaudeCard(base, root, runMark, dependencies, output, { preparedContext, caller, carried }) {
+  const mark = carried?.pushYes ? { CARRIED_PUSH_YES: String(carried.card) } : runMark;
   const pm = mark.PRODUCT_MANAGER_RUN_SESSION === '1';
-  let prompt = pm ? CARD_PROMPT : `${PRE_APPROVED_CARD_PROMPT}\n${JSON.stringify({ runStart: mark.PRE_APPROVED_RUN_SESSION })}`;
+  let prompt = carried?.prompt ?? (pm ? CARD_PROMPT : `${PRE_APPROVED_CARD_PROMPT}\n${JSON.stringify({ runStart: mark.PRE_APPROVED_RUN_SESSION })}`);
   if (preparedContext !== undefined) {
     try {
       const verified = verifyPreparedContext(preparedContext, {
@@ -838,13 +919,22 @@ async function runClaudeCard(base, root, mark, dependencies, output, preparedCon
       return 1;
     }
   }
-  const argv = ['-p', '--permission-mode', 'auto'];
+  if (carried) {
+    try {
+      writeFileSync(`${base}.card`, `${carried.card}\n`, { flag: 'wx' });
+    } catch (error) {
+      output.error(`Carried answer refused: cannot record card ${carried.card} in ${base}.card (${error.message})`);
+      return 2;
+    }
+  }
+  const argv = ['-p', ...(carried ? ['--resume', carried.sessionId] : []), '--permission-mode', 'auto'];
   if (pm) argv.push('--disallowedTools', 'Bash(git push *)', 'Bash(gh pr create *)', 'Bash(gh pr ready *)', 'Bash(gh pr merge *)');
   argv.push('--output-format', 'json', prompt);
   const retained = `Outputs: ${base}.json; ${base}.stderr.log; identity: ${base}.card`;
   const startSession = dependencies.startSession ?? sessionStarter(dependencies.command ?? ['claude'], mark, dependencies, { stdoutSuffix: '.json', openFlags: 'wx' });
   let outcome;
   try {
+    writeFileSync(`${base}.coordinator`, `${caller}\n`, { flag: 'wx' });
     outcome = await startSession({ argv, root, logs: base });
   } catch (error) {
     output.error(`Claude card could not launch: ${error.message}. ${retained}`);
@@ -866,7 +956,10 @@ async function runClaudeCard(base, root, mark, dependencies, output, preparedCon
 // Only tests replace the commands, starter, sender or coordinator route.
 export async function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
-  if (args[0] === CODEX_OBSERVER) return runManagedObserver(args, output);
+  if (args[0] === CODEX_PROFILE.observer) return runManagedObserver(CODEX_PROFILE, args, output);
+  const leadSlot = LEAD_OBSERVER.exec(args[0] ?? '')?.[1];
+  // The results folder lies in <state>/runs/; the observer refuses one that does not.
+  if (leadSlot) return runManagedObserver(leadProfile(dirname(dirname(process.env[LEAD_MARKERS.folder] ?? '')), Number(leadSlot)), args, output);
   if (args[0] === '--bind-app-job') {
     if (args.length !== 2 || !isAbsolute(args[1]) || CONTROL.test(args[1])) {
       output.error(USAGE);
@@ -931,6 +1024,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
   let preparedFile;
   let preparedOption = false;
   let preparedContext = dependencies.preparedContext;
+  let carryFile;
   let preApproved = false;
   let invalid = false;
   let continueCard;
@@ -944,6 +1038,8 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
     } else if (args[i] === '--prepared-context' && !preparedOption && i + 1 < args.length) {
       preparedOption = true;
       preparedFile = args[++i];
+    } else if (args[i] === '--carry' && carryFile === undefined && i + 1 < args.length) {
+      carryFile = args[++i];
     } else if (args[i] === '--continue-card' && continueCard === undefined && /^[1-9]\d*$/.test(args[i + 1] ?? '')) {
       continueCard = Number(args[++i]);
       if (!Number.isSafeInteger(continueCard)) invalid = true;
@@ -957,7 +1053,10 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
   const hasPrepared = preparedOption || preparedContext !== undefined;
   if (hasPrepared && (!claudeMode || (preparedOption && preparedContext !== undefined)
     || (preparedOption && (!isAbsolute(preparedFile) || CONTROL.test(preparedFile))))) invalid = true;
+  if (carryFile !== undefined && (!claudeMode || hasPrepared)) invalid = true;
   let inheritedMark;
+  let caller;
+  let carried;
   if (claudeMode) {
     const pm = process.env.PRODUCT_MANAGER_RUN_SESSION;
     const pre = process.env.PRE_APPROVED_RUN_SESSION;
@@ -966,6 +1065,11 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
     if (invalid || coordinatorOption || preApproved || continueCard !== undefined || !inheritedMark || typeof claudeCard !== 'string'
       || !isAbsolute(claudeCard) || CONTROL.test(claudeCard) || (hasPrepared && pm === '1')) {
       output.error(USAGE);
+      return 2;
+    }
+    caller = process.env.CLAUDE_CODE_SESSION_ID;
+    if (!SESSION_ID.test(caller ?? '')) {
+      output.error('Claude card launch refused: CLAUDE_CODE_SESSION_ID must hold the launching Claude Code session ID');
       return 2;
     }
     if (preparedOption) {
@@ -979,7 +1083,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
         return 1;
       }
     }
-    for (const suffix of ['.json', '.stderr.log', '.card']) {
+    for (const suffix of ['.json', '.stderr.log', '.card', '.coordinator']) {
       try {
         lstatSync(claudeCard + suffix);
       } catch (error) {
@@ -989,6 +1093,14 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
       }
       output.error(`Refusing existing Claude output: ${claudeCard + suffix}`);
       return 2;
+    }
+    if (carryFile !== undefined) {
+      try {
+        carried = readCarriedAnswer(carryFile, claudeCard, caller, dependencies.git ?? ((gitArgs) => gitReader(repositoryRoot())(gitArgs)));
+      } catch (error) {
+        output.error(`Carried answer refused: ${error.message}`);
+        return 2;
+      }
     }
   }
   coordinator ??= dependencies.coordinator;
@@ -1012,7 +1124,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
       return 1;
     }
   }
-  if (claudeMode) return runClaudeCard(claudeCard, root, inheritedMark, dependencies, output, preparedContext);
+  if (claudeMode) return runClaudeCard(claudeCard, root, inheritedMark, dependencies, output, { preparedContext, caller, carried });
   const adapter = dependencies.managedPhase;
   const selectedManaged = preApproved && (adapter === true || typeof adapter === 'function'
     || (process.platform === 'linux' && dependencies.command === undefined && dependencies.startSession === undefined));
@@ -1040,7 +1152,7 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
     const store = wholeJobStore(operatingRoot);
     const launch = (startSession) => runWholeJobs({ startSession, notify, root: operatingRoot, folder, output, runStart: start,
       continueCard, store, exec: dependencies.exec ?? ghExec, git: dependencies.git ?? gitReader(operatingRoot),
-      createIntent: (job, runStart) => createManagedIntent(folder, `job-${job.card}`, operatingRoot, runStart, job).intentPath });
+      createIntent: (job, runStart) => createManagedIntent(CODEX_PROFILE, folder, `job-${job.card}`, operatingRoot, runStart, job).intentPath });
     if (typeof adapter === 'function') return await launch(adapter);
     const managed = await managedCodex({ folder, root: operatingRoot, runStart: start, command });
     let code;

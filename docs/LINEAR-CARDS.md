@@ -139,11 +139,12 @@ an issue Linear moved to another team answers under a new ID, and every command 
 
 `node scripts/board-add.mjs` files nothing on Linear: it exits 1 naming `linear-card.mjs create`.
 
-`node scripts/board.mjs` lists the team's cards in the same pick view, `--intake` prints the intake document whose first
-line is `Board linear team <KEY>`, and `--closeout` is the strict scan. A read that fails on any page fails whole, with
-exit 2 under `--intake` and exit 1 otherwise, and never reads as an empty board. A card shows its kind label, the open
-blockers (the closed ones are dropped), its parent and its children, and its pull requests: an attachment whose url is a
-pull request of the GitHub repository `board-config.mjs` names counts as a closing pull request.
+`node scripts/board.mjs` lists the team's cards in the same pick view, `--intake <folder>` prints the intake summary
+whose first line is `Board linear team <KEY>` and writes each card's full text to that folder, and `--closeout` is the
+strict scan. A read that fails on any page fails whole, with exit 2 under `--intake` and exit 1 otherwise, and never
+reads as an empty board. A card shows its kind label, the open blockers (the closed ones are dropped), its parent and
+its children, and its pull requests: an attachment whose url is a pull request of the GitHub repository
+`board-config.mjs` names counts as a closing pull request.
 
 ## The claim
 
@@ -183,7 +184,8 @@ Every other step:
 
 | Step | On Linear |
 |---|---|
-| Read a card (`resume` intake, `to-issues` step 1, the `architect` and `reviewer` charters, `cross-review`) | `node scripts/linear-card.mjs text <ID>` for the card, and the pick view and card sections from `node scripts/board.mjs --intake`. `cross-review` puts the command's output where it puts `gh issue view` output |
+| Read a card (`resume` intake, `to-issues` step 1, the `architect` and `reviewer` charters, `cross-review`) | `node scripts/linear-card.mjs text <ID>` for the card, and the pick view and card summaries from `node scripts/board.mjs --intake <folder>`. `cross-review` puts the command's output where it puts `gh issue view` output |
+| Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses a Linear install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the card read, board read and identity rows of the preceding table and the next row |
 | Claim: assignee, `Claim:` comment (resume, "3. Start the job") | `node scripts/board-move.mjs <ID> "In progress"`, then `node scripts/linear-card.mjs assign <ID>`, then `node scripts/linear-card.mjs comment <ID> --body "Claim: <machine>, <runtime>, <time>"`. The session records the address in the printed `["comment",id,url]`. The re-read is `view <ID>`, complete when it also shows a `claim` line whose address is the recorded one |
 | Withdraw a claim | `node scripts/linear-card.mjs edit-comment <comment id> --body "Withdrawn: <machine>, <runtime>, <time>: an earlier claim holds this card."`, the id being the seventh value of the session's own `claim` line. The assignee is removed with `node scripts/linear-card.mjs unassign <ID>` only under the condition `resume` sets |
 | Awaiting push (`resume`, "7. Push authorisation") | `node scripts/board-move.mjs <ID> "Awaiting push"`, a written move, as on GitHub |
