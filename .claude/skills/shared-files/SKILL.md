@@ -140,8 +140,8 @@ byte an update writes, no seat and no runtime; `fabraik init` writes it only on 
 and a session reads it on `main` as the owner's standing authorization for the reviews the tiers call cross-family.
 
 **What a repository needs.** The supported profiles are Claude Code alone, Codex alone, or both with cross-family
-review. It needs a private repository whose default branch is `main`, the two branch rulesets with the administrator
-bypass of the required check that the direct documentation route depends on, the required `test` check, the board,
+review. It needs a private repository whose default branch is `main`, a workflow that reports the `test` check,
+the two branch rulesets [Branch rulesets](#branch-rulesets) gives, the board,
 dependencies installed at the repository root for the hooks, and each runtime having trusted the repository's
 hooks, since a hook file a runtime has not trusted does not run. For a first install without a lockfile,
 run `npm install` and commit that lockfile; use `npm ci` with an existing lockfile. The pre-push hook refuses a missing
@@ -155,6 +155,65 @@ compose the scans themselves must observe those same runtime and sweep rules; ca
 reimplementing them. Its `scripts/lib/doc-lint.test.mjs` command fixture must copy all modules the command imports,
 including `scripts/lib/runtimes.mjs` and, when the command calls the shared verdict, `scripts/lib/doc-lint-verdict.mjs`.
 The shared documents still name both runtimes, and the shared tests use the verdict's resolution rules.
+
+## Branch rulesets
+
+`main` carries two active branch rulesets, each targeting `refs/heads/main`. They are two because a bypass list covers a
+whole ruleset: the administrator role may bypass the required checks, which the direct documentation route depends on,
+and nobody may force-push to or delete `main`. [Administrator bypass](#administrator-bypass) says who may hold that
+role. Run each command from a checkout of the repository, signed in to `gh` as one of its administrators; `gh` fills in
+`{owner}` and `{repo}` from its default repository, which in a fork may be the parent, so first run
+`gh repo set-default OWNER/REPO`, naming this repository's owner and name. Each runs as shown in a POSIX shell or in
+PowerShell.
+
+`main: required checks` requires the `test` check from GitHub Actions, integration 15368, on a branch up to date
+with `main`. The administrator repository role, actor 5, may bypass it at any time:
+
+```sh title="Terminal"
+echo '{
+  "name": "main: required checks",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }],
+  "rules": [{
+    "type": "required_status_checks",
+    "parameters": {
+      "strict_required_status_checks_policy": true,
+      "do_not_enforce_on_create": false,
+      "required_status_checks": [{ "context": "test", "integration_id": 15368 }]
+    }
+  }]
+}' | gh api --method POST "repos/{owner}/{repo}/rulesets" --input -
+```
+
+`main: no force-push or deletion` refuses a force-push to `main` and its deletion, with no bypass:
+
+```sh title="Terminal"
+echo '{
+  "name": "main: no force-push or deletion",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "bypass_actors": [],
+  "rules": [{ "type": "non_fast_forward" }, { "type": "deletion" }]
+}' | gh api --method POST "repos/{owner}/{repo}/rulesets" --input -
+```
+
+Each command prints the ruleset GitHub created, with its `id`. Where the documentation sweep is on, the required checks
+also hold `{ "context": "sweep-scope", "integration_id": 15368 }` after the `test` entry. Add it only once the workflow
+on `main` reports `sweep-scope`, since until then no pull request can pass it. Remove it when the sweep is turned off.
+Either way, first read that ruleset with `gh api "repos/{owner}/{repo}/rulesets/{{RULESET_ID}}"`, `{{RULESET_ID}}` being
+its `id`, and keep what it prints. Send back its name, target, enforcement, conditions, bypass list and rules exactly as
+that read shows them, with only the `sweep-scope` entry added or removed, through
+`gh api --method PUT "repos/{owner}/{repo}/rulesets/{{RULESET_ID}}" --input -` in place of the first command's POST: a
+field left out of what you send may be lost. Read the ruleset again afterwards; its name, target, enforcement,
+conditions, bypass list and rules must match the earlier read except for that entry.
+
+To confirm both, list them with `gh api "repos/{owner}/{repo}/rulesets"`, then read each with
+`gh api "repos/{owner}/{repo}/rulesets/{{RULESET_ID}}"`. Its target, enforcement, conditions, bypass list and rules must
+match what you sent, and its `source` must name this repository. On the first ruleset's page in the repository settings,
+the bypass list holds the repository admin role, set to Always allow.
 
 ## Administrator bypass
 

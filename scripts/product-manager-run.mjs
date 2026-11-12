@@ -344,7 +344,7 @@ export function leadProfile(state, slot, settings = []) {
     label: 'lead',
     observer: `--observe-lead-phase=${slot}`,
     unit: (phaseId) => `${leadUnitPrefix(state)}slot${slot}-${phaseId}.service`,
-    phaseName: /^(?:select-[1-9]\d*|job-[1-9]\d*-(?:prepare|build|deliver)|end)$/,
+    phaseName: /^(?:select-[1-9]\d*|job-[1-9]\d*-(?:prepare|build|deliver|continue)|end)$/,
     markers: LEAD_MARKERS,
     environment: [...LEAD_ENVIRONMENT, ...Object.keys(process.env).filter((name) => name.startsWith('LC_'))],
     settings,

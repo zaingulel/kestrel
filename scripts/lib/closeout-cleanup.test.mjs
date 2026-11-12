@@ -264,9 +264,9 @@ function scenario(t, worktreeParts = ['wt']) {
       }
     }
     if (name === 'lsof' && (key === '-nP -iTCP -sTCP:LISTEN -Fpc' || lsofTarget(args))) return { absent: true };
-    if (name === 'ps' && key === '-ww -A -o pid= -o ppid= -o args=') {
+    if (name === 'ps' && key === '-ww -A -o pid= -o ppid= -o tty= -o args=') {
       state.onPs?.();
-      const rows = state.processes.map(({ pid, ppid, args: line }) => `${String(pid).padStart(7)} ${String(ppid).padStart(7)} ${line}\n`);
+      const rows = state.processes.map(({ pid, ppid, tty, args: line }) => `${String(pid).padStart(7)} ${String(ppid).padStart(7)} ${String(tty ?? '?').padEnd(8)} ${line}\n`);
       return state.ps ?? reply(0, rows.join(''));
     }
     return undefined;
@@ -673,16 +673,13 @@ const LSOF_WARNINGS = [
 ].join('\n');
 
 test('a non-listening process using the worktree retains it and the branch', { skip: SKIP_POSIX }, async (t) => {
-  for (const use of ['open file', 'working directory', 'arguments']) {
+  for (const use of ['open file', 'arguments']) {
     const s = scenario(t);
     let reason;
     if (use === 'open file') {
       const path = placeFile(join(s.worktree, 'logs', 'output.log'));
       s.state.lsof.open = [{ pid: 31337, command: 'tail', name: path }];
       reason = 'pid 31337 (tail) uses it';
-    } else if (use === 'working directory') {
-      s.state.lsof.l3 = reply(0, `p4242\ncbash\nfcwd\nn${s.worktree}\n`);
-      reason = 'pid 4242 (bash) uses it';
     } else {
       s.state.processes.push({ pid: 5150, ppid: 1, args: `node ${s.worktree}/worker.js --secret=private` });
       reason = 'pid 5150 names it in its arguments';
@@ -690,6 +687,75 @@ test('a non-listening process using the worktree retains it and the branch', { s
     assertWorktreeRetained(s, await s.cleanup(['23'], { pid: 4242 }), reason);
     assertWorktreeNotRemoved(s);
   }
+});
+
+test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a busy shell or any other use does', { skip: SKIP_POSIX }, async (t) => {
+  const lines = (...fields) => `${fields.join('\n')}\n`;
+  const terminal = (tty, args = 'zsh') => ({ pid: 4242, ppid: 1000, tty, args });
+  // An idle shell lsof lists before the pid under test, so a check that judged only the first listed process would pass.
+  const idleFirst = (w) => lines('p4200', 'cbash', 'fcwd', `n${w}`);
+  const idleRow = { pid: 4200, ppid: 1000, tty: 'pts/2', args: 'bash' };
+  // Each case: its name, the lsof listing for the worktree, the extra ps rows (null: unreadable ps) and the retention reason.
+  const retained = [
+    ['busy', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
+      [idleRow, terminal('pts/3', 'bash'), { pid: 4300, ppid: 4242, tty: 'pts/3', args: 'claude' }], 'pid 4242 (bash) uses it'],
+    ['file open', (w) => idleFirst(w) + lines('p4242', 'czsh', 'fcwd', `n${w}`, 'f3', `n${w}/notes.md`), [idleRow, terminal('pts/3')], 'pid 4242 (zsh) uses it'],
+    ['non-shell', (w) => idleFirst(w) + lines('p4242', 'cvim', 'fcwd', `n${w}`), [idleRow, terminal('pts/3', 'vim')], 'pid 4242 (vim) uses it'],
+    ['renamed program', (w) => lines('p4242', 'cnode', 'fcwd', `n${w}`), [terminal('pts/3', 'bash')], 'pid 4242 (node) uses it'],
+    ['script', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), [terminal('pts/3', 'bash /home/owner/run.sh')], 'pid 4242 (bash) uses it'],
+    ['command string', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`), [idleRow, terminal('pts/3', 'bash -c read answer')],
+      'pid 4242 (bash) uses it'],
+    ['arguments', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), (w) => [terminal('pts/3', `bash --rcfile ${w}/.bashrc`)],
+      'pid 4242 names it in its arguments'],
+    ['fd unknown', (w) => lines('p4242', 'czsh', `n${w}`), [terminal('pts/3')], 'pid 4242 (zsh) uses it'],
+    ['no files', () => lines('p4242', 'czsh'), [terminal('pts/3')], 'pid 4242 (zsh) uses it'],
+    ['ps unreadable', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), null, 'ps printed a row that could not be read'],
+    ['no terminal', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`), [idleRow, { pid: 4242, ppid: 1, tty: '?', args: 'bash' }],
+      'pid 4242 (bash) uses it'],
+    ['no terminal, macOS form', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), [{ pid: 4242, ppid: 1, tty: '??', args: 'zsh' }],
+      'pid 4242 (zsh) uses it'],
+    ['no ps row', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), [], 'pid 4242 (zsh) uses it'],
+  ];
+
+  const idle = scenario(t);
+  idle.state.lsof.l3Target = idle.worktree;
+  idle.state.lsof.l3 = reply(0, lines('p4242', 'c-zsh', 'fcwd', `n${idle.worktree}`, 'p4243', 'cbash', 'fcwd', `n${idle.worktree}/src`));
+  idle.state.processes.push(
+    { pid: 1000, ppid: 1, tty: '?', args: 'alacritty' }, terminal('pts/3', '-zsh'), { pid: 4243, ppid: 1000, tty: 'pts/4', args: '/usr/bin/bash -l' },
+  );
+  assert.deepEqual(await idle.cleanup(), {
+    exitCode: 0,
+    out: [
+      `idle shell pid 4242 (-zsh) in ${idle.worktree} is not a hold`,
+      `idle shell pid 4243 (bash) in ${idle.worktree} is not a hold`,
+      ...jobRemoved(idle), 'closeout-cleanup: 2 removed, 0 retained',
+    ],
+    err: [],
+  });
+  assert.equal(existsSync(idle.worktree), false);
+  assert.deepEqual(idle.unexpected, []);
+
+  for (const [, listing, processes, reason] of retained) {
+    const s = scenario(t);
+    s.state.lsof.l3Target = s.worktree;
+    s.state.lsof.l3 = reply(0, listing(s.worktree));
+    if (processes === null) s.state.ps = reply(0, 'unreadable process row\n');
+    else s.state.processes.push(...(typeof processes === 'function' ? processes(s.worktree) : processes));
+    assertWorktreeRetained(s, await s.cleanup(), reason);
+    assertWorktreeNotRemoved(s);
+  }
+
+  const s = scenario(t);
+  const folder = dirname(placeFile(join(s.root, 'scratch', 'notes.md')));
+  s.state.lsof.l3Target = folder;
+  s.state.lsof.l3 = reply(0, lines('p4242', 'czsh', 'fcwd', `n${folder}`));
+  s.state.processes.push(terminal('pts/3'));
+  assert.deepEqual(await s.cleanup(['--check', folder]), {
+    exitCode: 0,
+    out: [`unused path ${folder}: idle shell pid 4242 (zsh) in ${folder} is not a hold`, SUMMARY(1, 0, 0, 0)],
+    err: [],
+  });
+  assertNothingChanged(s);
 });
 
 test('unavailable worktree use observations retain it and the branch', { skip: SKIP_POSIX }, async (t) => {
@@ -2047,7 +2113,7 @@ const DOCKER_EMPTY = `${DOCKER_LOCAL}[ "$*" = "container ls --all --quiet --no-t
 const DOCKER_DOWN = `${DOCKER_LOCAL}echo '${DAEMON_DOWN}' >&2\nexit 1\n`;
 // lsof prints nothing and exits 1 when nothing matches; any other call prints a line the command retains on.
 const LSOF_FAKE = 'case "$*" in\n  "-nP -iTCP -sTCP:LISTEN -Fpc"|"-nP -Fpcfn /"*|"-nP -Fpcfn -x f +D /"*) exit 1 ;;\nesac\necho "unexpected lsof call: $*" >&2\nexit 1\n';
-const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o args=" ] || exit 99\necho \'      1       0 /sbin/init splash\'\n';
+const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o tty= -o args=" ] || exit 99\necho \'      1       0 ?        /sbin/init splash\'\n';
 
 // A real repository with job/23 checked out in a linked worktree that holds an ignored node_modules, an outside
 // scratch file, sh fakes for docker, lsof and ps first on PATH, and GIT_DIR naming a decoy repository the command's
@@ -2166,11 +2232,11 @@ test('the CLI retains a real worktree and branch while a process sits in it and 
   const f = cliFixture(t, DOCKER_EMPTY);
   const hold = join(f.bin, 'hold');
   writeFileSync(hold, '');
-  writeFileSync(join(f.bin, 'lsof'), `#!/bin/sh\nif [ -e '${hold}' ] && [ "$*" = '-nP -Fpcfn -x f +D ${f.worktree}' ]; then\n  printf 'p4242\\ncbash\\nfcwd\\nn${f.worktree}\\n'\n  exit 0\nfi\n${LSOF_FAKE}`, { mode: 0o755 });
+  writeFileSync(join(f.bin, 'lsof'), `#!/bin/sh\nif [ -e '${hold}' ] && [ "$*" = '-nP -Fpcfn -x f +D ${f.worktree}' ]; then\n  printf 'p4242\\ncvim\\nfcwd\\nn${f.worktree}\\n'\n  exit 0\nfi\n${LSOF_FAKE}`, { mode: 0o755 });
   const held = f.cleanup();
   assert.equal(held.status, 4, held.stdout + held.stderr);
   assert.equal(held.stderr, '');
-  assert.ok(held.stdout.includes(`retained worktree ${f.worktree}: pid 4242 (bash) uses it`), held.stdout);
+  assert.ok(held.stdout.includes(`retained worktree ${f.worktree}: pid 4242 (vim) uses it`), held.stdout);
   assert.equal(f.registered(), true);
   assert.equal(f.branchStatus(), 0);
   rmSync(hold);
@@ -2728,7 +2794,7 @@ function checkWithNoNewPrivs(t, overrides = {}) {
     [ROUTED_STAT]: reply(0, DAEMON_PROC_STAT),
     [nativeKey('docker', '--host', PROOF_HOST, 'container', 'ls', '--all', '--quiet', '--no-trunc')]: reply(0),
     [nativeKey('lsof', '-nP', '-Fpcfn', target)]: reply(1),
-    [nativeKey('ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'args=')]: reply(0, '      1       0 /sbin/init\n'),
+    [nativeKey('ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'tty=', '-o', 'args=')]: reply(0, '      1       0 ?        /sbin/init\n'),
     ...overrides,
   };
   const request = {
@@ -3098,7 +3164,7 @@ test('native Linux socket observations bind a listener to its descriptor and fil
       return reply(0, `${executable}\n`);
     }
     if (command === 'lsof') return reply(1);
-    if (command === 'ps') return reply(0, '1 0 /sbin/init\n');
+    if (command === 'ps') return reply(0, '1 0 ? /sbin/init\n');
     const result = runCommand(command, args, options);
     observations.push({ command, args, result });
     return result;

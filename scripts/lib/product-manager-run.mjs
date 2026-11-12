@@ -14,7 +14,7 @@
 // Without them no further session starts and one fallback message reaches the owner. The reason is printed once: by the
 // end session, or by the fallback when the end session cannot deliver.
 
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -191,9 +191,13 @@ function verifyClaimOwner(selection, metadata, item) {
   return claim;
 }
 
-function verifyClaimedJob(selection, { runStart, metadata, item, inventory, git }) {
-  const judgement = judgeApproval(selection.card, metadata, { before: runStart, run: true });
-  if (!judgement.startsWith('approved ')) throw new Error(`approval unavailable: ${judgement}`);
+// A `settled` job ended its delivery waiting on the owner, whose waiting line voided its record, so only its approval
+// goes unread.
+function verifyClaimedJob(selection, { runStart, metadata, item, inventory, git, settled = false }) {
+  if (!settled) {
+    const judgement = judgeApproval(selection.card, metadata, { before: runStart, run: true });
+    if (!judgement.startsWith('approved ')) throw new Error(`approval unavailable: ${judgement}`);
+  }
   if (!item || item.content.state !== 'OPEN' || boardConfig.TERMINAL_STATUSES.includes(item.status)) throw new Error(`card ${selection.card} has no current open board job`);
   const claim = verifyClaimOwner(selection, metadata, item);
   const key = canonicalWorktreeKey(selection.worktree);
@@ -445,7 +449,8 @@ function verifyRunJobs(jobs, runStart, readers, retry, facts) {
     let claim;
     let changed;
     try {
-      claim = verifyClaimedJob(job.descriptor, { runStart, metadata, item: inventory.byCard.get(job.descriptor.card), inventory: inventory.worktrees, git });
+      claim = verifyClaimedJob(job.descriptor, { runStart, metadata, item: inventory.byCard.get(job.descriptor.card), inventory: inventory.worktrees, git,
+        settled: job.lifecycle.outcomes.deliver?.disposition === 'awaiting-push' });
       changed = readActualPaths(job.descriptor, git, mainTip, job.phase === 'deliver');
     } catch (error) {
       if (!retry && job.phase === 'deliver' && error.status !== 1
@@ -537,13 +542,10 @@ export const CARRIED_PROMPT = 'Your coordinator carries the answer the owner gav
 // A second copy of owner-queue.mjs's screenshot pattern and order, a Herdr add-on file this launcher cannot import.
 const SCREENSHOT = /^screenshot-\d+\.(?:png|jpe?g|gif|webp)$/i;
 
-// A push yes holds only for the decision card the owner saw: the card's session ended built, and its clean `job/<card>`
-// worktree is still at `shown.head` with a review folder whose content identity is `shown.hash`. The folder's own
-// `shown-hash` file is never read, so a card re-shown at the same head cannot stand in for the one answered.
-function verifyShownCard(card, shown, ended, { listFolder, git }) {
-  if (typeof ended.result !== 'string' || readRunResult(ended.result).line !== `Run result: built ${card}`) {
-    throw new Error(`the ended session of card ${card} did not end with Run result: built ${card}`);
-  }
+// The saved decision card of card's clean `job/<card>` worktree: its head, and the content identity, `git hash-object
+// --no-filters` output, of `body.md` then each screenshot in numeric order in the review folder named for that head.
+// With `head`, a worktree at any other head is refused first. The folder's own `shown-hash` file is never read.
+function readSavedCard(card, { listFolder, git }, head) {
   const read = (args) => {
     try {
       return git(args);
@@ -558,10 +560,11 @@ function verifyShownCard(card, shown, ended, { listFolder, git }) {
     throw new Error(`the worktree inventory is unreadable (${error.message.trim()})`, { cause: error });
   }
   const worktree = records.find((record) => record.branch === `job/${card}`)?.path;
-  if (worktree === undefined) throw new Error(`no job/${card} worktree holds the shown card`);
-  if (read(['-C', worktree, 'rev-parse', 'HEAD']).replace(/\n$/, '') !== shown.head) throw new Error(`the job/${card} worktree has moved from the shown head ${shown.head}`);
+  if (worktree === undefined) throw new Error(`no job/${card} worktree holds the saved card`);
+  const current = read(['-C', worktree, 'rev-parse', 'HEAD']).replace(/\n$/, '');
+  if (head !== undefined && current !== head) throw new Error(`the job/${card} worktree has moved from the shown head ${head}`);
   if (read(['-C', worktree, 'status', '--porcelain', '--untracked-files=normal']) !== '') throw new Error(`the job/${card} worktree has uncommitted changes`);
-  const folder = `.claude/worklog/job_${card}-review-${shown.head}`;
+  const folder = `.claude/worklog/job_${card}-review-${current}`;
   const fromFolder = (readOne) => {
     try {
       return readOne();
@@ -570,8 +573,56 @@ function verifyShownCard(card, shown, ended, { listFolder, git }) {
     }
   };
   const screenshots = fromFolder(() => listFolder(join(worktree, folder))).filter((name) => SCREENSHOT.test(name)).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
-  const identity = read(['-C', worktree, 'hash-object', '--no-filters', '--', ...['body.md', ...screenshots].map((name) => `${folder}/${name}`)]);
-  if (identity.replace(/\n$/, '') !== shown.hash.replace(/\n$/, '')) throw new Error(`the saved card in ${folder} is not the card the owner was shown`);
+  const files = ['body.md', ...screenshots];
+  const identity = read(['-C', worktree, 'hash-object', '--no-filters', '--', ...files.map((name) => `${folder}/${name}`)]);
+  return { head: current, folder, files, identity: identity.replace(/\n$/, '') };
+}
+
+// A push yes holds only for the decision card the owner saw: the card's session ended built, and its saved card is
+// still at `shown.head` with the content identity `shown.hash`, so a card re-shown at the same head cannot stand in for
+// the one answered.
+function verifyShownCard(card, shown, ended, { listFolder, git }) {
+  if (typeof ended.result !== 'string' || readRunResult(ended.result).line !== `Run result: built ${card}`) {
+    throw new Error(`the ended session of card ${card} did not end with Run result: built ${card}`);
+  }
+  const { folder, identity } = readSavedCard(card, { listFolder, git }, shown.head);
+  if (identity !== shown.hash.replace(/\n$/, '')) throw new Error(`the saved card in ${folder} is not the card the owner was shown`);
+}
+
+const STATE_LINE = /^(?:Waiting version|Changes asked|Parked): /;
+
+// The configured board repository, as the approval read takes it.
+export function configuredRepository(exec) {
+  const nameWithOwner = `${boardConfig.BOARD_OWNER}/${boardConfig.BOARD_REPOSITORY}`;
+  const repository = JSON.parse(exec(['repo', 'view', nameWithOwner, '--json', 'id,nameWithOwner']));
+  if (typeof repository?.id !== 'string' || repository.nameWithOwner !== nameWithOwner) throw new Error(`the repository ${nameWithOwner} cannot be read`);
+  return repository;
+}
+
+// The one writer of a card's state line: one body edit that drops every earlier state line and ends the body with
+// `line`, then a re-read through the approval query, which it returns. A card body that is not text is refused
+// before any write. The edit moves the card's lastEditedAt, so it voids every earlier approval record.
+export function writeStateLine(card, line, { exec }) {
+  const repository = configuredRepository(exec);
+  const { issue } = readApproval(card, { exec, repository });
+  if (typeof issue.body !== 'string') throw new Error(`card ${card} has no readable body`);
+  const kept = issue.body.split('\n').filter((text) => !STATE_LINE.test(text)).join('\n').trimEnd();
+  exec(['api', '-X', 'PATCH', `repos/${repository.nameWithOwner}/issues/${card}`, '-f', `body=${kept ? `${kept}\n` : ''}${line}`]);
+  return readApproval(card, { exec, repository });
+}
+
+// A deliver that ends waiting on the owner names the version it waits with, `Waiting version: job/<card> <head>
+// <hashes> run <runStart>`, and proves on the re-read that no approval record remains. Throws, before any write for an
+// unreadable saved card or body, and after it for a record still approving.
+export function markWaiting(card, { exec, git, runStart }) {
+  const { head, files, identity } = readSavedCard(card, { listFolder: readdirSync, git });
+  const hashes = identity.split('\n');
+  if (!COMMIT.test(head) || hashes.length !== files.length || !hashes.every((hash) => COMMIT.test(hash))) {
+    throw new Error(`the saved card of job/${card} has no readable identity`);
+  }
+  const reread = writeStateLine(card, `Waiting version: job/${card} ${head} ${hashes.join(',')} run ${runStart}`, { exec });
+  const judgement = judgeApproval(card, reread, { run: true });
+  if (judgement.startsWith('approved ')) throw new Error(`card ${card} still holds an approving record after its waiting line: ${judgement}`);
 }
 
 // A carried answer names the logs base of an ended card session. It is accepted only from the session recorded as that
@@ -1195,6 +1246,209 @@ export function preApprovedCandidates({ exec, git, runStart, login, unavailable 
   return wholeCandidates(facts, runStart, new Set(), unavailable);
 }
 
+export const CONTINUE_PROMPT = 'Continue this exact answered pre-approved job.';
+const COMMIT_TEXT = '(?:[0-9a-f]{40}|[0-9a-f]{64})';
+const WAITING_LINE = new RegExp(`^Waiting version: job/([1-9]\\d*) (${COMMIT_TEXT}) (${COMMIT_TEXT}(?:,${COMMIT_TEXT})*) run \\S+$`);
+const CHANGES_LINE = new RegExp(`^Changes asked: from (${COMMIT_TEXT}): (\\S.*)$`);
+const SELECTION_FILE = /^select-[1-9]\d*\.selected\.json$/;
+
+// Every selection a lead recorded under `<stateFolder>/runs/*/select-*.selected.json`, with a line naming each folder
+// or file that cannot be read or holds no valid selection; a missing runs folder holds none. `readFile` reads one file
+// as text and `listFolder` names a folder's entries.
+export function readLeadSelections(stateFolder, { readFile, listFolder }) {
+  const runs = join(stateFolder, 'runs');
+  const selections = [];
+  const unreadable = [];
+  let folders;
+  try {
+    folders = listFolder(runs);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { selections, unreadable };
+    throw error;
+  }
+  for (const folder of [...folders].sort()) {
+    let names;
+    try {
+      names = listFolder(join(runs, folder));
+    } catch (error) {
+      unreadable.push(`Lead results folder ${join(runs, folder)} is unreadable: ${error.code ?? error.message}`);
+      continue;
+    }
+    for (const name of names.filter((entry) => SELECTION_FILE.test(entry)).sort()) {
+      const path = join(runs, folder, name);
+      try {
+        const selection = JSON.parse(readFile(path));
+        validateSelection(selection, selection?.runStart);
+        if (!runTime(selection.runStart)) throw new Error('selected job has an invalid run start');
+        selections.push(selection);
+      } catch (error) {
+        unreadable.push(`Lead selection ${path} is unreadable: ${error.code ?? error.message}`);
+      }
+    }
+  }
+  return { selections, unreadable };
+}
+
+// Whether this machine's lead holds `card`: its newest claim, by `login`, is one a selection of the lead's recorded.
+// Returns that selection and the comment an answer applies to: the card's one unresolved `Needs owner:` hold, else its
+// newest `Returned:` comment, each by `login` and ending `Job: job/<card> on <hostname>.`; with no hold and no such
+// return the comment is undefined. Returns undefined when the lead does not hold the card, two holds are unresolved or
+// the one hold is not this machine's job's.
+export function leadHolds(card, { comments, selections, hostname, login }) {
+  const claim = comments.filter(({ body }) => body.trimStart().startsWith('Claim:')).at(-1);
+  const selection = selections.find((entry) => entry.card === card && entry.claimUrl === claim?.url);
+  if (!selection || claim.author?.login !== login) return undefined;
+  const ofJob = (comment, prefix) => comment.author?.login === login && firstLine(comment.body).startsWith(prefix)
+    && firstLine(comment.body).endsWith(` Job: job/${card} on ${hostname}.`);
+  const holds = comments.filter(({ body }) => firstLine(body).startsWith('Needs owner:'));
+  if (holds.length > 1 || (holds.length === 1 && !ofJob(holds[0], 'Needs owner:'))) return undefined;
+  return { selection, comment: holds[0] ?? comments.findLast((comment) => ofJob(comment, 'Returned:')) };
+}
+
+// Why card's job/<card> worktree no longer matches its state line `line`, or undefined when it does: a waiting line
+// names the clean worktree's head and saved card identity, a change line the head the owner was shown.
+function worktreeMismatch(card, line, git) {
+  try {
+    const waiting = WAITING_LINE.exec(line);
+    if (waiting) {
+      const saved = readSavedCard(card, { listFolder: readdirSync, git }, waiting[2]);
+      if (saved.identity.split('\n').join(',') !== waiting[3]) return `the saved card in ${saved.folder} is not the version its waiting line names`;
+    }
+    const changes = CHANGES_LINE.exec(line);
+    const head = changes && readWorktreeRecords(git).find((record) => record.branch === `job/${card}`)?.head;
+    if (changes && head !== changes[1]) return `the job/${card} worktree is not at ${changes[1]}, the version its change line names`;
+  } catch (error) {
+    return error.message;
+  }
+  return undefined;
+}
+
+// What the owner's answer on `card`, in board status `status`, asks of this machine's lead: its continue, a refusal
+// reason for a failure item, or undefined when there is nothing to act on. A failure record whose time cannot be read
+// counts as newer than any answer.
+function cardAnswer(card, status, { exec, git, runStart, login, hostname, selections, failures, repository }) {
+  const metadata = readApproval(card, { exec, repository });
+  if (metadata.login.toLowerCase() !== login.toLowerCase()) throw new Error(`signed in to GitHub as ${metadata.login}, expected ${login}`);
+  const { issue } = metadata;
+  const held = leadHolds(card, { comments: issue.comments.nodes, selections, hostname, login: metadata.login });
+  if (!held || issue.comments.nodes.some(({ body }) => firstLine(body).startsWith('Needs owner:'))) return undefined;
+  if (typeof issue.body !== 'string') throw new Error(`card ${card} has no readable body`);
+  const line = issue.body.trimEnd().split(/\r?\n/).at(-1);
+  const edited = issue.lastEditedAt === null ? -Infinity : Date.parse(issue.lastEditedAt);
+  const judgement = judgeApproval(card, metadata, { before: runStart, run: true });
+  const approving = judgement.startsWith('approved ');
+  // A record grants only when it was posted after the edit that wrote the line it approves.
+  const recorded = approving ? Date.parse(judgement.split(' ')[2]) : NaN;
+  const granted = recorded > edited;
+  const failedSince = (time) => failures.some((record) => record.card === card && !(Date.parse(record.at) < time));
+  const continuing = (answer) => ({ card, claimUrl: held.selection.claimUrl, prompt: `${CONTINUE_PROMPT}\n${JSON.stringify({ card, runStart, ...answer })}` });
+  if (status === 'Awaiting push') {
+    const waiting = WAITING_LINE.exec(line);
+    if (!waiting || Number(waiting[1]) !== card || !granted || failedSince(recorded)) return undefined;
+    return worktreeMismatch(card, line, git) ?? continuing({ answer: 'yes', shown: { head: waiting[2], identity: waiting[3] } });
+  }
+  const returned = held.comment;
+  const answeredAt = returned && Date.parse(returned.lastEditedAt ?? returned.createdAt);
+  if (!returned) return undefined;
+  // GitHub times have one-second resolution, so an equal time cannot say which came first: it is shown, never skipped.
+  if (answeredAt === edited) return "its answer was posted in the same second as the card's last edit, so it cannot be told apart from an older answer; answer again";
+  if (!(answeredAt > edited) || failedSince(answeredAt)) return undefined;
+  if ((WAITING_LINE.test(line) || line.startsWith('Parked: ')) && approving) return `its ${line.slice(0, line.indexOf(':'))} line still has an approving record`;
+  const mismatch = worktreeMismatch(card, line, git);
+  if (mismatch) return mismatch;
+  const changes = CHANGES_LINE.exec(line);
+  if (changes && granted) return continuing({ answer: 'fix-and-merge', words: changes[2], from: changes[1] });
+  return continuing({ answer: 'changes', words: firstLine(returned.body).slice('Returned: '.length, -` Job: job/${card} on ${hostname}.`.length).trim() });
+}
+
+// The continue, `{ card, claimUrl, prompt }`, of each card the lead's `selections` name, outside `liveCards`, that the
+// owner answered: in Awaiting push, a valid owner record posted after its waiting line, its worktree here and clean at
+// that line's head and identity, as `yes`; in Backlog, the newest return `leadHolds` selects, posted after the card's
+// last edit, as `fix-and-merge` where a valid owner record was posted after its change line, otherwise as `changes`.
+// Either needs the card open, no unresolved hold and no failure record of the card in `failures` ({ card, at }) as new
+// as the answer. Each continue prompt is CONTINUE_PROMPT, a newline and the JSON of card, runStart and the answer.
+// The optional Map `refused` receives the reason for each answer that needs a failure item instead: a returned card
+// whose waiting or parked line still has an approving record, a return posted in the same second as the card's last
+// edit, or an answer whose worktree no longer matches its line.
+// The optional Set `unavailable` receives a `Card <n> answer unavailable: <reason>` line for each card that could not
+// be read. With no card left to judge it makes no GitHub read.
+export function answeredCards({ exec, git, runStart, login, hostname, selections, liveCards, failures = [], refused, unavailable }) {
+  const cards = [...new Set(selections.map(({ card }) => card))].filter((card) => !liveCards.has(card));
+  if (!cards.length) return [];
+  const board = fetchBoard(exec);
+  const repository = configuredRepository(exec);
+  const answered = [];
+  for (const card of cards) {
+    const item = board.find((entry) => entry.content.__typename === 'Issue' && entry.content.number === card);
+    if (item?.content.state !== 'OPEN' || !['Awaiting push', 'Backlog'].includes(item.status)) continue;
+    try {
+      const answer = cardAnswer(card, item.status, { exec, git, runStart, login, hostname, selections, failures, repository });
+      if (typeof answer === 'string') refused?.set(card, answer);
+      else if (answer) answered.push(answer);
+    } catch (error) {
+      unavailable?.add(`Card ${card} answer unavailable: ${error.message}`);
+    }
+  }
+  return answered;
+}
+
+// The pane's note of card's merged continue, naming its pull request.
+function mergedNote(card, exec) {
+  try {
+    const [pull] = JSON.parse(exec(['pr', 'list', '--head', `job/${card}`, '--state', 'merged', '--json', 'title,url', '--limit', '1']));
+    if (typeof pull?.title !== 'string' || typeof pull.url !== 'string') throw new Error('no merged pull request was listed');
+    return `Merged card ${card} with your changes: ${pull.title} ${pull.url}`;
+  } catch (error) {
+    return `Card ${card} merged; its pull request could not be read: ${error.message}`;
+  }
+}
+
+// Runs the continue `prompt` of an answered card as session `job-<card>-continue` in `folder`, records its outcome
+// there with phase `continue`, then queues it through `notify`: merged (closed, terminal and its worktree gone),
+// awaiting-push (built and in Awaiting push, then its waiting line written), parked (in Backlog with an owner hold
+// naming its job), stopped, failed or interrupted. A merge is then named with its pull request through `output.log`.
+// Resolves to the disposition.
+export async function runContinue({ card, claimUrl = null, prompt, folder, root, runStart, output, exec, git, startSession, notify }) {
+  const name = `job-${card}-continue`;
+  let disposition = 'failed';
+  let reason;
+  try {
+    const result = await runPreApprovedSession({ folder, root, startSession }, name, prompt);
+    if (result.interrupted) {
+      disposition = 'interrupted';
+      reason = cancellationMessage(result, `Card ${card} continue`, '', result.missing ? `guard refusal was not verified; ${GUARD_RECOVERY}` : '');
+    } else {
+      const unavailable = failure(result) ?? (result.missing && `missing ${result.missing}; ${GUARD_RECOVERY}`);
+      if (unavailable) throw new Error(unavailable);
+      const line = result.message.trimEnd().split(/\r?\n/).at(-1);
+      const ended = new RegExp(`^Run result: (?:(merged|built) ${card}|(parked|stop) ${card}: \\S.*)$`).exec(line);
+      if (!ended) throw new Error('the session ended without its exact job result');
+      const reported = ended[1] ?? ended[2];
+      const item = fetchBoard(exec).find((entry) => entry.content.__typename === 'Issue' && entry.content.number === card);
+      if (reported === 'merged' && (item?.content.state !== 'CLOSED' || !boardConfig.TERMINAL_STATUSES.includes(item.status)
+        || readWorktreeRecords(git).some((record) => record.branch === `job/${card}`))) throw new Error(`card ${card} merge and closeout are not confirmed`);
+      if (reported === 'built') {
+        if (item?.content.state !== 'OPEN' || item.status !== 'Awaiting push') throw new Error(`card ${card} owner-waiting state is not confirmed`);
+        markWaiting(card, { exec, git, runStart });
+      }
+      if (reported === 'parked') {
+        const { login, issue } = readApproval(card, { exec, repository: configuredRepository(exec) });
+        if (item?.content.state !== 'OPEN' || item.status !== 'Backlog' || !issue.comments.nodes.some((comment) =>
+          comment.author?.login === login && heldJobComment(comment.body, card, 'Needs owner:'))) throw new Error(`card ${card} parked ownership is not confirmed`);
+      }
+      disposition = { merged: 'merged', built: 'awaiting-push', parked: 'parked', stop: 'stopped' }[reported];
+      reason = ended[2] ? line : `Card ${card} continue: ${disposition}`;
+    }
+  } catch (error) {
+    disposition = 'failed';
+    reason = `Card ${card} continue unavailable: ${error.message}`;
+  }
+  writePreApprovedOutcome(folder, name, runStart, card, claimUrl, 'continue', disposition, reason);
+  await notify?.({ folder, name });
+  if (disposition === 'merged') output.log(mergedNote(card, exec));
+  return disposition;
+}
+
 function wholeReturn(card, record, facts, inventory, store, git, mainTip) {
   if (!record?.stopped || !record.owner || record.grant || record.delivery) throw new Error(`card ${card} has no verified stopped managed job to return`);
   const attempt = wholeAttempt(record, store);
@@ -1215,7 +1469,7 @@ function wholeReturn(card, record, facts, inventory, store, git, mainTip) {
   return { card, priorClaimUrls: intent.priorClaimUrls, base: intent.base, runStart: intent.runStart };
 }
 
-function settleWholeRecord(card, intentPath, disposition, result, { facts, store, git }) {
+function settleWholeRecord(card, intentPath, disposition, result, { facts, store, exec, git, runStart }) {
   const records = wholeRecords(store);
   const record = records.get(card);
   if (record?.intentPath !== intentPath || record.stopped !== null) throw new Error(`card ${card} launch registration changed before settlement`);
@@ -1245,7 +1499,10 @@ function settleWholeRecord(card, intentPath, disposition, result, { facts, store
     return null;
   }
   const owner = wholeOwner(attempt, record.owner, facts, inventory, git);
-  if (disposition === 'awaiting-push' && (!record.grant || item.status !== 'Awaiting push')) throw new Error(`card ${card} owner-waiting state is not confirmed`);
+  if (disposition === 'awaiting-push') {
+    if (!record.grant || item.status !== 'Awaiting push') throw new Error(`card ${card} owner-waiting state is not confirmed`);
+    markWaiting(card, { exec, git, runStart });
+  }
   if (disposition === 'parked' && (item.status !== 'Backlog' || !metadata.issue.comments.nodes.some((comment) =>
     comment.author?.login === metadata.login && heldJobComment(comment.body, card, 'Needs owner:')))) {
     throw new Error(`card ${card} parked ownership is not confirmed`);
@@ -1302,7 +1559,7 @@ export async function runWholeJobs({ startSession, notify, root, folder, output,
         if (!reported) throw new Error('worker ended without its exact job result');
         const settled = { merged: 'merged', built: 'awaiting-push', parked: 'parked', stop: 'stopped' }[reported];
         const facts = wholeFacts(exec, git, () => [card]);
-        owner = await store.locked(() => settleWholeRecord(card, intentPath, settled, result, { facts, store, git }));
+        owner = await store.locked(() => settleWholeRecord(card, intentPath, settled, result, { facts, store, exec, git, runStart }));
         disposition = settled;
         reason = paused ? line : `Card ${card}: ${disposition}`;
         if (disposition === 'stopped') workflowStop = true;
@@ -1465,7 +1722,10 @@ async function runPreApproved({ startSession, notify, root, folder, output, runS
         || readWorktreeInventory(git).some((entry) => entry.key === job.worktreeKey)) {
         throw new Error(`card ${job.selection.card} merge and closeout are not confirmed`);
       }
-    } else if (item?.content.state !== 'OPEN' || item.status !== 'Awaiting push') throw new Error(`card ${job.selection.card} owner-waiting state is not confirmed`);
+    } else {
+      if (item?.content.state !== 'OPEN' || item.status !== 'Awaiting push') throw new Error(`card ${job.selection.card} owner-waiting state is not confirmed`);
+      markWaiting(job.selection.card, { exec, git, runStart });
+    }
   }
   async function phase(job, phaseName) {
     const card = job.selection.card;

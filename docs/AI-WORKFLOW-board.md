@@ -67,13 +67,13 @@ pickable cards and then scans the whole board. Other modes list every column or 
 JSON (JavaScript Object Notation). Two modes serve the skills:
 
 - **Intake**, which `resume` runs, also reads the full details of every pickable card and of every claimed card with no
-  closing pull request. It prints a short summary of each and writes each card's full text to its own file, so a session
+  closing pull request. It prints a short summary of each. It writes each card's full text to its own file, so a session
   reads only the picked card in full. A card whose details it could not read shows as `UNAVAILABLE`, never as empty.
 - **Closeout**, which `closeout` runs after a merge, prints every drift row, advisory rows included. It fails only on
   drift that is not advisory and on any card it could not read.
 
 The JSON output lists these fields for each card. The table gives the GitHub meaning. A field that cannot be filled takes
-the empty value in the right-hand column.
+the empty value its row names.
 
 | Field | Meaning and empty value |
 |---|---|
@@ -97,8 +97,8 @@ On Linear, Jira and Azure Boards, the fields differ from the GitHub meaning in t
 - `assignees` holds display names on Linear, account IDs on Jira and native identity UUIDs on Azure Boards.
 - `closingPullRequests` holds GitHub pull request numbers.
 - `routing` is null, `parked` is false and `issueType` is absent, because those exist only on GitHub.
-- `subIssues` counts the native children. A child is completed when closed on Linear and Jira, or in Done on Azure
-  Boards.
+- `subIssues` counts the native children. A child counts as completed when closed on Linear and Jira, or in Done on
+  Azure Boards.
 
 On a Markdown card, the fields differ in these ways:
 
@@ -106,10 +106,10 @@ On a Markdown card, the fields differ in these ways:
 - `labels` holds the one kind label.
 - `state` is CLOSED exactly when the published status is Done.
 - `assignees` is always empty, because the job branch records the claim.
-- `closingPullRequests` lists open pull requests from `job/<N>`, only while the published status is Backlog or Ready.
+- `closingPullRequests` lists open pull requests from `job/{{NUMBER}}`, only while the published status is Backlog or Ready.
 
 A null or an empty array is the normalised form, not evidence that the thing is absent. Intake details are not fields of
-this output. They are the body, the parent, the comments and the latest claim, and they come from separate detail reads.
+this output. They are the body, the parent, the comments and the most recent claim, and they come from separate detail reads.
 `normalizeItem` in `scripts/lib/board.mjs` owns the fields.
 
 The scan reports known drift, a card whose column contradicts a known fact. Examples are a closed issue whose card is
@@ -178,7 +178,7 @@ that closes it.
 | Tracker | Where the cards live | What differs | Its page |
 |---|---|---|---|
 | GitHub Project | A GitHub Project beside the repository's issues | The default; the board's own automation moves some cards | This page |
-| Markdown cards | One file per card, `.agents/cards/<N>.md` | The files store only Backlog, Ready and Done. The job branch and its pull request show the other three columns, so the branch is the claim. Suits one person working alone, since another machine sees a claim only after a push; a team chooses a GitHub board | [Markdown cards](MARKDOWN-CARDS.md) |
+| Markdown cards | One file per card, `.agents/cards/{{NUMBER}}.md` | The files store only Backlog, Ready and Done. The job branch and its pull request show the other three columns, so the branch is the claim. Suits one person working alone, since another machine sees a claim only after a push; a team chooses a GitHub board | [Markdown cards](MARKDOWN-CARDS.md) |
 | Linear | The issues of one Linear team | Linear's own automation moves a card to In review and Done, so the workflow writes the earlier columns and checks those two | [Linear cards](LINEAR-CARDS.md) |
 | Jira | One Jira Cloud project | The agent moves every column through Jira's own transitions and reads each back | [Jira cards](JIRA-CARDS.md) |
 | Azure Boards | One Azure Boards project | The agent moves every column, each write guarded by the card's revision and read back | [Azure Boards cards](AZURE-CARDS.md) |
@@ -206,7 +206,7 @@ handles itself.
 | Auto-archive items | On | `is:issue,pr is:closed updated:<@today-2w` | Keeps the active board small; archiving never deletes a card, so history stays |
 | Pull request linked to issue | Off | | Awaiting push and In review follow push authorisation and the draft opening, not a link appearing |
 | Pull request merged | Off | | The issue's close, through the pull request's closing line, already triggers Item closed |
-| Item reopened | Off | | A reopen is a quality signal the session records on purpose; an automatic move would upset the Awaiting push and In review order |
+| Item reopened | Off | | A reopen is a quality signal the session records on purpose; an automatic move would break the Awaiting push and In review order |
 | Code changes requested | Off | | The `resume` skill's own review records track review state, not the board |
 | Code review approved | Off | | The same reason as Code changes requested |
 | Auto-close issue | Off | | An issue closes through its pull request's closing line, never because of a card's column |

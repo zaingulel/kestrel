@@ -35,6 +35,7 @@ const NON_BIND_MOUNT_TYPES = new Set(['volume', 'tmpfs', 'npipe', 'cluster', 'im
 // Only a name this plain reaches the command line; any other, whatever Docker would accept, is refused as unreadable.
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
+const SHELLS = new Set(['bash', 'zsh', 'fish', 'sh', 'dash', 'ksh']);
 const DATA_VOLUME = '/System/Volumes/Data';
 const ABOVE_FIRMLINKS = new Set([DATA_VOLUME, '/System/Volumes', '/System']);
 const realpath = process.platform === 'darwin' ? macRealpath : realpathSync;
@@ -263,7 +264,7 @@ export function cleanupJob(request, seams) {
     if (docker?.records) containers = removeWorktreeContainers(docker, worktree, report, retainWorktree);
   }
 
-  const context = { seams, git, records, worktree, docker, containers };
+  const context = { seams, git, records, worktree, docker, containers, note: report.line };
   for (const path of request.scratch) {
     const { absent, retained, forms } = removeScratch(path, context);
     if (absent) {
@@ -391,16 +392,18 @@ export function checkPaths(paths, seams) {
 }
 
 // One path's verdict: { verb: 'unused' | 'absent' | 'in use' | 'unverifiable', reason }. Only a completed check
-// that found nothing says unused; the Docker snapshot is taken only when a path gets that far.
+// that found nothing says unused, its reason naming each idle shell passed over; the Docker snapshot is taken only
+// when a path gets that far.
 function checkPath(path, seams, snapshot) {
   const target = readTarget(path);
   if (target.absent) return { verb: 'absent' };
   if (target.retained) return { verb: 'unverifiable', reason: target.retained };
   if (seams.platform === 'win32') return { verb: 'unverifiable', reason: 'no in-use check on this platform' };
+  const notes = [];
   const held = useChecks(path, target.forms, false, target.before.isDirectory(), {
-    seams, docker: snapshot(), containers: { gone: new Set() },
+    seams, docker: snapshot(), containers: { gone: new Set() }, note: (text) => notes.push(text),
   });
-  if (!held) return { verb: 'unused' };
+  if (!held) return { verb: 'unused', reason: notes.join(', ') };
   return { verb: held.inUse ? 'in use' : 'unverifiable', reason: held.reason };
 }
 
@@ -970,28 +973,35 @@ const relates = (paths, others, relations) =>
 const holdsFromAbove = (record, sources, forms) => record.State?.Running !== false &&
   relates(sources.map(({ path }) => path).filter(Boolean), forms, ['above']);
 
-// The processes and names of lsof's field output (-F with p, c, f and n); null on any other line.
+// The processes of lsof's field output (-F with p, c, f and n), each { pid, command, files } with a file per f line
+// as { fd, name }; a name with no f line before it, as -d cwd prints, is a file of unknown fd. Null on any other line.
 export function parseLsof(stdout) {
   const processes = [];
   for (const line of stdout.split('\n').filter(Boolean)) {
     const [field, value] = [line[0], line.slice(1)];
     const current = processes.at(-1);
-    if (field === 'p' && POSITIVE_INTEGER.test(value)) processes.push({ pid: value, command: '', names: [] });
+    if (field === 'p' && POSITIVE_INTEGER.test(value)) processes.push({ pid: value, command: '', files: [] });
     else if (!current || !['c', 'f', 'n'].includes(field)) return null;
     else if (field === 'c') current.command = value;
-    else if (field === 'n') current.names.push(value);
+    else if (field === 'f') current.files.push({ fd: value });
+    else if (field === 'n') {
+      const file = current.files.at(-1);
+      if (file && file.name === undefined) file.name = value;
+      else current.files.push({ fd: null, name: value });
+    }
   }
   return processes;
 }
 
-// The rows of `ps -ww -A -o pid= -o ppid= -o args=`, right-aligned numbers then the arguments, each
-// { pid, ppid, args }; null when any row is unreadable.
+// The rows of `ps -ww -A -o pid= -o ppid= -o tty= -o args=`, right-aligned numbers, the terminal name left-aligned
+// (`?` on Linux and `??` on macOS when there is none) then the arguments, each { pid, ppid, tty, args }; null when
+// any row is unreadable.
 export function parsePs(stdout) {
   const rows = [];
   for (const line of stdout.split('\n').filter(Boolean)) {
-    const row = /^ *(\d+) +(\d+)(?: (.*))?$/.exec(line);
+    const row = /^ *(\d+) +(\d+) +(\S+)(?: +(.*))?$/.exec(line);
     if (!row) return null;
-    rows.push({ pid: row[1], ppid: row[2], args: row[3] ?? '' });
+    rows.push({ pid: row[1], ppid: row[2], tty: row[3], args: row[4] ?? '' });
   }
   return rows;
 }
@@ -1034,7 +1044,7 @@ function listenerRetention(run, targets) {
   const directories = readLsof(run('lsof', ['-nP', '-a', '-p', pids, '-d', 'cwd', '-Fpn']), targets);
   if (directories.retain) return directories.retain;
   for (const { pid, command } of listening.processes) {
-    const cwd = directories.processes.find((entry) => entry.pid === pid)?.names[0];
+    const cwd = directories.processes.find((entry) => entry.pid === pid)?.files[0]?.name;
     if (cwd === undefined) return `pid ${pid} (${command}) listens, and its working directory could not be read`;
     if (targets.some((target) => atOrBelow(cwd, target))) return `pid ${pid} (${command}) serves it`;
   }
@@ -1319,10 +1329,37 @@ function readTarget(path) {
 }
 
 // Whether anything uses the target, in the order a removal checks: { reason, inUse } for the first container,
-// lsof or process check that holds it (inUse when it found a use, else it could not tell), or null.
-function useChecks(path, forms, inside, directory, { seams, docker, containers }) {
-  return containerRetention(forms, inside, { docker, containers }) ?? useRetention(path, forms, directory, seams.run) ??
-    processRetention(forms, seams);
+// lsof or process check that holds it (inUse when it found a use, else it could not tell), or null. A sitting shell
+// on a terminal with no child is passed over with a note.
+//
+// lsof lists only processes using the target and may escape bytes of the names it prints, so every row it returns is a
+// use whatever its names read, except a sitting shell, whose every file lsof lists is its working directory. `-x f`
+// makes +D cross into file systems mounted below the target. ps then rules a sitting shell idle: it has a terminal, is
+// no process's parent and was started as a plain interactive shell. A shell with no ps row has exited or is not yet
+// listed, so it holds and is waited out to the next run.
+function useChecks(path, forms, inside, directory, { seams, docker, containers, note }) {
+  const container = containerRetention(forms, inside, { docker, containers });
+  if (container) return container;
+  const lsof = readLsof(seams.run('lsof', directory ? ['-nP', '-Fpcfn', '-x', 'f', '+D', path] : ['-nP', '-Fpcfn', path]), forms);
+  if (lsof.retain) return unverifiable(lsof.retain);
+  const uses = ({ pid, command }) => found(`pid ${pid} (${command}) uses it`);
+  const busy = lsof.processes.find((user) => !sittingShell(user));
+  if (busy) return uses(busy);
+  const ps = readPs(seams.run);
+  if (ps.retain) return unverifiable(ps.retain);
+  const parents = new Set(ps.rows.map(({ ppid }) => ppid));
+  const withChild = lsof.processes.find(({ pid }) => parents.has(pid));
+  if (withChild) return uses(withChild);
+  const terminals = new Map(ps.rows.map(({ pid, tty }) => [pid, tty]));
+  const withoutTerminal = lsof.processes.find(({ pid }) => ['?', '??', undefined].includes(terminals.get(pid)));
+  if (withoutTerminal) return uses(withoutTerminal);
+  const naming = processRetention(forms, ps.rows, seams.pid);
+  if (naming) return naming;
+  const argumentsOf = new Map(ps.rows.map(({ pid, args }) => [pid, args]));
+  const notPlain = lsof.processes.find(({ pid }) => !plainInteractiveStart(argumentsOf.get(pid)));
+  if (notPlain) return uses(notPlain);
+  for (const { pid, command } of lsof.processes) note(`idle shell pid ${pid} (${command}) in ${path} is not a hold`);
+  return null;
 }
 
 const unverifiable = (reason) => ({ reason, inUse: false });
@@ -1384,26 +1421,33 @@ function containerRetention(forms, inside, { docker, containers }) {
   return null;
 }
 
-// The hold a process with the target or something below it open puts on it, or null; lsof is read as readLsof says.
-// `-x f` makes +D cross into file systems mounted below the target. lsof lists only processes using the target, and
-// may escape bytes of the names it prints, so every row it returns is a use whatever its names read.
-function useRetention(path, forms, directory, run) {
-  const lsof = readLsof(run('lsof', directory ? ['-nP', '-Fpcfn', '-x', 'f', '+D', path] : ['-nP', '-Fpcfn', path]), forms);
-  if (lsof.retain) return unverifiable(lsof.retain);
-  const [user] = lsof.processes;
-  return user ? found(`pid ${user.pid} (${user.command}) uses it`) : null;
+// Whether an lsof process is a shell sitting at a prompt: a shell by name, a login form's leading `-` aside, holding
+// at least one file and every file it holds a working directory.
+const sittingShell = ({ command, files }) =>
+  SHELLS.has(command.replace(/^-/, '')) && files.length > 0 && files.every(({ fd }) => fd === 'cwd');
+
+// Whether ps arguments are a shell started with nothing to run: the shell program, a path or a login form's leading
+// `-` aside, followed only by `-i`, `-l` or `--login`. A script or command string means the shell is working.
+const plainInteractiveStart = (args) => {
+  const [program, ...options] = args.trim().split(/\s+/);
+  return SHELLS.has(basename(program).replace(/^-/, '')) && options.every((option) => ['-i', '-l', '--login'].includes(option));
+};
+
+// Every process, read from a ps run that exited 0: { rows }, or { retain } with the reason when ps is absent, failed
+// or printed a row that could not be read.
+function readPs(run) {
+  const ps = run('ps', ['-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'tty=', '-o', 'args=']);
+  if (ps.absent) return { retain: 'no process check: ps is not installed' };
+  if (ps.failed) return { retain: `ps failed: ${ps.failed}` };
+  if (ps.status !== 0) return { retain: `ps failed: ${describe(ps)}` };
+  const rows = parsePs(ps.stdout);
+  if (!rows) return { retain: 'ps printed a row that could not be read' };
+  return { rows };
 }
 
 // The hold a process other than this command and its ancestors puts on the target by naming it in its arguments, or
-// null. The listing is read only from a ps run that exited 0. The arguments are not reported, since they may carry
-// secrets.
-function processRetention(forms, { run, pid }) {
-  const ps = run('ps', ['-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'args=']);
-  if (ps.absent) return unverifiable('no process check: ps is not installed');
-  if (ps.failed) return unverifiable(`ps failed: ${ps.failed}`);
-  if (ps.status !== 0) return unverifiable(`ps failed: ${describe(ps)}`);
-  const rows = parsePs(ps.stdout);
-  if (!rows) return unverifiable('ps printed a row that could not be read');
+// null. The arguments are not reported, since they may carry secrets.
+function processRetention(forms, rows, pid) {
   const parents = new Map(rows.map((row) => [row.pid, row.ppid]));
   const ancestors = new Set();
   for (let current = String(pid); current !== undefined && !ancestors.has(current); current = parents.get(current)) {

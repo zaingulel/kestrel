@@ -24,6 +24,7 @@ throughout this skill, including complete native-comment review before claiming.
 - Prepare this exact pre-approved job. Do not build or deliver.
 - Build and verify this exact prepared job. Do not publish or deliver.
 - Deliver this exact built job. Do not select or build another job.
+- Continue this exact answered pre-approved job.
 
 A session whose first message asks it to build a card in the cloud reads
 [references/cloud-build.md](references/cloud-build.md) whole before any other action, this check included, as "Cloud
@@ -314,7 +315,7 @@ branch. Two issues may run in parallel only when their files are disjoint.
   this session; "4. Plan" owns the steps under **Plan approval**.
 - **Strict construction and clerical corrections.** Read
   [references/strict-construction.md](references/strict-construction.md) whole before the first handoff of any
-  `strict-tdd` claim and before authorizing any clerical correction.
+  `strict-tdd` claim or of a review repair to one, and before authorizing any clerical correction.
 - Commit on the job branch after every green slice. Uncommitted files survive a crash but not a stray checkout,
   and the next session reads the branch, not the worktree, to see what was already green. A local commit needs
   no authorisation; only the push does. Commit green work before any stop, handoff, replan or split proposal as

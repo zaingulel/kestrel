@@ -48,15 +48,15 @@ Lenses:
    `.claude/worklog/<branch>-visual-direction.md`: a result that departs from that direction, or a visual change with no
    saved direction, is a `spec` finding. The skill's advice never lets the result depart from `docs/DESIGN-SYSTEM.md`,
    and a preference of the skill's that the direction did not adopt is no finding.
-6. **Evidence**: independently derive every coherent claim and its construction mode from the issue and final
-   diff before reading the recorded selection. Check the delivered observer, independent oracle, discrimination
-   proof, and focused evidence against `docs/TESTING-STRATEGY.md`, including its protected-invariant and local
-   subject floors and the branch work log's executed results. Audit meaningful pre-implementation failure and
-   staged coordinator validation under `resume`'s "5. Build", including honest chronology-gap recovery under
-   "6. Verify and review"; later mutations cannot repair history. Derive base behaviour from the job base, not
-   implementation earlier in the same job. A test that accepts the claimed wrong behaviour,
-   or asserts wall-clock timing instead of the behaviour, is a finding. Check each mutation receipt's `diff=`
-   against the passing run's as `docs/TESTING-STRATEGY.md` says; a match is an unexecuted mutation, a finding.
+6. **Evidence**: independently derive every coherent claim and its construction mode from the issue and final diff
+   before reading the recorded selection. Check the delivered observer, independent oracle, discrimination proof, and
+   focused evidence against `docs/TESTING-STRATEGY.md`, including its protected-invariant and local subject floors and
+   the branch work log's executed results. Audit the pre-implementation failure that strategy requires and staged
+   coordinator validation under `resume`'s "5. Build", including how its chronology audit under "6. Verify and review"
+   settled each gap; later mutations cannot repair history. Derive base behaviour from the job base, not implementation
+   earlier in the same job. A test that accepts the claimed wrong behaviour, or asserts wall-clock timing instead of the
+   behaviour, is a finding. Check each mutation receipt's `diff=` against the passing run's as
+   `docs/TESTING-STRATEGY.md` says; a match is an unexecuted mutation, a finding.
 7. **Spec conformance**: does the diff deliver what the originating board issue asked, and only that? Where
    `scripts/lib/board-config.mjs` exports `TRACKER = "jira"`, first read `docs/JIRA-CARDS.md` and use its
    "Review snapshots" card-text substitution instead of the GitHub issue read below. Where it exports

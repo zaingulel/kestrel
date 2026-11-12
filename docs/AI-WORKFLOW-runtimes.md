@@ -20,7 +20,7 @@ and [Where the rules live](#where-the-rules-live) lists every home.
 |---|---|---|
 | The contract | `CLAUDE.md`, which imports `AGENTS.md` and adds Claude-only notes | `AGENTS.md`, read directly |
 | Skills | `.claude/skills/`, a byte-identical copy of each skill | `.agents/skills/`, read directly |
-| How a skill is invoked | `/<name>` | `$<name>` |
+| How a skill is invoked | `/{{NAME}}` | `${{NAME}}` |
 | Seats | `.claude/agents/`, one Markdown file each | `.codex/agents/`, one TOML file each |
 | Hook registration | `.claude/settings.json` | `.codex/hooks.json` |
 | Hook scripts | `.claude/hooks/` | `.codex/hooks/` |
@@ -104,8 +104,8 @@ The manifest, `.agents/factory-manifest.json`, records each shared file's finger
 `scripts/lib/factory-sync.mjs`, `computeEntries` records them and `verifyManifest` compares each installed file or
 marked region with its record. The canonical repository commits the original, its copy and the manifest together, and a
 test refuses a difference. In the canonical repository, `node scripts/factory-sync.mjs --write` records the
-fingerprints. It refuses to run anywhere whose `origin` is not the canonical repository, so an adopter cannot bless its
-own drift.
+fingerprints. It refuses to run anywhere whose `origin` is not the canonical repository, so an adopter cannot record its
+own changes as the shared text.
 
 Publishing a release changes what adopters can take. Each adopter keeps a pinned copy at the release it installed or
 last updated to. Its copy moves only when it runs a release update to a named release. That update installs the
@@ -253,7 +253,7 @@ whatever the credential, and attaches no network secret to a GitHub request. So 
 and no token given to the environment changes that. Codex has no cloud build.
 
 The work therefore splits in two. A local session on the owner's machine keeps the board in step. It claims the card,
-starts the cloud session, watches it, waits for its draft with `node scripts/merge-watch.mjs --draft job/<issue>` and
+starts the cloud session, watches it, waits for its draft with `node scripts/merge-watch.mjs --draft job/{{ISSUE}}` and
 delivers it. The cloud session plans, builds, reviews and opens the draft pull request under that claim. It builds
 only a card that takes the pull request route. A local session builds a change the direct route to `main` admits.
 
@@ -346,12 +346,12 @@ cloud session control and the release of a cloud claim.
 
 ## Failure modes
 
-- **Codex fires no shell-command hook on Windows.** Two upstream limits stand, and trusting the hooks lifts neither.
+- **Codex fires no shell-command hook on Windows.** Two upstream limits stand, and trusting the hooks removes neither.
   Codex emits no `PreToolUse` event for shell commands on Windows (openai/codex#24453). Its shell payload there also
   wraps the command in a `powershell.exe -Command` string the git guard does not read.
-- **A hook cannot run.** This happens where `node` is missing, or where a Codex that finds no shell launches hooks
-  through `cmd.exe /C`, which cannot read these forms. The runtime reports a failed hook and the action goes ahead, as a
-  failed hook does on macOS. The failure is visible, not blocking.
+- **A hook cannot run.** This happens where `node` is missing. It also happens where a Codex that finds no shell
+  launches hooks through `cmd.exe /C`, which cannot read these forms. The runtime reports a failed hook and the action
+  goes ahead, as a failed hook does on macOS. The failure is visible, not blocking.
 - **A runtime has not trusted the hooks.** A hook file the runtime has not trusted does not run. A session checks for
   this when it starts and tells the owner. [The `resume` skill](../.agents/skills/resume/SKILL.md#before-intake) owns
   the check and the remedy.
@@ -376,7 +376,7 @@ cloud session control and the release of a cloud claim.
   its start message names, or a later claim followed it. Someone may also have closed the issue, or the job branch may
   already exist.
 - **The cloud session's clone is not the `main` it fetched.** `main` moved between the clone and the session's own
-  fetch, so the cloud session stops before its admission and says so. Where the local session's fetch shows `main`
+  fetch. The cloud session stops before its admission and says so. Where the local session's fetch shows `main`
   moved since the start message, it archives that session and starts a fresh one, unasked. The same stop again goes
   to the owner.
 - **The start form shows an earlier branch, environment or mode.** The form can keep an earlier session's choices. The
@@ -397,14 +397,14 @@ cloud session control and the release of a cloud claim.
   building. So the session that moves the card first has every cloud session under the claim stopped and archived. It
   archives those it started once verified, and has the owner confirm any other. Only then does it release the claim,
   which keeps any later start message from building.
-- **A cloud build turns out to be a direct-route change.** The cloud session opens no draft and tells the owner,
-  because the route carries only pull request changes. A local session builds such a card.
+- **A cloud build turns out to be a direct-route change.** The cloud session opens no draft and tells the owner.
+  The route carries only pull request changes. A local session builds such a card.
 - **The platform reclaims a cloud machine.** Only pushed work survives, so the cloud session pushes its branch before it
   waits on the owner.
 - **The local session ends before the draft opens.** The card keeps its `Claude Code cloud` claim in its column. The
   next session's work-pick offers its delivery first: waiting for the draft, or delivering it once open. That session
   did not start the cloud session, so the owner confirms its stop.
-- **The wait for the draft stops without one.** Foreign or unknown provenance, several pull requests, unreadable replies
+- **The wait ends without a draft.** Foreign or unknown provenance, several pull requests, unreadable replies
   or failed reads exit non-zero with the reason last. The session tells the owner and waits again on the owner's say.
 - **Origin uses an SSH host alias.** The origin lookups need a real GitHub host that `gh` resolves directly. An alias
   may work in git but fail here. The session stops and asks the owner for a directly resolvable origin, rather than

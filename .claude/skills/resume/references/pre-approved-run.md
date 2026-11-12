@@ -165,7 +165,7 @@ The product manager run's steps it names are in [runs.md](runs.md#steps-both-run
    The selection session performs the existing free, worktree and claim checks and ends with `Run result: selected <card>`.
    It writes `<logs>.selected.json` with exactly `runStart`, `card`, `claimUrl`, `priorClaimUrls`, `branch`, `worktree`
    and `base`. Validate authoritative ownership before preparation. The fixed phase prompts, each followed by a newline
-   and its JSON context, are the four **Run triggers** under "Before intake" lists.
+   and its JSON context, are the ones the **Run triggers** under "Before intake" name.
 
    Follow "4. Plan" and "6. Verify and review" for the required independent reviews. The preparation job launches the
    plan reviewer and settles its findings and required follow-up. The build job launches the final reviewer and settles
@@ -316,11 +316,11 @@ The product manager run's steps it names are in [runs.md](runs.md#steps-both-run
    push**, parked for the owner's push, because the direct route is bounded only by a hook the run could edit.
 
    A pre-approved run's card session runs section 8 and closeout unasked; its final message is the decision card, the pull request's address and
-   `Run result: merged <card>`, and lists anything closeout would ask the owner. Where a stop holds, the card goes to `Awaiting push`, its body's first Not done item names the stop and is saved again, and the card session's final message is the decision card followed by `Run result: built <card>`; the batch review gives the fresh yes, carried to that session as **Carried answers** in step 8 of the product manager run says. A question mid-job parks the job as step 7 of the product manager run says.
+   `Run result: merged <card>`, and lists anything closeout would ask the owner. Where a stop holds, the card goes to `Awaiting push`, its body's first Not done item names the stop and is saved again, and the card session's final message is the decision card followed by `Run result: built <card>`; the batch review gives the fresh yes, carried to that session as **Carried answers** in step 8 of the product manager run says. At that stop the run also writes the card's waiting line, as **Advance approval at push** gives, and the phase fails instead of ending `awaiting-push` where the line cannot be written or a record still approves. For a card the Herdr lead holds, the fresh yes is the approval record the owner posts for the version the line names, which the lead delivers as the Herdr lead section's answered cards say. A question mid-job parks the job as step 7 of the product manager run says.
 7. **Results and attention.** The result must match its exact card and route as step 5 says; no split result is
    accepted. Each completion is accounted once. Before queuing its fixed reference, the coordinator writes
    `<folder>/<name>.outcome.json` once with exclusive creation: exactly `runStart`, `card`, `claimUrl`, `phase`,
-   `disposition` and `reason`. Phase is `job` for a Linux whole-job outcome, or `select`, `prepare`, `build`, `deliver` or `end` on the existing routes; job disposition is the matching one of
+   `disposition` and `reason`. Phase is `job` for a Linux whole-job outcome, or `select`, `prepare`, `build`, `deliver`, `continue` or `end` on the existing routes; job disposition is the matching one of
    `selected`, `prepared`, `built`, `merged`, `awaiting-push`, `parked`, `stopped`, `failed` or `interrupted`.
    Readers also accept retained historical `timed-out` and `budget-exhausted` dispositions. Selection without validated identity has null card and claim URL; later job phases
    bind the stored identity and context. The end phase has null card and claim URL as step 8 says. The launcher owns the complete reason, including cancellation uncertainty;
@@ -407,7 +407,32 @@ the lead mints each run's mark and starts every card session itself.
   and frees its place, so the lead moves on. A card that ends merged, failed, interrupted or stopped frees its place
   too. A place frees only once the stop proof for the card's last session is confirmed. With an unconfirmed stop the
   lead keeps the place, names the unit in the pane and in the failure item, and frees the place when that unit is no
-  longer live. A restarted lead counts a box an earlier lead left running as held.
+  longer live. A restarted lead counts a box an earlier lead left running as held. At the stop the run writes the
+  card's waiting line, its only write to the card itself.
+- **An answered card.** Each pass, before it selects, the lead takes up a card it left waiting or parked that the
+  owner has answered, with no new claim. The card must be open, hold no `Needs owner:` comment, be reserved by no live
+  run of this lead and have its worktree here and clean at the head and identity its waiting line names. The lead
+  starts a `continue` session for it, on a running place and in a results folder of its own, with the prompt
+  `Continue this exact answered pre-approved job.`, a newline and the JSON of `card`, `runStart` and the answer.
+  Continues take turns: the pass waits for the continue to end and then ends, so while it runs the lead starts no other
+  continue and no run of its own, and the next pass starts at once. A continue whose stop is unconfirmed still runs
+  until its unit is no longer live, which the lead checks every 30 seconds; one whose unconfirmed stop names no unit
+  stops the lead. A continue relies on the admission its card passed in its own run, so it is not checked against
+  another lead's work. The answer is one of three:
+  - `yes`: the card is in `Awaiting push` and an approval record the owner posted after its waiting line is valid. The
+    session delivers that version as section 8 says, checked against the head and identity the line names.
+  - `changes`: the card is in `Backlog` and its newest `Returned:` comment is the owner's, for this machine and this
+    exact job, and newer than the card's last edit. The session makes the changes the owner's words ask for, runs every
+    check and review and ends at `Awaiting push`, so the card returns to the queue with a new waiting line for the
+    owner's yes.
+  - `fix-and-merge`: as `changes`, with a valid owner record posted after the card's `Changes asked:` line. The
+    session makes the changes, runs every check and review and merges without coming back, and the lead tells the
+    owner `Merged card <n> with your changes: <pull request title> <url>`. A failing check or review, or stop 10 under
+    **Advance approval at push**, ends it at `Awaiting push` as `changes` does.
+
+  A stale, replayed or other-account answer starts nothing. A returned card whose waiting or parked line still has an
+  approving record, or whose worktree no longer matches its line, gets a failure item. A continue that fails, is
+  interrupted or stops leaves a failure item, as a failed card does, and stops the lead.
 - **A failed card.** The lead replaces `.claude/worklog/lead/<card>.json` in the root checkout with the card, the
   step (choosing it, planning, building or delivering), the cause and the absolute path of the session's stream log.
   The queue panel shows the item. A usage limit is an ordinary failure with no retry, and the card keeps its claim:

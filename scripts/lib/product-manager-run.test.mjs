@@ -25,8 +25,9 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { gitEnvironment } from './factory-sync.mjs';
+import { judgeApproval, publishCheck, readApproval } from './advance-approval.mjs';
 import { CARD_PROMPT, CARRIED_PROMPT, END_PROMPT_PREFIX, GUARD_WITNESS, runRun, sessionArgv } from './product-manager-run.mjs';
-import { main } from '../product-manager-run.mjs';
+import { leadProfile, main } from '../product-manager-run.mjs';
 import { copyToolkit, GITHUB_TEST_CONFIG } from './board-toolkit-copy.mjs';
 import { END_MESSAGE, END_REPLY, GUARD_REFUSAL, STDERR_FIRST_WITNESS, SYSTEMCTL, SYSTEMD_RUN, deferred, nativeSystemd, probeManagedSystemd, readPhaseEvidence, schedulerFixture } from './pre-approved-fixture.mjs';
 
@@ -539,6 +540,12 @@ function wholeQueueFixture(fixture) {
         if (job.stopAfterBuild && mode === 'start') return park('stop');
         if (job.parkAfterBuild && mode === 'start') return park();
         if (!await admit('deliver')) return park();
+        if (job.waitAfterDeliver) {
+          git(['-C', job.worktree, 'add', job.file]);
+          git(['-C', job.worktree, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', `Build card ${card}`]);
+          fixture.wait(card);
+          return settle('built');
+        }
         await reach(`deliver ${card}`, card);
         writeFileSync(effect('deliver', card, mode), `delivered ${card}\n`, { flag: 'wx' });
         merge(job);
@@ -880,6 +887,35 @@ test('Codex whole-job admission revalidates every peer', {
   assert.deepEqual(observed, controls.map((control) => (control === 'resource-free candidate beside live peer unreviewed path'
     ? { control, decision: 'allow', namesPeer: false, effect: 'built 92 (start)\n' }
     : { control, decision: 'wait', namesPeer: true, effect: null })));
+});
+
+test('a whole-job session that ends awaiting push writes one waiting line and voids its record', {
+  skip: process.platform !== 'linux' && 'whole-job admission requires Linux',
+}, async (t) => {
+  const create = await schedulerFixture(t, { native: true });
+  const fixture = create({ cards: [91] });
+  const queue = wholeQueueFixture(fixture);
+  const first = fixture.jobs.get(91);
+  first.waitAfterDeliver = true;
+  try {
+    const run = queue.run(COORDINATOR);
+    assert.equal(await run.running, 0, run.messages.join('\n'));
+    const head = fixture.git(['-C', first.worktree, 'rev-parse', 'HEAD']).trim();
+    assert.notEqual(head, fixture.base, 'the built file is committed');
+    assert.equal(fixture.git(['-C', first.worktree, 'status', '--porcelain', '--untracked-files=normal']), '', 'the review folder leaves the worktree clean');
+    const record = JSON.parse(readFileSync(join(queue.store, 'job-91.json'), 'utf8'));
+    const outcome = JSON.parse(readFileSync(join(dirname(dirname(dirname(record.intentPath))), 'job-91.outcome.json'), 'utf8'));
+    assert.equal(outcome.disposition, 'awaiting-push');
+    assert.equal(first.status, 'Awaiting push');
+    assert.equal(record.grant, null, 'the settled record holds no grant');
+    assert.deepEqual(record.stopped, JSON.parse(readFileSync(join(dirname(record.intentPath), 'stop.json'), 'utf8')));
+    assert.deepEqual(fixture.edits.map(({ card }) => card), [91], 'one state-line edit, for the waiting card');
+    assert.equal(fixture.edits[0].body.split('\n').at(-1), waitingLine(91, first.worktree, head, fixture.runStart));
+    assert.match(recordAfter(fixture, 91), /^not approved 91: no valid record\b/, 'the edit voids the waiting card\'s record');
+  } finally {
+    await queue.finish();
+  }
+  assert.deepEqual(queue.adapterErrors, []);
 });
 
 test('pre-approved independent builds have no factory ceiling', async (t) => {
@@ -1508,6 +1544,342 @@ test('pre-approved wait diagnostics record each distinct reason once', async (t)
   }
 });
 
+// Real Git's content identity of the review folder the fixture wrote for `head`, as a waiting line names it.
+function savedIdentity(card, worktree, head) {
+  const folder = join(worktree, '.claude', 'worklog', `job_${card}-review-${head}`);
+  const files = ['body.md', 'screenshot-1.png'];
+  assert.deepEqual(readdirSync(folder).sort(), files, 'the review folder the fixture wrote');
+  const identity = execFileSync('git', ['hash-object', '--no-filters', '--', ...files], { cwd: folder, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe' });
+  return identity.trim().split('\n').join(',');
+}
+
+// The waiting line a stop must leave: the head the test names, real Git's identity of the review folder the fixture
+// wrote, and the run's mark.
+function waitingLine(card, worktree, head, mark) {
+  return `Waiting version: job/${card} ${head} ${savedIdentity(card, worktree, head)} run ${mark}`;
+}
+
+// The record rule over the approval read after a stop: a body edit moves `lastEditedAt`, which voids `edited=`.
+function recordAfter(fixture, card) {
+  const repository = JSON.parse(fixture.exec(['repo', 'view', '--json', 'id,nameWithOwner,defaultBranchRef']));
+  return judgeApproval(card, readApproval(card, { exec: fixture.exec, repository }));
+}
+
+const STATE_LINE = /^(?:Waiting version|Changes asked|Parked): /;
+
+test('a deliver phase that ends awaiting push writes one waiting line and voids its record', async (t) => {
+  const create = await schedulerFixture(t);
+  // 92's build is held until 91's waiting end is notified, so 92's delivery admission comes past the voided record.
+  const fixture = create({ cards: [91, 92], waiting: [91], held: ['job-92-build'],
+    observeNotification: ({ name }) => { if (name === 'job-91-deliver') fixture.release('job-92-build'); } });
+  const waiting = fixture.jobs.get(91);
+  // Earlier and malformed state lines, which the write replaces with its own.
+  waiting.body = ['Scope evidence for card 91.', `Waiting version: job/91 ${'0'.repeat(40)} stale run 2026-11-04T10:00:00Z`,
+    `Changes asked: from ${'0'.repeat(40)}: an older request`, 'Parked: malformed'].join('\n');
+  try {
+    const code = await fixture.start();
+    t.diagnostic(`exit=${code}; calls=${JSON.stringify(fixture.calls.map(({ name }) => name))}; errors=${JSON.stringify(fixture.errors)}`);
+    assert.deepEqual(fixture.edits.map(({ card }) => card), [91], 'one state-line edit, for the waiting card');
+    const lines = fixture.edits[0].body.split('\n');
+    const line = waitingLine(91, waiting.worktree, waiting.head, fixture.runStart);
+    assert.equal(lines.at(-1), line);
+    assert.deepEqual(lines.filter((text) => STATE_LINE.test(text)), [line], 'exactly one state line');
+    assert.equal(lines[0], 'Scope evidence for card 91.', 'the card keeps its own text');
+    assert.match(recordAfter(fixture, 91), /^not approved 91: no valid record\b/, 'the edit voids the waiting card\'s record');
+    assert.equal(code, 0);
+    fixture.outcome('job-91-deliver', 91, 'deliver', 'awaiting-push');
+    fixture.outcome('job-92-deliver', 92, 'deliver', 'merged');
+    assert.deepEqual(fixture.calls.filter(({ phase }) => phase === 'deliver').map(({ name }) => name), ['job-91-deliver', 'job-92-deliver']);
+    assert.equal(fixture.jobs.get(92).state, 'CLOSED');
+    fixture.retained([91]);
+    fixture.settledOnce();
+  } finally {
+    await fixture.finish();
+  }
+});
+
+test('a waiting line write that fails or leaves a record approving fails the phase', async (t) => {
+  const create = await schedulerFixture(t);
+  const rows = [
+    ['unreadable review folder', (job) => { job.review = false; }, []],
+    ['dirty worktree', (job) => { job.unstaged = ['a']; }, []],
+    ['non-string body', (job) => { job.body = null; }, []],
+    ['edit error', (job) => { job.editFailure = 'error'; }, []],
+    ['record still approving', (job) => { job.editFailure = 'stale'; }, [91]],
+  ];
+  const observed = [];
+  for (const [row, arrange] of rows) {
+    // The deliver session leaves the row's state as it ends waiting: a dirty tree or a null body set any earlier stops
+    // the run before delivery.
+    const fixture = create({ cards: [91], phaseReplies: { 'job-91-deliver': (job) => {
+      arrange(job);
+      fixture.wait(job.card);
+      return 'Run result: built 91';
+    } } });
+    try {
+      const code = await fixture.start();
+      const outcome = join(fixture.folder, 'job-91-deliver.outcome.json');
+      const disposition = existsSync(outcome) ? JSON.parse(readFileSync(outcome, 'utf8')).disposition : `no deliver outcome after ${fixture.calls.map(({ name }) => name)}: ${fixture.errors}`;
+      observed.push({ row, code, disposition, edited: fixture.edits.map(({ card }) => card) });
+      if (row === 'record still approving') assert.match(recordAfter(fixture, 91), /^approved 91 /, 'the stale edit leaves the record approving');
+    } finally {
+      await fixture.finish();
+    }
+  }
+  t.diagnostic(JSON.stringify(observed));
+  assert.deepEqual(observed, rows.map(([row, , edited]) => ({ row, code: 1, disposition: 'failed', edited })));
+});
+
+// The first line of the lead's continue prompt, spelled out here so the skill test can check the same text.
+const CONTINUE_LINE = 'Continue this exact answered pre-approved job.';
+// The mark of the lead pass that reads the answers, after every answer these tests post.
+const LEAD_MARK = '2026-11-05T11:00:00Z';
+const JOB_LINE = 'Job: job/91 on fixture-machine.';
+const CHANGE_WORDS = 'use the shorter title';
+const continuePrompt = (context) => `${CONTINUE_LINE}\n${JSON.stringify(context)}`;
+
+// Card 91 as a lead left it waiting on the owner: claimed by the lead's own selection, its decision card saved and its
+// waiting line written at the stop, which moved its lastEditedAt. `scenario` adds to the fixture's options.
+function leadWaitingCard(create, scenario = {}) {
+  const fixture = create({ cards: [91], ...scenario });
+  fixture.prepareSelected(91);
+  fixture.wait(91);
+  fixture.runtime.markWaiting(91, { exec: fixture.exec, git: fixture.git, runStart: fixture.runStart });
+  const job = fixture.jobs.get(91);
+  const selection = { runStart: fixture.runStart, card: 91, claimUrl: job.claimUrl, priorClaimUrls: [], branch: 'job/91', worktree: job.worktree, base: fixture.base };
+  return { fixture, job, selection };
+}
+
+// The owner's `fix`: the change line, written at 10:30, `between` comments, then the owner's return naming this
+// machine's job. An earlier Park, answered in the panel, left an older return that is history.
+function askChanges(fixture, job, between = []) {
+  job.comments = [{ body: `Returned: tighten the copy ${JOB_LINE}`, createdAt: '2026-11-05T10:20:00Z', lastEditedAt: '2026-11-05T10:25:00Z' }];
+  fixture.runtime.writeStateLine(91, `Changes asked: from ${job.head}: ${CHANGE_WORDS}`, { exec: fixture.exec });
+  job.lastEditedAt = '2026-11-05T10:30:00Z';
+  job.status = 'Backlog';
+  job.comments.push(...between, { body: `Returned: ${CHANGE_WORDS} ${JOB_LINE}`, createdAt: '2026-11-05T10:35:00Z' });
+}
+
+// The continues answeredCards gives a lead pass at LEAD_MARK on this machine, as card and prompt, or why it threw; a
+// `refused` Map, when given, receives each refusal reason.
+function answeredContinues(fixture, { selections, failures = [], refused }) {
+  try {
+    return fixture.runtime.answeredCards({ exec: fixture.exec, git: fixture.git, runStart: LEAD_MARK, login: 'owner', hostname: 'fixture-machine',
+      selections, liveCards: new Set(), failures, refused }).map(({ card, prompt }) => ({ card, prompt }));
+  } catch (error) {
+    return `threw ${error.message}`;
+  }
+}
+
+test('ANTI-REGRESSION: a stale, replayed or impersonated answer starts no session on newer work', async (t) => {
+  const create = await schedulerFixture(t);
+  // The owner's yes: a record of the waiting version, posted after its line and before the lead's mark.
+  const yes = (job, record = {}) => {
+    job.comments = [{ body: `Approved: card=91 edited=${job.lastEditedAt}`, createdAt: '2026-11-05T10:30:00Z', ...record }];
+  };
+  const reviewFile = (job) => join(job.worktree, '.claude', 'worklog', `job_91-review-${job.head}`, 'body.md');
+  // Each row arranges the scenario and may return the lead's selections and failure records; a row with an expected
+  // prompt is a positive control, and a row with an expected refusal reason, its fourth element, also checks the
+  // `refused` Map of the lead's answers: exactly when the expectation is a function of the scenario, by the words it
+  // holds when it is a pattern.
+  const rows = [
+    ['a stale edited=', ({ job }) => yes(job, { body: 'Approved: card=91 edited=none' })],
+    ['another login on the record', ({ job }) => yes(job, { login: 'intruder' })],
+    ['a record after the mark', ({ job }) => yes(job, { createdAt: '2026-11-05T11:30:00Z' })],
+    ['a moved head', ({ fixture, job }) => {
+      yes(job);
+      job.head = 'b'.repeat(40);
+      // The same decision card, saved again for the new head, so only the head differs from the line.
+      fixture.wait(91);
+    }],
+    ['a moved worktree under a Changes asked: line', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      // The worktree moves on with a commit after the owner was shown the head the line names.
+      job.head = 'b'.repeat(40);
+    }, null, ({ fixture }) => `the job/91 worktree is not at ${fixture.base}, the version its change line names`],
+    ['a changed identity', ({ job }) => {
+      yes(job);
+      writeFileSync(reviewFile(job), 'Another decision card for scheduler card 91.\n');
+    }],
+    ['a replayed Returned: older than the card edit', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.at(-1).createdAt = '2026-11-05T10:28:00Z';
+    }],
+    // The chat writes the change line and posts the Returned: within one second: an equal time is not an answer, and the
+    // card is shown as a failure, never skipped silently.
+    ['a Returned: in the same second as the card edit', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.at(-1).createdAt = job.lastEditedAt;
+    }, null, /(?=.*same second)(?=.*answer again)/s],
+    ['another login on the Returned:', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.at(-1).login = 'intruder';
+    }],
+    ['another machine on the Returned:', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.at(-1).body = `Returned: ${CHANGE_WORDS} Job: job/91 on other-machine.`;
+    }],
+    ['another job on the Returned:', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.at(-1).body = `Returned: ${CHANGE_WORDS} Job: job/92 on fixture-machine.`;
+    }],
+    ['a newer failure record', ({ fixture, job }) => {
+      yes(job);
+      return { failures: [{ format: 1, card: 91, outcome: 'failure', reason: 'Card 91 stopped while continuing it: the session ended',
+        log: join(fixture.folder, 'job-91-continue.jsonl'), at: '2026-11-05T10:45:00Z' }] };
+    }],
+    // The lead's selection names an older claim of the card; its newest claim is an ordinary local job's.
+    ["an ordinary local job's card", ({ fixture, job, selection }) => {
+      yes(job);
+      return { selections: [{ ...selection, claimUrl: `https://github.com/${fixture.repository}/issues/91#issuecomment-999` }] };
+    }],
+    ['two unresolved holds', ({ fixture, job }) => {
+      askChanges(fixture, job);
+      job.comments.push({ body: `Needs owner: which title? ${JOB_LINE}`, createdAt: '2026-11-05T10:40:00Z' },
+        { body: `Needs owner: which colour? ${JOB_LINE}`, createdAt: '2026-11-05T10:41:00Z' });
+    }],
+    ['a Parked: card whose record still approves', ({ fixture, job }) => {
+      fixture.runtime.writeStateLine(91, 'Parked: from the queue panel', { exec: fixture.exec });
+      job.lastEditedAt = '2026-11-05T10:20:00Z';
+      job.status = 'Backlog';
+      job.comments = [{ body: `Returned: tighten the copy ${JOB_LINE}`, createdAt: '2026-11-05T10:21:00Z', lastEditedAt: '2026-11-05T10:25:00Z' },
+        { body: 'Approved: card=91 edited=2026-11-05T10:20:00Z', createdAt: '2026-11-05T10:22:00Z' }];
+    }],
+    ['yes', ({ job }) => yes(job), ({ job }) => continuePrompt({ card: 91, runStart: LEAD_MARK, answer: 'yes',
+      shown: { head: job.head, identity: savedIdentity(91, job.worktree, job.head) } })],
+    ['changes', ({ fixture, job }) => askChanges(fixture, job), () => continuePrompt({ card: 91, runStart: LEAD_MARK, answer: 'changes', words: CHANGE_WORDS })],
+  ];
+  const observed = [];
+  const expected = [];
+  for (const [row, arrange, prompt, refusal] of rows) {
+    const scenario = leadWaitingCard(create);
+    try {
+      const { selections = [scenario.selection], failures } = arrange(scenario) ?? {};
+      const refused = new Map();
+      const continues = answeredContinues(scenario.fixture, { selections, failures, refused });
+      const pattern = refusal instanceof RegExp;
+      expected.push({ row, continues: prompt ? [{ card: 91, prompt: prompt(scenario) }] : [],
+        ...(refusal ? { refused: [[91, pattern ? `matches ${refusal}` : refusal(scenario)]] } : {}) });
+      observed.push({ row, continues,
+        ...(refusal ? { refused: [...refused].map(([card, reason]) => [card, pattern && refusal.test(reason) ? `matches ${refusal}` : reason]) } : {}) });
+    } finally {
+      await scenario.fixture.finish();
+    }
+  }
+  t.diagnostic(JSON.stringify(observed));
+  assert.deepEqual(observed, expected);
+});
+
+// The whole panel cycle over the scheduler fixture: the owner parks card 91 from the queue panel, answers the question
+// that leaves in the panel, the lead reads that answer as a change request, and the continue ends waiting again.
+test('a parked merge answered in the panel comes back as a waiting version', {
+  skip: !existsSync(new URL('./owner-queue.mjs', import.meta.url)) && 'the queue panel is installed only with the Herdr add-on',
+}, async (t) => {
+  const create = await schedulerFixture(t);
+  const { fixture, job, selection } = leadWaitingCard(create, { phaseReplies: { 'job-91-continue': () => {
+    fixture.wait(91);
+    return 'Run result: built 91';
+  } } });
+  try {
+    copyFileSync(new URL('./owner-queue.mjs', import.meta.url), fixture.toolkit.script('lib/owner-queue.mjs'));
+    const { act, collect } = await fixture.toolkit.load('lib/owner-queue.mjs');
+    // The lead's state folder holds the selection that claimed card 91.
+    const xdgState = mkdtempSync(join(tmpdir(), 'panel-cycle-xdg-'));
+    const before = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = xdgState;
+    t.after(() => {
+      if (before === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = before;
+      rmSync(xdgState, { recursive: true, force: true });
+    });
+    const runs = join(xdgState, 'fabraik-lead', 'runs', 'lead-run');
+    mkdirSync(runs, { recursive: true });
+    writeFileSync(join(runs, 'select-91.selected.json'), JSON.stringify(selection));
+    // The fixture's GitHub with the account's login read answered as the owner's.
+    const exec = (args) => (args.join(' ') === 'api user --jq .login' ? 'owner\n' : fixture.exec(args));
+    const readers = { root: fixture.root, tracker: 'github', executor: exec, run: fixture.git, hostname: 'fixture-machine', login: 'owner',
+      readFile: (path) => readFileSync(path, 'utf8'), listFolder: (path) => readdirSync(path), fileTime: () => null,
+      approvals: () => ({ lines: [], exitCode: 0 }) };
+    const silent = { log: () => {}, error: () => {} };
+    const itemOf = () => collect(readers).items.find((item) => item.card === 91);
+
+    await act({ ...readers, output: silent, card: 91, action: 'park', version: itemOf().version });
+    assert.equal(job.status, 'Backlog');
+    assert.equal(job.body.trimEnd().split('\n').at(-1), 'Parked: from the queue panel');
+    assert.equal(job.comments.at(-1).body, 'Needs owner: Parked from the queue panel: what should change? Job: job/91 on fixture-machine.');
+
+    const question = itemOf();
+    assert.equal(question.category, 'question', JSON.stringify(question));
+    assert.equal(question.answerable, true, JSON.stringify(question));
+    await act({ ...readers, output: silent, card: 91, action: 'answer', version: question.version, reply: 'tighten the copy' });
+    assert.equal(job.comments.at(-1).body, 'Returned: tighten the copy Job: job/91 on fixture-machine.');
+
+    const prompt = continuePrompt({ card: 91, runStart: LEAD_MARK, answer: 'changes', words: 'tighten the copy' });
+    assert.deepEqual(answeredContinues(fixture, { selections: [selection] }), [{ card: 91, prompt }]);
+    const disposition = await fixture.runtime.runContinue({ card: 91, claimUrl: job.claimUrl, prompt, folder: fixture.folder, root: fixture.root,
+      runStart: LEAD_MARK, output: silent, exec, git: fixture.git, startSession: fixture.startSession });
+    assert.equal(disposition, 'awaiting-push');
+    assert.equal(job.body.trimEnd().split('\n').at(-1), waitingLine(91, job.worktree, job.head, LEAD_MARK));
+  } finally {
+    await fixture.finish();
+  }
+});
+
+test('ANTI-REGRESSION: a fix-and-merge record from before a later edit or for another card cannot merge newer work', async (t) => {
+  const create = await schedulerFixture(t);
+  const valid = 'Approved: card=91 edited=2026-11-05T10:30:00Z';
+  const record = (body, extra = {}) => ({ body, createdAt: '2026-11-05T10:32:00Z', ...extra });
+  // Each row gives the records posted between the change line and the owner's return, and may change the card after.
+  // A fourth element `true` asserts the answer alone, without publishCheck's verdict.
+  const rows = [
+    ['a record before the change request', ({ waitingEdit }) => [record(`Approved: card=91 edited=${waitingEdit}`, { createdAt: '2026-11-05T10:20:00Z' })]],
+    ['a record after it, then a later edit', () => [record(valid)], ({ job }) => {
+      // The owner edits the card's text after the record, then returns it again.
+      job.body = job.body.replace('Scope evidence for card 91.', 'Scope evidence for card 91, revised.');
+      job.lastEditedAt = '2026-11-05T10:40:00Z';
+      job.comments.at(-1).createdAt = '2026-11-05T10:45:00Z';
+    }],
+    ['a record naming another card', () => [record('Approved: card=92 edited=2026-11-05T10:30:00Z')]],
+    ['a record by another login', () => [record(valid, { login: 'intruder' })]],
+    ['a record edited after posting', () => [record(valid, { lastEditedAt: '2026-11-05T10:33:00Z' })]],
+    // The card's text no longer ends in a state line. publishCheck admits this valid record whatever the body says, so the
+    // row asserts the answer alone: that verdict is the advance-approval guard's, not the lead's.
+    ['a returned card with no state line and a valid record', () => [record(valid)], ({ job }) => {
+      job.body = 'Scope evidence for card 91.';
+    }, true],
+    ['fix and merge', () => [record(valid)]],
+  ];
+  const observed = [];
+  const expected = [];
+  for (const [row, records, after, answerOnly] of rows) {
+    const scenario = leadWaitingCard(create);
+    const { fixture, job, selection } = scenario;
+    try {
+      const waitingEdit = job.lastEditedAt;
+      askChanges(fixture, job, records({ waitingEdit }));
+      after?.(scenario);
+      // Git as the guard reads it in card 91's job worktree: HEAD on its job branch and no push refspec.
+      const git = (args) => {
+        if (args.join(' ') === 'symbolic-ref --quiet --short HEAD') return 'job/91\n';
+        if (args.join(' ') === 'config --get-all remote.origin.push') throw Object.assign(new Error('unset'), { status: 1 });
+        return fixture.git(args);
+      };
+      const verdict = publishCheck('push', 'git push -u origin job/91', { start: LEAD_MARK, tracker: 'github', env: {}, exec: fixture.exec, git });
+      observed.push({ row, continues: answeredContinues(fixture, { selections: [selection] }),
+        ...(answerOnly ? {} : { publish: verdict === '' ? 'admitted' : /found no valid advance approval/.test(verdict) ? 'refused: no valid record' : verdict }) });
+      const fixAndMerge = row === 'fix and merge';
+      expected.push({ row, continues: [{ card: 91, prompt: continuePrompt(fixAndMerge
+        ? { card: 91, runStart: LEAD_MARK, answer: 'fix-and-merge', words: CHANGE_WORDS, from: job.head }
+        : { card: 91, runStart: LEAD_MARK, answer: 'changes', words: CHANGE_WORDS }) }],
+      ...(answerOnly ? {} : { publish: fixAndMerge ? 'admitted' : 'refused: no valid record' }) });
+    } finally {
+      await fixture.finish();
+    }
+  }
+  t.diagnostic(JSON.stringify(observed));
+  assert.deepEqual(observed, expected);
+});
+
 test('pre-approved delivery serializes and refuses an expanded footprint', async (t) => {
   const create = await schedulerFixture(t);
   for (const expanded of [false, true]) {
@@ -1998,7 +2370,7 @@ test('pre-approved delivery serializes and refuses an expanded footprint', async
             job.head = retainedHead;
             job.deltas.set(`${original}...HEAD`, extra ? ['a', 'b', 'c'] : ['a', 'b']);
             job.deltas.set(`${main}...HEAD`, extra ? ['b', 'c'] : ['b']);
-            job.status = 'Awaiting push';
+            fixture.wait(job.card);
             return 'Run result: built 92';
           },
         } });
@@ -2050,6 +2422,9 @@ test('pre-approved delivery serializes and refuses an expanded footprint', async
         assert.equal(readFileSync(b.reference.reviewRecordPath, 'utf8'), reviewBytes, 'main integration cannot rewrite accepted review bytes');
         assert.equal(JSON.parse(descriptorBytes).base, original);
         assert.equal(fixture.outcome('job-92-deliver', 92, 'deliver', 'awaiting-push'), bOutcome);
+        assert.deepEqual(fixture.edits.map(({ card }) => card), [92], 'one state-line edit, for the waiting card');
+        assert.equal(fixture.edits[0].body.split('\n').at(-1), waitingLine(92, b.worktree, retainedHead, fixture.runStart));
+        assert.match(recordAfter(fixture, 92), /^not approved 92: no valid record\b/, 'the edit voids the waiting card\'s record');
         if (extra) {
           assert.equal(code, 1);
           assert.equal(fixture.has('job-93-deliver'), false, 'B unique out-of-scope c prevents C delivery');
@@ -3163,6 +3538,16 @@ test('Managed Codex phase refuses delegated user units', async (t) => {
     assert.deepEqual(observed, { refused: true, unitAbsent: true, markerAbsent: true, proxyReady: true, proxyClosed: true },
       'only the host control may delegate a native user service; the private proxy must be live during the phase and closed at run return');
   });
+});
+
+test('the lead launcher admits a continue phase and still refuses every other unnamed phase', () => {
+  const { phaseName } = leadProfile('/fabraik-test-state', 1);
+  for (const name of ['select-3', 'job-7-prepare', 'job-7-build', 'job-7-deliver', 'end', 'job-7-continue']) {
+    assert.ok(phaseName.test(name), `the lead launcher must admit phase ${name}`);
+  }
+  for (const name of ['job-0-continue', 'job-7-merge', 'job-7-continue-x', 'continue', 'job-07-continue', 'job-7']) {
+    assert.ok(!phaseName.test(name), `the lead launcher must refuse phase ${name}`);
+  }
 });
 
 test('a managed session with a sealed environment passes no other variable', async (t) => {
@@ -4880,7 +5265,7 @@ test('the resume skill names both launcher commands, the prompts and probes the 
     assert.ok(runs.includes(text), `the run reference does not hold ${text}`);
   }
   assert.ok(resume.includes(PRE_APPROVED_CARD_PROMPT), `the resume main file does not hold ${PRE_APPROVED_CARD_PROMPT}`);
-  for (const text of [CARD_PROMPT, END_PROMPT_PREFIX, PRE_APPROVED_END_PREFIX]) {
+  for (const text of [CARD_PROMPT, END_PROMPT_PREFIX, PRE_APPROVED_END_PREFIX, CONTINUE_LINE]) {
     assert.ok(resume.includes(text), `the resume main file does not hold ${text}`);
   }
   const pick = productManagerRun.slice(productManagerRun.indexOf('5. **The pick** is the card session'), productManagerRun.indexOf('10. **Suggested cards.**'));

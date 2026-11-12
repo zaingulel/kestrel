@@ -77,7 +77,19 @@ complete, judge the stops from the saved `body.md`; each needs a fresh yes:
 6. `Untested:` names a check that the required `test` check does not run once the pull request is ready;
 7. `node scripts/board.mjs --approval check <card>` no longer prints `approved` for the card;
 8. a material limit the card did not carry;
-9. in a pre-approved run, `scripts/gates/pre-push-main` admits the change whole, so the direct route would carry it.
+9. in a pre-approved run, `scripts/gates/pre-push-main` admits the change whole, so the direct route would carry it;
+10. in a fix and merge, the fix goes beyond the owner's note: the fresh review under "6. Verify and review" answers one
+    more question, whether every change from the head the owner was shown to the final head traces to the owner's
+    words, and a change it names that does not, or no clear answer, is this stop.
+
+**Waiting version.** A card a pre-approved run leaves at `Awaiting push` ends with a line the run writes, `Waiting
+version: job/<card> <head> <identity> run <mark>`, naming the saved write-up's head and content identity and the run's
+mark. A change request ends with `Changes asked: from <head>: <the owner's words>`. Each is a body edit, so it voids
+every record posted before it, and the run proves on a re-read that none remains approving. A record posted after a
+waiting line answers stops 1 to 8 for that version only; stop 9 still holds. A record posted after a change request, on
+the owner's `fix and merge`, pre-approves the version built from that request, judged by every stop including 10; a stop
+returns the card to `Awaiting push` with a new waiting line, which voids that record. A job the run left at
+`Awaiting push` keeps its reservation and accounting without an approval and publishes nothing.
 
 With no stop, the review folder is saved as Saved write-up says and the identity it gives is written to `shown-hash` once the card is complete,
 though nobody is asked, and section 8's checks of that folder apply as for a yes. The body's `Decision card` block

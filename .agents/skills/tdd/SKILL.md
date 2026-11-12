@@ -16,12 +16,12 @@ outside that selection follows its handed-off construction mode and owes the fin
 `docs/TESTING-STRATEGY.md` selects, with expected values from an independent oracle. Permission to group focused
 evidence does not change the strict test-first learning cycle below.
 
-- **Meaningful red before green.** For one coherent claim, write the smallest focused set of cases needed to
-  expose it, with independently fixed expectations, and run it through `node scripts/run-log.mjs`. The local
-  testing strategy owns qualifying behavioural red, including its production-import distinction, and absent-baseline
-  alternatives. Follow `resume`'s staged dispatch under "5. Build": the test-only handoff ends at meaningful
-  expected red, and implementation starts only after coordinator validation with the test contract fixed.
-  An incorrect oracle returns for revalidation and an explicit revised contract.
+- **Meaningful red before green.** For one coherent claim, write the smallest focused set of cases needed to expose it,
+  with independently fixed expectations, and run it through `node scripts/run-log.mjs`. The local testing strategy owns
+  qualifying behavioural red, including its production-import distinction, and absent-baseline alternatives. Follow
+  `resume`'s staged dispatch under "5. Build": the test-only handoff ends at the expected red it names, and
+  implementation starts only after coordinator validation with the test contract fixed. An incorrect oracle returns for
+  revalidation and an explicit revised contract.
 - **Green.** In the implementation stage, write only enough code to pass the validated case set.
 - **Vertical slices.** One coherent claim's focused case set, then its minimal implementation, repeat. A claim
   may contain related material behaviours or cases; additional assertions or related cases alone do not create

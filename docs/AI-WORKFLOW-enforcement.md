@@ -73,7 +73,7 @@ architect handoffs against their templates. It also limits a protected seat, suc
 the `explorer` alone.
 
 On Codex, the dispatched text reaches the hook encrypted, so the hook checks a saved copy instead. The coordinating
-session saves each builder handoff as `.claude/worklog/handoffs/<task_name>.md` before it dispatches. The hook takes
+session saves each builder handoff as `.claude/worklog/handoffs/{{TASK_NAME}}.md` before it dispatches. The hook takes
 that file from whichever of the repository's worktrees holds it. It refuses a builder dispatch without a passing saved
 handoff, and a second builder dispatch while an earlier builder has not started. When the builder starts, the hook
 binds the handoff to it and shows the handoff to the builder. It then refuses every tool call of a builder thread that
@@ -118,8 +118,8 @@ integration does not rely on these hooks, and runs the same checks as explicit s
   case too.
 - **On push,** the hook runs lint and the script suite. A push to `main` first runs the gate as it stands on the
   remote's `main`, from a copy of that commit's tree. So a commit can never admit itself by changing the gate. When
-  every ref goes to `main` and that gate exits 0 printing exactly `setting-only`, the hook skips lint and the suite,
-  because the gate has checked the changed seats itself.
+  every ref goes to `main` and that gate exits 0 printing exactly `setting-only`, the hook skips lint and the suite.
+  The gate has checked the changed seats itself.
 - **Last on push,** once every other check has passed, a push that uses Git LFS uploads its objects.
 
 A charter mismatch names the seat, both files and the lines that differ. The canonical repository repairs both source
@@ -133,14 +133,15 @@ repository records a fingerprint and recovers from a refused recording.
 
 ### Checks on GitHub
 
-Two branch rulesets protect `main`, and one of them requires the repository's checks to pass. Those checks are `test`,
-and `sweep-scope` where the documentation sweep is on and active. Auto-merge then merges a ready pull request once
-they pass. On a draft pull request, `test` reports under a different name, so a draft can never satisfy the rule.
+Two branch rulesets protect `main`, and one of them requires the repository's checks to pass;
+[the `shared-files` skill](../.agents/skills/shared-files/SKILL.md#branch-rulesets) gives both. Auto-merge then merges a
+ready pull request once they pass. On a draft pull request, the `test` check reports under a different name, so a draft
+can never satisfy the rule.
 
 The administrator role can bypass the required checks, and the direct route to `main` relies on that. GitHub admits a
 write deploy key by the same bypass. So only the local push hook judges a push to `main` from either.
 [The `shared-files` skill](../.agents/skills/shared-files/SKILL.md#administrator-bypass) says who may hold that role. A ruleset's file or a workflow's
-configuration does not show GitHub's settings right then, or who holds the role. Only a read of the repository's
+configuration does not show GitHub's live settings, or who holds the role. Only a read of the repository's
 settings on GitHub shows that.
 
 ### What stays an instruction, and why the list is short
