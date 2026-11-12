@@ -113,7 +113,8 @@ Every rule this file does not hold in full has one home:
    approval is this yes only where fetched `main` settings explicitly hold `"preApprovedRun": true` at push and no
    stop holds. On Claude Code the yes also holds in the job session of that card when the coordinator carries it as
    `resume` says under "7. Push authorisation", only for the decision card the owner was shown. `closeout` follows the
-   merge unasked.
+   merge unasked. For a card the Herdr lead holds at `Awaiting push`, the yes is an approval record the owner posts for
+   the version shown, and the lead delivers it on its next pass.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
    is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
    to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
@@ -124,7 +125,9 @@ Every rule this file does not hold in full has one home:
    `Approved:` that its hook sees. It replaces the pick or push yes only where fetched `main` settings explicitly hold
    `"preApprovedRun": true`; an absent file or key, or `false`, leaves both approvals with the owner. With that setting
    a pre-approved run merges recorded cards, its publishing held by the git guard; `resume` owns the steps under "2.
-   Work-pick" and the stops under "7. Push authorisation".
+   Work-pick" and the stops under "7. Push authorisation". A record posted after a card's waiting line covers that
+   version only. One posted after the card's change request, on the owner's `fix and merge <card>: <what to change>`,
+   covers the version the lead builds from that request, unless a stop returns the card to the queue.
 
 A material change to the approved outcome, product meaning, or a trade-off goes back to the owner as a
 plain-language decision before it is built; a parser, state machine, or framework the outcome did not name is

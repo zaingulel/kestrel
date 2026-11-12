@@ -1,7 +1,7 @@
 // pre-approved-fixture.mjs: the scheduler fixture shared by the pre-approved scheduler tests and the Herdr lead's tests, with the managed-systemd probe and the systemd helpers its tests use.
 
 import childProcess, { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -48,8 +48,8 @@ export async function schedulerFixture(t, { native = false } = {}) {
   copyFileSync(new URL('./checkout-context.mjs', import.meta.url), toolkit.script('lib/checkout-context.mjs'));
   const runtime = await toolkit.load('lib/product-manager-run.mjs');
   const { main: launcherMain } = await toolkit.load('product-manager-run.mjs');
-  const { boardReadExec, leanBoardPage, leanNode } = await toolkit.load('lib/board-fixtures.mjs');
-  const { BOARD_OWNER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
+  const { boardReadExec, issueItemReply, leanBoardPage, leanNode, membership } = await toolkit.load('lib/board-fixtures.mjs');
+  const { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
   const repository = `${BOARD_OWNER}/${BOARD_REPOSITORY}`;
   const repositoryId = 'R_scheduler_fixture';
   const runStart = '2026-11-05T10:00:00Z';
@@ -66,14 +66,22 @@ export async function schedulerFixture(t, { native = false } = {}) {
     nativeGit(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Fixture settings']);
     base = nativeGit(['rev-parse', 'HEAD']).trim();
     nativeGit(['update-ref', 'refs/remotes/origin/main', base]);
+    // A real repository ignores its worklog, so a saved decision card leaves a job worktree clean.
+    const exclude = join(toolkit.root, '.git', 'info', 'exclude');
+    mkdirSync(dirname(exclude), { recursive: true });
+    appendFileSync(exclude, '.claude/worklog/job_*-review-*/\n');
   }
   const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  // The first line of the lead's continue prompt for an answered card, spelled out here like the phase prompts.
+  const continueLine = 'Continue this exact answered pre-approved job.';
   const prefixes = {
     select: 'Select and claim one eligible pre-approved job. Do not plan, build, or deliver.',
     prepare: 'Prepare this exact pre-approved job. Do not build or deliver.',
     build: 'Build and verify this exact prepared job. Do not publish or deliver.',
     deliver: 'Deliver this exact built job. Do not select or build another job.',
   };
+  const statusOptions = ['Backlog', 'Ready', 'In progress', 'Awaiting push', 'Done']
+    .map((name) => ({ id: `opt-${name.toLowerCase().replaceAll(' ', '-')}`, name }));
   // `hookStreams` maps a session name to `{ events, stderr }`: that session's starter writes `events` beside its logs and
   // names the file as `hookEvents`; `stderr`, when given, replaces the witnessed stderr log.
   return ({ cards, held = [], waiting = [], endReply = END_REPLY, observeNotification, observeOutput, phaseReplies = {}, hookStreams = {} }) => {
@@ -86,6 +94,12 @@ export async function schedulerFixture(t, { native = false } = {}) {
       head: base, deltas: new Map(), ancestry: new Map([[`${base} ${base}`, true]]),
       committed: [], unstaged: [], staged: [], untracked: [],
     }]));
+    // A card's body and `lastEditedAt`, as a test or a body edit sets them; a job without them, one a test adds itself
+    // included, has the defaults.
+    const bodyOf = (job) => (job.body === undefined ? `Scope evidence for card ${job.card}.` : job.body);
+    // A card's comments: each a body string, or an object that may also set its author and times.
+    const commentsOf = (job) => (job.comments ?? []).map((entry) => (typeof entry === 'string' ? { body: entry } : entry))
+      .map(({ body, login = 'owner', createdAt = '2026-11-05T10:15:00Z', lastEditedAt = null }) => ({ body, login, createdAt, lastEditedAt }));
     const gitState = { mainTip: base, mainReadError: undefined };
     const gates = new Map(held.map((name) => [name, deferred()]));
     const checkpoints = new Map();
@@ -98,6 +112,9 @@ export async function schedulerFixture(t, { native = false } = {}) {
     const inspections = [];
     const errors = [];
     const logged = [];
+    const edits = [];
+    let commentWrites = 0;
+    const commentTime = () => new Date(Date.parse('2026-11-05T10:20:00Z') + 60_000 * commentWrites++).toISOString().replace('.000Z', 'Z');
     let openDelivery = 0;
     let maxDelivery = 0;
     let running;
@@ -136,20 +153,40 @@ export async function schedulerFixture(t, { native = false } = {}) {
       job.reference = { descriptorPath, descriptorHash, planHash, reviewRecordPath };
     };
     const metadata = (job) => ({
-      state: job.state, title: `Scheduler card ${job.card}`, lastEditedAt: null, timelineItems: { nodes: [] },
+      state: job.state, title: `Scheduler card ${job.card}`, body: bodyOf(job), lastEditedAt: job.lastEditedAt ?? null, timelineItems: { nodes: [] },
       comments: { pageInfo: { hasNextPage: false }, nodes: [
         { author: { login: 'owner' }, createdAt: '2026-11-05T09:00:00Z', lastEditedAt: null,
           url: `https://github.com/${repository}/issues/${job.card}#issuecomment-${2000 + job.card}`,
           body: `Approved: card=${job.card} edited=none` },
         ...(job.selected ? [{ author: { login: 'owner' }, createdAt: job.claimCreatedAt ?? claimTime, lastEditedAt: null, url: job.claimUrl,
           body: `Claim: fixture-machine Codex job/${job.card} ${job.worktree}` }] : []),
-        ...(job.comments ?? []).map((body, index) => ({ author: { login: 'owner' }, createdAt: '2026-11-05T10:15:00Z',
-          lastEditedAt: null, url: `https://github.com/${repository}/issues/${job.card}#issuecomment-${4000 + index}`, body })),
+        ...commentsOf(job).map(({ body, login, createdAt, lastEditedAt }, index) => ({ author: { login }, createdAt,
+          lastEditedAt, url: `https://github.com/${repository}/issues/${job.card}#issuecomment-${4000 + index}`, body })),
       ] },
     });
     const exec = (args) => {
       if (args[0] === 'repo' && args[1] === 'view' && args.includes('--json')) {
         return JSON.stringify({ id: repositoryId, nameWithOwner: repository, defaultBranchRef: { name: 'main' } });
+      }
+      // A body edit moves the card's `lastEditedAt`, one second per edit; `editFailure` `'error'` refuses it and
+      // `'stale'` keeps the old time, so the card's record still approves.
+      const edited = new RegExp(`^repos/${repository}/issues/(\\d+)$`).exec(args[3] ?? '');
+      if (edited && args.length === 6 && args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH' && args[4] === '-f' && args[5].startsWith('body=')) {
+        const job = jobs.get(Number(edited[1]));
+        assert.ok(job, `unexpected scheduler body edit: ${JSON.stringify(args)}`);
+        if (job.editFailure === 'error') throw new Error('fake gh: edit refused');
+        const body = args[5].slice('body='.length);
+        edits.push({ card: job.card, body });
+        job.body = body;
+        if (job.editFailure !== 'stale') job.lastEditedAt = new Date(Date.parse('2026-11-05T10:15:00Z') + 1000 * edits.length).toISOString().replace('.000Z', 'Z');
+        return JSON.stringify({ number: job.card, body });
+      }
+      // A merged job's pull request, which a merged continue names.
+      const merged = /^job\/(\d+)$/.exec(args[3] ?? '');
+      if (merged && args.join(' ') === `pr list --head ${args[3]} --state merged --json title,url --limit 1`) {
+        const job = jobs.get(Number(merged[1]));
+        assert.ok(job, `unexpected scheduler pull request read: ${JSON.stringify(args)}`);
+        return JSON.stringify(job.state === 'CLOSED' ? [{ title: `Scheduler card ${job.card}`, url: `https://github.com/${repository}/pull/${job.card}` }] : []);
       }
       const query = args.find((arg) => arg.startsWith('query=')) ?? '';
       if (args[0] === 'api' && args[1] === 'graphql' && query.includes('comments(first: 100)')) {
@@ -163,11 +200,50 @@ export async function schedulerFixture(t, { native = false } = {}) {
           const number = Number(text);
           assert.ok(jobs.has(number), `unexpected scheduler detail identity: ${number}`);
           const nodes = metadata(jobs.get(number)).comments.nodes.map(({ body }) => ({ body }));
-          aliases[alias] = { number, body: `Scope evidence for card ${number}.`, parent: null,
+          aliases[alias] = { number, body: bodyOf(jobs.get(number)), parent: null,
             comments: { totalCount: nodes.length, pageInfo: { hasPreviousPage: false, startCursor: null }, nodes } };
         }
         assert.ok(Object.keys(aliases).length, `unexpected scheduler detail query: ${query}`);
         return JSON.stringify({ data: { repository: aliases } });
+      }
+      // A card's comments with their authors, and the writes a queue panel action makes: a new comment from a body file,
+      // a comment edit from a body file, and a Status move through the project's field and the card's board item. Each
+      // written comment is one minute later than the last, from 10:20, so it is newer than any body edit.
+      const call = args.join(' ');
+      const number = Number(args[2]);
+      if (call === `issue view ${args[2]} --repo ${repository} --json comments` && jobs.has(number)) {
+        return JSON.stringify({ comments: metadata(jobs.get(number)).comments.nodes.map(({ author, body, createdAt, url }) => ({ author, body, createdAt, url })) });
+      }
+      if (args.length === 7 && call === `issue comment ${args[2]} --repo ${repository} --body-file ${args[6]}` && jobs.has(number)) {
+        const job = jobs.get(number);
+        job.comments = [...(job.comments ?? []), { body: readFileSync(args[6], 'utf8'), createdAt: commentTime() }];
+        return `https://github.com/${repository}/issues/${number}#issuecomment-${4000 + job.comments.length - 1}\n`;
+      }
+      const reply = new RegExp(`^api -X PATCH repos/${repository}/issues/comments/(\\d+) -F body=@(.+)$`).exec(call);
+      if (reply && args.length === 6) {
+        // A comment id is unique on GitHub but not across the fixture's cards, so an edit names exactly one holder.
+        const holders = [...jobs.values()].filter((entry) => metadata(entry).comments.nodes.some(({ url }) => url.endsWith(`#issuecomment-${reply[1]}`)));
+        const [job] = holders;
+        const index = Number(reply[1]) - 4000;
+        assert.ok(holders.length === 1 && index >= 0 && index < (job.comments ?? []).length, `unexpected scheduler comment edit: ${JSON.stringify(args)}`);
+        const entry = job.comments[index];
+        job.comments[index] = { ...(typeof entry === 'string' ? {} : entry), body: readFileSync(reply[2], 'utf8'), lastEditedAt: commentTime() };
+        return '{}';
+      }
+      if (args[0] === 'api' && args[1] === 'graphql' && query.includes('field(name:"Status")')) {
+        return JSON.stringify({ data: { [BOARD_OWNER_TYPE]: { projectV2: { id: 'PVT_scheduler', field: { id: 'PVTSSF_status', options: statusOptions } } } } });
+      }
+      if (args[0] === 'api' && args[1] === 'graphql' && query.includes('projectItems(first:20)')) {
+        const job = jobs.get(Number(/issue\(number:(\d+)\)/.exec(query)?.[1]));
+        assert.ok(job, `unexpected scheduler item probe: ${query}`);
+        return JSON.stringify(issueItemReply([{ ...membership(`PVTI_scheduler_${job.card}`), value: { name: job.status } }], { issueId: `I_scheduler_${job.card}` }));
+      }
+      const move = /^project item-edit --id PVTI_scheduler_(\d+) --project-id PVT_scheduler --field-id PVTSSF_status --single-select-option-id (\S+)$/.exec(call);
+      if (move && jobs.has(Number(move[1]))) {
+        const option = statusOptions.find(({ id }) => id === move[2]);
+        assert.ok(option, `unexpected scheduler status option: ${move[2]}`);
+        jobs.get(Number(move[1])).status = option.name;
+        return '';
       }
       if (args[0] === 'api' && args[1] === 'graphql') {
         // A fresh board reader makes each authoritative read observe the fixture's current state.
@@ -216,6 +292,10 @@ export async function schedulerFixture(t, { native = false } = {}) {
         } else files = argv.includes('--cached') ? job.staged : job.unstaged;
         return files.map((file) => `${file}\0`).join('');
       }
+      // A content identity is real Git's, over the folder the fixture wrote; it needs no repository.
+      if (job && argv[0] === 'hash-object' && argv[1] === '--no-filters' && argv[2] === '--') {
+        return execFileSync('git', argv, { cwd: worktree, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe' });
+      }
       if (job && argv[0] === 'ls-files' && argv.length === 4 && ['--others', '--exclude-standard', '-z'].every((arg) => argv.includes(arg))) {
         return job.untracked.map((file) => `${file}\0`).join('');
       }
@@ -236,6 +316,20 @@ export async function schedulerFixture(t, { native = false } = {}) {
         writeFileSync(`${logs}.hook-events.jsonl`, stream.events);
         return { ...result, hookEvents: `${logs}.hook-events.jsonl` };
       };
+      // A continue of an answered card: its job merges unless the test gives the session's reply.
+      if (prompt.startsWith(`${continueLine}\n`)) {
+        const context = JSON.parse(prompt.slice(continueLine.length + 1));
+        Object.assign(call, { phase: 'continue', context, card: context.card });
+        const job = jobs.get(context.card);
+        assert.ok(job?.selected, 'only a selected card is continued');
+        assert.equal(name, `job-${job.card}-continue`);
+        if (Object.hasOwn(phaseReplies, name)) {
+          const override = phaseReplies[name];
+          return reply(typeof override === 'function' ? override(job) : override);
+        }
+        merge(job);
+        return reply(`Run result: merged ${job.card}`);
+      }
       if (!phase) {
         reached(name).resolve();
         return prompt.startsWith('End the pre-approved run: ')
@@ -248,7 +342,7 @@ export async function schedulerFixture(t, { native = false } = {}) {
       if (phase === 'select') {
         assert.deepEqual(context, { runStart: callStart });
         const job = [...jobs.values()].find((entry) => !entry.selected && ['Ready', 'Backlog'].includes(entry.status)
-          && !(entry.comments ?? []).some((body) => body.trimStart().startsWith('Needs owner:')));
+          && !commentsOf(entry).some(({ body }) => body.trimStart().startsWith('Needs owner:')));
         if (!job) {
           reached(name).resolve();
           return reply('Run result: stop none: scheduler fixture complete');
@@ -287,7 +381,7 @@ export async function schedulerFixture(t, { native = false } = {}) {
         if (native) writeFileSync(join(job.worktree, job.file), `built ${job.card}\n`);
       }
       if (phase === 'deliver') {
-        if (waiting.includes(job.card)) job.status = 'Awaiting push';
+        if (waiting.includes(job.card)) fixture.wait(job.card);
         else merge(job);
       }
       return reply(`Run result: ${phase === 'prepare' ? 'prepared' : phase === 'build' || job.status === 'Awaiting push' ? 'built' : 'merged'} ${job.card}`, result);
@@ -305,6 +399,19 @@ export async function schedulerFixture(t, { native = false } = {}) {
         writeFileSync(join(folder, `job-${card}-prepare.outcome.json`), JSON.stringify({ runStart: active, card, claimUrl: job.claimUrl,
           phase: 'prepare', disposition: 'prepared', reason: `Prepared card ${card} accepted by the independent fixture review` }));
         return { phase: 'build', ...selection(job, active), ...job.reference };
+      },
+      edits,
+      // A card's deliver ends waiting on the owner, its decision card saved in the review folder named for its head;
+      // `job.review = false` saves none.
+      wait: (card) => {
+        const job = jobs.get(card);
+        job.status = 'Awaiting push';
+        if (job.review === false) return;
+        const head = native ? nativeGit(['-C', job.worktree, 'rev-parse', 'HEAD']).trim() : job.head;
+        const review = join(job.worktree, '.claude', 'worklog', `job_${card}-review-${head}`);
+        mkdirSync(review, { recursive: true });
+        writeFileSync(join(review, 'body.md'), `Decision card for scheduler card ${card}.\n`);
+        writeFileSync(join(review, 'screenshot-1.png'), `Screenshot of scheduler card ${card}.\n`);
       },
       get maxDelivery() { return maxDelivery; },
       release: (name, result = { exitCode: 0 }) => { assert.ok(gates.has(name), `no named gate ${name}`); gates.get(name).resolve(result); },

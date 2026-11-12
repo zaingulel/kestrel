@@ -189,7 +189,7 @@ hold the narrow pieces together, each with a cost, and narrow contexts still los
   builder cannot change a plan once it arrives. [`AGENTS.md`](../AGENTS.md#coding-standards-and-the-executed-test-bar)
   says which seats read them. They cost upkeep, and they help only as far as plans and reviews apply them.
 - **Independent review challenges what a writer cannot see.** A writer rarely finds the plausible mistakes in its own
-  work, and its model family shares its blind spots. A plan-first card's plan gets a read-only review before any
+  work. A model of the same family tends to make the same ones. A plan-first card's plan gets a read-only review before any
   build. At the `code` and `sign-off` tiers, the model family that did not write the change reviews the
   final tree. That reviewer derives the claims from the card and the final diff before it reads the selected evidence,
   as [the testing strategy](TESTING-STRATEGY.md#4-construction-modes) says. A detail a handoff lost, or an assumption
@@ -213,8 +213,8 @@ states the rule:
 1. One contract file every runtime reads, with skills for the steps and hooks for the guards:
    [`AGENTS.md`](../AGENTS.md).
 2. Owner decisions in plain language: [`AGENTS.md`](../AGENTS.md#owner-gates) under "Owner gates".
-3. One worktree per card, and a draft pull request the platform merges for each change off the direct route:
-   [`AGENTS.md`](../AGENTS.md#runtime-notes) under "Runtime notes" and
+3. One worktree per card, and a draft pull request the platform merges for each change off the direct route.
+   The rules live in [`AGENTS.md`](../AGENTS.md#runtime-notes) under "Runtime notes" and
    [`AGENTS.md`](../AGENTS.md#publication-and-machinery) under "Publication and machinery".
 4. Narrow seats, bounded handoffs and judgment settled in the plan:
    [`AGENTS.md`](../AGENTS.md#runtime-notes) under "Runtime notes".
@@ -233,9 +233,9 @@ highest-consequence invariants and its own answers to the two review questions.
 
 Every pull request the `resume` skill delivers carries exactly one review line. The line makes the review that ran
 before the pull request opened readable on GitHub. The Review section of [the pull request
-template](../.github/pull_request_template.md) specifies its format; any tool that writes or parses the line, in any
-repository, follows it, and a tool that disagrees with it is the defect. Where they run, the documentation sweep and
-its day-after triage run no review before their pull requests open, so they carry no line.
+template](../.github/pull_request_template.md) specifies its format. Any tool that writes or parses the line follows
+it, in any repository, and a tool that disagrees with it is the defect. Where they run, the documentation sweep and its
+day-after triage run no review before their pull requests open, so they carry no line.
 
 The line sits in the Review section of a pull request body with five sections. The session writes the body with the
 vendored `pr` skill. The body leads with what the owner decides on, and three collapsed parts keep the full supporting

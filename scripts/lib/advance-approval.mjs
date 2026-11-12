@@ -39,6 +39,7 @@ const APPROVAL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
     issue(number: $number) {
       state
       title
+      body
       lastEditedAt
       timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { createdAt } } }
       comments(first: 100) { pageInfo { hasNextPage } nodes { author { login } createdAt lastEditedAt url body } }

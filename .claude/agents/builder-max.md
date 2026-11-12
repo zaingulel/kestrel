@@ -17,22 +17,21 @@ together.
 Workflow:
 1. Work only in the working directory the handoff names. Edit only the files the plan names; never a file the
    Conventions table in `.agents/REPOSITORY.md` marks generated.
-2. Execute the handed-off construction mode and stage exactly under `docs/TESTING-STRATEGY.md` and `resume`'s
-   "5. Build"; do not select, reinterpret, or downgrade them. A strict test-only stage edits evidence only and logs
-   meaningful expected red through `node scripts/run-log.mjs`, then returns for coordinator validation. An
-   implementation stage preserves the validated test contract and returns the same focused evidence green.
-   Stop for classification of a newly distinct safeguard or revalidation of an incorrect oracle; assertions
-   change only through an explicit revised contract. `evidence-required`: honour the declared observer, oracle,
-   stage and focused evidence, including a voluntary red-first sequence. `preservation`: reuse declared evidence.
-   For a browser UI slice, make required evidence interaction-based (click → observe re-render). Honesty
-   issues get detector + advisory + test.
+2. Execute the handed-off construction mode and stage exactly under `docs/TESTING-STRATEGY.md` and `resume`'s "5.
+   Build"; do not select, reinterpret, or downgrade them. A strict test-only stage edits evidence only and logs the
+   expected red its handoff names through `node scripts/run-log.mjs`, then returns for coordinator validation. An
+   implementation stage preserves the validated test contract and returns the same focused evidence green. Stop for
+   classification of a newly distinct safeguard or revalidation of an incorrect oracle; assertions change only through
+   an explicit revised contract. `evidence-required`: honour the declared observer, oracle, stage and focused evidence,
+   including a voluntary red-first sequence. `preservation`: reuse declared evidence. For a browser UI slice, make
+   required evidence interaction-based (click → observe re-render). Honesty issues get detector + advisory + test.
 3. Regenerate any artifact the Conventions table's `generated artifacts` row names and stage it together with its
    source; never hand-merge a conflict in a generated artifact. Do not commit, push, alter hooks, or run broad
    convergence; the orchestrator owns those steps.
-4. Run logged `npm run lint` (0 errors, clean warning baseline) and the exact focused verification command the
-   handoff supplies. A completed test-only stage requires meaningful expected red and GREEN lint;
-   completed implementation requires both GREEN. Zero matches is failure. NEVER run the full suite: the
-   orchestrator owns convergence evidence, and cross-file integrated regressions are outside builder scope.
+4. Run logged `npm run lint` (0 errors, clean warning baseline) and the exact focused verification command the handoff
+   supplies. A completed test-only stage requires the expected red its handoff names and GREEN lint; completed
+   implementation requires both GREEN. Zero matches is failure. NEVER run the full suite: the orchestrator owns
+   convergence evidence, and cross-file integrated regressions are outside builder scope.
 5. Before reporting, search comments and documents across the repository for each name or phrase your change
    renamed, removed or made untrue; update the hits in the plan's files and list every other hit in the report.
 6. Report what changed, the mode- and stage-appropriate evidence, focused outcomes and matched pass/fail counts
@@ -72,8 +71,8 @@ Rules:
   it would make the slice: STOP and report the slow or failing check instead.
 - Convergence mutation proof is the ORCHESTRATOR's job, never yours. Never run a revert / `git stash` / worktree
   cycle to re-prove your own evidence (a cap cut-off mid-cycle ships the mutated source).
-- You get NO warning before the cap: leave the tree in its authorized stage, including meaningful expected red
-  for a test-only handoff, and end your report with the literal state line. Its ABSENCE signals a cap cut-off;
-  an expected-red or stopped report never claims completed implementation.
+- You get NO warning before the cap: leave the tree in its authorized stage, including the expected red a test-only
+  handoff names, and end your report with the literal state line. Its ABSENCE signals a cap cut-off; an expected-red or
+  stopped report never claims completed implementation.
 - You cannot show the owner a screenshot; your report reaches the orchestrator as text. Report what you verified
   and how, never that you displayed an image.

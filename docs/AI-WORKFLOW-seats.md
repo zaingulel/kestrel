@@ -7,8 +7,8 @@ description: Each seat is an agent role with a narrow charter. This page shows w
 ## Summary
 
 A seat is an agent role with a narrow charter and no more tools than that charter needs. Use this page to see which
-seat does what in a job, and how work passes from one seat to another. Read it before you plan a job or settle a
-review, so each piece of work reaches the seat built for it. The seat files hold each charter, and the
+seat does what in a job, and how work passes from one seat to another. Before you plan a job or settle a
+review, read it, so each piece of work reaches the seat built for it. The seat files hold each charter, and the
 [`resume`](../.agents/skills/resume/SKILL.md) skill says when the session dispatches each seat.
 
 The session that talks to the owner coordinates and never builds. It plans the cards that need no architect, hands
@@ -108,15 +108,15 @@ and the planner template carries either completed findings or the Claude Code lo
 ### One charter on two runtimes
 
 Each seat has one charter, written once for Claude Code under `.claude/agents/` and once for Codex under
-`.codex/agents/`. The two bodies must match, except for how each runtime invokes a skill: `/name` on Claude Code,
-`$name` on Codex. A check compares them and checks the runtime settings around each body on their own. A repository's
+`.codex/agents/`. The two bodies must match, except for how each runtime invokes a skill: `/{{NAME}}` on Claude Code,
+`${{NAME}}` on Codex. A check compares them and checks the runtime settings around each body on their own. A repository's
 own custom seat needs no counterpart on the other runtime, but the check still validates its definition.
 
 ### Plan review across model families
 
 The `plan-reviewer` reads a `plan-first` card's plan before any builder starts. Normally the other model family
-reviews it: a Claude-written plan goes to Codex, and a Codex-written plan to Claude. A writer's own family shares its
-blind spots, so the other family is more likely to catch a plausible mistake. [The `resume`
+reviews it: a Claude-written plan goes to Codex, and a Codex-written plan to Claude. A writer's own family tends to repeat its
+mistakes, so the other family is more likely to catch a plausible one. [The `resume`
 skill](../.agents/skills/resume/SKILL.md#4-plan) owns which cards get the review, and [the `cross-review`
 skill](../.agents/skills/cross-review/SKILL.md#4-review-a-plan-before-the-build) owns how it runs.
 
@@ -155,11 +155,11 @@ how a repository overrides a seat and what an override may not do.
 
 ## Failure modes
 
-- **A seat reaches its turn limit.** A seat stops at its limit with no warning, so its report lacks the finish
-  line the table in [Mental model](#mental-model) gives. The session treats that report as capped and never resumes the
-  seat. A capped builder's remaining work goes to a fresh builder as a smaller slice, and the session never finishes it
-  by hand. A capped architect, oracle or security reviewer leaves its settled points in its result file. The session
-  then dispatches one fresh seat for the open points, or finishes the result inline.
+- **A seat reaches its turn limit.** A seat stops at its limit with no warning. Its report then lacks the finish line
+  the table in [Mental model](#mental-model) gives. The session treats that report as capped and never resumes the seat.
+  A capped builder's remaining work goes to a fresh builder as a smaller slice, and the session never finishes it by
+  hand. A capped architect, oracle or security reviewer leaves its settled points in its result file. The session then
+  dispatches one fresh seat for the open points, or finishes the result inline.
 - **A handoff leaves a decision open.** The plan settles judgment that would make a handoff unreliable, or the session
   splits the slice smaller. The session never absorbs it by editing, and a builder that meets it stops and asks.
 - **A handoff is incomplete.** The handoff hook refuses it. On Codex it also refuses a builder dispatch with no saved
@@ -170,9 +170,9 @@ how a repository overrides a seat and what an override may not do.
   [The `resume` skill](../.agents/skills/resume/SKILL.md#4-plan) owns that route under "4. Plan".
 - **The two runtimes' charters differ.** The commit check names the seat, both files and the differing lines. A builder
   corrects both charters together at their source, and an adopter receives the correction through a release update.
-- **A seat file and the seat settings file disagree.** The contract test fails, naming the seat, until the render
-  command applies the settings file and the session commits the result. Every command that applies the settings
-  file refuses one that breaks an override limit before it writes anything.
+- **A seat file and the seat settings file disagree.** The contract test fails and names the seat. It stays red until
+  the render command applies the settings file and the session commits the result. Every command that applies the
+  settings file refuses one that breaks an override limit before it writes anything.
 
 ## Key files
 

@@ -215,26 +215,36 @@ throughout this skill, including complete native-comment review before claiming.
    Stop a process it reports using a scratch
    target only when it is confirmed as this session's own, and verify it stopped; otherwise the target stays and
    is reported. If the session could not leave the job worktree in step 3, run the verifier checkout's copy by its
-   path from where the session is: the command then retains the worktree and the branch. Deleting a folder does
-   not end a shell in it, but anything run there that needs that folder then fails, so this too is a process hold.
+   path from where the session is: the command then retains the worktree and the branch, since anything the
+   session runs there after the folder is deleted fails.
 
-   **Process holds.** A process using a target is waited out. Unless it is confirmed as this session's own, never
+   **Process holds.** A process using a target is waited out.
+   On Linux and macOS an idle shell is not such a process: bash, zsh, fish, sh, dash or ksh, a login form such as
+   `-zsh` included, started with no arguments but `-i`, `-l` or `--login`, whose only use of the target lsof lists is
+   its working directory at or below it, that has a controlling terminal and no child process. The command prints a
+   line naming each idle shell it passed over, as the reason on the `unused` line in `--check`, and goes on. The shell
+   stays at its prompt in a removed folder, harmless once the job has merged. A shell with a child process, another
+   file open there, the target in its arguments, a script or command to run, or no terminal stays a hold, as does every
+   other process. Windows is unchanged: it refuses to delete a folder a shell sits in, and the command retains every
+   target there.
+   Unless it is confirmed as this session's own, never
    type into, stop or kill it, and never ask the owner to `cd` away or close anything. One terminal tab is confirmed
    as this session's own: where the runtime lists this session's terminal tabs and closes the ones it opened, as the
    desktop app's `list_terminal_tabs` and `stop_terminal_tab` do, a tab that started in the target or a folder inside
    it, that `list_terminal_tabs` reports with nothing running, and that this session opened. Close it with
    `stop_terminal_tab` and `close: true`, then run the command again; a hold that remains is still waited out.
-   Idleness is read from the runtime, never assumed: a tab whose running state is unknown or that runs anything, such
-   as a dev server, a long command or an editor, stays a hold, and so does a tab the tool will not close, since it
-   never closes one the owner opened or typed in. Report each hold in one line that says whether the holder is idle
-   at its prompt or running something, or that this is unknown, record it under Deferred cleanup and ask the owner
-   nothing: the target is safe while it waits and no decision is pending. A use check that could not finish is
-   treated the same. Call the holder the owner's terminal only on evidence: a runtime tool that lists terminal tabs
-   shows an owner-opened tab with that process, or `ps -o pid=,ppid=,tty=,args= -p <pid>` shows an interactive shell
-   on a terminal whose parent chain does not reach this session, and the line then gives its idleness as unknown
-   unless such a tool reports it. Otherwise the line names the process ID and command and says its
-   owner is unknown; a process the session cannot identify is no owner question either. A later session removes the
-   target once the hold has gone.
+   These tab steps apply only to a holder the command still reports after passing over idle shells. Idleness is read
+   from the runtime, never assumed: such a tab whose running state is unknown or that runs anything, such as a dev
+   server, a long command or an editor, stays a hold, and so does one the tool will not close, since it never closes
+   one the owner opened or typed in. Report each hold in one line that says whether the holder is idle at its prompt
+   or running something, or that this is unknown, record it under Deferred cleanup and ask the owner nothing: the
+   target is safe while it waits and no decision is pending. A use check that could not finish is treated the same.
+   Call the holder the owner's terminal only on evidence: a runtime tool that lists terminal tabs shows an
+   owner-opened tab with that process, or `ps -o pid=,ppid=,tty=,args= -p <pid>` shows an interactive shell on a
+   terminal whose parent chain does not reach this session, and the line then gives its idleness as unknown unless
+   such a tool reports it. Otherwise the line names the process ID and command and says its owner is unknown; a
+   process the session cannot identify is no owner question either. A later session removes the target once the hold
+   has gone.
 
    If ownership is
    uncertain, do not run the command: retain the worktree, report why, record the retention under
@@ -302,7 +312,11 @@ and move to `Backlog` that `resume` prescribes, and filing the suggested cards a
 the `Verdict:` comment `resume` prescribes when the owner answers a run's job, which precedes a carried no, and the
 `Needs owner` comment and move to `Backlog` a no prescribes where it is not carried. A session the owner starts or
 reopens, and on Claude Code the coordinator a run reports to, may rewrite that comment to `Returned:`, only on the
-owner's own message in its chat; a card session never does.
+owner's own message in its chat; a card session never does. On the owner's `fix <card>: <what to change>` or
+`fix and merge <card>: <what to change>`, that session also writes the change request on the card and the
+`Returned:` comment, editing a hold in place where one exists. A press of the queue panel's controls that park a
+merge, answer a question the lead holds, or keep or drop a suggested card is the owner's own answer for the writes
+`resume` prescribes for each.
 
 ## Update local main
 

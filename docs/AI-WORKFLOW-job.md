@@ -7,7 +7,7 @@ description: This page follows one approved card to one commit on main, stage by
 ## Summary
 
 A job takes one approved card to one commit on `main`. This page follows that path stage by stage: who acts, what
-each stage leaves behind and what a machine holds there. Read it to understand a job before you run one, or to see
+each stage leaves behind and what a machine holds there. Use it to understand a job before you run one, or to see
 where a stopped job stands. The exact steps are in the [`resume`](../.agents/skills/resume/SKILL.md) and
 [`closeout`](../.agents/skills/closeout/SKILL.md) skills, and this page owns none of them.
 
@@ -159,7 +159,7 @@ three behaviours again. The decision card then cites the checks that ran, not th
 
 ### Push authorisation and delivery
 
-At push authorisation the card moves to Awaiting push, and the owner reads a decision card lifted from the pull request
+At push authorisation the card moves to Awaiting push, and the owner reads a decision card taken from the pull request
 body. The owner's yes covers the whole delivery sequence, repairs and rebases within its scope included.
 [`AGENTS.md`](../AGENTS.md#owner-gates) owns what that yes approves, under "Owner gates".
 

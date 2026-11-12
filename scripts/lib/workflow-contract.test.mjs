@@ -945,6 +945,25 @@ test('ANTI-REGRESSION: a suggested card carries its hold in the one call that cr
   assert.ok(creates[0].startsWith("gh issue create --title 'Proposed: "), `the create command must set the hold: ${creates[0]}`);
 });
 
+// Every strict-tdd chronology gap but the two record slips reaches the owner. Pins the table's exact kinds and
+// deciders in any row order, never a definition's wording, which fresh review judges. Recurring cost: one scan of
+// text this file already reads.
+test('ANTI-REGRESSION: the strict chronology audit settles only the two record slips itself and sends code before red to the owner', () => {
+  const lines = RESUME_CORPUS.split('\n').map((line) => line.trim());
+  const headers = lines.flatMap((line, at) => (line.startsWith('| Chronology gap |') ? [at] : []));
+  assert.equal(headers.length, 1, 'the resume skill must hold exactly one chronology gap table');
+  const rows = [];
+  for (let at = headers[0] + 2; at < lines.length && lines[at].startsWith('|'); at += 1) {
+    const cells = lines[at].split('|').slice(1, -1).map((cell) => cell.trim());
+    rows.push(`${cells[0]} | ${cells.at(-1)}`);
+  }
+  assert.deepEqual(rows.sort(), [
+    'Code before red | The owner',
+    'Paperwork slip | The coordinating session',
+    'Selection slip | The coordinating session',
+  ]);
+});
+
 test('the refused-shape check catches each refused shape and passes quoted jq text', () => {
   const cases = [
     ['echo "$(git branch --show-current)"', ['command substitution']],

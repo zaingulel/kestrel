@@ -19,15 +19,42 @@ This file is part of the `resume` skill: a section number or quoted heading in i
 - Before dispatching any review pass, rerun each convergence check whose latest worklog receipt does not hold
   for the clean committed head sent to review under the **Receipt reuse** rule in
   [references/deliver.md](deliver.md).
-- Before dispatching the review, audit each `strict-tdd` claim's worklog and diff for the meaningful pre-implementation
-  failure and coordinator validation required by "5. Build". A genuine chronology miss goes to the owner before
-  review as the existing decision on accepting that claim without its required red run. Follow `AGENTS.md`'s
-  Owner gates and Compact instructions: record the gap and accepted scope, quoting the exact question and
-  owner approval verbatim. Reuse that acceptance only within the session that obtained it and its exact scope, following those
-  gates after compaction; do not repeatedly ask about the same accepted gap there. A fresh session cannot infer
-  approval from an earlier session, worklog or memory. Later checks against the base or convergence mutations
-  prove current behaviour only: they never repair chronology or waive the decision automatically. A new claim
-  or gap outside that acceptance needs its own decision.
+- **Chronology audit.** Before dispatching the review, and again before the re-review that follows a `strict-tdd`
+  review repair, audit each `strict-tdd` claim's worklog, stage commit and diff for the red and the coordinator
+  validation "5. Build" requires. A record whose red receipt selected exactly the frozen identities and whose
+  validation verdict was recorded before implementation dispatch is complete. Any other gap is settled by its kind:
+
+  | Chronology gap | What the record shows | Who settles it |
+  |---|---|---|
+  | Paperwork slip | The four conditions below hold, but the validation verdict was recorded after implementation dispatch or not at all | The coordinating session |
+  | Selection slip | The four conditions below hold, but the red run selected tests beyond the frozen identities | The coordinating session |
+  | Code before red | Any other gap: implementation for the claim existed before its frozen tests logged their red, or the record cannot show which came first | The owner |
+
+  The four conditions: the test-only stage held evidence changes only, shown by a validation verdict recorded before
+  implementation dispatch or by the stage commit's diff; its red receipt was logged in that stage, and no earlier
+  receipt shows a frozen identity passing with the same frozen assertions under the same validated contract, since a
+  pass before the stage strengthened those assertions, or under a contract since revised, shows nothing about order; the
+  stage report shows the red its handoff named: each frozen identity run and failing for the claimed reason, or the run
+  stopped by exactly the absence failure the plan declared; and the frozen identities and assertions are unchanged
+  since, except through a recorded revised contract. A gap that is both slips is settled as both. Each of these is code
+  before red: implementation built in the same handoff as its test, or before it; red obtained by removing, reverting or
+  stashing implementation; a red run that left out a frozen identity, other than by stopping at the absence failure the
+  plan declared, or failed for a reason neither qualifying nor declared; and a review repair whose new test passed on
+  the reviewed tree.
+
+  To settle a slip, record in the worklog, marked as made at this audit, the evidence each condition rests on: the
+  stage commit where its diff shows the stage held evidence changes only, or the validation verdict recorded before
+  implementation dispatch and the red receipt it accepted where that is the proof; the quoted red receipt line; and
+  the check of the frozen contract. For a paperwork slip that record is also its validation verdict. Name the slip
+  with that evidence on the claim's row of the pull request body's Test receipts. A selection slip's red discharges no
+  discrimination proof: the claim takes the executed mutation `docs/TESTING-STRATEGY.md` names. Code before red
+  goes to the owner before review as the existing decision on accepting that claim without its required red run.
+  Follow `AGENTS.md`'s Owner gates and Compact instructions: record the gap and accepted scope, quoting the exact
+  question and owner approval verbatim. Reuse that acceptance only within the session that obtained it and its
+  exact scope, following those gates after compaction; do not repeatedly ask about the same accepted gap there. A
+  fresh session cannot infer approval from an earlier session, worklog or memory. Later checks against the base or
+  convergence mutations prove current behaviour only: they never repair chronology, turn code before red into a
+  slip, or waive the decision automatically. A new claim or gap outside that acceptance needs its own decision.
 - Before dispatching the review, file every card the acceptance criteria require, in this repository or another, as
   the `to-issues` skill says. A card that can only be filed after the merge, such as one that must cite the merge
   commit, is named under **Not done** in the pull request body as closeout's to file.

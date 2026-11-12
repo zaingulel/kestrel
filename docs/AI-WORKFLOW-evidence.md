@@ -8,8 +8,8 @@ description: This page explains how the workflow chooses evidence for a change a
 
 A green check proves only what that check observed, on the inputs it ran against. It cannot show that the check was
 the right one for the claim. Use this page to understand how the workflow chooses evidence for a change and records each
-check. It also says what a recorded result can and cannot prove. Read it before you judge whether a job's evidence
-supports what its pull request says.
+check. It also says what a recorded result can and cannot prove. Before you judge whether a job's evidence
+supports what its pull request says, read it.
 
 Each repository's [testing strategy](TESTING-STRATEGY.md) owns which evidence a claim needs. The
 [`resume`](../.agents/skills/resume/SKILL.md) skill owns when each check runs and how review settles. This page explains
@@ -79,13 +79,14 @@ Each claim gets one of three construction modes. Its subject sets a minimum mode
 
 A repository's testing strategy can raise the minimum mode for its own subjects, such as security or privacy. A
 failure counts as meaningful only when it shows the claimed defect through the code's public interface. A broken test
-setup or a reference to code that does not exist yet does not count.
+setup or a reference to code that no one has written does not count.
 
 The session hands a `strict-tdd` claim to builders in two handoffs. A test-only builder writes the check and logs its
 meaningful failure, and an expected failure is a valid result for that stage. The coordinating session reads the diff
 and the receipt, records its verdict in the job's worklog and fixes the test contract. Only then does an implementation
 builder make the check pass. A distinct safeguard found later stops for classification, and a wrong oracle stops for
-revalidation. No builder edits the fixed assertions to reach green.
+revalidation. No builder edits the fixed assertions to reach green. A missing test that a review finds goes through
+the same two handoffs before any fix.
 [The builder template](../.agents/templates/builder-handoff.md) carries the stage. No hook checks this order, because an
 exit code cannot say why a test failed.
 
@@ -93,8 +94,10 @@ exit code cannot say why a test failed.
 
 Some claims have nothing to run before the change, so no meaningful failure is possible. The plan then fixes the
 acceptance examples and their independent expected values first. It names a sufficient alternative: its observer, its
-build steps and its discrimination proof. Review alone cannot prove executable behaviour. Behaviour a job added
-earlier never counts as present at the job's base, so it cannot move to `preservation`.
+build steps and its discrimination proof. Review alone cannot prove executable behaviour. A claim at a strict minimum
+keeps its two handoffs on this route. The plan names the failure the missing code will give. The test-only builder logs
+that failure in place of a meaningful one. Behaviour a job added earlier never counts as present at the job's base, so
+it cannot move to `preservation`.
 
 A text-only change, such as a documentation or instruction change, has no executable observer for its meaning. Where
 it changes what a reader or agent must do, documentation lint is its mechanical check. The fresh review of the final
@@ -111,10 +114,11 @@ a mutation: the coordinating session breaks the code on purpose, sees the check 
 pass. A builder never runs a mutation cycle. Every changed protected rule, such as a trust or honesty rule, keeps one
 deliberate mutation even when a qualifying failure exists.
 
-Nobody can recreate a missed sequence afterwards. A later mutation can show the check discriminates on the
-code as it stands, never that a failure came first. The final audit under "6. Verify and review" in the `resume` skill
-keeps that gap visible and leaves the decision with the owner. A saved record of the gap is never fresh
-authorisation.
+Nobody can recreate a missed sequence afterwards. A later mutation can show the check discriminates on the code as it
+stands, never that a failure came first. The final audit under "6. Verify and review" in the `resume` skill sorts each
+gap. Sometimes the commits and receipts still show the failure came first, and only the record slipped. The coordinating
+session then settles the gap and names it in the pull request. Code built before its failing check stays a gap, and the
+decision stays with the owner. A saved record of the gap is never fresh authorisation.
 
 ### Recording each check
 
@@ -167,7 +171,7 @@ reports as passing. The head of `scripts/sweep-scope-check.mjs` and `docs/DOC-SW
 
 One fresh review reads the final tree and its evidence before the pull request opens. It challenges both the change
 and the evidence chosen for it. The reviewer derives the claims from the card and the final diff before it reads the
-selected evidence. So a downgraded mode shows up as a finding. A builder repairs a true finding, and the session
+selected evidence. So a downgraded mode appears as a finding. A builder repairs a true finding, and the session
 verifies it again.
 [The review line](AI-WORKFLOW.md#the-review-line) records the review that ran. A correctly formatted line shows the
 format is right, never that a review took place.
