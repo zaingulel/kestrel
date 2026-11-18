@@ -4263,7 +4263,7 @@ class BonsaiStartupTests(unittest.TestCase):
             self.skipTest('Unit sandboxes cannot be applied in hosted environment')
         runtime = f'/run/user/{os.getuid()}'
         if not Path(f'{runtime}/systemd/private').is_socket():
-            self.skipTest('no user service manager to run transient units')
+            self.fail('Local user service manager is required to run transient units')
         routes_closed_in_both = {
             'writable sockets': ['/tmp/kestrel-probe.sock'],
             'net namespace differs from host': True,
