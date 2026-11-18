@@ -12,12 +12,15 @@ from pathlib import Path
 import re
 import selectors
 import shutil
+import socket
+import socketserver
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -28,6 +31,8 @@ from tool_catalogue import brain_result
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE_PYTHON = HERMES_PYTHON
 BRAIN_KEY_SENTINEL = 'b7e2c4a9' * 8
+# A socket path holds at most 107 bytes, which a temporary folder under TMPDIR or ROOT/.runtime can exceed.
+SHORT_TEMPORARY_ROOT = '/tmp'
 
 BASELINE_SYSTEM_PROMPT = (
     "Speak naturally in concise English. "
@@ -102,8 +107,13 @@ def setUpModule():
     unittest.enterModuleContext(patch.object(hermes_worker, 'BRAIN_KEY', key))
 
 
+class UnixBrainServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
 class ScriptedBrain:
-    def __init__(self, replies):
+    def __init__(self, replies, *, socket_path=None):
+        self.socket_path = socket_path
         self.replies = iter(replies)
         self.requests = []
         brain = self
@@ -156,10 +166,13 @@ class ScriptedBrain:
                     self.wfile.flush()
                 self.wfile.write(b'data: [DONE]\n\n')
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), BrainRequest)
+        if socket_path is None:
+            self.server = ThreadingHTTPServer(('127.0.0.1', 0), BrainRequest)
+            self.url = f'http://127.0.0.1:{self.server.server_port}/v1'
+        else:
+            self.server = UnixBrainServer(socket_path, BrainRequest)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs=dict(poll_interval=0.01), daemon=True)
         self.thread.start()
-        self.url = f'http://127.0.0.1:{self.server.server_port}/v1'
 
     def close(self):
         self.server.shutdown()
@@ -256,6 +269,11 @@ with (patch.object(pathlib.Path, 'home', return_value=pathlib.Path(sys.argv[5]))
     hermes_worker.main(base_url=sys.argv[4])
 '''.replace('BRAIN_KEY_FIXTURE', repr(BRAIN_KEY_SENTINEL)).replace('NON_STREAMING_FIXTURE', repr(non_streaming)).replace('TRACE_FIXTURE', repr(str(trace_root if trace_root is not None else home / 'traces'))).replace(
     'MEMORY_FIXTURE', repr(str(memory_root if memory_root is not None else home / 'notes')))
+        if brain.socket_path is not None:
+            bootstrap = bootstrap.replace("allowed = ('127.0.0.1', int(sys.argv[3]))",
+                                          f'allowed = {brain.socket_path!r}').replace(
+                'hermes_worker.main(base_url=sys.argv[4])', f'hermes_worker.main(brain_socket={brain.socket_path!r})')
+            return [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home)]
         command = [str(NATIVE_PYTHON), '-c', bootstrap, str(ROOT), str(home),
                    str(brain.server.server_port), brain.url]
         if synthetic_default_home is not None:
@@ -3078,7 +3096,7 @@ class NativeHermesTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory:
             home = Path(directory).resolve()
             with patch.object(WorkerProcess, 'command', staticmethod(contaminated_command)):
-                worker = WorkerProcess(home, Mock(server=proxy.server, url=provider.url))
+                worker = WorkerProcess(home, Mock(server=proxy.server, url=provider.url, socket_path=None))
             try:
                 first_event = worker.event()
                 if first_event == {'ready': True}:
@@ -3257,6 +3275,69 @@ class NativeHermesTests(unittest.TestCase):
             ready = json.loads(result.stdout)
             self.assertEqual(ready, {'ready': True})
             self.assertIs(ready['ready'], True)
+
+    def test_production_worker_entrypoint_reaches_brain_through_socket_file(self):
+        require_native_hermes()
+        from hermes_worker import child_environment
+
+        with (tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory,
+              tempfile.TemporaryDirectory(prefix='kestrel-run-', dir=SHORT_TEMPORARY_ROOT) as runtime):
+            checkout = Path(directory).resolve()
+            home = checkout / 'worker-home'
+            home.mkdir(mode=0o700)
+            checkout_runtime = checkout / '.runtime'
+            checkout_runtime.mkdir(mode=0o700)
+            write_brain_key(checkout_runtime / 'brain-api-key')
+            (checkout_runtime / 'hermes-0.22.2').symlink_to(ROOT / '.runtime/hermes-0.22.2', target_is_directory=True)
+            worker_source = checkout / 'hermes_worker.py'
+            for name in ('hermes_worker.py', 'tool_catalogue.py', 'app_resolver.py'):
+                shutil.copyfile(ROOT / name, checkout / name)
+            (Path(runtime) / 'kestrel-brain').mkdir(mode=0o700)
+            brain = ScriptedBrain([[({'content': '[delivery:neutral]\nEntrypoint reply.'}, None), ({}, 'stop')]],
+                                  socket_path=f'{runtime}/kestrel-brain/brain.sock')
+            self.addCleanup(brain.close)
+            request = json.dumps({'messages': [{'role': 'user', 'content': 'Hello Kestrel.'}]})
+            with patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+                environment = child_environment(home)
+            result = subprocess.run(
+                [str(NATIVE_PYTHON), str(worker_source)],
+                env=environment,
+                input=f'{{"begin":true}}\n{request}\n', capture_output=True, text=True, timeout=45,
+            )
+            self.assertEqual(len(brain.requests), 1, f'stdout: {result.stdout}\nstderr: {result.stderr}')
+            self.assertEqual(brain.requests[0][1]['Host'], '127.0.0.1:8080')
+            self.assertEqual(brain.requests[0][1]['Authorization'], f'Bearer {BRAIN_KEY_SENTINEL}')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([json.loads(line) for line in result.stdout.splitlines()], [
+                {'ready': True}, {'session_ready': True}, *spoken_turn('Entrypoint reply.'),
+            ])
+
+    def test_worker_reaches_brain_only_through_socket_file(self):
+        require_native_hermes()
+        with (tempfile.TemporaryDirectory(prefix='hermes-test-', dir=ROOT / '.runtime') as directory,
+              tempfile.TemporaryDirectory(prefix='kestrel-run-', dir=SHORT_TEMPORARY_ROOT) as runtime):
+            socket_path = f'{runtime}/brain.sock'
+            brain = ScriptedBrain([[({'content': '[delivery:neutral]\nSocket reply.'}, None), ({}, 'stop')]],
+                                  socket_path=socket_path)
+            self.addCleanup(brain.close)
+            home = Path(directory).resolve()
+            worker = WorkerProcess(home, brain)
+            try:
+                self.assertEqual(worker.event(), {'ready': True})
+                worker.begin()
+                self.assertEqual(worker.request([{'role': 'user', 'content': 'Hello Kestrel.'}]),
+                                 spoken_turn('Socket reply.'))
+                self.assertEqual(len(brain.requests), 1)
+                target, headers, _ = brain.requests[0]
+                self.assertEqual(target, '/v1/chat/completions')
+                self.assertEqual(headers['Host'], '127.0.0.1:8080')
+                self.assertEqual(headers['Authorization'], f'Bearer {BRAIN_KEY_SENTINEL}')
+                # A getaddrinfo attempt logs a host and port, so this exact set also proves name lookup never ran.
+                self.assertEqual(set((home / 'connections.jsonl').read_text().splitlines()), {json.dumps(socket_path)})
+                worker.process.stdin.close()
+                self.assertEqual(worker.process.wait(timeout=5), 0)
+            finally:
+                worker.close()
 
     def test_native_reply_streams_once_and_uses_caller_history(self):
         replies = [[({'content': '[deliv'}, None), ({'content': 'ery:curious]'}, None),
@@ -3610,6 +3691,112 @@ case.assertEqual(messages, original)
         self.assertTrue((ROOT / '.runtime/voice-venv/bin/python').exists())
 
 
+HEALTH_LISTENER = '''
+import http.server, socketserver, sys
+class Health(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Length', '2')
+        self.end_headers()
+        self.wfile.write(b'{}')
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+server = Server(sys.argv[1], Health)
+print('listening', flush=True)
+server.serve_forever()
+'''
+
+# Runs inside a transient unit carrying a service's fence. It connects to nothing but the test's own listener and
+# the session bus, and writes nothing but its planted socket in the unit's private /tmp, which shows the walk below is not blind.
+FENCE_PROBE = '''
+import errno, json, os, socket, stat, subprocess, sys
+
+listener, test_pid = sys.argv[1:]
+socket.socket(socket.AF_UNIX).bind('/tmp/kestrel-probe.sock')
+
+
+def refusal(attempt, *arguments):
+    try:
+        attempt(*arguments)
+    except OSError as error:
+        return errno.errorcode[error.errno]
+    return None
+
+
+def outside_network():
+    runtime = f'/run/user/{os.getuid()}'
+    result = subprocess.run(
+        ['/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect', '--quiet', '--', '/usr/bin/readlink', '/proc/self/ns/net'],
+        env={'PATH': '/usr/bin:/bin', 'XDG_RUNTIME_DIR': runtime, 'DBUS_SESSION_BUS_ADDRESS': f'unix:path={runtime}/bus'},
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def writable_paths():
+    """What this process could change, each writable folder counted whole. Sockets and pipes stay out: a read-only mount does not stop them."""
+    found = []
+    for folder, subfolders, files in os.walk('/'):
+        descend = []
+        for name in subfolders:
+            path = os.path.join(folder, name)
+            if path == '/proc' or os.path.islink(path):
+                continue
+            if os.access(path, os.W_OK):
+                found.append(path)
+            else:
+                descend.append(name)
+        subfolders[:] = descend
+        for name in files:
+            path = os.path.join(folder, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:  # The host changes its own folders during the walk.
+                continue
+            if not (stat.S_ISSOCK(mode) or stat.S_ISFIFO(mode) or stat.S_ISLNK(mode)) and os.access(path, os.W_OK):
+                found.append(path)
+    return found
+
+
+sockets = []
+unlistable = []
+for folder, subfolders, files in os.walk('/'):
+    subfolders[:] = [name for name in subfolders if os.path.join(folder, name) not in
+                     ('/proc', '/sys', '/usr', '/home', '/run/user')]
+    for name in subfolders:
+        path = os.path.join(folder, name)
+        if not os.path.islink(path) and os.access(path, os.X_OK) and not os.access(path, os.R_OK):
+            unlistable.append(path)
+    for name in files:
+        path = os.path.join(folder, name)
+        if stat.S_ISSOCK(os.lstat(path).st_mode) and os.access(path, os.W_OK):
+            sockets.append(path)
+with open('/proc/self/cgroup') as cgroup:
+    own_cgroup = '/sys/fs/cgroup' + cgroup.read().strip().split('::')[1]
+own_kill = own_cgroup + '/cgroup.kill'
+scratch = os.path.dirname(listener)
+print(json.dumps({
+    'connect to listener': refusal(socket.socket(socket.AF_UNIX).connect, listener),
+    'writable sockets': sorted(sockets),
+    'net namespace': os.readlink('/proc/self/ns/net'),
+    'network of a command started outside': outside_network(),
+    'ipc namespace': os.readlink('/proc/self/ns/ipc'),
+    'test process visible': os.path.exists('/proc/' + test_pid),
+    'writable': {path: os.access(path, os.W_OK) for path in ('/dev/shm', '/dev/mqueue', '/dev/pts')},
+    'own cgroup.kill present': os.path.exists(own_kill),
+    'own cgroup.kill writable': os.access(own_kill, os.W_OK),
+    'journal readable': os.access('/var/log/journal', os.R_OK),
+    'AF_VSOCK': refusal(socket.socket, socket.AF_VSOCK),
+    'AF_INET': refusal(socket.socket, socket.AF_INET),
+    'unlistable folders': sorted(unlistable),
+    'changeable': sorted(path.replace(own_cgroup, 'own cgroup').replace(scratch, 'scratch') for path in writable_paths()),
+    'read-only mounts': {path: bool(os.statvfs(path).f_flag & os.ST_RDONLY) for path in ('/', '/run', '/sys', '/proc/sys', '/sys/fs/cgroup')},
+    'new user namespace': refusal(os.unshare, os.CLONE_NEWUSER),
+}))
+'''
+
+
 class BonsaiStartupTests(unittest.TestCase):
     def launcher_fixture(self):
         directory = tempfile.TemporaryDirectory(prefix='bonsai-startup-')
@@ -3628,6 +3815,11 @@ class BonsaiStartupTests(unittest.TestCase):
         key = root / '.runtime/brain-api-key'
         key.write_text(BRAIN_KEY_SENTINEL + '\n')
         key.chmod(0o600)
+        runtime = root / 'runtime'
+        runtime.mkdir(mode=0o700)
+        environment = patch.dict(os.environ, XDG_RUNTIME_DIR=str(runtime))
+        environment.start()
+        self.addCleanup(environment.stop)
         return root, prism, server
 
     def test_brain_launcher_pins_f16_and_scrubs_environment(self):
@@ -3641,7 +3833,7 @@ class BonsaiStartupTests(unittest.TestCase):
         observed = json.loads(result.stdout)
         self.assertEqual(observed['arguments'], [
             '-m', str(root / '.runtime/models/bonsai-2-27b/Ternary-Bonsai-2-27B-PQ2_0.gguf'),
-            '--alias', 'bonsai-2-27b', '--host', '127.0.0.1', '--port', '8080',
+            '--alias', 'bonsai-2-27b', '--host', str(root / 'runtime/kestrel-brain/brain.sock'),
             '--api-key-file', str(root / '.runtime/brain-api-key'),
             '--gpu-layers', 'all', '-fa', 'on', '-c', '64000', '-np', '1', '-b', '256', '-ub', '128',
             '--fit', 'off', '--kv-offload', '--cache-type-k', 'f16', '--cache-type-v', 'f16',
@@ -3658,8 +3850,11 @@ class BonsaiStartupTests(unittest.TestCase):
                 str(root / '.runtime/tools/bonsai-prism-b10787-73bfe6c/cuda-12.8/llama-prism-b10787-73bfe6c'),
                 str(root / '.runtime/tools/cudart-b11815-cuda-12.8/cudart-llama-b11815-bin-ubuntu-cuda-12.8-x64'),
             )),
+            'CUDA_CACHE_PATH': str(root / '.runtime/brain-compute-cache'),
         })
         self.assertEqual(observed['cwd'], str(server.parent))
+        for folder in (root / 'runtime/kestrel-brain', root / '.runtime/brain-compute-cache'):
+            self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
 
     def test_brain_launcher_refuses_missing_empty_or_malformed_key(self):
         root, _, _ = self.launcher_fixture()
@@ -3707,6 +3902,15 @@ class BonsaiStartupTests(unittest.TestCase):
                 self.assertEqual(result.stderr, 'The brain key .runtime/brain-api-key is missing or unsafe. '
                                  'Create it as README.md describes under Brain key, then restart Kestrel.\n')
                 self.assertEqual(result.stdout, '')
+        with self.subTest('missing XDG_RUNTIME_DIR'):
+            key.unlink()
+            regular(valid + b'\n')()
+            environment = {name: value for name, value in os.environ.items() if name != 'XDG_RUNTIME_DIR'}
+            result = subprocess.run(['/usr/bin/bash', str(root / 'run-brain.sh')], env=environment,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0, 'The launcher started the server without a runtime folder')
+            self.assertIn('XDG_RUNTIME_DIR', result.stderr)
+            self.assertEqual(result.stdout, '')
 
     def test_brain_launcher_propagates_failure(self):
         root, _, server = self.launcher_fixture()
@@ -3717,14 +3921,34 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertIn('server refused', result.stderr)
 
     def readiness_fixture(self):
-        directory = tempfile.TemporaryDirectory(prefix='bonsai-health-')
+        directory = tempfile.TemporaryDirectory(prefix='bonsai-health-', dir=SHORT_TEMPORARY_ROOT)
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
         shutil.copyfile(ROOT / 'check-brain-ready.sh', root / 'check-brain-ready.sh')
+        (root / 'kestrel-brain').mkdir(mode=0o700)
+        self.record_readiness_curl(root)
         return root
 
+    def record_readiness_curl(self, root, *overrides):
+        # Real curl over the real socket; a later --retry wins, so a refused case never waits on the retry budget.
+        curl = root / 'curl'
+        curl.write_text(
+            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
+            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            f'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--retry", "0", *{list(overrides)!r}])\n'
+        )
+        curl.chmod(0o755)
+
+    def serve_readiness_socket(self, root, handler):
+        server = UnixBrainServer(str(root / 'kestrel-brain/brain.sock'), handler)
+        self.addCleanup(server.server_close)
+        thread = threading.Thread(target=server.serve_forever, kwargs=dict(poll_interval=0.01), daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+
     def run_readiness(self, root, main_pid=None):
-        environment = dict(os.environ, PATH=f'{root}:/usr/bin:/bin',
+        environment = dict(os.environ, PATH=f'{root}:/usr/bin:/bin', XDG_RUNTIME_DIR=str(root),
                            http_proxy='http://poison.invalid:99', HTTP_PROXY='http://poison.invalid:99',
                            ALL_PROXY='http://poison.invalid:99', HOME=str(root), CURL_HOME=str(root))
         environment.pop('MAINPID', None)
@@ -3742,33 +3966,14 @@ class BonsaiStartupTests(unittest.TestCase):
             '--retry', '120', '--retry-all-errors', '--retry-delay', '1',
             '--retry-max-time', '120', '--max-time', '5', '--max-filesize', '4096',
             '--output', '/dev/null', '--write-out', '%{http_code}',
+            '--unix-socket', str(root / 'kestrel-brain/brain.sock'),
             'http://127.0.0.1:8080/health',
         ])
 
-    def test_brain_readiness_requires_owned_listener(self):
-        root = self.readiness_fixture()
+    def owned_child(self, *command, **options):
+        child = subprocess.Popen(command, **options)
 
-        class HealthRequest(BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header('Content-Length', '2')
-                self.end_headers()
-                self.wfile.write(b'{}')
-
-        server = ThreadingHTTPServer(('127.0.0.1', 0), HealthRequest)
-        self.addCleanup(server.server_close)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join)
-        self.addCleanup(server.shutdown)
-        child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'],
-                                 stdin=subprocess.PIPE)
-
-        def close_child():
-            child.stdin.close()
+        def stop():
             if child.poll() is None:
                 child.terminate()
             try:
@@ -3776,111 +3981,96 @@ class BonsaiStartupTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
+            if child.stdout is not None:
+                child.stdout.close()
 
-        self.addCleanup(close_child)
-        curl = root / 'curl'
-        curl.write_text(
-            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
-            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-            'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--connect-to", '
-            f'"127.0.0.1:8080:127.0.0.1:{server.server_port}"])\n'
-        )
-        curl.chmod(0o755)
-        lsof = root / 'lsof'
-        lsof.write_text(
-            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
-            'arguments = sys.argv[1:]\n'
-            'assert arguments == ["-nP", "-a", "-p", arguments[3], "-iTCP@127.0.0.1:8080", "-sTCP:LISTEN", "-t"]\n'
-            f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(arguments))\n'
-            'os.execv("/usr/bin/lsof", ["lsof", *arguments[:4], '
-            f'"-iTCP@127.0.0.1:{server.server_port}", *arguments[5:]])\n'
-        )
-        lsof.chmod(0o755)
-        self.assertIsNone(child.poll())
-        for pid, owns_listener in [(child.pid, False), (os.getpid(), True)]:
-            with self.subTest(pid=pid, owns_listener=owns_listener):
-                result = self.run_readiness(root, str(pid))
+        self.addCleanup(stop)
+        return child
+
+    def health_listener_child(self, path):
+        child = self.owned_child('/usr/bin/python3', '-c', HEALTH_LISTENER, str(path), stdout=subprocess.PIPE)
+        with selectors.DefaultSelector() as selector:
+            selector.register(child.stdout, selectors.EVENT_READ)
+            self.assertTrue(selector.select(5), 'Health listener did not start')
+        self.assertEqual(child.stdout.readline(), b'listening\n')
+        return child
+
+    def test_brain_readiness_requires_owned_listener(self):
+        root = self.readiness_fixture()
+        socket_path = root / 'kestrel-brain/brain.sock'
+        owner = self.health_listener_child(socket_path)
+        look_alike = self.health_listener_child(socket_path.with_name('brain.sock.old'))
+        unrelated = self.owned_child('/usr/bin/sleep', '60')
+        dead = subprocess.Popen(['/usr/bin/true'])
+        dead.wait(timeout=5)
+        for case, pid in [('listener owner', str(owner.pid)), ('foreground check', None)]:
+            with self.subTest(case):
+                result = self.run_readiness(root, pid)
                 self.assert_readiness_arguments(root)
-                if owns_listener:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                else:
-                    self.assertNotEqual(result.returncode, 0,
-                                        'HTTP 200 from an unrelated listener must not admit the wrong live PID')
-                    self.assertIn('Bonsai listener ownership could not be verified. '
-                                  'Check kestrel-brain.service and port 8080, then restart Kestrel.', result.stderr)
-                self.assertTrue((root / 'lsof-arguments.json').exists(), 'Readiness must invoke lsof')
-                self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
-                    '-nP', '-a', '-p', str(pid), '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
-                ])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, '')
+                self.assertEqual(result.stdout, '')
+        for case, pid in [('empty', ''), ('non-numeric', '../1'), ('dead process', str(dead.pid)),
+                          ('unrelated process', str(unrelated.pid)), ('look-alike listener', str(look_alike.pid))]:
+            with self.subTest(case):
+                result = self.run_readiness(root, pid)
+                self.assert_readiness_arguments(root)
+                self.assertNotEqual(result.returncode, 0, 'A healthy socket must not admit a process that does not own it')
+                self.assertIn('Bonsai listener ownership could not be verified. '
+                              'Check kestrel-brain.service and its socket file, then restart Kestrel.', result.stderr)
+                self.assertEqual(result.stdout, '')
 
     def test_brain_readiness_requires_200_and_success(self):
         root = self.readiness_fixture()
-        curl = root / 'curl'
-        for status, code in [('200', 0), ('204', 0), ('302', 0), ('000', 56),
-                             ('200', 63), ('000', 28), ('200', 22)]:
-            with self.subTest(status=status, exit_code=code):
-                curl.write_text(
-                    '#!/usr/bin/python3\nimport json, pathlib, sys\n'
-                    f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-                    f'print({status!r}, end="")\nsys.exit({code})\n'
-                )
-                curl.chmod(0o755)
+        response = {}
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class HealthRequest(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                response['answer'](self)
+
+        def status(code, *headers):
+            def answer(request):
+                request.send_response(code)
+                for name, value in headers:
+                    request.send_header(name, value)
+                request.send_header('Content-Length', '0')
+                request.end_headers()
+            return answer
+
+        def oversized(request):
+            request.send_response(200)
+            request.send_header('Content-Length', '4097')
+            request.end_headers()
+
+        self.serve_readiness_socket(root, HealthRequest)
+        cases = {
+            '200': (status(200), ()),
+            '204': (status(204), ()),
+            '302': (status(302, ('Location', '/redirect-target')), ()),
+            '500': (status(500), ()),
+            'no reply': (lambda request: None, ()),
+            '200 over the size limit': (oversized, ()),
+            'no answer before the deadline': (lambda request: release.wait(5), ('--max-time', '0.2')),
+        }
+        for case, (answer, overrides) in cases.items():
+            with self.subTest(case):
+                response['answer'] = answer
+                self.record_readiness_curl(root, *overrides)
                 result = self.run_readiness(root)
                 self.assert_readiness_arguments(root)
                 self.assertEqual(result.stdout, '')
-                if status == '200' and code == 0:
+                if case == '200':
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stderr, '')
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('Bonsai did not become ready. Check kestrel-brain.service and restart Kestrel.',
                                   result.stderr)
-
-        curl.write_text(
-            '#!/usr/bin/python3\nimport json, pathlib, sys\n'
-            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-            'print("200", end="")\n'
-        )
-        timeout = root / 'timeout'
-        timeout.write_text(
-            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
-            f'pathlib.Path({str(root / "timeout-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-            'os.execvp(sys.argv[4], sys.argv[4:])\n'
-        )
-        timeout.chmod(0o755)
-        lsof = root / 'lsof'
-        cases = [('23', '23', 0), ('23', '', 0), ('23', '23\n24', 0), ('23', '24', 0),
-                 ('23', '', 1), ('23', '', 127), ('23', '', 124), ('', '23', 0), ('invalid', '23', 0)]
-        for pid, output, code in cases:
-            with self.subTest(pid=pid, ownership=output, exit_code=code):
-                for name in ('timeout-arguments.json', 'lsof-arguments.json'):
-                    (root / name).unlink(missing_ok=True)
-                lsof.write_text(
-                    '#!/usr/bin/python3\nimport json, pathlib, sys\n'
-                    f'pathlib.Path({str(root / "lsof-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-                    f'print({output!r}, end="")\nsys.exit({code})\n'
-                )
-                lsof.chmod(0o755)
-                result = self.run_readiness(root, pid)
-                self.assert_readiness_arguments(root)
-                if pid == '23':
-                    self.assertEqual(json.loads((root / 'timeout-arguments.json').read_text()), [
-                        '--signal=TERM', '--kill-after=1s', '2s', 'lsof', '-nP', '-a', '-p', pid,
-                        '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
-                    ])
-                    self.assertEqual(json.loads((root / 'lsof-arguments.json').read_text()), [
-                        '-nP', '-a', '-p', pid, '-iTCP@127.0.0.1:8080', '-sTCP:LISTEN', '-t',
-                    ])
-                else:
-                    self.assertFalse((root / 'timeout-arguments.json').exists())
-                    self.assertFalse((root / 'lsof-arguments.json').exists())
-                if pid == '23' and output == '23' and code == 0:
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                else:
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn('Bonsai listener ownership could not be verified. Check kestrel-brain.service and port 8080, then restart Kestrel.',
-                                  result.stderr)
-                self.assertEqual(result.stdout, '')
 
     def test_brain_readiness_wire_and_redirect_refusal(self):
         root = self.readiness_fixture()
@@ -3899,20 +4089,7 @@ class BonsaiStartupTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'{}')
 
-        server = ThreadingHTTPServer(('127.0.0.1', 0), HealthRequest)
-        self.addCleanup(server.server_close)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(thread.join)
-        self.addCleanup(server.shutdown)
-        curl = root / 'curl'
-        curl.write_text(
-            '#!/usr/bin/python3\nimport json, os, pathlib, sys\n'
-            f'pathlib.Path({str(root / "curl-arguments.json")!r}).write_text(json.dumps(sys.argv[1:]))\n'
-            'os.execv("/usr/bin/curl", ["curl", *sys.argv[1:], "--connect-to", '
-            f'"127.0.0.1:8080:127.0.0.1:{server.server_port}"])\n'
-        )
-        curl.chmod(0o755)
+        self.serve_readiness_socket(root, HealthRequest)
         (root / '.curlrc').write_text('location\nproxy = "http://poison.invalid:99"\n')
         ready = self.run_readiness(root)
         self.assert_readiness_arguments(root)
@@ -3926,12 +4103,25 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(refused.stdout, '')
         self.assertEqual(requests, ['/health', '/health'])
 
+    def read_unit(self, name):
+        class RepeatedKeys(dict):
+            # systemd lets a unit repeat a key; configparser keeps only the last, so collect them.
+            def __setitem__(self, key, value):
+                if isinstance(value, list) and isinstance(self.get(key), list):
+                    self[key].extend(value)
+                else:
+                    super().__setitem__(key, value)
+
+        unit = configparser.ConfigParser(interpolation=None, strict=False, dict_type=RepeatedKeys)
+        unit.optionxform = str
+        with (ROOT / f'systemd/kestrel-{name}.service').open() as source:
+            unit.read_file(source)
+        return unit
+
     def test_user_units_pin_login_lifecycle(self):
         units = {}
         for name in ('brain', 'voice'):
-            unit = configparser.ConfigParser(interpolation=None)
-            with (ROOT / f'systemd/kestrel-{name}.service').open() as source:
-                unit.read_file(source)
+            unit = self.read_unit(name)
             units[name] = unit
             self.assertEqual(unit['Service']['Type'], 'exec')
             self.assertEqual(unit['Service']['Restart'], 'no')
@@ -3946,11 +4136,12 @@ class BonsaiStartupTests(unittest.TestCase):
                          {'graphical-session.target', 'kestrel-voice.service'})
         self.assertEqual(brain['Service']['KillMode'], 'control-group')
         self.assertEqual(brain['Service']['TimeoutStartSec'], '130s')
-        prefix = '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/bash '
-        self.assertEqual(brain['Service']['ExecStart'], prefix + '%h/Projects/zaingulel/kestrel/run-brain.sh')
-        self.assertEqual(brain['Service']['ExecStartPost'],
-                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
-                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
+        self.assertEqual(brain['Service']['ExecStart'],
+                         '/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                         '/usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh')
+        self.assertEqual(brain['Service']['ExecStartPost'].split('\n')[1],
+                         '+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                         'MAINPID=${MAINPID} /usr/bin/bash %h/Projects/zaingulel/kestrel/check-brain-ready.sh')
         self.assertNotIn('Install', brain)
         self.assertEqual(voice['Service']['ExecStart'], '%h/Projects/zaingulel/kestrel/run-voice.sh')
         self.assertEqual(voice['Service']['KillMode'], 'mixed')
@@ -3961,3 +4152,255 @@ class BonsaiStartupTests(unittest.TestCase):
         self.assertEqual(set(voice['Unit']['Wants'].split()), dependencies)
         self.assertEqual(set(voice['Unit']['After'].split()), dependencies | {'graphical-session.target'})
         self.assertFalse(voice['Unit'].get('Requires'))
+
+    def test_user_units_fence_both_services(self):
+        project = '%h/Projects/zaingulel/kestrel'
+        gpu = ('/dev/nvidia0', '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset')
+        fence_check = ('+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 MAINPID=${MAINPID} '
+                       f'/usr/bin/bash {project}/check-network-fence.sh')
+        masks = ('-/dev/shm', '-/dev/mqueue', '-/dev/pts', '-/dev/ptmx', '-/dev/hugepages', '-/var/log', '-/run/log',
+                 '-/run/docker.sock', '-/run/dbus', '-/run/systemd', '-/run/udev', '-/run/tailscale', '-/run/cups',
+                 '-/run/avahi-daemon', '-/run/ssh-unix-local', '-/run/polkit', '-/run/containerd', '-/run/sudo',
+                 '-/run/sddm', '-/opt/containerd', '-/var/db/sudo')
+        stores = tuple(f'{project}/.runtime/{folder}'
+                       for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions', 'cache'))
+        expected = {
+            'brain': {
+                'ExecStartPre': '+/usr/bin/nvidia-modprobe -c 0 -c 255\n'
+                                '+/usr/bin/nvidia-modprobe -u -c 0\n'
+                                '+/usr/bin/nvidia-modprobe -m\n'
+                                f'+/usr/bin/mkdir -p -m 0700 {project}/.runtime/brain-compute-cache',
+                'ExecStartPost': fence_check + '\n'
+                                 '+/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t '
+                                 f'MAINPID=${{MAINPID}} /usr/bin/bash {project}/check-brain-ready.sh',
+                'RuntimeDirectory': 'kestrel-brain',
+                'RuntimeDirectoryMode': '0700',
+                'BindPaths': ' '.join((*gpu, '%t/kestrel-brain', f'{project}/.runtime/brain-compute-cache')),
+                'BindReadOnlyPaths': ' '.join((
+                    f'{project}/run-brain.sh', f'{project}/.runtime/brain-api-key',
+                    f'{project}/.runtime/models/bonsai-2-27b',
+                    f'{project}/.runtime/tools/bonsai-prism-b10787-73bfe6c',
+                    f'{project}/.runtime/tools/cudart-b11815-cuda-12.8')),
+                'InaccessiblePaths': ' '.join(masks),
+                'RestrictAddressFamilies': 'AF_UNIX',
+                'SystemCallFilter': '~connect io_uring_setup io_uring_enter io_uring_register',
+                'SystemCallErrorNumber': 'EPERM',
+                'PrivatePIDs': 'yes',
+            },
+            'voice': {
+                'ExecStartPre': '+/usr/bin/touch %t/uwsm-app.lock\n+/usr/bin/mkdir -p %h/Pictures\n'
+                                f'+/usr/bin/mkdir -p -m 0700 {" ".join(stores)}',
+                'ExecStartPost': fence_check,
+                'RuntimeDirectory': 'kestrel',
+                'RuntimeDirectoryMode': '0700',
+                'RuntimeDirectoryPreserve': 'yes',
+                'BindPaths': ' '.join((*(f'-{device}' for device in gpu), *stores,
+                                       '%t/kestrel', '%t/uwsm-app.lock')),
+                'BindReadOnlyPaths': ' '.join((
+                    project, '%t', '%h/Pictures', '-%h/.local/share/applications',
+                    '-%h/.local/share/flatpak/exports/share', '-%h/.local/share/flatpak/app',
+                    '-%h/.local/bin', '-%h/Applications')),
+                'InaccessiblePaths': ' '.join((*masks, f'-{project}/.git', f'-{project}/.claude')),
+                'RestrictAddressFamilies': 'AF_UNIX AF_NETLINK AF_INET AF_INET6',
+                # Voice reaches the desktop bus and PipeWire, and the panel reader needs to see other programs.
+                'SystemCallFilter': None,
+                'SystemCallErrorNumber': None,
+                'PrivatePIDs': None,
+            },
+        }
+        sandbox = {
+            'ProtectSystem': 'strict', 'ProtectHome': 'tmpfs', 'PrivateNetwork': 'yes',
+            'PrivateUsers': 'self', 'PrivateTmp': 'disconnected', 'PrivateDevices': 'yes',
+            'NoNewPrivileges': 'yes', 'PrivateIPC': 'yes', 'ProtectControlGroups': 'yes',
+            'SystemCallArchitectures': 'native', 'JoinsNamespaceOf': None, 'ReadOnlyPaths': '/run',
+            'ProtectKernelTunables': 'yes', 'RestrictNamespaces': 'yes',
+            # TemporaryFileSystem stops every + line with 226/NAMESPACE, so it can never hide /run here.
+            'TemporaryFileSystem': None,
+        }
+        for name, facts in expected.items():
+            service = self.read_unit(name)['Service']
+            for key, value in {**sandbox, **facts}.items():
+                self.assertEqual(service.get(key), value, f'{name} {key}')
+            for key in ('ExecStartPre', 'ExecStartPost'):
+                for line in service.get(key, '').split('\n'):
+                    self.assertTrue(line.startswith('+'), f'{name} {key} {line}')
+            for key in ('BindPaths', 'BindReadOnlyPaths'):
+                for path in service[key].split():
+                    self.assertNotIn(':', path, f'{name} {key} {path}')
+        self.assertNotIn('JoinsNamespaceOf', self.read_unit('brain')['Unit'])
+        self.assertNotIn('JoinsNamespaceOf', self.read_unit('voice')['Unit'])
+
+    def probe_unit_fence(self, name, runtime):
+        """Runs the probe in a transient unit holding the real unit's fence lines, its private endpoints left out."""
+        not_fence = ('Exec', 'Runtime', 'Timeout', 'Standard', 'Type', 'WorkingDirectory', 'Environment',
+                     'Restart', 'KillMode')
+        fence = []
+        for key, value in self.read_unit(name)['Service'].items():
+            if key.startswith(not_fence):
+                continue
+            value = value.replace('%h', str(Path.home())).replace('%t', runtime)
+            if key.startswith('Bind'):
+                # A store not yet created is left out rather than failing the unit with 226/NAMESPACE.
+                value = ' '.join(path if path.startswith('-') else f'-{path}' for path in value.split())
+            fence.append(f'--property={key}={value}')
+        with tempfile.TemporaryDirectory(prefix='kestrel-probe-', dir=runtime) as scratch:
+            listener = socket.socket(socket.AF_UNIX)
+            self.addCleanup(listener.close)
+            listener.bind(f'{scratch}/listener.sock')
+            listener.listen()
+            result = subprocess.run(
+                ['/usr/bin/systemd-run', '--user', '--wait', '--collect', '--pipe', '--quiet',
+                 f'--unit=kestrel-probe-{name}-{os.getpid()}', *fence, '--property=ExecStartPre=+/usr/bin/true',
+                 f'--property=BindPaths={scratch}', '--property=RuntimeMaxSec=20s',
+                 '/usr/bin/python3', '-I', '-S', '-c', FENCE_PROBE, f'{scratch}/listener.sock', str(os.getpid())],
+                env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'XDG_RUNTIME_DIR': runtime},
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, f'{name}: {result.stderr}')
+        return json.loads(result.stdout)
+
+    def test_unit_fences_close_routes_line_text_cannot_show(self):
+        if os.environ.get('CI'):
+            self.skipTest('Unit sandboxes cannot be applied in hosted environment')
+        runtime = f'/run/user/{os.getuid()}'
+        if not Path(f'{runtime}/systemd/private').is_socket():
+            self.fail('Local user service manager is required to run transient units')
+        routes_closed_in_both = {
+            'writable sockets': ['/tmp/kestrel-probe.sock'],
+            'net namespace differs from host': True,
+            'ipc namespace differs from host': True,
+            'writable': {'/dev/shm': False, '/dev/mqueue': False, '/dev/pts': False},
+            'own cgroup.kill present': True,
+            'own cgroup.kill writable': False,
+            'journal readable': False,
+            'AF_VSOCK': 'EAFNOSUPPORT',
+            'unlistable folders': [],
+            'read-only mounts': dict.fromkeys(('/', '/run', '/sys', '/proc/sys', '/sys/fs/cgroup'), True),
+            'new user namespace': 'EPERM',
+        }
+        expected = {
+            'brain': {'connect to listener': 'EPERM', 'test process visible': False, 'AF_INET': 'EAFNOSUPPORT',
+                      'command starts outside the fence': False},
+            'voice': {'connect to listener': None, 'test process visible': True, 'AF_INET': None,
+                      'command starts outside the fence': True},
+        }
+        home = str(Path.home())
+        kestrel = f'{home}/Projects/zaingulel/kestrel'
+        allowed = {
+            'both': {'/dev/full', '/dev/null', '/dev/random', '/dev/tty', '/dev/urandom', '/dev/zero', '/dev/nvidia0',
+                     '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools', '/dev/nvidia-modeset',
+                     'own cgroup/memory.pressure', '/tmp', '/var/tmp', 'scratch'},
+            'brain': {f'{kestrel}/.runtime/brain-compute-cache', f'{runtime}/kestrel-brain'},
+            'voice': {f'{kestrel}/.runtime/{folder}' for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions',
+                                                                    'cache')} | {
+                f'{runtime}/kestrel', f'{runtime}/uwsm-app.lock'},
+        }
+        self.maxDiff = None
+        for name, routes in expected.items():
+            with self.subTest(unit=name):
+                observed = self.probe_unit_fence(name, runtime)
+                changeable = set(observed.pop('changeable'))
+                allow_list = allowed['both'] | allowed[name]
+                self.assertLessEqual({'/tmp', '/var/tmp', 'scratch'}, changeable)
+                self.assertEqual(changeable - allow_list, set())
+                for kind in ('net', 'ipc'):
+                    observed[f'{kind} namespace differs from host'] = (
+                        observed.pop(f'{kind} namespace') != os.readlink(f'/proc/self/ns/{kind}'))
+                observed['command starts outside the fence'] = (
+                    observed.pop('network of a command started outside') == os.readlink('/proc/self/ns/net'))
+                self.assertEqual(observed, {**routes_closed_in_both, **routes})
+
+    def test_network_fence_refuses_shared_host_network(self):
+        script = ROOT / 'check-network-fence.sh'
+        advice = "Kestrel's network fence did not apply. Check the service's systemd log, then restart Kestrel."
+
+        def check(mainpid, script=script):
+            environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}
+            if mainpid is not None:
+                environment['MAINPID'] = str(mainpid)
+            return subprocess.run(['/usr/bin/bash', str(script)], env=environment, cwd='/',
+                                  capture_output=True, text=True, timeout=5)
+
+        def start(*command):
+            child = subprocess.Popen(command)
+            self.addCleanup(child.wait)
+            self.addCleanup(child.kill)
+            return child
+
+        def refuse(mainpid):
+            result = check(mainpid)
+            self.assertNotEqual(result.returncode, 0, f'{mainpid!r}: {result.stderr}')
+            self.assertEqual(result.stdout, '')
+            self.assertEqual(result.stderr.strip(), advice, f'{mainpid!r}')
+
+        refuse(start('/usr/bin/sleep', '30').pid)
+        refuse(None)
+        refuse('../1')
+        refuse('not-a-pid')
+        gone = subprocess.Popen(['/usr/bin/true'])
+        gone.wait()
+        refuse(gone.pid)
+        if subprocess.run(['/usr/bin/unshare', '-Urnm', '/usr/bin/true']).returncode != 0:
+            self.skipTest('unprivileged network and mount namespaces are unavailable')
+
+        def start_fenced(*planting):
+            # Empty folders over the trees that hold host sockets leave the walk only what the child plants itself.
+            child = start('/usr/bin/unshare', '-Urnm', '/usr/bin/bash', '-c', ' && '.join((
+                *(f'/usr/bin/mount -t tmpfs tmpfs {folder}' for folder in ('/run', '/tmp', '/var', '/dev', '/opt')),
+                *planting, '/usr/bin/touch /run/fixture-ready', 'exec /usr/bin/sleep 30')))
+            deadline = time.monotonic() + 5
+            while not os.path.exists(f'/proc/{child.pid}/root/run/fixture-ready'):
+                self.assertIsNone(child.poll(), 'the fenced child ended before it finished its private folders')
+                self.assertLess(time.monotonic(), deadline, 'the fenced child never finished its private folders')
+                time.sleep(0.01)
+            return child
+
+        fenced = start_fenced()
+        passed = check(fenced.pid)
+        self.assertEqual((passed.returncode, passed.stdout, passed.stderr), (0, '', ''))
+        refuse(f'{fenced.pid}/../{fenced.pid}')
+        exposed = start_fenced('/usr/bin/python3 -I -S -c '
+                               '"import socket; socket.socket(socket.AF_UNIX).bind(\'/run/planted.sock\')"')
+        reached = check(exposed.pid)
+        self.assertEqual((reached.returncode, reached.stdout, reached.stderr.strip()), (
+            1, '', "Kestrel's fence leaves a socket file reachable: /run/planted.sock. Add that path to "
+                   "InaccessiblePaths= in the service's drop-in, then restart Kestrel."))
+        hidden = start_fenced('/usr/bin/mkdir /run/hidden',
+                              '/usr/bin/python3 -I -S -c '
+                              '"import socket; socket.socket(socket.AF_UNIX).bind(\'/run/hidden/planted.sock\')"',
+                              '/usr/bin/chmod 0311 /run/hidden')
+        unseen = check(hidden.pid)
+        self.assertEqual((unseen.returncode, unseen.stdout, unseen.stderr.strip()), (
+            1, '', "Kestrel's fence leaves a folder it cannot check: /run/hidden. A socket file inside it would go "
+                   "unseen. Add that path to InaccessiblePaths= in the service's drop-in, then restart Kestrel."))
+        with tempfile.TemporaryDirectory(prefix='kestrel-walker-') as folder:
+            for status, body in ((127, None), (137, '#!/usr/bin/bash\nkill -KILL "$$"\n')):
+                walker = Path(folder) / f'walker-{status}'
+                if body is not None:
+                    walker.write_text(body)
+                    walker.chmod(0o755)
+                text = script.read_text().replace('/usr/bin/find', str(walker))
+                self.assertNotEqual(text, script.read_text())
+                unfinished = Path(folder) / f'check-{status}.sh'
+                unfinished.write_text(text)
+                result = check(fenced.pid, script=unfinished)
+                self.assertEqual((result.returncode, result.stdout, result.stderr.strip()), (
+                    1, '', f'Kestrel could not check its fence: {walker} ended with status {status}. '
+                           'Check that find runs, then restart Kestrel.'))
+
+        def start_blind_chroot():
+            # An empty root has no /run, so the walk has nothing to read and the script must refuse rather than pass.
+            root = tempfile.TemporaryDirectory(prefix='kestrel-blind-')
+            self.addCleanup(root.cleanup)
+            child = start('/usr/bin/unshare', '-Urn', '/usr/bin/python3', '-I', '-S', '-c',
+                          'import os, sys, time; os.chroot(sys.argv[1]); '
+                          'open("/ready", "w").close(); time.sleep(30)', root.name)
+            deadline = time.monotonic() + 5
+            # The marker is written inside the chroot, so its appearance proves the child has entered it.
+            while not os.path.exists(f'{root.name}/ready'):
+                self.assertIsNone(child.poll(), 'the blind child ended before it entered its chroot')
+                self.assertLess(time.monotonic(), deadline, 'the blind child never entered its chroot')
+                time.sleep(0.01)
+            return child
+
+        blind = check(start_blind_chroot().pid)
+        self.assertEqual((blind.returncode, blind.stdout, blind.stderr), (1, '', f'{advice}\n'))

@@ -8,9 +8,9 @@ import stat
 import sys
 
 if __package__:
-    from .conversation import address as conversation_address, close_writer, same_uid
+    from .conversation import address as conversation_address, bound_listener, close_writer, same_uid
 else:
-    from conversation import address as conversation_address, close_writer, same_uid
+    from conversation import address as conversation_address, bound_listener, close_writer, same_uid
 
 UNAVAILABLE = 'Kestrel conversation unavailable. Check Kestrel and try again.'
 MAX_REQUEST = 32768
@@ -18,7 +18,7 @@ SUBMIT_REPLIES = (b'accepted\n', b'invalid\n', b'busy\n', b'unavailable\n')
 
 
 def address() -> str:
-    return '\0kestrel.control.' + conversation_address()[len('\0kestrel.conversation.'):]
+    return conversation_address()[:-len('conversation.sock')] + 'control.sock'
 
 
 class ConversationControl:
@@ -29,7 +29,8 @@ class ConversationControl:
         self.tasks = set()
 
     async def start(self):
-        self.server = await asyncio.start_unix_server(self.connected, path=address(), limit=MAX_REQUEST + 1, backlog=8)
+        self.server = await asyncio.start_unix_server(
+            self.connected, sock=bound_listener(address()), limit=MAX_REQUEST + 1, backlog=8)
 
     def connected(self, reader, writer):
         if self.server is None or len(self.tasks) >= 8:

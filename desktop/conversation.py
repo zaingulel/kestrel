@@ -5,15 +5,24 @@ record containing exactly one of the two fixed advisories below. No text is pers
 """
 
 import asyncio
-import hashlib
+import errno
+import fcntl
 import json
 import os
+from pathlib import Path
 import socket
+import stat
 import struct
 import sys
 import uuid
 
+if __package__:
+    from .status import _directory
+else:
+    from status import _directory
+
 MAX_SNAPSHOT = 1024 * 1024
+MAX_SOCKET_PATH = 107
 UNAVAILABLE = 'Conversation unavailable. Reopen the panel.'
 TOO_LARGE = 'Conversation is too large to display. Restart Kestrel to begin a new conversation.'
 
@@ -23,7 +32,48 @@ def address() -> str:
     if (not runtime.startswith('/') or len(runtime.encode('utf-8')) > 4096
             or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in runtime)):
         raise ValueError(UNAVAILABLE)
-    return '\0kestrel.conversation.' + str(os.getuid()) + '.' + hashlib.sha256(runtime.encode('utf-8')).hexdigest()
+    path = runtime + '/kestrel/conversation.sock'
+    if len(path.encode('utf-8')) > MAX_SOCKET_PATH:
+        raise ValueError(UNAVAILABLE)
+    return path
+
+
+def bound_listener(path: str) -> socket.socket:
+    # Binding here keeps asyncio from silently deleting a live owner's socket file.
+    folder = _directory(Path(os.environ['XDG_RUNTIME_DIR']), create=True)
+    try:
+        # The lock spans bind and listen: a bound socket that is not yet listening refuses connections.
+        try:
+            fcntl.flock(folder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OSError(errno.EADDRINUSE, 'Endpoint is busy', path) from None
+        try:
+            found = os.lstat(path)
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISSOCK(found.st_mode) or found.st_uid != os.getuid():
+                raise OSError(errno.EEXIST, 'Endpoint path is not a socket owned by this account', path)
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(1)
+                try:
+                    probe.connect(path)
+                except ConnectionRefusedError:
+                    os.unlink(path)
+                except (TimeoutError, BlockingIOError):
+                    raise OSError(errno.EADDRINUSE, 'Endpoint is busy', path) from None
+                else:
+                    raise OSError(errno.EADDRINUSE, 'Endpoint is in use', path)
+        listener = socket.socket(socket.AF_UNIX)
+        try:
+            listener.bind(path)
+            listener.listen(1)
+        except BaseException:
+            listener.close()
+            raise
+        return listener
+    finally:
+        os.close(folder)
 
 
 def same_uid(peer) -> bool:
@@ -93,7 +143,7 @@ class ConversationFeed:
 
     async def start(self):
         try:
-            self.server = await asyncio.start_unix_server(self.connected, path=address(), limit=1)
+            self.server = await asyncio.start_unix_server(self.connected, sock=bound_listener(address()), limit=1)
         except (OSError, ValueError, UnicodeError):
             # A missing panel channel never prevents voice startup.
             self.server = None

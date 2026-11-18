@@ -5,6 +5,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,6 +29,15 @@ import reply_progress
 import speech
 import tool_actions
 from test_hermes import NATIVE_PYTHON, ROOT, ScriptedBrain
+
+SCREENSHOT_ARGV = (
+    '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect',
+    '--property=RuntimeMaxSec=2s', '--property=TimeoutStopSec=1s',
+    '--setenv=PATH', '--setenv=LC_ALL', '--setenv=XDG_RUNTIME_DIR', '--setenv=HOME', '--setenv=OMARCHY_PATH',
+    '--setenv=WAYLAND_DISPLAY', '--setenv=HYPRLAND_INSTANCE_SIGNATURE', '--setenv=OMARCHY_SCREENSHOT_DIR',
+    '--setenv=XDG_PICTURES_DIR',
+    '--', '/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save',
+)
 
 
 class LocalVolumeTests(unittest.IsolatedAsyncioTestCase):
@@ -348,7 +358,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
         for permission in (bot.PermissionTier.ASK, bot.PermissionTier.FORBIDDEN):
             with patch.dict(bot.LOCAL_TOOLS, {'take_screenshot': bot.LocalTool(permission, AsyncMock(), phrase, phrase)}):
                 self.assertIsNone(bot.match_instant_tool(phrase))
-        argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        argv = SCREENSHOT_ARGV
         advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
         started = 2_000_000_000_000_000_000
         with tempfile.TemporaryDirectory() as folder:
@@ -400,6 +410,70 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await tool.run(command=command)
             command.assert_awaited_once_with(argv)
+
+    async def test_screenshot_route_carries_output_status_and_settings_across_the_service_manager(self):
+        runtime = Path(f'/run/user/{os.getuid()}')
+        for socket in (runtime / 'systemd' / 'private', runtime / 'bus'):
+            if not socket.is_socket():
+                self.skipTest(f'{socket} is not a socket: no user service manager to start a transient unit')
+        self.assertEqual(tool_actions.SCREENSHOT_COMMAND, SCREENSHOT_ARGV)
+        fixture = {'WAYLAND_DISPLAY': 'wayland-fixture', 'HYPRLAND_INSTANCE_SIGNATURE': 'fixture',
+                   'XDG_PICTURES_DIR': '/pictures/white space'}
+        script = ('printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\\n" "$PATH" "$LC_ALL" "$XDG_RUNTIME_DIR" "$HOME" "$OMARCHY_PATH" '
+                  '"$WAYLAND_DISPLAY" "$HYPRLAND_INSTANCE_SIGNATURE" "$${OMARCHY_SCREENSHOT_DIR-absent}" "$XDG_PICTURES_DIR"')
+        home = tool_actions.pwd.getpwuid(os.getuid()).pw_dir
+        # An unset forwarded variable arrives set and empty, so the unset case reads as empty rather than absent.
+        # The service manager expands `${NAME}` itself and has no default syntax, so `$$` hands the shell its own.
+        for destination, arrived in (({'OMARCHY_SCREENSHOT_DIR': '/screens/white space'}, '/screens/white space'),
+                                     ({}, '')):
+            line = (f'/usr/bin:/bin|C.UTF-8|{runtime}|{home}|/usr/share/omarchy|wayland-fixture|fixture|{arrived}|'
+                    '/pictures/white space\n')
+            with self.subTest(destination=destination):
+                with patch.dict(os.environ, {**fixture, **destination}, clear=True):
+                    with patch.object(tool_actions, 'SCREENSHOT_COMMAND',
+                                      (*SCREENSHOT_ARGV[:-5], '/usr/bin/sh', '-c', script)):
+                        self.assertEqual(await tool_actions.run_local_command(tool_actions.SCREENSHOT_COMMAND), line)
+        with patch.dict(os.environ, fixture, clear=True):
+            with patch.object(tool_actions, 'SCREENSHOT_COMMAND', (*SCREENSHOT_ARGV[:-5], '/usr/bin/sh', '-c', 'exit 7')):
+                with self.assertRaisesRegex(RuntimeError, '^command failed$'):
+                    await tool_actions.run_local_command(tool_actions.SCREENSHOT_COMMAND)
+
+    def test_screenshot_unit_outlives_its_waiter_and_stops_at_its_limit(self):
+        runtime = Path(f'/run/user/{os.getuid()}')
+        for socket in (runtime / 'systemd' / 'private', runtime / 'bus'):
+            if not socket.is_socket():
+                self.skipTest(f'{socket} is not a socket: no user service manager to start a transient unit')
+        unit = f'kestrel-test-screenshot-{os.getpid()}-{time.monotonic_ns()}'
+        env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime)}
+
+        def state():
+            return subprocess.run(['/usr/bin/systemctl', '--user', 'is-active', unit], capture_output=True,
+                                  text=True, timeout=5, env=env).stdout.strip()
+
+        def wait_until(condition):
+            deadline = time.monotonic() + 10
+            while not condition():
+                self.assertLess(time.monotonic(), deadline, f'{unit} stayed {state()!r}')
+                time.sleep(0.05)
+
+        # Ignoring TERM makes stopping the unit need the forced kill that TimeoutStopSec schedules.
+        waiter = subprocess.Popen(
+            [SCREENSHOT_ARGV[0], f'--unit={unit}', *SCREENSHOT_ARGV[1:-5], '/usr/bin/sh', '-c',
+             'trap "" TERM; /usr/bin/sleep 30'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+
+        def clean_up():
+            waiter.kill()
+            waiter.wait()
+            for verb in ('stop', 'reset-failed'):
+                subprocess.run(['/usr/bin/systemctl', '--user', verb, unit], capture_output=True, timeout=5, env=env)
+
+        self.addCleanup(clean_up)
+        wait_until(lambda: state() == 'active')
+        waiter.terminate()
+        waiter.wait(timeout=5)
+        self.assertEqual(state(), 'active')
+        wait_until(lambda: state() == 'inactive')
 
     async def test_media_actions_require_observed_state(self):
         for key, phrase, action in (('pause_media', 'pause music', 'pause'), ('next_track', 'next track', 'next')):
@@ -849,14 +923,14 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                                 'XDG_PICTURES_DIR': '/pictures/white space'}
         for argv in (('/usr/bin/omarchy-shell', 'media', 'status'),
                      ('/usr/bin/hyprctl', '-j', 'activeworkspace'),
-                     ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')):
+                     SCREENSHOT_ARGV):
             process = Mock(pid=9876, returncode=0)
             process.stdout.read = AsyncMock(side_effect=[b'ok\n', b''])
             process.wait = AsyncMock(return_value=0)
             expected = baseline | selectors
             if argv[0] == '/usr/bin/omarchy-shell':
                 expected['OMARCHY_PATH'] = '/usr/share/omarchy'
-            if argv[0] == '/usr/bin/omarchy':
+            if argv == SCREENSHOT_ARGV:
                 expected |= {'HOME': '/canonical/home', 'OMARCHY_PATH': '/usr/share/omarchy',
                              'OMARCHY_SCREENSHOT_DIR': '/shots/$(literal)',
                              'XDG_PICTURES_DIR': '/pictures/white space'}
@@ -890,7 +964,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             await tool_actions.run_local_command(('/tmp/omarchy-shell', 'media', 'status'))
             self.assertEqual(spawn.await_args.kwargs['env'], baseline)
 
-        screenshot = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        screenshot = SCREENSHOT_ARGV
         for key in ('OMARCHY_SCREENSHOT_DIR', 'XDG_PICTURES_DIR'):
             for value in ('', 'relative', 'a' * 4097, '/' + 'a' * 4096, '/bad\npath', '/bad\x85path'):
                 with (patch.dict(os.environ, poisoned | {key: value}, clear=True),
@@ -909,6 +983,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(spawn.await_args.kwargs['env'], baseline | selectors | destinations |
                                  {'HOME': '/canonical/home', 'OMARCHY_PATH': '/usr/share/omarchy'})
         for argv in (('/tmp/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'),
+                     SCREENSHOT_ARGV[-5:],
                      ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'copy'),
                      (*screenshot, 'extra'), screenshot[:-1]):
             process = Mock(pid=9876, returncode=0)
@@ -931,7 +1006,7 @@ class LocalDesktopTests(unittest.IsolatedAsyncioTestCase):
             ('/usr/bin/omarchy-shell', 'media', 'next'),
             ('/usr/bin/hyprctl', '-j', 'activeworkspace'),
             ('/usr/bin/omarchy-shell', 'media', 'status', 'extra'),
-            ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save'),
+            SCREENSHOT_ARGV,
         ))
         for argv, budget, size, accepted in cases:
             with self.subTest(argv=argv, size=size):
@@ -2674,7 +2749,7 @@ class WholeConversationTests(WholeConversationCase):
         path = Path(folder.name) / 'screenshot-2026-10-18_12-34-56.png'
         path.write_bytes(b'PRIVATE screenshot content must never be opened')
         os.utime(path, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
-        argv = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        argv = SCREENSHOT_ARGV
         advisory = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
         command = AsyncMock(side_effect=[str(path) + '\n', 'PRIVATE native output'])
         logs = []

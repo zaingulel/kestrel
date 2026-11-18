@@ -672,7 +672,14 @@ class WholeConversationTests(WholeConversationCase):
         path = Path(folder.name) / 'screenshot-2026-10-18_12-34-56.png'
         path.write_bytes(b'PRIVATE screenshot content must never be opened')
         os.utime(path, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
-        screenshot = ('/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save')
+        screenshot = (
+            '/usr/bin/systemd-run', '--user', '--wait', '--pipe', '--collect',
+            '--property=RuntimeMaxSec=2s', '--property=TimeoutStopSec=1s',
+            '--setenv=PATH', '--setenv=LC_ALL', '--setenv=XDG_RUNTIME_DIR', '--setenv=HOME', '--setenv=OMARCHY_PATH',
+            '--setenv=WAYLAND_DISPLAY', '--setenv=HYPRLAND_INSTANCE_SIGNATURE', '--setenv=OMARCHY_SCREENSHOT_DIR',
+            '--setenv=XDG_PICTURES_DIR',
+            '--', '/usr/bin/omarchy', 'capture', 'screenshot', 'fullscreen', 'save',
+        )
         screenshot_failure = "I couldn't confirm the screenshot. Check your screenshot folder. I won't retry."
         lookup_failure = "I couldn't check the installed apps. I didn't send an open request. Use the app menu."
         no_match = "I couldn't find exactly one installed app with that name, so I didn't open anything."

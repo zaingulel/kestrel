@@ -1,12 +1,16 @@
 import asyncio
+from contextlib import contextmanager
+import errno
 import io
 import json
 import os
 from pathlib import Path
+import socket
+import stat
 import struct
 import sys
-import hashlib
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -15,6 +19,11 @@ from desktop import conversation, control
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def endpoint_folder(runtime):
+    # A listener the product does not bind itself is given the same private folder the product creates.
+    os.makedirs(Path(runtime) / 'kestrel', mode=0o700, exist_ok=True)
 
 
 class ControlTests(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +58,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*peers)
 
             self.addAsyncCleanup(cleanup)
+            endpoint_folder(runtime)
             server = await asyncio.start_unix_server(connected, path=control.address())
             try:
                 for response, expected in ((b'accepted\n', (0, b'{"status":"accepted"}\n')),
@@ -265,6 +275,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*peers)
 
             self.addAsyncCleanup(cleanup)
+            endpoint_folder(runtime)
             socket = await asyncio.start_unix_server(connected, path=control.address())
             try:
                 for response in (b'', b'accepted', b'accepted\nextra', b'accepted\n' * 2,
@@ -296,8 +307,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             server = control.ConversationControl(lambda: calls.append('toggle') or 'starting')
             self.addAsyncCleanup(server.close)
             await server.start()
-            self.assertEqual(control.address(), '\0kestrel.control.' + str(os.getuid()) + '.' +
-                             hashlib.sha256(runtime.encode()).hexdigest())
+            self.assertEqual(control.address(), f'{runtime}/kestrel/control.sock')
             with self.assertRaises(OSError):
                 duplicate = control.ConversationControl(lambda: 'inactive')
                 await duplicate.start()
@@ -390,6 +400,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             def connected(reader, writer):
                 peers.append(asyncio.create_task(refuse(reader, writer)))
 
+            endpoint_folder(runtime)
             refusing = await asyncio.start_unix_server(connected, path=control.address())
             try:
                 self.assertEqual(await cli('--toggle'), (1, b'', (control.UNAVAILABLE + '\n').encode()))
@@ -544,6 +555,177 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await conversation.close_writer(writer)
 
+    async def test_endpoint_refuses_hostile_paths(self):
+        @contextmanager
+        def private_runtime(length=None):
+            with tempfile.TemporaryDirectory() as base:
+                runtime = base
+                if length is not None:
+                    # The endpoint path is the runtime plus 26 bytes of '/kestrel/conversation.sock'.
+                    runtime = os.path.join(base, 'x' * (length - 26 - len(base) - 1))
+                    os.mkdir(runtime, 0o700)
+                with patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+                    yield runtime
+
+        def listening(path):
+            listener = conversation.bound_listener(path)
+            self.addCleanup(listener.close)
+            return listener
+
+        def connect(path):
+            client = socket.socket(socket.AF_UNIX)
+            self.addCleanup(client.close)
+            client.settimeout(2)
+            client.connect(path)
+
+        def refusal(path, seconds=5):
+            # A probe that never gives up would hang here instead of failing the claim.
+            outcome = []
+
+            def attempt():
+                try:
+                    outcome.append(conversation.bound_listener(path))
+                except BaseException as error:
+                    outcome.append(error)
+
+            worker = threading.Thread(target=attempt, daemon=True)
+            worker.start()
+            worker.join(seconds)
+            self.assertFalse(worker.is_alive(), 'The listener probe must give up')
+            if isinstance(outcome[0], socket.socket):
+                outcome[0].close()
+            self.assertIsInstance(outcome[0], OSError, outcome[0])
+            return outcome[0]
+
+        with self.subTest('addresses'), private_runtime() as runtime:
+            self.assertEqual(conversation.address(), f'{runtime}/kestrel/conversation.sock')
+            self.assertEqual(control.address(), f'{runtime}/kestrel/control.sock')
+
+        with self.subTest('folder is private and owned'), private_runtime() as runtime:
+            path = f'{runtime}/kestrel/conversation.sock'
+            listener = listening(path)
+            folder = os.lstat(f'{runtime}/kestrel')
+            self.assertTrue(stat.S_ISDIR(folder.st_mode))
+            self.assertEqual(stat.S_IMODE(folder.st_mode), 0o700)
+            self.assertEqual(folder.st_uid, os.getuid())
+            self.assertEqual(listener.getsockname(), path)
+            self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+            connect(path)
+
+        with self.subTest('unsafe runtime folder'), private_runtime() as runtime:
+            os.chmod(runtime, 0o755)
+            with self.assertRaises(ValueError):
+                conversation.bound_listener(f'{runtime}/kestrel/conversation.sock')
+            self.assertFalse(os.path.lexists(f'{runtime}/kestrel'))
+
+        with self.subTest('regular file'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            Path(path).write_bytes(b'not a socket')
+            self.assertEqual(refusal(path).errno, errno.EEXIST)
+            self.assertEqual(Path(path).read_bytes(), b'not a socket')
+            self.assertTrue(stat.S_ISREG(os.lstat(path).st_mode))
+
+        with self.subTest('symlink'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            target = Path(runtime) / 'target'
+            target.write_bytes(b'someone else file')
+            os.symlink(target, path)
+            self.assertEqual(refusal(path).errno, errno.EEXIST)
+            self.assertEqual(os.readlink(path), str(target))
+            self.assertEqual(target.read_bytes(), b'someone else file')
+
+        with self.subTest('live listener'), private_runtime() as runtime:
+            path = f'{runtime}/kestrel/conversation.sock'
+            listening(path)
+            inode = os.lstat(path).st_ino
+            self.assertEqual(refusal(path).errno, errno.EADDRINUSE)
+            self.assertEqual(os.lstat(path).st_ino, inode)
+            connect(path)
+
+        with self.subTest('saturated backlog'), private_runtime() as runtime:
+            path = f'{runtime}/kestrel/conversation.sock'
+            listening(path)
+            inode = os.lstat(path).st_ino
+            for _ in range(16):
+                client = socket.socket(socket.AF_UNIX)
+                self.addCleanup(client.close)
+                client.setblocking(False)
+                try:
+                    client.connect(path)
+                except BlockingIOError:
+                    break
+            else:
+                self.fail('The listener backlog never filled')
+            self.assertEqual(refusal(path).errno, errno.EADDRINUSE)
+            self.assertEqual(os.lstat(path).st_ino, inode)
+            self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+
+        with self.subTest('dead socket'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            dead = socket.socket(socket.AF_UNIX)
+            dead.bind(path)
+            dead.close()
+            self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+            listener = listening(path)
+            self.assertEqual(listener.getsockname(), path)
+            connect(path)
+
+        with self.subTest('concurrent start'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            stale = socket.socket(socket.AF_UNIX)
+            stale.bind(path)
+            stale.close()
+            real, rival = socket.socket, []
+
+            class RacingSocket(real):
+                # The rival starts after this socket has bound but before it listens.
+                def listen(self, backlog):
+                    if not rival:
+                        rival.append(None)
+                        try:
+                            rival[0] = conversation.bound_listener(path)
+                        except BaseException as error:
+                            rival[0] = error
+                    super().listen(backlog)
+
+            with patch.object(conversation.socket, 'socket', RacingSocket):
+                listening(path)
+            if isinstance(rival[0], real):
+                rival[0].close()
+            self.assertIsInstance(rival[0], OSError, rival[0])
+            self.assertEqual(rival[0].errno, errno.EADDRINUSE)
+            self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
+            connect(path)
+            self.assertEqual(listening(control.address()).getsockname(), control.address())
+
+        with self.subTest('refusal releases the endpoint lock'), private_runtime() as runtime:
+            endpoint_folder(runtime)
+            path = f'{runtime}/kestrel/conversation.sock'
+            Path(path).write_bytes(b'not a socket')
+            self.assertEqual(refusal(path).errno, errno.EEXIST)
+            self.assertEqual(listening(control.address()).getsockname(), control.address())
+
+        for length in (107, 108):
+            with self.subTest(length=length), private_runtime(length) as runtime:
+                path = f'{runtime}/kestrel/conversation.sock'
+                self.assertEqual(len(path.encode()), length)
+                if length == 107:
+                    self.assertEqual(conversation.address(), path)
+                    self.assertEqual(listening(path).getsockname(), path)
+                else:
+                    with self.assertRaises(ValueError) as refused:
+                        conversation.address()
+                    self.assertEqual(str(refused.exception), conversation.UNAVAILABLE)
+
+        for runtime in ('', 'relative', '/bad\npath', '/bad\x7fpath', '/' + 'a' * 4096):
+            with self.subTest(runtime=runtime[:32]), patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
+                with self.assertRaises(ValueError):
+                    conversation.address()
+
     async def test_private_wire_and_corrupt_input(self):
         valid = {'version': 2, 'session': 'fixture', 'turns': [
             {'speaker': 'you', 'text': '<b>Private canary</b>', 'state': 'complete', 'source': 'spoken'},
@@ -575,8 +757,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(conversation.same_uid(peer))
 
         with tempfile.TemporaryDirectory() as runtime, patch.dict(os.environ, XDG_RUNTIME_DIR=runtime):
-            self.assertEqual(conversation.address(), '\0kestrel.conversation.' + str(os.getuid()) + '.' +
-                             hashlib.sha256(runtime.encode()).hexdigest())
+            self.assertEqual(conversation.address(), f'{runtime}/kestrel/conversation.sock')
             feed = conversation.ConversationFeed()
             self.addAsyncCleanup(feed.close)
             await feed.start()
@@ -637,6 +818,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 writer.write(hostile_payload)
                 accepted.set()
 
+            endpoint_folder(runtime)
             server = await asyncio.start_unix_server(hostile, path=conversation.address())
             async def close_hostile():
                 server.close()
@@ -892,4 +1074,5 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
                 process.terminate()
                 _, errors = await asyncio.wait_for(process.communicate(), 5)
                 self.assertEqual(errors, b'')
-            self.assertEqual(list(Path(runtime).iterdir()), [], 'The feed never writes transcript files')
+            self.assertLessEqual({str(path.relative_to(runtime)) for path in Path(runtime).rglob('*')},
+                                 {'kestrel', 'kestrel/conversation.sock'}, 'The feed never writes transcript files')

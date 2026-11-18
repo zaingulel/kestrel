@@ -351,7 +351,9 @@ class HermesRequestChannel:
                     ])
                 except Exception as error:
                     raise RuntimeError(f'kestrel-brain.service is unavailable: {error}. Restart Kestrel and try again.') from error
-            self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=(ROOT / '.runtime').resolve())
+            sessions = ROOT / '.runtime/hermes-sessions'
+            sessions.mkdir(mode=0o700, exist_ok=True)
+            self.home = tempfile.TemporaryDirectory(prefix='hermes-session-', dir=sessions.resolve())
             async with asyncio.timeout(ENGINE_TIMEOUT):
                 try:
                     self.process = await asyncio.create_subprocess_exec(
