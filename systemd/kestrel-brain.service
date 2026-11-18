@@ -6,7 +6,7 @@ PartOf=graphical-session.target kestrel-voice.service
 Type=exec
 WorkingDirectory=%h/Projects/zaingulel/kestrel
 ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t /usr/bin/bash %h/Projects/zaingulel/kestrel/run-brain.sh
-ExecStartPre=+/usr/bin/nvidia-modprobe -c 0
+ExecStartPre=+/usr/bin/nvidia-modprobe -c 0 -c 255
 ExecStartPre=+/usr/bin/nvidia-modprobe -u -c 0
 ExecStartPre=+/usr/bin/nvidia-modprobe -m
 ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/Projects/zaingulel/kestrel/.runtime/brain-compute-cache

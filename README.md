@@ -122,7 +122,7 @@ install -Dm644 systemd/kestrel-brain.service ~/.config/systemd/user/kestrel-brai
 install -Dm644 systemd/kestrel-voice.service ~/.config/systemd/user/kestrel-voice.service
 ```
 
-Both base units carry the [sandbox](#privacy-and-runtime-boundary). Every `ExecStartPre=` and `ExecStartPost=` line starts with `+`, because a sandboxed helper would create the service's private network first and push the main process onto the host network. The brain's first `+` lines create the graphics card's device files with `nvidia-modprobe`, one call per device group. The following `+` lines create the graphics cache and voice's private writable folders with `mkdir -p -m 0700`, which never changes an existing folder, and your Pictures folder with plain `mkdir -p`. A drop-in bind names one path, never `source:destination`: any other form exits the service with `226/NAMESPACE`. A drop-in that sets an `Exec` line must first reset it. An empty `BindPaths=` or `BindReadOnlyPaths=` clears both lists at once, so reset them once, before setting either. `InaccessiblePaths=` and the other sandbox lines carry over from the base units. `TemporaryFileSystem=` cannot be used, because it stops every `+` line with `226/NAMESPACE`.
+Both base units carry the [sandbox](#privacy-and-runtime-boundary). Every `ExecStartPre=` and `ExecStartPost=` line starts with `+`, because a sandboxed helper would create the service's private network first and push the main process onto the host network. The brain's first `+` lines create the graphics card's device files with `nvidia-modprobe`, one call per device group, except that the first call also creates the control device file. The following `+` lines create the graphics cache and voice's private writable folders with `mkdir -p -m 0700`, which never changes an existing folder, and your Pictures folder with plain `mkdir -p`. A drop-in bind names one path, never `source:destination`: any other form exits the service with `226/NAMESPACE`. A drop-in that sets an `Exec` line must first reset it. An empty `BindPaths=` or `BindReadOnlyPaths=` clears both lists at once, so reset them once, before setting either. `InaccessiblePaths=` and the other sandbox lines carry over from the base units. `TemporaryFileSystem=` cannot be used, because it stops every `+` line with `226/NAMESPACE`.
 
 Select the retained snapshot with persistent `~/.config/systemd/user/kestrel-brain.service.d/zz-kestrel.conf` and `~/.config/systemd/user/kestrel-voice.service.d/zz-kestrel.conf`. Where a file already exists, save its exact prior bytes first, then update it in place; otherwise create it exclusively. Other drop-ins stay as they are. Replace `<full-commit>` below with the reviewed commit; retain exact ownership copies and the prior definition bytes for rollback.
 
@@ -134,7 +134,7 @@ WorkingDirectory=%h/.local/share/kestrel/bonsai-27b-<full-commit>
 ExecStart=
 ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin:/bin LANG=C.UTF-8 XDG_RUNTIME_DIR=%t /usr/bin/bash %h/.local/share/kestrel/bonsai-27b-<full-commit>/run-brain.sh
 ExecStartPre=
-ExecStartPre=+/usr/bin/nvidia-modprobe -c 0
+ExecStartPre=+/usr/bin/nvidia-modprobe -c 0 -c 255
 ExecStartPre=+/usr/bin/nvidia-modprobe -u -c 0
 ExecStartPre=+/usr/bin/nvidia-modprobe -m
 ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/.local/share/kestrel/bonsai-27b-<full-commit>/.runtime/brain-compute-cache

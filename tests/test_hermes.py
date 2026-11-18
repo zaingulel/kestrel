@@ -4166,7 +4166,7 @@ class BonsaiStartupTests(unittest.TestCase):
                        for folder in ('hermes-memory', 'hermes-traces', 'hermes-sessions', 'cache'))
         expected = {
             'brain': {
-                'ExecStartPre': '+/usr/bin/nvidia-modprobe -c 0\n'
+                'ExecStartPre': '+/usr/bin/nvidia-modprobe -c 0 -c 255\n'
                                 '+/usr/bin/nvidia-modprobe -u -c 0\n'
                                 '+/usr/bin/nvidia-modprobe -m\n'
                                 f'+/usr/bin/mkdir -p -m 0700 {project}/.runtime/brain-compute-cache',
