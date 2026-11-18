@@ -4259,6 +4259,8 @@ class BonsaiStartupTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_unit_fences_close_routes_line_text_cannot_show(self):
+        if os.environ.get('CI'):
+            self.skipTest('Unit sandboxes cannot be applied in hosted environment')
         runtime = f'/run/user/{os.getuid()}'
         if not Path(f'{runtime}/systemd/private').is_socket():
             self.skipTest('no user service manager to run transient units')
