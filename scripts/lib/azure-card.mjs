@@ -66,7 +66,7 @@ export function parseCardArgs(args) {
 
 function fileBody(path) {
   try { return readFileSync(path, 'utf8'); }
-  catch (error) { throw new Error(`Azure body file ${path} could not be read: ${error.code}`); }
+  catch (error) { throw new Error(`Azure body file ${path} could not be read: ${/** @type {NodeJS.ErrnoException} */ (error).code}`); }
 }
 const literalHtml = (source) => '<pre>' + source.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;') + '</pre>';
 
@@ -83,8 +83,8 @@ function comments(command, source, exec) {
   let returned;
   try { returned = exec({ method: before ? 'PATCH' : 'POST', path, query: { 'api-version': '7.1-preview.4', format: 'markdown' }, body: { text: source } }); }
   catch (error) {
-    const failure = new Error(`Azure ${command.id} comment outcome unknown; inspect native discussion before retrying; no retry sent: ${error.message}`);
-    if (error.rateLimited === true) failure.rateLimited = true;
+    const failure = new Error(`Azure ${command.id} comment outcome unknown; inspect native discussion before retrying; no retry sent: ${/** @type {Error} */ (error).message}`);
+    if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited === true) /** @type {Error & { rateLimited?: boolean }} */ (failure).rateLimited = true;
     throw failure;
   }
   const id = returned?.id ?? returned?.commentId;
@@ -97,8 +97,8 @@ function comments(command, source, exec) {
     if (!confirmed || confirmed.isDeleted || confirmed.accountId !== project.viewer.id || confirmed.body !== source || confirmed.format !== 'markdown' || confirmed.version !== returned.version) throw new Error('native comment readback does not confirm ID/author/text/version');
     return [[before ? 'edited-comment' : 'comment', command.id, id, confirmed.url], ...(before ? [['advisory', 'no atomic comment-edit guarantee; native comments have no documented compare-and-swap']] : [])];
   } catch (error) {
-    const failure = new Error(`Azure ${command.id} comment ${isAzureIdentifier('AB-' + id) ? id : 'identity unknown'} outcome unconfirmed: ${error.message}; inspect native discussion; do not repeat blindly`);
-    if (error.rateLimited === true) failure.rateLimited = true;
+    const failure = new Error(`Azure ${command.id} comment ${isAzureIdentifier('AB-' + id) ? id : 'identity unknown'} outcome unconfirmed: ${/** @type {Error} */ (error).message}; inspect native discussion; do not repeat blindly`);
+    if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited === true) /** @type {Error & { rateLimited?: boolean }} */ (failure).rateLimited = true;
     throw failure;
   }
 }

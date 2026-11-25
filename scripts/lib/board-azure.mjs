@@ -21,7 +21,7 @@ const validUuid = (value) => typeof value === 'string' && UUID.test(value);
 const validDate = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 const problem = (message, cause) => {
   const error = new Error('Azure ' + message);
-  if (cause?.rateLimited === true) error.rateLimited = true;
+  if (cause?.rateLimited === true) /** @type {Error & { rateLimited?: boolean }} */ (error).rateLimited = true;
   return error;
 };
 const rootOf = (project) => `/${project.id}/_apis/wit`;
@@ -41,7 +41,7 @@ function collection(response, label) {
 }
 
 export function readAzureProject(exec = azureExec) {
-  const config = validateAzureConfig(boardConfig.AZURE_CONFIG, 'Azure board-config.mjs AZURE_CONFIG');
+  const config = validateAzureConfig(/** @type {typeof boardConfig & { AZURE_CONFIG?: unknown }} */ (boardConfig).AZURE_CONFIG, 'Azure board-config.mjs AZURE_CONFIG');
   if (boardConfig.BOARD_PROJECT_NUMBER !== null || boardConfig.ROUTING_FIELD !== null ||
       !Array.isArray(boardConfig.ROUTING_OPTIONS) || boardConfig.ROUTING_OPTIONS.length !== 0 || boardConfig.PARKED_LANE !== null) {
     throw problem('board-config.mjs must have no GitHub project number, routing field/options or parked lane');
@@ -224,12 +224,12 @@ export function mutateAzureIssue(command, exec = azureExec) {
     const validation = exec({ method: creating ? 'POST' : 'PATCH', path, query: { 'api-version': '7.1', validateOnly: true }, body: patch });
     // Assignment must resolve the supplied principal to the profile UUID before any real write.
     if (assignment !== undefined && (validation?.fields?.['System.AssignedTo']?.id ?? null) !== assignment) throw problem('validated assignee identity does not match authenticated identity');
-  } catch (error) { throw problem('validation failed; inspect native process required fields and setup: ' + error.message, error); }
+  } catch (error) { throw problem('validation failed; inspect native process required fields and setup: ' + /** @type {Error} */ (error).message, error); }
   let returned;
   try { returned = exec({ method: creating ? 'POST' : 'PATCH', path, query: { 'api-version': '7.1' }, body: patch }); }
   catch (error) {
-    if (creating) throw problem(`create outcome unknown in ${project.name} for title ${JSON.stringify(command.title)}; inspect the project before retrying; no retry sent: ${error.message}`, error);
-    throw problem(`${command.id} mutation failed or outcome unknown: ${error.message}; inspect current card; no retry sent`, error);
+    if (creating) throw problem(`create outcome unknown in ${project.name} for title ${JSON.stringify(command.title)}; inspect the project before retrying; no retry sent: ${/** @type {Error} */ (error).message}`, error);
+    throw problem(`${command.id} mutation failed or outcome unknown: ${/** @type {Error} */ (error).message}; inspect current card; no retry sent`, error);
   }
   const known = creating && validId(returned?.id) ? publicId(returned.id) : command.id;
   if (creating && !known) throw problem(`create outcome unknown in ${project.name} for title ${JSON.stringify(command.title)}; inspect the project before retrying; no retry sent`);
@@ -242,7 +242,7 @@ export function mutateAzureIssue(command, exec = azureExec) {
     intended(confirmed);
     return { issue: confirmed, skipped: false, viewer: project.viewer, column };
   } catch (error) {
-    throw problem(`${creating ? 'created ' : ''}${known} outcome unconfirmed: ${error.message}; inspect the native card${creating ? '; do not rerun create' : '; no retry sent'}`, error);
+    throw problem(`${creating ? 'created ' : ''}${known} outcome unconfirmed: ${/** @type {Error} */ (error).message}; inspect the native card${creating ? '; do not rerun create' : '; no retry sent'}`, error);
   }
 }
 
@@ -258,7 +258,7 @@ export function moveAzureCards(pairs, exec = azureExec) {
       const result = mutateAzureIssue({ name: 'move', id: issueNumber, status: statusName }, exec);
       completed.push({ issueNumber, statusName: result.column, skipped: result.skipped });
     } catch (error) {
-      throw problem(`move failed; confirmed ${completed.map((item) => item.issueNumber + ' ' + item.statusName).join(', ') || 'none'}; ${issueNumber}: ${error.message}`, error);
+      throw problem(`move failed; confirmed ${completed.map((item) => item.issueNumber + ' ' + item.statusName).join(', ') || 'none'}; ${issueNumber}: ${/** @type {Error} */ (error).message}`, error);
     }
   }
   return completed;
@@ -295,8 +295,8 @@ function allIssues(project, exec) {
       query: 'SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.Id] ASC',
     } });
   } catch (error) {
-    const failure = problem('project query unavailable, including possible native query limits; inspect the project/query limit: ' + error.message);
-    if (error.rateLimited) failure.rateLimited = true;
+    const failure = problem('project query unavailable, including possible native query limits; inspect the project/query limit: ' + /** @type {Error} */ (error).message);
+    if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited) /** @type {Error & { rateLimited?: boolean }} */ (failure).rateLimited = true;
     throw failure;
   }
   if (response?.queryType !== 'flat' || !validDate(response.asOf) || !Array.isArray(response.workItems) || response.workItemRelations !== undefined) throw problem('project query is malformed or incomplete');
@@ -333,7 +333,7 @@ function closingPulls(ids, project, ghExec) {
   const repository = `${boardConfig.BOARD_OWNER}/${boardConfig.BOARD_REPOSITORY}`;
   let pages;
   try { pages = JSON.parse(ghExec(['api', `repos/${repository}/pulls?state=all&per_page=100`, '--paginate', '--slurp'])); }
-  catch (error) { throw new Error('GitHub pull-request pages are unavailable: ' + error.message); }
+  catch (error) { throw new Error('GitHub pull-request pages are unavailable: ' + /** @type {Error} */ (error).message); }
   if (!Array.isArray(pages) || pages.length === 0 || !pages.every(Array.isArray)) throw new Error('GitHub pull-request pages are malformed or incomplete');
   const matches = new Map(ids.map((id) => [id, []]));
   const seen = new Set();
@@ -425,7 +425,7 @@ export function azureCardDetails(exec, ids) {
   try {
     ids.forEach(nativeId);
     project = readAzureProject(exec);
-  } catch (error) { return new Map(ids.map((number) => [number, { number, unavailable: error.message }])); }
+  } catch (error) { return new Map(ids.map((number) => [number, { number, unavailable: /** @type {Error} */ (error).message }])); }
   let rateLimit;
   return new Map(ids.map((number) => {
     if (rateLimit) return [number, { number, unavailable: rateLimit.message }];
@@ -438,8 +438,8 @@ export function azureCardDetails(exec, ids) {
         comments: comments.map((comment) => `comment ${comment.id} | ${comment.format}${comment.format === 'unknown legacy' && comment.nativeFormat !== null ? ' (' + comment.nativeFormat + ')' : ''} | author ${comment.accountId} | ${comment.createdAt}${comment.isDeleted ? ' | deleted tombstone (not an active claim)' : ''}\n${comment.body}`),
         commentCount: comments.length, commentsUnavailable: null }];
     } catch (error) {
-      if (error.rateLimited) rateLimit = error;
-      return [number, { number, unavailable: error.message }];
+      if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited) rateLimit = /** @type {Error} */ (error);
+      return [number, { number, unavailable: /** @type {Error} */ (error).message }];
     }
   }));
 }

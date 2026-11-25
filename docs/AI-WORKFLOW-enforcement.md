@@ -21,7 +21,7 @@ rules.
 flowchart LR
     accTitle: The six triggers and what each one reaches
     accDescr: Six separate triggers each reach their own control, and passing one control says nothing about another.
-    T[Agent tool call] --> G[Git guard and handoff hook]
+    T[Agent tool call] --> G[Git guard, handoff hook and owner menu hook]
     E[Agent turn ends] --> V[Green check and product stop gate]
     C[Git commit or merge] --> P[Commit hook and product commit gate]
     U[Git push] --> Q[Push hook, and the main gate for a push to main]
@@ -39,6 +39,7 @@ instruction.
 | Git guard | Before every shell command an agent submits | The unsafe git and GitHub command forms the head of `scripts/lib/unsafe-git.mjs` lists | What a wrapper or a started program does; a server-side limit |
 | Cleanup approval | Before a shell command, in a Claude Code session at the trusted root | A direct cleanup call that lacks the trusted root's context | Protection from a hostile interpreter or a changed trusted root |
 | Handoff hook | Before a helper is dispatched, and on Codex before every tool call | A handoff with a missing line or an unfilled slot, and a builder told to prove its own mutation | Whether the plan is sound, or whether the builder follows it |
+| Owner menu hook | On Claude Code, in a job a Herdr coordinator started: when a permission request, question or plan menu opens, and after a question or plan menu is answered | An allow from the queue panel for a permission call the panel did not show whole | Whether the owner read the menu; any approval to merge |
 | Green check | When an agent's turn ends | Ending a turn on a lint error in pending source changes, after any product stop gate | A check it could not run, which it states as unverified; changes in another checkout |
 | Product gates | At turn end, and on every commit | A turn end or commit whose gate exits non-zero or is not executable | Anything, where the repository supplies no gate |
 | Test output filter | Before every shell command on Claude Code | Condenses a green test run and passes a red one through in full | Nothing; it changes only what the session reads |
@@ -56,10 +57,16 @@ instruction.
 
 Each runtime reads its own registration file. On Claude Code, `.claude/settings.json` runs the git guard and the test
 output filter before every shell command. It runs the handoff hook before every helper dispatch and the green check at
-turn end. On Codex, `.codex/hooks.json` runs the git guard before every shell command and the handoff hook before every tool
-call and when a helper starts. It runs the green check at turn end, with its own command form for native Windows.
-Codex finds its hooks through the repository's shared git directory, so every worktree of the repository runs the same
-hooks. A Claude Code session started at the root checkout keeps that root's git guard after it enters a job worktree.
+turn end. It runs the owner menu hook when a permission request, question or plan menu opens, and again after a question
+or plan menu is answered. In a job a Herdr coordinator started, the first run hands the menu to the owner's queue panel
+and waits. The panel's answer, or one the coordinator relays, becomes Claude Code's allow or deny. It allows a
+permission only for a call the panel showed whole. The second run closes the panel's matching ask once Claude Code has
+the answer, wherever the owner gave it. The owner's yes to merge such a job is removing its card's `show-me-first`
+marker, never a menu answer. On Codex, `.codex/hooks.json` runs the git guard before every shell command and the handoff
+hook before every tool call and when a helper starts. It runs the green check at turn end, with its own command form for
+native Windows. Codex finds its hooks through the repository's shared git directory, so every worktree of the repository
+runs the same hooks. A Claude Code session started at the root checkout keeps that root's git guard after it enters a
+job worktree.
 
 A registered hook is configuration, not proof that the hook ran. A runtime must load the hook and its user must trust
 it before it runs at all. The Codex hooks read the command and its working directory from the event Codex sends, as

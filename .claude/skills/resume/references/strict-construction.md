@@ -3,8 +3,8 @@
 This file is part of the `resume` skill: a section number or quoted heading in it names a section of
 [its SKILL.md](../SKILL.md).
 
-- **Strict construction has two handoffs.** For each `strict-tdd` claim, first dispatch a test-only handoff:
-  its approved plan and file list allow evidence changes only, with independently grounded expectations and the
+- **Strict construction has two handoffs.** For each `strict-tdd` claim, first dispatch a test-only handoff,
+  carrying a `Stage: test-only` line: its approved plan and file list allow evidence changes only, with independently grounded expectations and the
   failing observation to log: meaningful red, or the absence failure the plan declared under the local testing
   strategy's no-baseline alternative. When it returns, commit every change the stage made as one stage commit
   whose message names the claim and says it ends at expected red; the chronology audit under "6. Verify and
@@ -18,7 +18,15 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   chronology gap. Before implementation dispatch, record the claim, accepted red receipt and coordinator
   validation verdict in the existing branch worklog, explicitly confirming that the inspected diff contains
   evidence-only changes. Carry that record into the implementation handoff with the validated test contract
-  fixed: test identities, assertions, expected values and their source. Validate once per coherent claim or
+  fixed: test identities, assertions, expected values and their source. The implementation handoff carries a
+  `Stage: implementation` line, one `Frozen test: <file> :: <full title>` line per frozen identity and one or more
+  `Red receipt:` lines, each a failing run-log receipt copied whole, together naming every frozen test; each receipt
+  must be a whole line of the run log of the job worktree, which the handoff's `Working directory` names. The
+  handoff hook on Claude Code and the dispatch hook on Codex refuse a strict handoff without its `Stage:` line, and
+  an implementation handoff without these lines or with a receipt the log does not hold. That proves only that the job
+  worktree's run log holds a well-formed failing receipt naming every frozen test. The session writes that log, and one
+  exit code covers the whole selection, so it cannot show that each test failed or why: the coordinator's validation
+  of each failure and the chronology audit's stage-commit read stay. Validate once per coherent claim or
   newly distinct safeguard, not per assertion. A newly discovered safeguard stops for classification before
   editing. An incorrect oracle stops for coordinator revalidation and an explicit revised contract before work
   resumes; a builder never quietly edits the frozen assertions to obtain green. The testing strategy owns
@@ -27,8 +35,10 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   a distinct behaviour of the claim has no test, is repaired through the same two handoffs: the test-only
   handoff writes the missing test and logs its red against the reviewed tree before any fix, and the
   implementation handoff follows validation. A strict repair never writes its test and fix in one handoff. A
-  repair's new test that passes on the reviewed tree logs no red: the behaviour it covers was built before its
-  test, which the chronology audit treats as code before red.
+  repair's new test that passes on the reviewed tree logs no red. When the behaviour it covers is present at the
+  job base, it is an `existing behaviour` test: it takes the `evidence-required` route with its executed mutation
+  and goes to no owner. Otherwise the behaviour was built before its test, which the chronology audit treats as
+  code before red.
 - **Clerical corrections.** After planning and required plan review are complete, the coordinator may authorize and
   record a clerical correction. This route is unavailable while owner approval of the completed plan is pending,
   whether from the optional gate or an owner instruction; it introduces no approval requirement when none applies
@@ -45,7 +55,8 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   and ambiguous meaning are excluded.
 
   Record old/new text, reason and identity proof in the existing worklog and revised handoff; provide that
-  record to final review and summarize in the pull request. Builders perform file edits and cannot self-authorize.
+  record to final review and summarize in the pull request. Builders perform file edits, except in a wording-only
+  change as "5. Build" says, and cannot self-authorize.
   Uncertain equivalence returns to the seat that wrote the plan; incorrect oracles use existing coordinator
   revalidation and revised-contract steps. Existing required plan review and fresh final-tree review remain.
   Owner-requested preapproval revisions follow Plan

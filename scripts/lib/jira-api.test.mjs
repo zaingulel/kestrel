@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Expectations follow Atlassian Basic auth and REST v3 status codes plus the Jira custody contract.
 // Real children use the existing --import fetch-stub pattern and isolated HOME/USERPROFILE.
 import { test } from 'node:test';

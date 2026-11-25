@@ -108,7 +108,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     ['[]', `${label}: file: must hold one JSON object; found []`],
     ['{"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"seats":{}}', `${label}: version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"seats":{},"extra":true}', `${label}: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "extra"; ${RECOVERY}`],
     [withRuntimes('claude'), `${label}: ${runtimesRule}; found "claude"`],
     [withRuntimes([]), `${label}: ${runtimesRule}; found []`],
     [withRuntimes(['gemini']), `${label}: ${runtimesRule}; found ["gemini"]`],
@@ -149,7 +149,7 @@ test('a settings file that is malformed or holds an unknown name or an unsafe va
     '{"claude":{"builder":{"model":"opus","effort":"high"},"reviewer":{"model":"opus","maxTurns":90}},"codex":{"reviewer":{"model_reasoning_effort":"high"}}}',
   );
   assert.deepEqual(seatsRecord(new Map()), {});
-  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], greptile: false, herdr: false, docSweep: true, seats: new Map() });
+  assert.deepEqual(parseSettings(withSeats({}), label), { runtimes: ['claude', 'codex'], greptile: false, herdr: false, docSweep: true, docsSite: 'off', seats: new Map() });
   assert.equal(parseSettings('{"version":1,"seats":{},"greptile":true}', label).greptile, true);
   assert.equal(parseSettings('{"version":1,"seats":{},"herdr":true}', label).herdr, true);
   assert.equal(parseSettings('{"version":1,"seats":{},"docSweep":false}', label).docSweep, false);
@@ -220,7 +220,7 @@ test('ANTI-REGRESSION: an override that breaks the seat policy is reported and o
 // Mutation: leave the shared file out of the seat policy run on the rendered bytes, or take the larger of the two
 // caps, and the raised cases go green.
 test('ANTI-REGRESSION: an override may not raise the oracle or security-reviewer turn limit above the shared file\'s own', () => {
-  for (const [seat, model, shipped, raised] of [['security-reviewer', 'opus', 90, [91, 150]], ['oracle', 'fable', 60, [61, 90]]]) {
+  for (const [seat, model, shipped, raised] of /** @type {[string, string, number, number[]][]} */ ([['security-reviewer', 'opus', 90, [91, 150]], ['oracle', 'fable', 60, [61, 90]]])) {
     const path = `.claude/agents/${seat}.md`;
     const shared = buffer(claudeSeat(seat, model, 'xhigh', shipped));
     for (const limit of raised) {
@@ -247,8 +247,7 @@ test('a problem the shared bytes already have is not charged to the override', (
   assert.match(another[0], /^reviewer\.toml: unknown model `example-other-model`/);
 });
 
-test('seat setting values are read from the plain form and a damaged seat is refused by name', async () => {
-  const { seatSettingValues } = await import('./seat-settings.mjs');
+test('seat setting values are read from the plain form and a damaged seat is refused by name', () => {
   const claude = claudeSeat('builder', 'opus', 'high', 40);
   assert.deepEqual(seatSettingValues(CLAUDE_PATH, buffer(claude)), { model: 'opus', effort: 'high', maxTurns: 40 });
   assert.deepEqual(seatSettingValues(CODEX_PATH, buffer(codexSeat('builder', 'gpt-5', 'high'))), { model: 'gpt-5', model_reasoning_effort: 'high' });
@@ -320,6 +319,6 @@ test('every seat in this repository carries its settings in the form the substit
 test('the settings-form check passes for a Claude seat whose maxTurns already equals any stand-in value', () => {
   const claude = runtimes.find(({ runtime }) => runtime === 'claude');
   for (const maxTurns of [7, 1]) {
-    assertSubstitutionForm(CLAUDE_PATH, buffer(claudeSeat('builder', 'sonnet', 'high', maxTurns)), claude);
+    assertSubstitutionForm(CLAUDE_PATH, buffer(claudeSeat('builder', 'sonnet', 'high', maxTurns)), /** @type {NonNullable<typeof claude>} */ (claude));
   }
 });

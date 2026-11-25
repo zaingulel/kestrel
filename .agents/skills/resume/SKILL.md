@@ -17,14 +17,17 @@ throughout this skill, including complete native-comment review before claiming.
 
 ## Before intake
 
-**Run triggers.** A session reads [references/runs.md](references/runs.md) whole, and the part for its run's kind, [references/product-manager-run.md](references/product-manager-run.md) or [references/pre-approved-run.md](references/pre-approved-run.md), which the message or the session's start message names, as **Reference files** says, before it acts on any of these messages, and, where the message is its first, once the target is recorded and before the intake reads: the owner's instruction `Start a product manager run.` or `Start a pre-approved run.`; a first message that is exactly `Continue the product manager run.`, or begins `End the product manager run: ` or `End the pre-approved run: `; a message beginning `Fabraik run update: `; a message beginning `Your coordinator carries the answer the owner gave for your card, word for word.`, the owner's answer carried to this card session; or a first message that is one of these fixed phase prompts, each followed by a newline and its JSON context:
+**Run triggers.** A session reads [references/runs.md](references/runs.md) and [references/pre-approved-run.md](references/pre-approved-run.md) whole, as **Reference files** says, before it acts on either of these messages, and, where the message is its first, once the target is recorded and before the intake reads: the owner's instruction `Start a pre-approved run.`; or a first message that begins `End the pre-approved run: `. A session given `Start a product manager run.` starts nothing and says the run is retired and that a pre-approved run builds from `Ready`.
 
-- Continue this exact pre-approved Codex job.
+A session whose first message is one of these fixed phase prompts, which are run triggers too, each followed by a newline and its JSON context, reads at that same point, in place of those files, [references/pre-approved-phase.md](references/pre-approved-phase.md) whole and the files it names for that prompt:
+
 - Select and claim one eligible pre-approved job. Do not plan, build, or deliver.
 - Prepare this exact pre-approved job. Do not build or deliver.
 - Build and verify this exact prepared job. Do not publish or deliver.
 - Deliver this exact built job. Do not select or build another job.
-- Continue this exact answered pre-approved job.
+- Continue this exact pre-approved sidebar job.
+
+A session whose first message is the job prompt `Run the resume skill for card #<N> as a Herdr job.`, with `<N>` the card number, reads [references/herdr-job.md](references/herdr-job.md) whole before any other action and follows it with the rest of this skill.
 
 A session whose first message asks it to build a card in the cloud reads
 [references/cloud-build.md](references/cloud-build.md) whole before any other action, this check included, as "Cloud
@@ -44,6 +47,20 @@ verified.
 
 A Claude Code session whose `printenv CLAUDE_CODE_REMOTE` prints `true` is a cloud session: once this check is done it
 continues at "Cloud build" below, not with the fetch, intake or work-pick.
+
+**One opening command.** A session that is no cloud session and whose first message is no run trigger issues the
+fetch, the inventory, section 1's intake reads and closeout's Deferred cleanup discovery as one command from the
+`main` checkout, in the same turn as the hook check:
+`node scripts/resume-start.mjs <scratch> > <scratch>/resume-start.txt`. Exit 0, 3 for drift, 4 for an incomplete
+cleanup list or 5 for both means it found that checkout on `main`, clean and at the fetched commit before and after
+the reads, saved the intake summary unchanged as `<scratch>/board-intake.txt` and printed one document standing for
+those reads, read whole under Complete reads with the line count stderr gives: the target, the inventory, the
+intake's exit, stderr and summary, the open pull requests and the cleanup list. That proof makes the `main` checkout
+the verifier checkout, leaving Update local main, which has nothing to do, unread. For a session started in that
+checkout it is also the instruction check: record the target as the read revision of `AGENTS.md` and this skill as
+loaded; a session started elsewhere loads both from the target under Instruction reuse below. The sweep read and
+section 1's closing recheck stay the session's own. Any other exit names the step that stopped it, with nothing
+printed or saved: follow the steps below and section 1 by hand.
 
 Fetch `origin/main` with `git fetch --no-prune origin main` and record the fetched commit as the target; in the
 same turn read the local inventory with `git status`, `git branch --show-current` and
@@ -98,15 +115,16 @@ redirected to a literal path there:
 node scripts/board.mjs --intake <scratch>/intake > <scratch>/board-intake.txt
 ```
 
-- The document is a summary: the pick listing and, for every pickable card and every claimed card with no closing pull
-  request, its column, Workstream, parent, open blockers, assignees, latest `Claim:`, whether it is a suggested card,
-  its `Needs owner:` comments, its What to build section and the path and line count of the file holding its full body
-  and comments; stderr holds the drift scan, the details outcome and the document's line count. Read the document whole
-  under Complete reads above, using that line count. Read a card's file only once that card is picked, whole, using the
-  line count its `card text:` line gives; never read every card's file.
+- The document is a summary: the board line and, for every pickable card and every claimed card with no closing pull request, one section with its
+  column, Workstream, labels, parent, open blockers, assignees, latest `Claim:`, whether it is a suggested card, its
+  `Needs owner:` and `Returned:` comments, each under the account that posted it and its address where the tracker's
+  read gives them, its What to build section and the path and line count of the file holding its full body and
+  comments; a pickable card with no number has one row and no section; stderr holds the drift scan, the details outcome and the document's line count. Read the
+  document whole under Complete reads above, using that line count. Read a card's file only once that card is picked,
+  whole, using the line count its `card text:` line gives; never read every card's file.
 - Exit 0 is a complete read with no drift; 2 is a failed board read, so board freshness is unavailable and no
   work is selected; 3 is drift, reconciliation to do before work-pick; 4 is an incomplete read; 5 is 3 and 4
-  together. A card that stderr or the document marks `UNAVAILABLE` is reported at work-pick and never presented
+  together. A card whose details stderr or the document marks `UNAVAILABLE` is reported at work-pick and never presented
   as startable.
 - When every read has returned, recheck the verifier checkout with `git rev-parse HEAD` and
   `git status --porcelain`, in the same turn as the document's final batch of sections. Unless they show the
@@ -121,19 +139,23 @@ node scripts/board.mjs --intake <scratch>/intake > <scratch>/board-intake.txt
   jobs, then read only their bodies: the "Not done" section says where to pick up. For each draft, read its card's
   newest claim with the card read of "3. Start the job", since the intake omits it once a closing pull request exists;
   a draft whose newest claim names `Claude Code cloud` is taken up only as step 5 of "Cloud build" says.
-- Planned work comes from the document. Prefer `Ready` work matching the owner's latest objective;
-  `Backlog` remains eligible. `Ready` means startable in the next session with no missing owner decision,
-  external dependency, or scheduled date; a card waiting on any of those goes to `Backlog` with its trigger
-  named in a comment. A card in `In progress` with no branch or pull request behind it may be another machine's or
-  session's job, since a job branch stays local until push: never return it to `Ready` on the session's own
-  judgment and never offer it as a candidate row. Show it to the owner at work-pick with the claim the document
-  gives for it, whether a comment, none or `UNAVAILABLE`, and return it to `Ready` only on the owner's say. A card
+- Planned work comes from the document. Prefer `Ready` work matching the owner's latest objective; `Backlog` remains
+  eligible. `Ready` means startable in the next session with no missing owner decision, external dependency, or
+  scheduled date; a card waiting on any of those goes to `Backlog` with its trigger named in a comment, which begins
+  `Ready when:` where the card leaves `Ready`. On the owner's word naming one or more cards for `Ready`, in any wording,
+  a session moves them there. Without that word it moves there only the returns `handoff` and parking make and, on the
+  GitHub Projects tracker, a trigger card that section 1 of [references/held-cards.md](references/held-cards.md) admits,
+  read whole before that move; gate one admits that card. A wish the owner states with that word or a work-pick, such as
+  a mock-up first, is written on the card by the session that receives it, before any plan, as a comment beginning
+  `First step:` that quotes it. For a direct local GitHub pick, write it only after the claim command exits 0. A card in `In progress` with no branch or pull request behind it may be another
+  machine's or session's job, since a job branch stays local until push: never offer it as a candidate, and show it to
+  the owner at work-pick with the claim the document gives for it, whether a comment, none or `UNAVAILABLE`. A card
   whose newest claim names `Claude Code cloud` is held for a cloud build: work-pick offers its delivery first, as step 4
   of "Cloud build" says, and before any return to `Ready` it is released as "Releasing a cloud claim" in that section
   says.
-- A card is held for the owner while any of its comments begins `Needs owner:`, and a card whose title begins `Proposed: ` is a suggested card held for the owner; neither is ever a candidate row. Where the intake shows either, read [references/held-cards.md](references/held-cards.md) whole before the table is shown, and before answering, returning or taking up such a card. A card whose `Returned:`
+- A card is held for the owner while any of its comments begins `Needs owner:`, whoever posted it, and a card whose title begins `Proposed: ` is a suggested card held for the owner; neither is ever a candidate. One line above the table, or above the line naming the card taken, names each held card with the account that posted that comment, where its section gives one, and the comment's first line, and each suggested card with its title. Read [references/held-cards.md](references/held-cards.md) whole before answering, returning or taking up such a card. A card whose `Returned:`
   comment names a `Job:` is not startable here with that machine as the reason, and is taken up only on that machine
-  as the parked-job paragraph at the end of this skill says. Where a picked card's file shows a `Returned:` comment, read [references/held-cards.md](references/held-cards.md) whole before any further step.
+  as the parked-job paragraph at the end of this skill says. Where a picked card's section shows a `Returned:` comment, read [references/held-cards.md](references/held-cards.md) whole before any further step.
 - If the Conventions table in `.agents/REPOSITORY.md` marks the documentation routines active and the repository's
   settings file, `.agents/factory-settings.json`, does not hold `"docSweep": false`, intake sweep-triage tasks and
   findings source reports as `docs/SWEEP-TRIAGE.md` describes. Where that file is absent, holds no such key or holds
@@ -141,41 +163,45 @@ node scripts/board.mjs --intake <scratch>/intake > <scratch>/board-intake.txt
   before issuing the intake reads.
 
 After the current verifier and all intake reads are settled, reconsider pending cleanup under
-[closeout's Deferred cleanup](../closeout/SKILL.md#deferred-cleanup) before work-pick. Reuse the fetched inventory
-and investigate discovered targets under that procedure without changing work selection or claims.
+[closeout's Deferred cleanup](../closeout/SKILL.md#deferred-cleanup) before work-pick. Where the opening command
+succeeded, its `deferred cleanup` lines are that section's discovery read and its reading of each hit's comments: make
+neither again, read only the comments of the cards they list as pending, together, and settle their targets; an
+incomplete list is incomplete discovery there. Reuse the fetched inventory and investigate discovered targets under
+that procedure without changing work selection or claims.
 
 ## 2. Work-pick (owner gate one)
 
-Keep every worthwhile Ready or Backlog recommendation, with no arbitrary shortlist. The intake document is the evidence
-for every row; after selection the picked card's file, read whole as section 1 says, serves planning unless changed
-evidence invalidates it; never issue one `gh issue view` per card.
+Every worthwhile `Ready` or `Backlog` card is a candidate, with no arbitrary shortlist. The intake document is the
+evidence for every candidate; after selection the picked card's file, read whole as section 1 says, serves planning
+unless changed evidence invalidates it; never issue one `gh issue view` per card. An open epic parent is never a
+candidate; its next unblocked child is, and a child with an open blocker is not offered.
 
-A card held for a cloud build, which step 1 finds by a newest claim naming `Claude Code cloud`, comes first: its one
-line stands above the table, as step 4 of "Cloud build" says, and the closing recommendation names it ahead of any row.
+A card held for a cloud build, which step 1 finds by a newest claim naming `Claude Code cloud`, is named first: its one
+line stands above the table or the line naming the card taken, as step 4 of "Cloud build" says, and the table's closing
+recommendation names it ahead of any candidate.
 
-State the session's own model in one line, then always present this table, even for one candidate:
+State the session's own model in one line. A pre-approved run picks as its rules below say.
+Otherwise, unless the owner names a card or asks for the candidates, in any wording, take the top of `Ready`: the first
+`Ready` card in the document, which orders that column as its `Ready order:` line says, that is startable now, an open
+epic parent standing in that order for its next unblocked child. Say in one line which card it is and that it is the top
+of `Ready`, after one line for each `Ready` card above it giving why it is not startable, and go on at "3. Start the
+job" with no table and no second question. The top is unknown where that line calls any `Ready` card's place unknown,
+where the read reports a `Ready` card whose content did not resolve, or where a card above it is marked `UNAVAILABLE`.
+Show the table where `Ready` holds no startable card, where the top is unknown and where the owner asks for the
+candidates; a card the owner names that is not startable now is reported with its reason, and the table follows. Every
+table follows [references/pick-table.md](references/pick-table.md), read whole before it is shown.
 
-| # | Card | Outcome for the user | Why now, and the risk | Gates it triggers | Route and why | Startable now? |
-|---|---|---|---|---|---|---|
-
-`Card` is the issue number and its title as written, whatever its length. Write every other cell as a phrase,
-not a sentence, aiming for twelve words or fewer and never dropping a fact the decision needs:
-`Outcome for the user` adds what the title does not say, and `Startable now?` is yes, or no with the reason.
-
-An open epic parent is never a candidate row; its next unblocked child is, and a child with an open blocker
-is not offered. Gates are read off AGENTS.md, Owner gates and Review: owner direction, sign-off, architect plan,
-screenshot, security review, the external review where the repository has turned that add-on on, and any further gate
-the Surfaces table in `AGENTS.md` names. Route names the build seat (`builder-max`, `builder`, or `builder-lite`),
-whether the architect runs, and the reason from residual judgment, uncertainty, failure consequence, and verification
-strength. Close with one line recommending a row number, then stop; no acceptance-criteria list is presented. The
-owner's pick of any row is the work-pick approval of that card's
-outcome and acceptance criteria as written, and it starts the job with no further confirmation unless the checks
-in "3. Start the job" do not confirm the card is free; planning proceeds autonomously after it. One issue per
-branch. Two issues may run in parallel only when their files are disjoint.
-
-**Advance approval.** Read [references/advance-approval.md](references/advance-approval.md) whole before the table is shown, and before answering any owner question about posting, checking or withdrawing an `Approved:` record.
-
-**Product manager run.** Its rules are in [references/product-manager-run.md](references/product-manager-run.md), read as **Run triggers** under "Before intake" says.
+For a local GitHub Projects session, a startable card the owner names or picks from the table goes directly to the
+claim in "3. Start the job" with the original intake. If the named card is already shown occupied, read
+[references/exceptions.md](references/exceptions.md) before any claim. Keep the owner's explicit pick in this session's
+context for the delivery eligibility check in [references/merge-on-evidence.md](references/merge-on-evidence.md).
+On another tracker, a named or table-picked card moves to the top of `Ready` as its card guide says, after the free
+check of [references/claim-reads.md](references/claim-reads.md). The claim then refreshes the intake as "3. Start the
+job" says; a changed assignee or latest claim makes the card Not free. A failed move is told to the owner and starts
+nothing. The card taken, named or picked is owner gate one, which "Owner gates" in `AGENTS.md` defines; planning
+proceeds autonomously after it. One issue per branch. Where a person or the coordinator picks the cards, two issues may run in parallel only when
+their files are disjoint: a card whose files overlap a running job's waits until that job merges, and the other
+startable cards build meanwhile.
 
 **Pre-approved run.** Its rules are in [references/pre-approved-run.md](references/pre-approved-run.md), read as **Run triggers** under "Before intake" says.
 
@@ -194,7 +220,9 @@ branch. Two issues may run in parallel only when their files are disjoint.
   first refreshes it, as that step requires after a reconciliation write. The runtime is `Claude Code cloud` for a card
   started for a cloud build as "Cloud build" says. Record the address on the `wrote:` line of the claim, because that
   address is how the session knows its own claim.
-  - **Exit 0**, Free and the session's own claim is first: it holds the card. Continue.
+  - **Exit 0**, Free and the session's own claim is first: it holds the card. For a direct local GitHub pick, retain
+    the repository, card and exact claim address with the owner's explicit pick in this session's context; write any
+    requested `First step:` comment now, before planning. Continue.
   - **Exit 2, 3, 4 or 5**, Could not confirm before any write, Not free, another claim first, or Could not confirm
     after the writing began: read [references/exceptions.md](references/exceptions.md) whole before any further step.
     After exit 4 or 5 the command is never run again, because a second run posts a second claim.
@@ -257,15 +285,14 @@ branch. Two issues may run in parallel only when their files are disjoint.
   keeps its own rule: cost and latency break only equal-reliability ties. Use `builder` for bounded substantive
   implementation, `builder-max` from the outset when uncertainty or failure consequence warrants deeper reasoning, and
   `builder-lite` only for mechanical edits with strong verification and no remaining judgment.
-- An `architect` dispatch carries completed findings or, on Claude Code, a bounded unresolved lookup that its
-  charter permits it to send only to `explorer`; the architect waits for completed findings before planning.
-  Each explorer writes completed findings with
-  `file:line` references and explicit unresolved gaps to its own distinct named findings file, such as
-  `.claude/worklog/<branch>-discovery-<name>.md`. The handoff's `Discovery:` line carries every findings file path
-  or, for the Claude lookup branch, the bounded question and its named findings-file destination. The session's
-  own findings use the same references and gaps. An unbounded list of places to search is insufficient. On an
-  unplanned return, the coordinating session completes the missing discovery under this rule or names the missing
-  plan file, then redispatches the architect; that return is not a capped architect.
+- An `architect` dispatch carries completed findings or, on Claude Code, a bounded unresolved lookup that its charter
+  permits it to send only to `explorer`; the architect waits for completed findings before planning. Each explorer
+  writes completed findings with `file:line` references and explicit unresolved gaps to its own distinct named findings
+  file, such as `.claude/worklog/<branch>-discovery-<name>.md`. The handoff's `Discovery:` line carries every findings
+  file path or, for the Claude lookup branch, the bounded question and its named findings-file destination. The
+  session's own findings use the same references and gaps. An unbounded list of places to search is insufficient. On an
+  unplanned return, the coordinating session completes the missing discovery under this rule, then redispatches the
+  architect; that return is not a capped architect.
 - Every `architect` dispatch is a filled copy of `.agents/templates/planner-handoff.md` whose `Deliverable:` line
   names the plan file, `.claude/worklog/<branch>-plan.md`.
 - **Capped seats.** An `architect`, `oracle` or `security-reviewer` reply that does not end with its finish line, `plan delivered in full`, `brief delivered in full` or `security review delivered in full`, is capped: read [references/exceptions.md](references/exceptions.md) whole before acting on it.
@@ -276,16 +303,18 @@ branch. Two issues may run in parallel only when their files are disjoint.
   `.claude/worklog/<branch>-security-review.md`. For missing locations, its Claude charter permits only bounded
   `explorer` discovery, completed before its own trust judgment.
 - A plan names its scope: the files each slice changes and the claim each slice proves, never a line estimate.
-  Size is the owner's judgment before work-pick, through the `to-issues` size signals; after work-pick no seat
+  Size is the owner's judgment before work-pick, through the `to-tickets` size signals; after work-pick no seat
   splits, stops or replans work for its estimated or actual size. An architect's finding that the card holds more
   than one independently demonstrable outcome goes to the owner as a split proposal before any build, and the
-  session never narrows such a plan inline or merges slices to fit. A product manager run settles a proposal only as its step 11 in [references/product-manager-run.md](references/product-manager-run.md) says. A card that came out of a split is never split
+  session never narrows such a plan inline or merges slices to fit. A card that came out of a split is never split
   again on a session's own judgment; only the owner starts another split. A parser, state machine, or general
   framework the outcome did not name is a scope change and goes back to the owner before it is built.
 - Before implementation, every coherent claim has a fixed observer, independently grounded expectations and a
   construction mode selected under the local `docs/TESTING-STRATEGY.md`. Resolve any absent runnable baseline or
   unavailable observation through that authority's named alternative or stop; a model choice changes no admission.
   Carry the acceptance examples, selected evidence and construction stage in the existing builder handoff fields.
+  Label each new test `new behaviour` (absent at the job base) or `existing behaviour` (present there, proven by its
+  executed mutation); the local `docs/TESTING-STRATEGY.md` says which construction mode each label admits.
   Every plan, including the session's short plan, statically verifies its prescribed recipe by reading the test
   source, runner selection options and fixture prerequisites, without executing tests. The architect retains its
   existing live-path and fixture-affordance checklist. Carry verified commands and their source revision,
@@ -294,6 +323,14 @@ branch. Two issues may run in parallel only when their files are disjoint.
   actual-result validation at the first required execution. Static validity is not execution evidence; Receipt
   reuse alone governs passing receipts.
 - **Machinery rule.** Read [references/machinery.md](references/machinery.md) whole before a plan that adds to, changes or removes the workflow's scripts, tools, hooks or tests, or rewrites a testing strategy, a coding standard or the workflow text of `AGENTS.md`, and before a workflow-health assessment the owner asks for.
+- **Owner ask.** Once the plan is complete and every plan review finding settled, the session lists from the card and
+  the plan every owner action, as "Owner gates" in `AGENTS.md` defines one, that the work needs and the card does not
+  name, each with its limit. Where there is any, it asks the owner about all of them in one plain-language question with
+  a recommendation, and no builder is dispatched before the answer, which bounds the build. Where plan approval is on,
+  the list and the question are part of its presentation; in a run, the question parks the job as step 7 of
+  [references/card-session.md](references/card-session.md) says.
+- **First step.** A card's `First step:` comment names its plan's first slice; once that slice is built, the session
+  shows the owner the result, and no further slice is built before their choice.
 - **Plan approval (optional owner gate).** `AGENTS.md` owns what this gate is and what turns it on, under "Owner
   gates"; these are its steps, taken once the plan is complete and every finding of any plan review is settled.
   - **Read the setting on the fetched `main`,** never from the files of the job, so a job cannot switch its own
@@ -310,9 +347,10 @@ branch. Two issues may run in parallel only when their files are disjoint.
 ## 5. Build
 
 - Every edit goes to `builder-lite`, `builder`, or `builder-max` through `.agents/templates/builder-handoff.md`; the
-  session never builds (AGENTS.md, Runtime notes). Builders never run the full suite, never commit.
-- Where the repository has turned plan approval on, no builder is dispatched before the owner's yes to the plan in
-  this session; "4. Plan" owns the steps under **Plan approval**.
+  session never builds (AGENTS.md, Runtime notes), except that it makes a wording-only change itself. A change is
+  wording-only when it touches no code, test, hook, guard or setting and its plan, after the plan review of "4. Plan",
+  fixes every replacement sentence word for word before any edit; a plan that owes no plan review gets that same
+  review first. Builders never run the full suite, never commit.
 - **Strict construction and clerical corrections.** Read
   [references/strict-construction.md](references/strict-construction.md) whole before the first handoff of any
   `strict-tdd` claim or of a review repair to one, and before authorizing any clerical correction.
@@ -326,29 +364,34 @@ branch. Two issues may run in parallel only when their files are disjoint.
   and the convergence checks `docs/TESTING-STRATEGY.md` names. The log lives at `.claude/worklog/<branch>.md`.
   On every agent-initiated rerun, supply a nonblank diagnosed reason through `RUN_LOG_RERUN_REASON`; for example,
   `RUN_LOG_RERUN_REASON='Changed the failing assertion' node scripts/run-log.mjs focused -- npm run lint`.
-- When two repair-and-re-review cycles still produce true findings, new or repeated, judge them. If each is bounded
-  and verifiable, run one more round that fixes all of them. Bring the owner the choice, with a recommendation, only
-  when a finding needs an unsettled design, owner judgment or evidence that cannot be bounded, or when that round
-  still does not converge. Findings are never ignored.
 - Regenerate any artifact the Conventions table's `generated artifacts` row names and commit it with its source;
   the Stop and pre-commit hooks enforce it.
 - **Waiting.** Use the native awaited operation bounded by higher-priority instructions, tool limits and the next
   communication/observation deadline, with headroom for the update. Interruptibility alone waives no deadline. Use a
-  long interruptible helper wait only where active requirements permit it. Retain one owned command/cell and resume
-  its identifier; inspect output and terminal status before awaiting again. Never substitute manual sleep/status-check
-  loops or repeated short checks of unchanged state for native awaits; bounded native awaits at communication/observation
+  long interruptible helper wait only where active requirements permit it. Retain one owned command/cell and resume its
+  identifier; inspect output and terminal status before awaiting again. Never substitute manual sleep/status-check loops
+  or repeated short checks of unchanged state for native awaits; bounded native awaits at communication/observation
   deadlines remain the procedure. Internal process polling inside one awaited cell is not repeated model polling. An
   all-results barrier must not hide failure, completion or owner/helper interruption. Where no shorter active deadline
   applies, use the longest supported interruptible interval. Where behavior is unknown, use a documented supported
   bounded wait. Every session the coordinator starts, or takes over from the owner, is launched or taken over as a
   native awaited operation or as a named session whose completion wakes the coordinator, which carries the owner's
-  questions and answers to and from it by message, the receiver acting on one only when the sender shown is the session
-  that started it (no hook sees a message, so this rests on the receiver); a push yes reaches a job only by the carry
-  that **Carried answers** in [references/runs.md](references/runs.md) gives, never by message, an owner gate's yes
-  still counting only where `AGENTS.md` says; a terminal tab is only for the owner to watch.
+  questions, widened as "Owner gates" in `AGENTS.md` says, and answers to and from it by message, the receiver acting on
+  one only when the sender shown is the session that started it or took it over, or the session it started or took over
+  (no hook sees a message, so this rests on the receiver); a push yes reaches a job only as the record **Owner
+  answer** in [references/owner-answer.md](references/owner-answer.md) gives for that job's route, never by message alone, and a Herdr job takes none, its owner removing the marker, so a job
+  whose named session still runs is shown and delivered by the coordinator itself as **Batch review** under "7. Push
+  authorisation" says, an owner gate's yes still counting only where `AGENTS.md` says; a terminal tab is only for the
+  owner to watch.
   - On Codex, use the forms in [references/codex.md](references/codex.md).
   - On Claude Code, use `Bash` with `run_in_background: true` and its completion notification, while meeting active
-    communication obligations.
+    communication obligations. A one-shot session has no later turn for a notification to wake, and Claude Code ends a
+    print-mode session's background work 10 minutes after its last turn. Such a session runs each helper with
+    `run_in_background: false` and each command in the foreground with the `Bash` timeout at its 600000 maximum, and
+    never ends its turn while a helper or command it started still runs.
+- **A merged job.** When a job the coordinator started or took over reports that its work has merged, the
+  coordinator runs [Update local main](../closeout/references/update-local-main.md) on the root checkout before it
+  starts or answers any other job.
 
 ## 6. Verify and review
 
@@ -358,7 +401,7 @@ Read [references/review-and-push.md](references/review-and-push.md) whole before
 
 Read [references/review-and-push.md](references/review-and-push.md) whole, as "6. Verify and review" says, before this section's first step.
 
-**Batch review.** Its steps are in [references/batch-review.md](references/batch-review.md), and the Saved write-up and presentation rules its steps use are in [references/review-and-push.md](references/review-and-push.md): read both whole before applying any step of it, whether the owner's message asks to see what is waiting or a run's step names it.
+**Batch review.** Its steps are in [references/batch-review.md](references/batch-review.md), and the Saved write-up and presentation rules its steps use are in [references/review-and-push.md](references/review-and-push.md), and the records an owner's answer leaves are in [references/owner-answer.md](references/owner-answer.md): read all three whole before applying any step of it, whether the owner's message asks to see what is waiting or a run's step names it.
 
 ## 8. Deliver
 

@@ -238,6 +238,7 @@ function claim(call, exec, { hostname, now }, before, output) {
     output.log(`outcome: Could not confirm: ${reason}`);
     return 5;
   };
+  /** @type {[string, () => unknown][]} */
   const writes = [
     ['the move to In progress', () => {
       const [{ skipped }] = moveCards([{ issueNumber: call.issue, statusName: CLAIM_COLUMN }], exec);
@@ -262,7 +263,7 @@ function claim(call, exec, { hostname, now }, before, output) {
   // the session cannot know its own claim, though the comment may well have been posted.
   let created;
   try {
-    created = JSON.parse(reply);
+    created = JSON.parse(/** @type {string} */ (reply));
   } catch {
     created = null;
   }
@@ -315,7 +316,7 @@ export function main(args = process.argv.slice(2), deps = {}) {
   try {
     call = parseArgs(args);
   } catch (err) {
-    return refuse(err.message);
+    return refuse(/** @type {Error} */ (err).message);
   }
   if (call.runtime !== undefined && !RUNTIMES.includes(call.runtime)) {
     return refuse(`--runtime must be exactly one of ${RUNTIMES.map((name) => `"${name}"`).join(', ')}`);
@@ -329,7 +330,7 @@ export function main(args = process.argv.slice(2), deps = {}) {
   try {
     tracker = deps.tracker ?? trackerOf(boardConfig);
   } catch (err) {
-    return refuse(err.message);
+    return refuse(/** @type {Error} */ (err).message);
   }
   if (tracker !== 'github') {
     return refuse(`this command serves only the GitHub Projects tracker, not "${tracker}"; claim by hand as references/claim-reads.md of the resume skill says`);

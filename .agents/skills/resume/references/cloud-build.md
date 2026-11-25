@@ -168,9 +168,10 @@ authorisation answers no permission prompt or safety check from the runtime: eac
    says.
 
    A session that parks or ends before the draft opens leaves the card in its column under its claim. The next session's
-   work-pick then offers the card's delivery first, above the candidate table, in one line: the card, the machine and
-   time its claim gives, whether its draft is open, what picking it does, which is to run this wait or, with the draft
-   open, to go on at step 5, and that it is picked only where no other session still waits on it.
+   work-pick then offers the card's delivery first, above the candidate table or the line naming the card taken, in one
+   line: the card, the machine and time its claim gives, whether its draft is open, what picking it does, which is to
+   run this wait or, with the draft open, to go on at step 5, and that it is picked only where no other session still
+   waits on it.
 5. **Delivery, locally.** Once the draft is open, the session carries the card through this step in the same session,
    unasked. Every takeover, including resumed delivery or an owner-supplied pull request number, verifies provenance
    anew. Read origin:
@@ -276,9 +277,10 @@ and no authorization asked. The pull request body records
 “&lt;seat&gt; reviewed the plan; &lt;reason&gt;; the cross-family plan review does not apply”, naming the cloud build as the reason. No plan review of the other family runs at local delivery.
 
 In a cloud build every review runs in the cloud on this family's own seats, the review of the final tree included, and
-there is no cross-family pass and no authorization to ask: the same `reviewer` charter runs on this family's own seat,
-in a fresh context, and the pull request body records which family reviewed, that the job was built in a cloud session,
-and that the cross-family gate therefore does not apply. `security-reviewer` runs wherever "6. Verify and review"
+there is no cross-family pass and no authorization to ask: one primary `reviewer` runs on this family's own seat,
+in a fresh context, with no supplemental pass, using `cross-review` section 1's frozen inputs, pending list and
+validation for that single pass. The pull request body records which family reviewed, that the job was built in a
+cloud session, and that the cross-family gate therefore does not apply. `security-reviewer` runs wherever "6. Verify and review"
 requires it, in the cloud on its own seat. The local session that delivers the job runs no review of the other family.
 That recording is the whole of the route: a same-family review in a cloud build that the body does not declare is a
 skip.

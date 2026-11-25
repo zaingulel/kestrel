@@ -1,5 +1,5 @@
 ---
-description: The committed Git hooks that check commits, merges and pushes before they leave your machine, how to turn them on and what the main-branch gate may rely on.
+description: The committed Git hooks that check commits, merges and pushes before they leave your machine. It also says how to turn them on and what the main-branch gate may rely on.
 ---
 
 # Git hooks
@@ -8,11 +8,14 @@ These Git hooks are committed, deterministic local gates that check your commits
 integration (CI) sees them. They move the repository's most-repeated discipline rules off agent and human memory, so a
 mistake is caught before it reaches a metered CI run. Turn them on as [Activation](#activation) shows.
 
-| Hook | What it enforces | Bypass |
+| Hook | What it enforces | Native Git option |
 |---|---|---|
 | [`pre-commit`](#pre-commit) | Agent definitions parse, charters match and the product gate passes | `git commit --no-verify` |
 | [`pre-merge-commit`](#pre-merge-commit) | `pre-commit` runs on a merge that would auto-commit | `git merge --no-verify` |
-| [`pre-push`](#pre-push) | Dependencies, lint, tests, the gate on `main` and large-file uploads | `git push --no-verify` |
+| [`pre-push`](#pre-push) | Dependencies, applicable evidence or local checks, the gate on `main` and large-file uploads | `git push --no-verify` |
+
+The table identifies Git's native options. Agent runtime guards refuse `git commit --no-verify`, `git push --no-verify` and hook-path overrides.
+Agents use ordinary Git commands with the hooks active.
 
 ## pre-commit
 
@@ -55,14 +58,26 @@ Install the root dependencies first:
 - For a first install without a lockfile, run `npm install`.
 - With an existing lockfile, run `npm ci`.
 
-If no executable ESLint exists in the root or its ancestors, the hook refuses the push before lint or tests. With
-ESLint available, the hook runs `npm run lint` and the `scripts/lib` node:test suite:
+If no executable ESLint exists in the root or its ancestors, the hook refuses the push before receipt reuse, lint or
+tests. The setting-only case under [Pushes to main](#pushes-to-main) is the exception. With ESLint available, a push with
+no `refs/heads/main` ref may reuse each check's successful `scope=root` receipt for the current clean head. It may do so
+only when every nondeleted pushed ref names that head. The writer marks root execution only when the actual command directory
+and Git's successfully read top-level resolve to the same physical directory. Legacy unscoped receipts, nested
+execution and unknown scope cannot qualify. Writable receipts cannot authenticate execution: a session able to write
+the worklog can forge them.
 
-- When npm is missing, the hook skips `npm run lint` with a warning.
-- The hook invokes the suite as `node --test` directly, so a missing npm cannot bypass it.
-- The suite fails closed on a missing node.
+The hook runs each check without applicable evidence:
 
-To add the repository's `npm test`, opt in with `RUN_TESTS=1 git push`.
+- `npm run lint` runs unless a qualified lint receipt applies; missing npm then refuses the push.
+- The `scripts/lib` node:test suite runs through `node --test` directly unless a qualified suite receipt applies.
+- The suite fallback fails closed on a missing node.
+
+Missing, failed, malformed or inapplicable evidence retains that check's fallback. After known tool or dependency
+invalidation, rerun the affected check before reuse; the receipt reader does not observe those changes. A push
+containing main, including a mixed push, retains both local checks outside the distinct setting-only case.
+
+`RUN_TESTS=1 git push` adds the repository's `npm test`, including in the setting-only case. The product/main gate and
+Git LFS handling remain active. Use ordinary `git push`; agent runtime guards refuse hook bypasses.
 
 ### Pushes to main
 

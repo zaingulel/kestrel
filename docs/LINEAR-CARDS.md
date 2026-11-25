@@ -96,6 +96,9 @@ finds, each pointing back here.
 3. **Create the kind labels.** Create one label for each value of `KIND_LABELS` in `board-config.mjs`, named exactly
    as the file names it. The starter's are `epic`, `enhancement`, `task`, `bug` and `documentation`. Hold each name
    once, in the team or in the workspace: `create` refuses a kind whose label is missing or held twice.
+4. **Create the `show-me-first` label.** Create one label named exactly `show-me-first`, in the team or in the
+   workspace. Setting it on a card holds that card for the owner's look: it never merges on its evidence, and
+   `node scripts/board.mjs --waits <identifier>` reports `show-me-first` for it.
 
 **Set the team's automation**
 
@@ -246,18 +249,19 @@ This table fixes the card read, the board read, the identity comparison and the 
 | Card read (resume, "3. Start the job") | `gh issue view {{ISSUE}} --json state,assignees,comments --jq ...` | `node scripts/linear-card.mjs view {{ID}}` prints `["state",S]`, `["assignees",[displayName,...]]`, one `["claim",position,author,createdAt,url,firstLine,commentId]` per `Claim:` comment, oldest first, and `["comments",n]` last. Complete under the unchanged rule: exit 0, `state` and `assignees` once each, `comments` last. The free check reads the first six values as on GitHub; the seventh, `commentId`, is what a withdrawal edits. |
 | Board read (resume, same step) | `gh api graphql ... projectItems ...` | `node scripts/linear-card.mjs view {{ID}} --board` prints one `["board","linear","<TEAM>","<Column>"]`, then `["boards",1]`. Complete: exit 0, exactly one `board` line, none of its three values null, then `boards` 1. A card in an unmapped state prints a null column, so its read is incomplete, loudly. |
 | Identity comparison (resume, same step) | The matching configured `board` line's owner and number against the intake document's first line, `Board <owner>/<repository> project <number>` | The intake document's first line is `Board linear team <KEY>`. The `board` line's second and third values must be `linear` and that `<KEY>`, and its column the one in the card's heading. Assignees compare as a set, written `@<displayName>` in the document. |
-| Blocker read-back (to-issues) | `gh api "repos/{owner}/{repo}/issues/{{ISSUE}}/dependencies/blocked_by" --jq '.[].number'` | `node scripts/linear-card.mjs text {{ID}}`; its `["blockedBy",[...]]` line lists every blocker, open or closed. A missing or extra link against the owner-approved list is a failure to fix before reporting ready, as on GitHub. |
+| Blocker read-back (to-tickets) | `gh api "repos/{owner}/{repo}/issues/{{ISSUE}}/dependencies/blocked_by" --jq '.[].number'` | `node scripts/linear-card.mjs text {{ID}}`; its `["blockedBy",[...]]` line lists every blocker, open or closed. A missing or extra link against the owner-approved list is a failure to fix before reporting ready, as on GitHub. |
 
 Every other step:
 
 | Step | On Linear |
 |---|---|
-| Read a card (`resume` intake, `to-issues` step 1, the `architect` and `reviewer` charters, `cross-review`) | `node scripts/linear-card.mjs text {{ID}}` for the card, and the pick view and card summaries from `node scripts/board.mjs --intake {{FOLDER}}`. `cross-review` puts the command's output where it puts `gh issue view` output |
+| Read a card (`resume` intake, `to-tickets` step 1, the `architect` and `reviewer` charters, `cross-review`) | `node scripts/linear-card.mjs text {{ID}}` for the card, and the board line and card summaries from `node scripts/board.mjs --intake {{FOLDER}}`. `cross-review` puts the command's output where it puts `gh issue view` output |
 | Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses a Linear install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the card read, board read and identity rows of the preceding table and the next row |
 | Claim: assignee, `Claim:` comment (resume, "3. Start the job") | `node scripts/board-move.mjs {{ID}} "In progress"`, then `node scripts/linear-card.mjs assign {{ID}}`, then `node scripts/linear-card.mjs comment {{ID}} --body "Claim: {{MACHINE}}, {{RUNTIME}}, {{TIME}}"`. The session records the address in the printed `["comment",id,url]`. The re-read is `view {{ID}}`, complete when it also shows a `claim` line whose address is the recorded one |
 | Withdraw a claim | `node scripts/linear-card.mjs edit-comment {{COMMENT_ID}} --body "Withdrawn: {{MACHINE}}, {{RUNTIME}}, {{TIME}}: an earlier claim holds this card."`, the id being the seventh value of the session's own `claim` line. Only under the condition `resume` sets, remove the assignee with `node scripts/linear-card.mjs unassign {{ID}}` |
 | Awaiting push (`resume`, "7. Push authorisation") | `node scripts/board-move.mjs {{ID}} "Awaiting push"`, a written move, as on GitHub |
-| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `node scripts/linear-card.mjs comment {{ID}} --body "{{LINE}}"`. The first two measures read `not measurable: Linear's reads give neither this account's own name nor archived issues, so a verdict's author and the full history cannot be established`; no read is made for them. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json`, then `linear-card.mjs text {{ID}}` for each card it lists, applying the same title and body tests, and gives those counts as the cards it could read, with the share itself `not measurable: archived issues are left out of this read`; a failed read leaves no counts, naming the card |
+| Owner answer (`resume`, "7. Push authorisation") | Post the record's one line with `node scripts/linear-card.mjs comment {{ID}} --body-file {{FILE}}`, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives, from the account the session publishes as. The queue panel writes none on this tracker, so the session in whose chat the owner answered writes it before it acts |
+| Fix built (`resume`, "7. Push authorisation") | Post the fix line the same way, once the fix is built and before its push |
 | The `Closes #{{ISSUE}}` line | `Closes {{ID}}`, such as `Closes ENG-123`. A Linear job always takes the pull request route |
 | Draft opened, "Move the card to In review" (`resume`, "8. Deliver") | Nothing to move: Linear moves the card when the draft is marked ready for review |
 | `handoff`, step 5 | `node scripts/board-move.mjs {{ID}} Ready`, a written move. The draft does nothing on Linear, so Linear does not pull the parked card to In Review |
@@ -266,14 +270,15 @@ Every other step:
 | `closeout`, Deferred cleanup | The pending record is a GitHub issue comment, which a Linear card has no counterpart for: report retained targets, as the section says for a tracker that is not GitHub issues |
 | `closeout`, Leftover rule, card state and most recent claim | `node scripts/linear-card.mjs view {{ID}}`: its `state` line and its most recent `claim` line |
 | `closeout`, Leftover rule, open-card search | No command searches Linear card text, so that evidence is unavailable, as a failed search is. A hit still cannot be ruled out, so the artifact stays unsettled unless other evidence settles it |
-| `gh issue create` and `board-add` (`to-issues`, step 6a and 6b) | `node scripts/linear-card.mjs create`, as [Filing a card](#filing-a-card) says; `board-add` refuses. A Linear card has no Workstream |
-| Suggested card (`resume`, "2. Work-pick") | File with `linear-card.mjs create --title 'Proposed: {{TITLE}}' --body-file {{FILE}} --status Backlog --kind {{KIND}}`. A yes is `linear-card.mjs edit {{ID}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no keeps the title and the owner cancels the card in Linear, because `board-move` writes no Done |
-| Link a child to its parent Epic (`to-issues`, step 6c) | `--parent {{EPIC}}` on `create`, or `node scripts/linear-card.mjs parent {{ID}} --to {{EPIC}}` afterwards. The Epic's children are its Linear sub-issues |
-| Blocked-by (`to-issues`) | `--blocked-by {{ID}},...` on `create`, or `node scripts/linear-card.mjs block {{ID}} --by {{BLOCKER}}` afterwards |
-| Fold work into an existing card (`to-issues`) | `node scripts/linear-card.mjs edit {{ID}} [--title {{TITLE}}] [--body-file {{FILE}}]` |
-| Verify the publish (`to-issues`, step 8) | `node scripts/verify-issue-publish.mjs {{EPIC_ID}} {{CHILD_ID}}...`. Correct a kind-label failure in Linear's label settings. The failures read as on GitHub, in Linear's words: `is not in this board read` is a lag to re-run, `is archived while still open` is a card to unarchive, and `belongs to team` names a card of another team |
+| `gh issue create` and `board-add` (`to-tickets`, step 6a and 6b) | `node scripts/linear-card.mjs create`, as [Filing a card](#filing-a-card) says, with `--status Backlog`, or `--status Ready` only where `to-tickets` step 6b allows it; `board-add` refuses. A Linear card has no Workstream |
+| Move a picked card to the top of `Ready` (`resume`, "2. Work-pick") | `node scripts/board-move.mjs {{ID}} Ready`, a written move, without `--top`, which needs the GitHub Projects tracker. The intake reads no column order from Linear and orders `Ready` by issue ID, so the top of `Ready` is the startable card with the lowest ID there |
+| Suggested card (`resume`, "2. Work-pick") | A yes is `linear-card.mjs edit {{ID}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no keeps the title and the owner cancels the card in Linear, because `board-move` writes no Done |
+| Link a child to its parent Epic (`to-tickets`, step 6c) | `--parent {{EPIC}}` on `create`, or `node scripts/linear-card.mjs parent {{ID}} --to {{EPIC}}` afterwards. The Epic's children are its Linear sub-issues |
+| Blocked-by (`to-tickets`) | `--blocked-by {{ID}},...` on `create`, or `node scripts/linear-card.mjs block {{ID}} --by {{BLOCKER}}` afterwards |
+| Fold work into an existing card (`to-tickets`) | `node scripts/linear-card.mjs edit {{ID}} [--title {{TITLE}}] [--body-file {{FILE}}]` |
+| Verify the publish (`to-tickets`, step 8) | `node scripts/verify-issue-publish.mjs {{EPIC_ID}} {{CHILD_ID}}...`. Correct a kind-label failure in Linear's label settings. The failures read as on GitHub, in Linear's words: `is not in this board read` is a lag to re-run, `is archived while still open` is a card to unarchive, and `belongs to team` names a card of another team |
 | Comments | A Linear comment, posted with `comment` |
-| Return a card to Backlog or Ready outside a job | `node scripts/board-move.mjs {{ID}} Backlog` or `Ready` |
+| Return a card to Backlog or Ready outside a job | `node scripts/board-move.mjs {{ID}} Backlog` or `Ready`; `Ready` only on the owner's word, as the `resume` skill says under "1. Find where things stand" |
 | Epic done | Nothing to write: the team's auto-close setting closes it |
 | Cloud build | None: a Linear install starts no cloud build |
 | Documentation sweep | None: init asks no sweep question on Linear and refuses `docSweep: true` |

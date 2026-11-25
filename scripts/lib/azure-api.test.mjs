@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Literal Microsoft REST endpoints/authentication and the approved custody contract are the oracle.
 // Two real children cover the stdin/stdout wire; all hostile inputs use direct seams.
 import { test } from 'node:test';
@@ -198,7 +199,7 @@ test('Azure transport confines credentials and destinations', async (t) => {
   // Only the child receives HOME, and it obtains the literal sentinel from its private file.
   const lib = join(repositoryRoot, 'scripts', 'lib');
   mkdirSync(lib, { recursive: true });
-  for (const name of ['azure-api.mjs', 'azure-config.mjs']) {
+  for (const name of ['azure-api.mjs', 'azure-config.mjs', 'workflow-pin.mjs', 'factory-sync.mjs', 'runtimes.mjs', 'seat-settings.mjs', 'check-agents.mjs']) {
     copyFileSync(fileURLToPath(new URL('./' + name, import.meta.url)), join(lib, name));
   }
   writeFileSync(join(lib, 'board-config.mjs'), AZURE_TEST_CONFIG);

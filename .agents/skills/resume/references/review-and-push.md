@@ -40,7 +40,10 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   before red: implementation built in the same handoff as its test, or before it; red obtained by removing, reverting or
   stashing implementation; a red run that left out a frozen identity, other than by stopping at the absence failure the
   plan declared, or failed for a reason neither qualifying nor declared; and a review repair whose new test passed on
-  the reviewed tree.
+  the reviewed tree when the behaviour it covers is absent at the job base. An `existing behaviour` test is never
+  a chronology gap and never an owner question: a review repair's new test that passes on the reviewed tree is one
+  when its behaviour is present at the job base, and it takes the `evidence-required` route with its executed
+  mutation.
 
   To settle a slip, record in the worklog, marked as made at this audit, the evidence each condition rests on: the
   stage commit where its diff shows the stage held evidence changes only, or the validation verdict recorded before
@@ -56,10 +59,10 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   convergence mutations prove current behaviour only: they never repair chronology, turn code before red into a
   slip, or waive the decision automatically. A new claim or gap outside that acceptance needs its own decision.
 - Before dispatching the review, file every card the acceptance criteria require, in this repository or another, as
-  the `to-issues` skill says. A card that can only be filed after the merge, such as one that must cite the merge
+  the `to-tickets` skill says. A card that can only be filed after the merge, such as one that must cite the merge
   commit, is named under **Not done** in the pull request body as closeout's to file.
-- One fresh review of the final tree, at the tier two questions choose. Both are asked of every change: can it be
-  undone, and how far does the damage reach if it is wrong. Each repository says what the two questions mean for it in
+- The selected tier's required reviews cover the final tree, at the tier two questions choose. Both are asked of every
+  change: can it be undone, and how far does the damage reach if it is wrong. Each repository says what the two questions mean for it in
   the `hard to undo` and `wide reach` rows of its Surfaces table.
   - **Hard to undo** is judged looking forward: once the change is published or adopted, could it be put right by a
     known correction under the repository's own control? A change that could not is hard to undo, and the
@@ -79,7 +82,7 @@ This file is part of the `resume` skill: a section number or quoted heading in i
     and states which part sets the tier and why, in the pull request body's `Undo:` and `Reach:` lines: the change
     takes the tier of the part that takes the heaviest, and a part the guard rule below names takes `sign-off` as
     that rule says. Answers are never added across parts: one part that is hard to undo and another that is wide in
-    reach make a `sign-off` change only where a single part is both. The one fresh review still covers the whole
+    reach make a `sign-off` change only where a single part is both. The required reviews still cover the whole
     final tree, at that tier, because a reviewer shown one part cannot see what the parts do to each other and
     the external review, where the add-on is on, reads a whole pull request. The `document` tier keeps its anchor, the
     gate's exit on the whole change, and line count never lowers a tier.
@@ -101,10 +104,11 @@ This file is part of the `resume` skill: a section number or quoted heading in i
     one hard to undo but narrow in reach, and one easy to undo and narrow in reach that the gate does not admit, so a
     small test in a file only one repository has is reviewed here. `AGENTS.md`, `CLAUDE.md`, `.agents/REPOSITORY.md`,
     the rules, skills and every other seat-file change (instructions, tools, permissions, or any other line) are
-    included. The `reviewer` charter is run by the model family that did not write the diff, through `cross-review`;
-    an instruction that misreads a gate has cost more than most code. When the other family's seat cannot be reached, or
-    the repository's settings file names one runtime, read [references/review-routes.md](review-routes.md)
-    whole before the review runs on this family's seat.
+    included. On the normal authorized dual-runtime route, the other family's configured `reviewer` and
+    `reviewer-supplemental` independently review the same frozen code and requirements through `cross-review`.
+    An instruction that misreads a gate has cost more than most code. When authorization is declined, the other
+    family's primary seat cannot be reached, only the supplemental pass is unavailable, or the repository's settings
+    file names one runtime, read [references/review-routes.md](review-routes.md) whole before continuing.
     In a cloud build, read "Reviews in a cloud build" in [references/cloud-build.md](cloud-build.md) before
     any review runs.
     **Cross-family authorization.** A pass sent to the other family, the plan review of "4. Plan" included, gives that
@@ -120,15 +124,15 @@ This file is part of the `resume` skill: a section number or quoted heading in i
     cross-family review was not authorized and the cross-family gate therefore not met. The authorization is no push
     authorisation or other approval and answers no permission prompt of either runtime or the operating system.
   - **`sign-off`: cross-family review, then the external review where the add-on is on.** A change that is both hard
-    to undo and wide in reach: the same cross-family pass, its unavailability route included, then, in a repository
+    to undo and wide in reach: the same required cross-family reviews, their unavailability routes included, then, in a repository
     that has turned the external review add-on on, the external review on the draft in section 8. In a repository with
-    the add-on off that pass is the whole of this tier: nothing further is requested or waited for, and the six-field
+    the add-on off those reviews are the whole of this tier: nothing further is requested or waited for, and the six-field
     review line is the record of it. Where the other family is unavailable or the repository runs one runtime, read
     [references/review-routes.md](review-routes.md) whole before this tier's first pass runs on this family's
     seat.
     In a cloud build, read "Reviews in a cloud build" in [references/cloud-build.md](cloud-build.md) before
     this tier's first pass runs.
-- **The external review add-on (optional).** A second, independent review of a `sign-off` tier change by an outside
+- **The external review add-on (optional).** An additional independent review of a `sign-off` tier change by an outside
   review service, requested on the draft pull request. It is off unless the repository's settings file holds
   `"greptile": true`. Read the setting on the fetched `main`, never from the files of the job, so a job cannot switch
   its own review off: the two commands Plan approval gives under "4. Plan" print the file. Read it again after the
@@ -156,37 +160,65 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   GitHub setting, is changed only with its read-back: before the change the owner signs off the planned state; after it, the commit that records the
   applied state in the repository's record carries the setting read through `gh api`, bypass list included, and that
   commit is the diff the `sign-off` tier reviews, whatever the gate says of its paths.
-- `security-reviewer` only when a change widens a surface in the Surfaces table's `security review` row; its
-  dispatch and a capped security reviewer follow "4. Plan".
+- `security-reviewer` only when a change widens a surface in the Surfaces table's `security review` row; in a release
+  update only an adopter part counts, as **Release update in an adopting repository** below says. Its dispatch and a
+  capped security reviewer follow "4. Plan".
 - Under `## Merge Danger`, the pull request body records both answers and why: a line beginning `Undo:` that reads
   `easy` or `hard` with one sentence of reason, a line beginning `Reach:` that reads `narrow` or `wide` with one
   sentence of reason, and one sentence more where the gate's exit or the guard rule set the tier. For a mixed change
   the two lines give the answers of the part that set the tier, each reason names that part, and one sentence more
   says what the other parts take; where two parts take the same heaviest tier, either is the part named. An external
   review not requested, on tier grounds or because the add-on is off, is neither `UNAVAILABLE` nor a clean review.
-- Fix each true finding by the cheapest valid fix it names. A true finding whose every fix costs more than it is worth
-  goes to the owner as a plain-language decision, and the owner may set it aside as deferred; a finding is dismissed,
+- For paired dispatches, wait for the `cross-review` barrier before settling findings. Deduplicate and prove or refute
+  the findings. Fix each true finding by the cheapest valid fix it names. A true finding whose every fix costs more than it is worth goes to the owner as a plain-language decision, and the owner may set it aside as deferred; a finding is dismissed,
   with a reason, only when it is false. Then one pass scoped to the repaired hunks and what they can break, by the
-  same reviewer with its context intact or by the session. No further pass when a repair adds no factual claim. Record
-  the review in the pull request body's review line, in the format the Review section of
+  same reviewer with its context intact or by the session. No further pass when a repair adds no factual claim;
+  no third full review follows the paired initial passes. Record the review in the pull request body's review line, in the format the Review section of
   [the pull request template](../../../../.github/pull_request_template.md) specifies.
+- When two repair-and-re-review cycles still produce true findings, new or repeated, judge them. If each is bounded
+  and verifiable, run one more round that fixes all of them. Bring the owner the choice, with a recommendation, only
+  when a finding needs an unsettled design, owner judgment or evidence that cannot be bounded, or when that round
+  still does not converge. Findings are never ignored.
+- **Release update in an adopting repository.** A release update's own writes are the shared files and the manifest
+  it writes from the verified release, for `AGENTS.md` its shared region alone, with the seat values the seat
+  settings file names, the shared files it removes because the verified release no longer lists them, and the two
+  compaction settings of its bounded Codex configuration merge. Every other changed line is an adopter part,
+  reviewed as a part of a mixed change above: a change to the settings file or the seat settings file and the seat
+  values that change renders, a customer-owned file edit, any other difference in `.codex/config.toml`, an edit the
+  update merged into included, and any hand step. A setting that turns a runtime or add-on on or off is an adopter
+  part judged as the adopter's choice, while the files it brings or removes are released shared files like the
+  rest. A plain release update has no adopter part. This rule holds only for an update to the installed release or
+  a newer one; any other move is reviewed as an ordinary change. The two questions and the guard rule choose the
+  tier as for any change, and the review judges the update's integrity and each adopter part. A change inside the
+  released shared files carries the canonical repository's evidence, given when it merged there: no plan or review
+  derives a claim from it or asks for its red run, mutation or other proof, and no step asks the owner how to prove
+  it. The pull request body gives the update's receipt, exit 0; a receipt of `check` at the final head, with the
+  drift line of that run quoted beside it, whose drift category is healthy and whose recorded release is the one
+  the card names, whatever its other categories report; the receipts of the repository's own checks; each adopter
+  part; and a link to the canonical repository's notes of each release applied, which link the pull request of each
+  change. A true finding inside a released shared file is fixed only in the canonical repository the manifest
+  names: it is filed there as `to-tickets` step 6 says and named under **Not done**, and whether it holds the update
+  is settled as for any true finding above.
 
 ## 7. Push authorisation (owner gate two)
 
-Move the card to `Awaiting push`: `node scripts/board-move.mjs <issue> "Awaiting push"`. Write the pull request
-body with the vendored `pr` skill: read `.agents/skills/pr/SKILL.md`, fill `.github/pull_request_template.md` as
-the body under the Which template wins rule below, save it as the Saved write-up rule says, and present the decision
-card to the owner as the Chat presentation rule says. On the direct route section 8 describes, the filled body
+Write the pull request body with the vendored `pr` skill: read `.agents/skills/pr/SKILL.md`, fill
+`.github/pull_request_template.md` as the body under the Which template wins rule below, and save it as the Saved
+write-up rule says. Then judge it as [merge-on-evidence.md](merge-on-evidence.md) says, read whole first: work that
+merges on its evidence goes to section 8 unasked, and work that waits moves to `Awaiting push`, with
+`node scripts/board-move.mjs <issue> "Awaiting push"`, and its decision card goes to the owner as the Chat presentation
+rule says. On the direct route section 8 describes, the filled body
 becomes the squash commit's message, since there is no pull request
 to hold it. The job's own `Closes #<issue>` line is the only closing word in a pull request body or a
 direct-route commit message: GitHub closes, as completed, any issue whose link follows close, fix or resolve in any
 tense, another repository's `owner/repo#N` included. Every other mention, such as the
-canonical repository's card for a deferred finding, which `to-issues` step 6 says how to file, keeps those words
+canonical repository's card for a deferred finding, which `to-tickets` step 6 says how to file, keeps those words
 from directly before its link. The owner's yes, or any instruction to push, approves the card and covers every step of section 8: the
 push, the draft pull request, the comments that request the external review where the add-on is on, repairs on the same
 branch, rebasing onto `main`, marking ready, and the auto-merge. Nothing in section 8 stops to ask again, except for a
 material limit the card did not carry, as the Chat presentation rule says; a public comment there is delivery, not a
-new action. Push only after it, or on a card's advance approval as **Advance approval at push** says.
+new action. A coordinated Herdr job asks no such yes: it merges unless its card carries `show-me-first`, as
+[the merge route](herdr-job.md#the-merge-route) says. Push only after it, or where the work merges on its evidence.
 
 **Chat presentation.** The owner answers a decision card, never the whole body. Apply the outcome-reporting rule in
 `AGENTS.md`. The card's sentences are copied from the filled body, never reworded: where one does not stand alone, the
@@ -194,19 +226,25 @@ body's sentence is rewritten and saved, then copied. Length follows risk: only b
 and no real limit is dropped to keep a card short. The body's `Decision card` block holds blocks 1 to 5, and chat shows
 that block as saved, with any screenshot inline, then blocks 6 and 7.
 
-1. **What changes for you:** the Summary's opening sentences, then its `Picked:` or `Approved in advance:` line where
-   it has one.
+1. **What changes for you:** the Summary's opening sentences.
 2. **Screenshot:** each screenshot the Evidence shows, or the line `no visual change`. In the saved block it reads
    `screenshots under Evidence` or `no visual change`.
 3. **What a yes accepts:** any `**Taste calls I made**` and `**Needs your ears**` lists whole, then the opening sentence
-   of every other Not done item in the body's order, then each declaration the Review section carries of how a review
-   ran; or `Nothing` where Not done says so and nothing was declared.
+   of every other Not done item in the body's order, then how the review ran where Review carries a declaration.
+   Copy ordinary declarations whole. For the [Codex primary fallback](review-routes.md#codex-primary-fallback), write
+   a standalone sentence in Review findings identifying who completed the review and why Claude Code was unavailable.
+   Copy that sentence verbatim into this block. Keep the structured fallback line only in its declaration slot.
+   Where Not done says `Nothing` and Review carries no declaration, write `Nothing`.
 4. **Risk:** the `Undo:` and `Reach:` lines whole, with any sentence that follows them.
-5. **Checks:** the Evidence's `Passed:`, `Failed:` and `Untested:` lines whole.
+5. **Checks:** the Evidence's `Passed:`, `Failed:` and `Untested:` lines whole. `Untested:` names only the checks that
+   will not have run when the pull request merges, as the `check` contract in
+   [merge-on-evidence.md](merge-on-evidence.md) says.
 6. **Full write-up:** the saved `body.md`'s path, or the pull request's address only where that pull request's body
    already is the saved write-up, that the owner can ask to see it here, and the log's path or link.
-7. **The question,** with what a yes does: it approves this card and, in plain words, the delivery section 8 then runs.
-   On a job a product manager run picked, the Verdict paragraph's second question follows.
+7. **The question,** which asks for a yes, the change the owner wants, or a no, and says the answer is recorded on the
+   card. It says what a yes does: it approves this card, whatever wait reason held it, and, in plain words, the
+   delivery section 8 then runs. A change merges without being shown again only where the fix path of
+   [owner-answer.md](owner-answer.md) admits it.
 
 The card never copies or quotes the review line, a `Reviewed commit:` line, the `Closes #<issue>` line or the carried-receipt
 lines: what reads them takes a second copy in the body for an error. An owner who asks sees the saved `body.md` in chat,
@@ -217,19 +255,22 @@ A material limit missing from the card has not been accepted. Whoever finds one 
 left out. Before the merge the session takes nothing further in section 8 until the owner answers, with
 `gh pr ready <pr> --undo` where the pull request is already ready; after the merge the owner decides what follows.
 
-**Saved write-up.** Before the question, every job saves its review folder, `.claude/worklog/job_<card>-review-<head>/`,
+**Saved write-up.** Before the judgement and any question, every job saves its review folder, `.claude/worklog/job_<card>-review-<head>/`,
 `<head>` being what `git rev-parse HEAD` prints: the filled body as `body.md` and each screenshot its Evidence shows as
 `screenshot-<n>`, keeping its extension. A save that fails is a stop. The card is shown from that saved body, and on a
-yes that body is the approved body. A yes holds only for what it was shown from, whose identity is what
-`git hash-object --no-filters -- <folder>/body.md <folder>/<each screenshot, in numeric order>` prints in the job's
-worktree, one line per file. On showing the card the session prints `<head>` and that identity in the owner's chat and
-writes the identity to `shown-hash` in that folder. Before section 8 begins `git rev-parse HEAD` must print `<head>`,
-`git status --porcelain --untracked-files=normal` must print nothing and the same command must print the identity
-shown: the session that showed the card compares it with `shown-hash`, and a job session holding a carried yes
-compares it with the `shown` it was carried, never with `shown-hash`, which a card shown again at the same head
-rewrites. Otherwise the yes does not count: save again and show the card again. A cloud
-session saves no folder and asks nothing; its draft's body is the write-up, and the local session that takes the draft
-up saves the folder at the head it kept before it shows the card.
+yes that body is the approved body. A yes holds only for what it was shown from, whose identity is what `git hash-object
+--no-filters -- <folder>/body.md <folder>/<each screenshot, in numeric order>` prints in the job's worktree, one line
+per file. On showing the card the session prints `<head>` and that identity in the owner's chat and writes the identity
+to `shown-hash` in that folder. Before section 8 begins `git rev-parse HEAD` must print `<head>`, `git status
+--porcelain --untracked-files=normal` must print nothing and the same command must print the identity shown: the session
+that showed the card compares it with `shown-hash`, a coordinator that showed a job whose named session still runs
+compares it with the identity it printed, and a session acting on a recorded answer compares it with the identity that
+record names; neither of the last two reads `shown-hash`, which a card shown again at the same head rewrites. Otherwise
+the yes does not count: save again and show the card again. A cloud session saves no folder and asks nothing; its draft's body is the
+write-up, and the local session that takes the draft up saves the folder at the head it kept before it shows the card.
+
+**Owner answer.** How the owner's answer reaches a waiting card, as the record owner-answer.md gives for the job's route, the fix path and who acts on a
+record, is in [references/owner-answer.md](owner-answer.md), read whole before a session records or acts on an answer.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
 the two differ, `.github/pull_request_template.md` wins: it decides which sections and lines the body has, their
@@ -240,25 +281,5 @@ them, **Not done** and the `Closes #<issue>` line. It records the two answers of
 `Reach:` lines under `## Merge Danger`, answered by section 6's definitions, and never again under the skill's own
 labels, Door and Blast Radius. A pull request a scheduled routine opens is written with the skill under this same rule,
 with the `## Pull request body` section of that routine's manual standing where the template stands.
-
-**Advance approval at push.** Read [advance-approval.md](advance-approval.md) whole before the decision card is shown.
-
-**Verdict.** A job a product manager run picked, its Summary ending in a `Picked:` line, gets one verdict each time the
-owner answers its push question, by any route: a batch review, an answer carried to its session or its reopened
-session. A job approved in advance,
-its Summary ending in an `Approved in advance:` line, gets none. The approval
-question also asks whether the owner would have sent this job's board card back rather than have it built. That second answer never
-holds the first: any owner instruction to push is the yes, answered or not. After the reply and before anything else for
-that job, post one comment with `gh issue comment <issue> --body "<line>"`, whose values are fixed and carry no free
-text: `Verdict: <yes or no> changes=<yes or no> sent-back=<yes, no or unanswered> at=<time>`, the time being what
-`date -u +%Y-%m-%dT%H:%MZ` prints. `changes=yes` means the job needed a change before it could go: on a no whose reason
-asks for a change, on a yes where an earlier verdict on the card holds `changes=yes`, or where the owner's reply says
-so. A no whose reason does not settle it gets one question, and `changes=no` needs the owner's word there. A yes with
-none of those is `changes=no`. `sent-back` is the owner's own word and is never inferred; a reply that leaves it out is
-`unanswered`. Say in one line what was recorded, and where the owner corrects it, rewrite that comment by the
-route section 1 of [held-cards.md](held-cards.md) names. A `Verdict:` comment is a record and never an approval: a later
-session asks again.
-
-**Stage 2 evidence.** Its rules are in [references/runs.md](runs.md), read as **Run triggers** under "Before intake" says.
 
 **Per-card attention.** Its rules are in [references/runs.md](runs.md), read as **Run triggers** under "Before intake" says.

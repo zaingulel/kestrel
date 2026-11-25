@@ -1,3 +1,4 @@
+// @ts-nocheck
 // linear-api.mjs — the transport to Linear's GraphQL API: the key from its private file, one POST,
 // and the answer's data or one classified failure.
 //

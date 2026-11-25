@@ -8,10 +8,10 @@ description: Complete repository-specific starter documents after Fabraik instal
 Turn the installed starter documents into substantive instructions grounded in this repository. This implements
 init's fill-documents step after the installation is committed and merged.
 
-Reuse an existing setup card. If none exists, use the installed [to-issues](../to-issues/SKILL.md) skill to propose
+Reuse an existing setup card. If none exists, use the installed [to-tickets](../to-tickets/SKILL.md) skill to propose
 one covering completion of the starter documents and actual checker verification. The owner confirms the
 proposal and its Workstream using the installed tracker convention and board configuration; ask the owner if that
-convention is unsettled. Then follow to-issues' approval, publication and verification steps for the issue and board
+convention is unsettled. Then follow to-tickets' approval, publication and verification steps for the issue and board
 placement, without changing board schema, labels or configuration. The owner selects that card through the installed
 [resume](../resume/SKILL.md) workflow to start the setup job worktree, or resumes an existing setup job.
 

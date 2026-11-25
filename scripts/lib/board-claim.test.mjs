@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -543,6 +544,60 @@ test('board-claim claims a free card: the move, the assignee and the claim comme
     assert.ok(stdout.split('\n').find((line) => line.startsWith('wrote: ') && line.includes(claimBody(runtime))).includes(OWN_URL), stdout);
     assert.ok(stdout.split('\n').some((line) => line.startsWith('after: ') && line.includes(OWN_URL)), stdout);
   }
+});
+
+test('board-claim elects one of two same-runtime contenders', () => {
+  const intake = intakeFile();
+  const args = [String(ISSUE), '--intake', intake, '--runtime', 'Codex'];
+  const comments = [];
+  let column = 'Ready';
+  let assigned = false;
+  let herdr;
+  const manualOutput = outputSink();
+  const herdrOutput = outputSink();
+  const fallback = boardExec({}).exec;
+  const addresses = [OWN_URL, `https://github.com/${REPO}/issues/${ISSUE}#issuecomment-${OWN_ID + 1}`];
+  const exec = (args) => {
+    const kind = callKind(args);
+    if (kind === 'card read') return cardReply({ assignees: assigned ? ['carol'] : [], comments });
+    if (kind === 'board read') return boardReply({ nodes: [boardNode(BOARD_OWNER, BOARD_PROJECT_NUMBER, column)] });
+    if (kind === 'board item') {
+      const reply = JSON.parse(BOARD_ITEM_REPLY);
+      reply.data.repository.issue.projectItems.nodes[1].value.name = column;
+      return JSON.stringify(reply);
+    }
+    if (isDeepStrictEqual(args, ITEM_EDIT)) { column = 'In progress'; return ''; }
+    if (isDeepStrictEqual(args, ASSIGN)) { assigned = true; return ''; }
+    if (args[0] === 'api' && args.includes('POST')) {
+      const body = args.find((arg) => arg.startsWith('body=')).slice(5);
+      const index = comments.length;
+      const url = addresses[index];
+      comments.push({ body, url });
+      return JSON.stringify({ ...JSON.parse(commentCreated(body, { id: OWN_ID + index })), html_url: url });
+    }
+    return fallback(args);
+  };
+  const deps = { tracker: 'github', hostname: 'omarchy', now: CLOCK };
+  const manualExec = (call) => {
+    if (callKind(call) === 'status field') {
+      herdr = main(args, { ...deps, ghExec: exec, output: herdrOutput });
+    }
+    return exec(call);
+  };
+  const manual = main(args, { ...deps, ghExec: manualExec, output: manualOutput });
+  assert.equal(herdr, 0, herdrOutput.stdout + herdrOutput.stderr);
+  assert.equal(manual, 4, manualOutput.stdout + manualOutput.stderr);
+  assert.deepEqual(comments.map(({ body }) => body), [claimBody('Codex'), claimBody('Codex')]);
+  assert.ok(herdrOutput.stdout.split('\n').includes(`wrote: ${JSON.stringify(['claim', claimBody('Codex'), addresses[0]])}`));
+  const outcomeAddress = (stdout, expectedOutcome) => {
+    const outcome = stdout.match(outcomeLine(expectedOutcome))?.[0];
+    const addressesInOutcome = outcome?.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/\d+#issuecomment-\d+(?![A-Za-z0-9_/?#=-])/g) ?? [];
+    assert.equal(addressesInOutcome.length, 1, outcome);
+    return addressesInOutcome[0];
+  };
+  assert.equal(outcomeAddress(herdrOutput.stdout, 'Free'), addresses[0]);
+  assert.ok(manualOutput.stdout.split('\n').includes(`wrote: ${JSON.stringify(['claim', claimBody('Codex'), addresses[1]])}`));
+  assert.equal(outcomeAddress(manualOutput.stdout, 'Another claim is first'), addresses[0]);
 });
 
 test('board-claim exits 4 Another claim is first when a new claim precedes its own', () => {

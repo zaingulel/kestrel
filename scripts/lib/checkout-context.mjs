@@ -4,9 +4,10 @@
 // Git directory under the shared common directory. The guard takes this context as an injected input.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { gitExecutable } from './posix-shell.mjs';
+import { kindOf } from './runtimes.mjs';
 
 const isMainWorkingTree = (dir) => {
   // By path on Windows, whose bare-name search reaches the working directory first.
@@ -57,7 +58,7 @@ export function isCodexAppRunRecord(record) {
       !APP_RUN_FIELDS.every((name) => Object.hasOwn(record, name))) return false;
   const { sessionId, kind, runStart, card } = record;
   if (typeof sessionId !== 'string' || sessionId.length !== 36 || !SESSION_UUID.test(sessionId) ||
-      (kind !== 'product-manager' && kind !== 'pre-approved') || !Number.isSafeInteger(card) || card <= 0 ||
+      kind !== 'pre-approved' || !Number.isSafeInteger(card) || card <= 0 ||
       typeof runStart !== 'string' || !UTC_SECOND.test(runStart)) return false;
   const time = Date.parse(runStart);
   return Number.isFinite(time) && new Date(time).toISOString() === `${runStart.slice(0, -1)}.000Z`;
@@ -83,11 +84,71 @@ export function resolveCodexAppWorktree(worktree, operatingRoot, env = process.e
   return { gitDir, linked: topLevel === worktree && gitDir !== commonDir && commonDir === join(realpathSync.native(operatingRoot), '.git') };
 }
 
+// A contained read that could not be made: the step it was making and why.
+export class ContainedReadError extends Error {
+  constructor(step, cause) {
+    super(`could not ${step}: ${cause}`);
+    this.step = step;
+    this.cause = cause;
+  }
+}
+
+// Opens without following a final link or waiting on a special file.
+const READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+function lstatIfPresent(path) {
+  try {
+    return lstatSync(path);
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null;
+    throw new ContainedReadError(`read ${path}`, /** @type {NodeJS.ErrnoException} */ (error).code);
+  }
+}
+
+// One file under a root as { path, entry }, entry null where it or a folder above it is absent. A folder below the root
+// that is not a real directory, or a file that is not regular, refuses before anything reads or changes it, so nothing
+// follows a link out of the root (as runtimes.mjs checkContained walks).
+export function containedEntry(root, segments) {
+  const path = join(root, ...segments);
+  let folder = root;
+  for (const name of segments.slice(0, -1)) {
+    folder = join(folder, name);
+    const stat = lstatIfPresent(folder);
+    if (stat === null) return { path, entry: null };
+    if (!stat.isDirectory()) throw new ContainedReadError(`use ${path}`, `${folder} is ${kindOf(stat)}, not a directory`);
+  }
+  const entry = lstatIfPresent(path);
+  if (entry !== null && !entry.isFile()) throw new ContainedReadError(`use ${path}`, `it is ${kindOf(entry)}, not a regular file`);
+  return { path, entry };
+}
+
+// A checked file's text, read through a descriptor that must still be that entry (readAppRunFile).
+export function readContainedEntry({ path, entry }) {
+  let fd;
+  try {
+    fd = openSync(path, READ_FLAGS);
+  } catch (error) {
+    throw new ContainedReadError(`read ${path}`, /** @type {NodeJS.ErrnoException} */ (error).code);
+  }
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) {
+      throw new ContainedReadError(`read ${path}`, 'it changed while it was read');
+    }
+    return readFileSync(fd, 'utf8');
+  } catch (error) {
+    if (error instanceof ContainedReadError) throw error;
+    throw new ContainedReadError(`read ${path}`, /** @type {NodeJS.ErrnoException} */ (error).code);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function statIfPresent(path) {
   try {
     return lstatSync(path);
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') throw error;
     return null;
   }
 }
@@ -112,7 +173,8 @@ function readAppRunFile(path) {
   }
 }
 
-// Null is affirmative exclusion of both entries; any failure to establish the pair stays unavailable.
+// Null is affirmative exclusion of both entries; any failure to establish the pair stays unavailable. The retired
+// product manager mark still counts as a mark, so a bound session that carries it stays unavailable.
 export function readAppRunConnection({ sessionCwd, sessionId, reportedCwd, env = process.env, operatingRoot }) {
   const unavailable = { runUnavailable: CODEX_APP_RUN_UNAVAILABLE };
   try {

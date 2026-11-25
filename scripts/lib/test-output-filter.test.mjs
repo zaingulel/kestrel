@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,15 +40,17 @@ function runRewritten(command) {
 const shQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 
 // The temp folder name carries a space on purpose, so every platform exercises the quoting above.
-function fixture(name, source) {
-  const file = join(mkdtempSync(join(tmpdir(), 'workflow filter-')), name);
+function fixture(t, name, source) {
+  const folder = mkdtempSync(join(tmpdir(), 'workflow filter-'));
+  t.after(() => rmSync(folder, { recursive: true, force: true }));
+  const file = join(folder, name);
   writeFileSync(file, source);
   return file;
 }
 
 test('test output filtering condenses green runs, keeps red runs loud, and never touches exit status', async (t) => {
   await t.test('a red run surfaces the failing test name and error, and exits non-zero', () => {
-    const file = fixture('red.test.mjs',
+    const file = fixture(t, 'red.test.mjs',
       "import { test } from 'node:test';\ntest('sentinel case that must stay visible', () => { throw new Error('boom-sentinel'); });\n");
     const { status, surfaced } = runRewritten(`node --test ${shQuote(file)}`);
     assert.notEqual(status, 0, `expected a non-zero exit, got ${status}`);
@@ -57,7 +59,7 @@ test('test output filtering condenses green runs, keeps red runs loud, and never
   });
 
   await t.test('a green run surfaces only the condensed summary, and exits 0', () => {
-    const file = fixture('green.test.mjs',
+    const file = fixture(t, 'green.test.mjs',
       "import { test } from 'node:test';\ntest('per-test line that should be dropped', () => {});\n");
     const { status, surfaced } = runRewritten(`node --test ${shQuote(file)}`);
     assert.equal(status, 0, `expected a clean exit, got ${status}: ${surfaced}`);
@@ -115,7 +117,7 @@ test('test output filtering condenses green runs, keeps red runs loud, and never
       assert.ok(rewritten, `expected a rewrite for: ${command}`);
       assert.ok(rewritten.endsWith('exit $__fg_status'), `rewrite must end by exiting the runner's status: ${rewritten}`);
     }
-    assert.ok(rewriteTestCommand('cd "/repo lane/741" && npm test').startsWith('cd "/repo lane/741" && '));
+    assert.ok(/** @type {string} */ (rewriteTestCommand('cd "/repo lane/741" && npm test')).startsWith('cd "/repo lane/741" && '));
   });
 
   await t.test('the workflow direct run-log command wraps only known runners without granting permission', () => {
@@ -152,7 +154,7 @@ test('test output filtering condenses green runs, keeps red runs loud, and never
   });
 
   await t.test('a wrapped run-log runner is condensed as one command, while other run-log commands stay untouched', () => {
-    const file = fixture('logged-green.test.mjs',
+    const file = fixture(t, 'logged-green.test.mjs',
       "import { test } from 'node:test';\ntest('logged detail that should be dropped', () => {});\n");
     const fixtureDir = dirname(file);
     writeFileSync(join(fixtureDir, 'package.json'), JSON.stringify({

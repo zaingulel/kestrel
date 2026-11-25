@@ -14,7 +14,7 @@
 //   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
-//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `herdr`, `docSweep`, `crossFamilyReview`, `productManager` and `preApprovedRun`.
+//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `herdr`, `docSweep`, `docsSite`, `crossFamilyReview`, `waitForOwner` and `coordinator`.
 //     `version` is exactly 1; any other version is refused as unsupported by this copy, with the recovery. Another
 //     key is refused with the recovery.
 //  2. `seats` is an object whose only keys are `claude` and `codex`, each an object from seat name to an object of
@@ -50,18 +50,19 @@
 //     Anything else is refused. The release update and the manifest check act on the value: runtimes.mjs names the add-on's
 //     paths, which a tree installs only where the value is `true`.
 // 13. `docSweep`, when present, is `true` or `false`; with no key, as with `true`, the documentation sweep is on.
-//     Anything else is refused. The release update and the manifest check act on the value.
+//     Anything else is refused. The release update and the manifest check act on the value. `docsSite`, when present,
+//     is `off`, `local` or `online`; with no key it is `off`. Anything else is refused. The release update and the
+//     manifest check act on the value: runtimes.mjs names the docs site's paths.
 // 14. `crossFamilyReview`, when present, is `true`, and only where both runtimes are present; with no key no
 //     cross-family review is authorized. Anything else is refused. No update or check acts on the value. `fabraik init`
 //     writes it only on a yes to its disclosure, and the session reads it, as the `resume` skill says under
 //     "6. Verify and review".
-// 15. `productManager`, when present, is `true` or `false`; with no key, as with `false`, product manager mode is off.
-//     Anything else is refused. No update or check acts on the value; the session reads it on the fetched `main`, as
-//     the `resume` skill says under "2. Work-pick".
-// 16. `preApprovedRun`, when present, is `true` or `false`; with no key, as with `false`, pre-approved run mode is off
-//     and a record replaces neither the ordinary pick nor push yes. Anything else is refused. The launcher, board
-//     approval check and publication guard enforce explicit fetched-main true, as the `resume` skill says under
-//     "2. Work-pick"; updates leave the value untouched.
+// 15. `productManager` is retired with the product manager run: a file that holds it is refused by name and told to
+//     remove it.
+// 16. `waitForOwner`, when present, is `always`, `on-screen` or `when-needed`; with no key, or no file, it is
+//     `always`. Anything else is refused, and so is the retired key `preApprovedRun`. The launcher, the Herdr lead and
+//     the publication guard read it on the fetched `main`, as the `resume` skill says under "2. Work-pick"; updates
+//     leave the value untouched.
 //
 // The JSON half of rule 1, the list half of rule 9 and rules 10 to 16 are readSettingsHeader (runtimes.mjs), which
 // parseSettings calls; rules 2, 4, 5 and the seat half of rule 9 are parseSettings and seatsByPath; 6 is
@@ -122,10 +123,10 @@ function readSeats(seats, label, fromFile, runtimes) {
   return byPath;
 }
 
-/** Parse the settings file's text, or undefined for a tree with no settings file, into the runtimes present, whether the Greptile add-on is on, whether the Herdr add-on is on, whether the documentation sweep is on, and a Map from seat path to that seat's values. Throws a refusal naming `label`. */
+/** Parse the settings file's text, or undefined for a tree with no settings file, into the runtimes present, whether the Greptile add-on is on, whether the Herdr add-on is on, whether the documentation sweep is on, the docs site level, and a Map from seat path to that seat's values. Throws a refusal naming `label`. */
 export function parseSettings(text, label) {
-  const { settings, runtimes, greptile, herdr, docSweep } = readSettingsHeader(text, label);
-  return { runtimes, greptile, herdr, docSweep, seats: readSeats(settings.seats, label, true, runtimes) };
+  const { settings, runtimes, greptile, herdr, docSweep, docsSite } = readSettingsHeader(text, label);
+  return { runtimes, greptile, herdr, docSweep, docsSite, seats: readSeats(settings.seats, label, true, runtimes) };
 }
 
 /** The same Map for the nested { claude, codex } form alone, as the manifest's seatDefaults holds it. */
@@ -135,7 +136,7 @@ export function seatsByPath(seats, label) {
 
 /** The inverse of seatsByPath, in a fixed order so the manifest bytes are deterministic. */
 export function seatsRecord(byPath) {
-  const entries = [...byPath].map(([path, values]) => ({ ...seatOf(path), values }));
+  const entries = [...byPath].map(([path, values]) => ({ .../** @type {{ runtime: string, seat: string }} */ (seatOf(path)), values }));
   const record = {};
   for (const runtime of Object.keys(SETTING_NAMES)) {
     const ofRuntime = entries.filter((entry) => entry.runtime === runtime).sort((a, b) => (a.seat < b.seat ? -1 : 1));
@@ -226,7 +227,7 @@ export function substituteSeatSettings(path, data, values) {
     const form = lineForm(runtime, name);
     const mentions = mentionsOf(form, lines, block);
     replaced[name] = plainValue(path, name, form, lines, mentions);
-    lines[mentions[0]] = form.render(value);
+    lines[mentions[0]] = /** @type {NonNullable<typeof form>} */ (form).render(value);
   }
   return { data: Buffer.from(lines.join('\n'), 'latin1'), replaced };
 }

@@ -152,7 +152,7 @@ function probedCard(number, item) {
   try {
     card = normalizeItem(parseNode(item));
   } catch (err) {
-    throw new Error(`${prefix}, but its board item could not be read: ${err.message}`);
+    throw new Error(`${prefix}, but its board item could not be read: ${/** @type {Error} */ (err).message}`);
   }
   if (card.number !== number) {
     throw new Error(
@@ -228,7 +228,7 @@ function verifyBoardCards(numbers, cardsByNumber, unresolvedCount, ghExec) {
       } catch (err) {
         if (unresolvedCount > 0) throw new Error(unresolvedReadMessage(number, unresolvedCount));
         throw new Error(
-          `could not confirm whether issue #${number} is on the board: ${err.message}`,
+          `could not confirm whether issue #${number} is on the board: ${/** @type {Error} */ (err).message}`,
         );
       }
       if (probe) {
@@ -387,6 +387,7 @@ export function verifyLinearPublication(args, exec) {
   const cards = new Map(readLinearBoard(exec).items.map(normalizeItem).map((card) => [card.number, card]));
   const archivedNumbers = [];
   for (const id of requestedNumbers) {
+    /** @type {{ status: unknown, routing: unknown, labels: unknown[] } | undefined} */
     let card = cards.get(id);
     if (!card) {
       card = directLinearCard(id, exec);
@@ -425,7 +426,7 @@ export function verifyJiraPublication(args, exec) {
     if (!Array.isArray(issue.fields.labels)) throw new Error(`requested issue ${key} has unavailable labels`);
     checkCardFields(key, { status: project.columnOf(issue.fields.status), routing: null, labels: issue.fields.labels });
     const kind = Object.keys(KIND_LABELS).find((name) => issue.fields.labels.includes(KIND_LABELS[name]));
-    if (issue.fields.issuetype.id !== project.config.issueTypes[kind]) throw new Error(`requested issue ${key} has an issue type that does not match its ${kind} kind`);
+    if (issue.fields.issuetype.id !== project.config.issueTypes[/** @type {string} */ (kind)]) throw new Error(`requested issue ${key} has an issue type that does not match its ${kind} kind`);
   }
   const children = readJiraChildren(subjectNumber, exec);
   const verified = boardVerifiedLines(requested);

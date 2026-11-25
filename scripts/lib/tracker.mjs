@@ -1,3 +1,4 @@
+// @ts-nocheck
 // tracker.mjs — which tracker an install runs, whether it records a card's kind as a native issue
 // type, and how a card's identity prints and sorts on all of them. Pure and free of any
 // configuration import, so every tool can share it.

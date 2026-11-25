@@ -44,6 +44,7 @@ function projectItemFieldsJson(status, workstream) {
 // a substring of the query that should blow up (simulating a gh failure mid-run) and
 // `failMessage` the message it throws; `nodeIdJson` / `addJson` override the two
 // fail-loud parse points, and `itemFieldsJson` supplies the post-failure field re-read.
+/** @type {(options?: { itemId?: string, failOn?: string | null, failMessage?: string, nodeIdJson?: unknown, addJson?: unknown, itemFieldsJson?: unknown }) => { exec: (args: string[]) => string, calls: string[][] }} */
 function recordingExec({
   itemId = 'PVTI_item543',
   failOn = null,
@@ -167,9 +168,9 @@ test('addIssueToBoard fails loudly when GitHub says the item exists but the re-r
   assert.throws(
     () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
     (error) => {
-      assert.match(error.message, /#543/);
-      assert.match(error.message, /Content already exists in this project/);
-      assert.match(error.message, /re-read found no item/);
+      assert.match(/** @type {Error} */ (error).message, /#543/);
+      assert.match(/** @type {Error} */ (error).message, /Content already exists in this project/);
+      assert.match(/** @type {Error} */ (error).message, /re-read found no item/);
       return true;
     },
   );
@@ -185,9 +186,9 @@ test('addIssueToBoard fails loudly when the re-read finds the item archived', ()
   assert.throws(
     () => addIssueToBoard({ issueNumber: 543, statusName: 'Ready', workstreamName: 'Platform' }, exec),
     (error) => {
-      assert.match(error.message, /PVTI_archived/);
-      assert.match(error.message, /archived item PVTI_archived/);
-      assert.match(error.message, /unarchive it/);
+      assert.match(/** @type {Error} */ (error).message, /PVTI_archived/);
+      assert.match(/** @type {Error} */ (error).message, /archived item PVTI_archived/);
+      assert.match(/** @type {Error} */ (error).message, /unarchive it/);
       return true;
     },
   );
@@ -357,12 +358,12 @@ test('addIssueToBoard rejects a non-positive or non-integer issue number before 
   // Both name guards are covered, not just one. They are not redundant with optionIdFor:
   // a blank or non-string name is a caller bug and gets a distinct message, where an
   // unrecognised name is a typo and gets the valid-options list instead.
-  for (const [statusName, workstreamName, expected, label] of [
+  for (const [statusName, workstreamName, expected, label] of /** @type {[string | undefined, string | undefined, RegExp, string][]} */ ([
     ['  ', 'Platform', /invalid status name/, 'an empty status name'],
     [undefined, 'Platform', /invalid status name/, 'a missing status name'],
     ['Ready', '  ', /invalid workstream name/, 'an empty workstream name'],
     ['Ready', undefined, /invalid workstream name/, 'a missing workstream name'],
-  ]) {
+  ])) {
     const { exec, calls } = recordingExec();
     assert.throws(() => addIssueToBoard({ issueNumber: 543, statusName, workstreamName }, exec), expected);
     assert.equal(calls.length, 0, `exec ran for ${label}`);
@@ -388,6 +389,50 @@ test('board-add CLI reports both fields on success and drives the injected execu
   ]);
   assert.equal(errors.length, 0);
   assert.equal(calls.length, 6, 'the CLI must drive the injected executor, not a real gh');
+});
+
+test('adding an existing card to Ready wakes the coordinator', () => {
+  const { exec } = recordingExec({ itemId: 'PVTI_alreadythere', nodeIdJson: issueItemReply([raceItem('PVTI_alreadythere', false)], { issueId: ISSUE_NODE_ID }) });
+  let woken = 0;
+  const errors = [];
+
+  const code = boardAddMain(['543', 'ready', 'Platform'], {
+    output: { log: () => {}, error: (m) => errors.push(m) },
+    ghExec: exec,
+    wake: () => { woken += 1; return 'no coordinator'; },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(woken, 1);
+  assert.deepEqual(errors, ['board-add: the coordinator was not woken: no coordinator']);
+});
+
+// A Status write that lands and a Workstream write that fails: the card is already on Ready.
+function addWithFailedWorkstream(status) {
+  const { exec } = recordingExec({ failOn: 'fieldId:"PVTSSF_workstream"', itemFieldsJson: projectItemFieldsJson(status, null) });
+  let woken = 0;
+  const errors = [];
+  const code = boardAddMain(['543', status, 'Platform'], {
+    output: { log: () => {}, error: (m) => errors.push(m) },
+    ghExec: exec,
+    wake: () => { woken += 1; return null; },
+  });
+  return { code, woken, errors };
+}
+
+test('a failed add that asked for Ready still wakes the coordinator and exits 1', () => {
+  const { code, woken, errors } = addWithFailedWorkstream('Ready');
+  assert.equal(code, 1);
+  assert.equal(woken, 1);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^board-add: /);
+});
+
+test('a failed add that asked for another Status wakes nothing', () => {
+  const { code, woken, errors } = addWithFailedWorkstream('Backlog');
+  assert.equal(code, 1);
+  assert.equal(woken, 0);
+  assert.match(errors[0], /^board-add: /);
 });
 
 test('board-add CLI fails loud on a wrong argument count, without calling GitHub', () => {

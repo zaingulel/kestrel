@@ -8,6 +8,7 @@
 //   node scripts/board-move.mjs <issue#> <Status>
 //   node scripts/board-move.mjs 272 Done
 //   node scripts/board-move.mjs 274 "In review"
+//   node scripts/board-move.mjs --top 754 Ready
 //   node scripts/board-move.mjs --batch 453:Done 454:"In review"
 //   node scripts/board-move.mjs --lane 12:"To Sebastiano" 13:none
 //   node scripts/board-move.mjs --help
@@ -29,7 +30,7 @@
 
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { moveCards, moveLanes, parseBatchArgs } from './lib/board-move.mjs';
+import { isReady, moveCards, moveLanes, parseBatchArgs, placeCardAfter, wakeCoordinator } from './lib/board-move.mjs';
 import { PARKED_LANE } from './lib/board-config.mjs';
 import { moveLinearCards } from './lib/board-linear.mjs';
 import { configuredTracker, gitRunner, moveMarkdownCards } from './lib/board-markdown.mjs';
@@ -43,6 +44,7 @@ import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, cardRef, isAzureIdentifier } from '
 
 export const BOARD_MOVE_USAGE =
   'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
+  '       node scripts/board-move.mjs --top <issue#> <Status>   e.g. board-move.mjs --top 754 Ready\n' +
   '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
   '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
   '       node scripts/board-move.mjs --help   prints the modes, with no board read\n' +
@@ -54,6 +56,7 @@ export const BOARD_MOVE_HELP = [
   BOARD_MOVE_USAGE,
   '',
   '  <issue#> <Status>                 move one card; a several-word Status may be unquoted',
+  '  --top <issue#> <Status>           move one card, then put it first in the board\'s order; GitHub Projects only',
   '  --batch <issue#>:<Status>...      move each card to its Status',
   '  --lane <issue#>:<option|none>...  put each card in a parked-lane option; none clears it',
   '  --help                            this text, with no board read',
@@ -96,12 +99,21 @@ function moveAll(pairs, lane, executor, tracker, linearExecutor, jiraExecutor, a
   return markdown ? moveMarkdownCards(pairs, gitRunner(), executor) : moveCards(pairs, executor);
 }
 
+// Wakes the coordinator once when a Status move to Ready is among `pairs`; a failed wake is an advisory and
+// never changes the exit code.
+function wakeAfterReady(pairs, lane, wake, output) {
+  if (lane || !pairs.some(({ statusName, skipped }) => isReady(statusName) && !skipped)) return;
+  const cause = wake();
+  if (cause) output.error(`board-move: the coordinator was not woken: ${cause}`);
+}
+
 export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   const executor = dependencies.ghExec ?? ghExec;
   const linearExecutor = dependencies.linearExec ?? linearExec;
   const jiraExecutor = dependencies.jiraExec ?? jiraExec;
   const azureExecutor = dependencies.azureExec ?? azureExec;
+  const wake = dependencies.wake ?? wakeCoordinator;
   // --help reads no board and prints a fixed text, so any companion argument would promise more.
   if (args.includes('--help')) {
     if (args.length > 1) return usageError(output);
@@ -109,29 +121,34 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     return 0;
   }
   const lane = args[0] === '--lane';
+  const top = args[0] === '--top';
   let tracker;
   try {
     tracker = configuredTracker();
   } catch (err) {
-    output.error(`board-move: ${err.message}`);
+    output.error(`board-move: ${/** @type {Error} */ (err).message}`);
+    return 1;
+  }
+  if (top && tracker !== 'github') {
+    output.error(`board-move: --top needs the GitHub Projects tracker; this repository's tracker is ${tracker}`);
     return 1;
   }
   let pairs;
   if (args[0] === '--batch' || lane) {
     if (args.length < 2) return usageError(output);
     try {
-      pairs = parseBatchArgs(args.slice(1), lane ? PARKED_LANE?.field ?? 'Lane' : 'Status', tracker);
+      pairs = parseBatchArgs(args.slice(1), lane ? /** @type {{ field: string } | null} */ (PARKED_LANE)?.field ?? 'Lane' : 'Status', tracker);
     } catch (err) {
-      output.error(`board-move: ${err.message}`);
+      output.error(`board-move: ${/** @type {Error} */ (err).message}`);
       return 1;
     }
   } else {
-    const [issueRaw, ...statusParts] = args;
+    const [issueRaw, ...statusParts] = top ? args.slice(1) : args;
     const keyed = tracker === 'linear' || tracker === 'jira' || tracker === 'azure';
     const identifier = tracker === 'jira' ? JIRA_IDENTIFIER : LINEAR_IDENTIFIER;
     const issueNumber = keyed ? issueRaw : Number(issueRaw);
     const statusName = statusParts.join(' ').trim();
-    const validIssue = tracker === 'azure' ? isAzureIdentifier(issueRaw) : keyed ? identifier.test(issueRaw) : Number.isInteger(issueNumber) && issueNumber > 0;
+    const validIssue = tracker === 'azure' ? isAzureIdentifier(issueRaw) : keyed ? identifier.test(issueRaw) : Number.isInteger(issueNumber) && /** @type {number} */ (issueNumber) > 0;
     if (!validIssue || !statusName) return usageError(output);
     pairs = [{ issueNumber, statusName }];
   }
@@ -139,10 +156,24 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   try {
     completed = moveAll(pairs, lane, executor, tracker, linearExecutor, jiraExecutor, azureExecutor);
   } catch (err) {
-    output.error(`board-move: ${err.message}`);
+    output.error(`board-move: ${/** @type {Error} */ (err).message}`);
+    // A batch that failed part-way may have committed its Ready moves, so any requested Ready pair wakes.
+    wakeAfterReady(pairs, lane, wake, output);
     return 1;
   }
-  for (const pair of completed) output.log(reportLine(pair, lane && PARKED_LANE.field));
+  for (const pair of completed) output.log(reportLine(pair, lane && /** @type {{ field: string }} */ (/** @type {{ field: string } | null} */ (PARKED_LANE)).field));
+  if (top) {
+    const [{ issueNumber, statusName }] = completed;
+    try {
+      placeCardAfter(issueNumber, null, executor);
+    } catch (err) {
+      output.error(`board-move: #${issueNumber} is at ${statusName}, but its place first in the board's order is not confirmed: ${/** @type {Error} */ (err).message}`);
+      wakeAfterReady(completed, lane, wake, output);
+      return 1;
+    }
+    output.log(`board-move: #${issueNumber} first in the board's order`);
+  }
+  wakeAfterReady(completed, lane, wake, output);
   return 0;
 }
 

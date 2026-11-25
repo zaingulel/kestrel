@@ -1,3 +1,4 @@
+// @ts-nocheck
 // unsafe-git.test.mjs — mutation-proof unit tests for the PreToolUse(Bash) guard rules.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
@@ -5,14 +6,20 @@
 // the launcher's witness reads and the text the reason must name, never a bare truthy, so a rule that
 // fires for the wrong reason reddens a test instead of hiding behind another rule's verdict.
 
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { requirePreApprovedRun } from './advance-approval.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { ownerAnswerLine, requireMergeOnEvidence } from './merge-evidence.mjs';
+import { posixShell } from './posix-shell.mjs';
+import { presentRuntimes } from './runtimes.mjs';
 import { blockReason, cleanupPermission } from './unsafe-git.mjs';
+import { repairWorkflowSnapshot, verifyJobPin, workflowStore } from './workflow-pin.mjs';
 
 const REASON_CREATE = "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
 const REASON_MERGE = 'gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused';
@@ -100,7 +107,7 @@ test('gh pr merge outside the delivery form is blocked, bare, path-qualified, as
     'gh --repo someone/example-repository pr merge 493',
     'gh pr -R someone/example-repository merge 493',
     'gh pr view 493 && gh pr merge 493',
-    '/Users/zain/.local/bin/gh pr merge 493 --squash',
+    '/Users/someone/.local/bin/gh pr merge 493 --squash',
     './bin/gh pr merge 493 --squash',
   ];
   for (const command of blocked) assert.equal(blockReason(command), REASON_MERGE, command);
@@ -114,6 +121,20 @@ test('gh pr merge outside the delivery form is blocked, bare, path-qualified, as
   assert.equal(blockReason('gh pr merge --auto --squash 493'), REASON_MERGE);
   assert.equal(blockReason('gh pr merge 493 --auto --squash --delete-branch'), REASON_MERGE);
   assert.equal(blockReason('gh --repo someone/example-repository pr merge --auto 493'), REASON_MERGE);
+});
+
+// Mutation: make the guard refuse any of these board writes and this goes red.
+test('ANTI-REGRESSION: the git guard admits the board writes an agent takes unasked inside the project', () => {
+  for (const command of [
+    'node scripts/board-move.mjs 12 Ready',
+    'node scripts/board-move.mjs --top 12 Ready',
+    "gh issue create --title 'Proposed: a follow-up' --body-file card.md",
+    'node scripts/board-add.mjs 12 Backlog Workflow',
+    'gh issue edit 12 --remove-assignee octocat',
+    'gh issue comment 12 --body-file note.md',
+  ]) {
+    assert.equal(blockReason(command), '', command);
+  }
 });
 
 // The allow list runs the `gh pr ready` and delivery `gh pr merge` prefixes unprompted, so these two
@@ -862,8 +883,8 @@ test('ANTI-REGRESSION: every workflow worktree add form passes, the Codex siblin
     'git worktree add -b slice/232-guard ../slice-232-guard job/232',
     'git worktree add -b slice/232-guard .claude/worktrees/slice-232-guard job/232',
     'git worktree add -b slice/232-guard ../../../.claude/worktrees/slice-232-guard job/232',
-    'git worktree add -b slice/232-guard /Users/z/repo/.claude/worktrees/slice-232-guard job/232',
-    'git worktree add -b slice/232-guard "/Users/z/Claude Code/repo/.claude/worktrees/slice-232-guard" job/232',
+    'git worktree add -b slice/232-guard /Users/someone/repo/.claude/worktrees/slice-232-guard job/232',
+    'git worktree add -b slice/232-guard "/Users/someone/Claude Code/repo/.claude/worktrees/slice-232-guard" job/232',
     'git worktree add .claude/worktrees/docs-sweep -b docs-sweep/2026-10-12',
     'git worktree add .claude/worktrees/docs-triage -b docs-triage/2026-10-13',
     'git worktree add --detach .claude/worktrees/verify-232 origin/main',
@@ -1078,7 +1099,7 @@ EOF`,
 // The walk resolves each hop with node:path, which on Windows yields a drive-letter, backslashed
 // path, so the fixture paths are built the same way to match on every platform.
 
-const ROOT = resolve('/Users/z/Claude Code/repo');
+const ROOT = resolve('/Users/someone/Claude Code/repo');
 const WORKTREES = join(ROOT, '.claude', 'worktrees');
 const JOB = join(WORKTREES, '1170');
 const isRootCheckout = (dir) => dir === ROOT || (dir.startsWith(`${ROOT}${sep}`) && !dir.startsWith(`${WORKTREES}${sep}`));
@@ -1258,8 +1279,8 @@ test('the path placeholder carries a real quoted path, spaces and all', () => {
 // by hand, never derived with node:path. Mutation: drop the drive-path reading and `/c/…` resolves
 // to C:\c\…, so the cd into the root from a worktree is allowed.
 
-const WIN_ROOT = 'C:\\Users\\z\\Claude Code\\repo';
-const WIN_JOB = 'C:\\Users\\z\\Claude Code\\repo\\.claude\\worktrees\\1170';
+const WIN_ROOT = 'C:\\Users\\someone\\Claude Code\\repo';
+const WIN_JOB = 'C:\\Users\\someone\\Claude Code\\repo\\.claude\\worktrees\\1170';
 const winCheckout = (root, cwd) => ({
   cwd,
   platform: 'win32',
@@ -1268,11 +1289,11 @@ const winCheckout = (root, cwd) => ({
 
 test('ANTI-REGRESSION: on Windows a Git Bash drive path after cd or -C is read as its drive', () => {
   const winJob = winCheckout(WIN_ROOT, WIN_JOB);
-  assert.equal(blockReason('cd "/c/Users/z/Claude Code/repo" && git commit -m "wip"', winJob), rootReason('commit'));
-  assert.equal(blockReason('git -C "/c/Users/z/Claude Code/repo" switch -c x', winJob), rootReason('switch'));
-  assert.equal(blockReason('cd "/C/Users/z/Claude Code/repo" && git commit -m "wip"', winJob), rootReason('commit'));
+  assert.equal(blockReason('cd "/c/Users/someone/Claude Code/repo" && git commit -m "wip"', winJob), rootReason('commit'));
+  assert.equal(blockReason('git -C "/c/Users/someone/Claude Code/repo" switch -c x', winJob), rootReason('switch'));
+  assert.equal(blockReason('cd "/C/Users/someone/Claude Code/repo" && git commit -m "wip"', winJob), rootReason('commit'));
   const winRoot = winCheckout(WIN_ROOT, WIN_ROOT);
-  assert.equal(blockReason('cd "/c/Users/z/Claude Code/repo/.claude/worktrees/1170" && git commit -m "wip"', winRoot), '');
+  assert.equal(blockReason('cd "/c/Users/someone/Claude Code/repo/.claude/worktrees/1170" && git commit -m "wip"', winRoot), '');
 });
 
 test('on Windows a rooted path other than a drive is an unresolved target', () => {
@@ -1287,9 +1308,9 @@ test('on macOS and Linux a /c/ folder is judged as the real folder it names', ()
     platform: 'linux',
     isRootCheckout: (dir) => dir === root || (dir.startsWith(`${root}/`) && !dir.startsWith(`${root}/.claude/worktrees/`)),
   });
-  const root = '/c/Users/z/repo';
-  assert.equal(blockReason('cd /c/Users/z/repo && git commit -m "wip"', posixCheckout(root, `${root}/.claude/worktrees/1170`)), rootReason('commit'));
-  assert.equal(blockReason('cd /c/Users/z/repo/.claude/worktrees/1170 && git commit -m "wip"', posixCheckout(root, root)), '');
+  const root = '/c/Users/someone/repo';
+  assert.equal(blockReason('cd /c/Users/someone/repo && git commit -m "wip"', posixCheckout(root, `${root}/.claude/worktrees/1170`)), rootReason('commit'));
+  assert.equal(blockReason('cd /c/Users/someone/repo/.claude/worktrees/1170 && git commit -m "wip"', posixCheckout(root, root)), '');
   assert.equal(blockReason('cd /srv/repo && git commit -m "wip"', posixCheckout('/srv/repo', '/srv/repo/.claude/worktrees/1170')), rootReason('commit'));
 });
 
@@ -1353,29 +1374,38 @@ test('cleanup permission grants only the plain trusted-root command', () => {
   }
 });
 
-// ── product manager run session ──────────────────────────────────────────────
+// ── retired product manager run session ──────────────────────────────────────
 
-// The four commands `resume` step 8 refuses a run, and the run session's own publish check.
-test('ANTI-REGRESSION: a run session refuses git push and gh pr create, ready and merge, and without the mark nothing changes', () => {
-  const RUN_SESSION = { runSession: true };
-  const REFUSED = /^a product manager run session does not publish/;
+// Oracle: card 770 retires the product manager run, so the option that named its session restricts nothing.
+// Mutation: restore the run session refusal in blockReason. Recurring cost: pure calls, no subprocess.
+test('ANTI-REGRESSION: the retired product manager option refuses no publish, and every other rule still judges the command', () => {
   const publishing = [
     'git push origin job/1',
-    'git push --dry-run ./.product-manager-run-no-remote HEAD',
     'gh pr create --draft --title x',
     'gh pr ready 406',
     'gh pr merge --auto --squash --delete-branch 406',
   ];
-  assert.deepEqual(publishing.filter((command) => !REFUSED.test(blockReason(command, undefined, RUN_SESSION))), []);
-  // The mark takes nothing else: the hook check still gets its own refusal, and an ordinary command or a mention passes.
-  assert.equal(blockReason('git commit --no-verify --dry-run', undefined, RUN_SESSION), REASON_COMMIT_NO_VERIFY);
-  assert.equal(blockReason('git status', undefined, RUN_SESSION), '');
-  assert.equal(blockReason('echo "git push"', undefined, RUN_SESSION), '');
-  for (const options of [undefined, { runSession: false }]) {
+  for (const options of [undefined, { runSession: true }]) {
     for (const command of publishing) assert.equal(blockReason(command, undefined, options), '', command);
     assert.equal(blockReason('git push --force origin job/1', undefined, options), REASON_PUSH_FORCE);
     assert.equal(blockReason('gh pr create --title x', undefined, options), REASON_CREATE);
   }
+});
+
+// ── desktop app session whose run mark cannot be read ───────────────────────
+// The Claude hook passes `runMarkUnreadable`, the cause, only in the desktop app, where a sidebar card session's mark
+// is a line of its saved conversation. The expected texts are the plan's refusal prefixes followed by the cause.
+// Recurring cost: pure calls, no subprocess. Remove if the sidebar run route is retired.
+
+test('ANTI-REGRESSION: a desktop app session whose run mark cannot be read publishes nothing, and every other rule still judges it', () => {
+  const cause = 'its transcript could not be read (ENOENT)';
+  const UNREADABLE = { runMarkUnreadable: cause };
+  const PUBLISHES_NOTHING = `a desktop app session whose run mark cannot be read publishes nothing: ${cause}`;
+  assert.equal(blockReason('git push origin job/1', inJob, UNREADABLE), PUBLISHES_NOTHING);
+  assert.equal(blockReason('gh pr merge 3', inJob, UNREADABLE), PUBLISHES_NOTHING);
+  assert.equal(blockReason('git status', inJob, UNREADABLE), '');
+  assert.equal(blockReason('git commit --no-verify -m x', inJob, UNREADABLE), REASON_COMMIT_NO_VERIFY);
+  assert.equal(blockReason('git push origin job/1', inJob), '');
 });
 
 // ── gh pr new is gh pr create ───────────────────────────────────────────────
@@ -1401,28 +1431,21 @@ test('gh pr new is judged as gh pr create', () => {
   assert.equal(blockReason('gh pr new <<EOF --title x\nbody mentions --draft\nEOF'), REASON_CREATE);
   assert.equal(blockReason('gh pr new --title x <<EOF --draft\nbody\nEOF'), '');
   assert.equal(blockReason('echo "gh pr new"'), '');
-  // A product manager run session refuses the alias as it refuses the create, and outside the mark nothing changes.
-  const REFUSED = /^a product manager run session does not publish/;
-  assert.match(blockReason('gh pr new --draft --title x', undefined, { runSession: true }), REFUSED);
-  for (const options of [undefined, { runSession: false }]) {
-    assert.equal(blockReason('gh pr new --draft --title x', undefined, options), '');
-    assert.equal(blockReason('gh pr new --title x', undefined, options), REASON_CREATE);
-  }
 });
 
 // ── pre-approved run session ─────────────────────────────────────────────────
-// The advance approval check reads git and GitHub through two injected runners, each taking the
-// argument list and returning stdout or throwing, as merge-watch's gitExec and ghExec do. The fakes
-// answer only the reads the check makes, for a job/7 worktree whose origin is acme/widgets and whose
-// GraphQL reply carries GitHub's own field names, and record every call so a case can say which reads
-// a refusal must come before. The expected lines are written by hand from the plan's record form,
-// validity rules and exit codes. Origin-lookup credential custody also uses an isolated builtin
-// execution mock; the Windows executable cases retain their real missing-executable failures.
+// The publish check reads git and GitHub through two injected runners, each taking the argument list
+// and returning stdout or throwing, as merge-watch's gitExec and ghExec do. The fakes answer only the
+// reads the check makes, for a job/7 worktree whose origin is acme/widgets and whose GraphQL card reply
+// carries GitHub's own field names, its labels complete and none unless a case gives its own, and record every
+// call so a case can say which reads a refusal must come before. The session directory holds the saved write-up of HEAD, clear unless a case gives its
+// own, the pull request's head is HEAD and its published body is the clear write-up, and job/7 has no
+// open pull request when a push lists them. The expected lines are written by hand from the plan's
+// delivery forms, card checks and wait reasons. Origin-lookup credential custody also uses an isolated
+// builtin execution mock; the Windows executable cases retain their real missing-executable failures.
 
 const PRE_APPROVED = 'a pre-approved run session ';
-const NOT_APPROVED = `${PRE_APPROVED}found no valid advance approval (check exit 0): not approved 7: `;
-const UNAVAILABLE = `${PRE_APPROVED}found no valid advance approval (check exit 2): unavailable 7: `;
-const REASON_RUN_SESSION = "a product manager run session does not publish: a built job waits for the owner's yes to push";
+const UNAVAILABLE = `${PRE_APPROVED}could not read card 7: `;
 const RUN_START = '2026-11-04T12:00:00Z';
 const ORIGIN_URL = 'https://github.com/acme/widgets.git';
 const ORIGIN_ID = 'R_kgDOwidgets';
@@ -1432,24 +1455,84 @@ const CREATE_ONLY = `${PRE_APPROVED}opens a pull request only as \`gh pr create 
 const READY = 'gh pr ready 12';
 const MERGE = 'gh pr merge --auto --squash --delete-branch 12';
 const DELIVERY = [PUSH, CREATE, READY, MERGE];
-const PR_VIEW = 'gh pr view 12 --json state,headRefName,baseRefName,headRepository,isCrossRepository';
+const PR_VIEW = 'gh pr view 12 --json state,headRefName,baseRefName,headRepository,isCrossRepository,headRefOid';
+const PR_LIST = 'gh pr list --head job/7 --state open --json number,isDraft,autoMergeRequest';
+// The listing also names isCrossRepository after these fields, so the stand-in answers any call that starts with them.
+const isPrList = (call) => call.startsWith(PR_LIST);
 const isGh = (call) => call.startsWith('gh ');
 const isGraphql = (call) => call.startsWith('gh api graphql');
-const record = (fields = {}) => ({
-  author: { login: 'zain' },
-  createdAt: '2026-11-03T09:00:00Z',
-  lastEditedAt: null,
-  url: 'https://github.com/acme/widgets/issues/7#issuecomment-1',
-  body: 'Approved: card=7 edited=none',
-  ...fields,
-});
-// advance-approval.mjs loads in place beside this file, so the checkout holding the running code is read through
+const PINNED_PR_SELECTION = 'repository(owner:$owner,name:$name) { id pullRequest(number:$number) { number state headRefName baseRefName headRepository { id } isCrossRepository headRefOid isDraft autoMergeRequest { enabledAt } isInMergeQueue isMergeQueueEnabled } }';
+const REQUIRED_BRANCH_READ = 'gh api repos/{owner}/{repo}/branches/main';
+const REQUIRED_RULES_READ = 'gh api --paginate --slurp repos/{owner}/{repo}/rules/branches/main';
+const REQUIRED_CHECKS_READ = 'gh pr checks 12 --required --json name,bucket,link';
+const CHECKED_SQUASH_READ = 'git --no-replace-objects rev-list --parents -n 1 HEAD';
+
+// The saved write-up of HEAD, in the pull request template's grammar: clear (body B of the plan), and one edit of it
+// per wait reason. A screenshot's expected hash is git's own `hash-object --no-filters` output for its fixed contents.
+// The clear write-up repeats merge-evidence.test.mjs's, since importing a test file would run its tests here too, and
+// adds the Reviewed commit line a Herdr publication reads.
+const WAIT_KEYS = ['check', 'screenshot', 'beyond-card', 'sign-off', 'hard-to-undo'];
+const HEAD_COMMIT = '5ca1ab1e'.repeat(5);
+const REVIEW_FOLDER = `.claude/worklog/job_7-review-${HEAD_COMMIT}`;
+// An earlier head of job/7, the version an owner answer can name.
+const ANSWERED_COMMIT = 'a11ce5ed'.repeat(5);
+// The commit deliver.md's squash makes on fetched main from HEAD_COMMIT, the version its decision card shows.
+const SQUASH_COMMIT = '50fa5e1f'.repeat(5);
+const REVIEW_LINE = 'Review: tier=code rounds=1 raised=0 fixed=0 dismissed=0 deferred=0';
+const UNDO_EASY = 'Undo: easy, a later commit reverts it.';
+const UNDO_HARD = 'Undo: hard, a published tag cannot be withdrawn.';
+const CLEAR = [
+  '## Not done', '', 'Nothing', '',
+  '## Merge Danger', '', UNDO_EASY, 'Reach: narrow, one file.', '',
+  '## Evidence', '', 'no visual change', '', 'Passed: focused tests and lint.', 'Failed: none', 'Untested: none',
+  `Reviewed commit: ${HEAD_COMMIT}`, '',
+  '## Review', '', REVIEW_LINE, '',
+].join('\n');
+const edit = (body, from, to) => {
+  assert.ok(body.includes(from), `the write-up holds ${from}`);
+  return body.replace(from, to);
+};
+const ON_SCREEN = edit(CLEAR, 'no visual change\n\n', '');
+const SHOT_1 = 'Screenshot 1 of the logo in the header.\n';
+const SHOT_1_HASH = '92e211a8620359c126ec6fa690ac2e18323cecc8';
+// Git's blob hash of `text`, as `hash-object --no-filters` prints it: the sha1 of `blob <byte length>\0<bytes>`.
+// blobHash(SHOT_1) equals SHOT_1_HASH, Git's own output, which pins the formula.
+const blobHash = (text) => {
+  const bytes = Buffer.from(text);
+  return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+};
+const image = (alt, at) => `![${alt}](https://github.com/user-attachments/assets/${at})`;
+// The published body of work on screen whose one screenshot is attached, so no screenshot reason holds.
+const ATTACHED_BODY = edit(ON_SCREEN, '## Evidence\n\n', `## Evidence\n\n${image(`screenshot-1 ${SHOT_1_HASH}`, 'a1')}\n`);
+// A card's labels as the card read answers them, on one page.
+const labelsOf = (...names) => ({ pageInfo: { hasNextPage: false }, nodes: names.map((name) => ({ name })) });
+
+// A session directory holding `files` in the review folder of HEAD and, given `answered`, those files in the review
+// folder of ANSWERED_COMMIT; `cleanup` registers its removal.
+function sessionDirectory(files, cleanup, answered) {
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'pre-approved-session-')));
+  cleanup(() => rmSync(cwd, { recursive: true, force: true }));
+  const folders = [[REVIEW_FOLDER, files], ...(answered === undefined ? [] : [[`.claude/worklog/job_7-review-${ANSWERED_COMMIT}`, answered]])];
+  for (const [folder, held] of folders) {
+    mkdirSync(join(cwd, folder), { recursive: true });
+    for (const [name, text] of Object.entries(held)) writeFileSync(join(cwd, folder, name), text);
+  }
+  return cwd;
+}
+const CLEAR_SESSION = sessionDirectory({ 'body.md': CLEAR }, after);
+// merge-evidence.mjs loads in place beside this file, so the checkout holding the running code is read through
 // this directory, never the session checkout.
 const CODE_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+// A card comment as the card read answers it, never edited, so with no editor. The fixture's card holds the acting
+// account's own claim, made during the run.
+const cardComment = (login, createdAt, body) => ({ author: { login }, editor: null, createdAt, lastEditedAt: null, url: 'https://github.com/acme/widgets/issues/7#issuecomment-1', body });
+const claimBy = (login, createdAt) => cardComment(login, createdAt, `Claim: fixture-machine, claude, ${createdAt}`);
+const OWN_CLAIM = claimBy('owner', '2026-11-04T12:05:00Z');
 
 function preApprovedRun({
   start = RUN_START,
   tracker = 'github',
+  boundCard,
   env = {},
   branch = 'job/7',
   pushUrls = `${ORIGIN_URL}\n`,
@@ -1458,23 +1541,138 @@ function preApprovedRun({
   unscopedId = ORIGIN_ID,
   repository = {},
   pullRequest = {},
+  pinnedPull,
+  pinnedNumber = 12,
+  gitTop,
+  objectFormat = 'sha1',
+  requiredChecks = [{ name: 'test', bucket: 'pass', link: 'https://github.com/acme/widgets/actions/runs/1' }],
+  localHead = HEAD_COMMIT,
+  pinnedReads,
   issue = {},
-  closedAt = [],
-  comments = [record()],
-  hasNextPage = false,
+  comments = [OWN_CLAIM],
+  viewer = 'owner',
   repositoryId = ORIGIN_ID,
   graphqlError,
   settingOid = 'a'.repeat(40),
   settingMode = '100644\n',
-  settingText = '{"version":1,"preApprovedRun":true}',
+  settingText = '{"version":1,"waitForOwner":"when-needed"}',
   settingError,
   ancestry,
   sessionAncestry,
+  answeredAncestor,
+  squash,
+  cwd = CLEAR_SESSION,
+  pullBody = CLEAR,
+  openPulls = [],
+  platform = 'linux',
 } = {}) {
   const calls = [];
+  // Given `squash`, its commit defaults to SQUASH_COMMIT, and it sets parents, tree and ORIG_HEAD: ORIG_HEAD is HEAD_COMMIT (null for
+  // none) and no ref is named ORIG_HEAD, the one parent is fetched main, both trees are equal and the first parent is an
+  // ancestor of ORIG_HEAD, and the checkout is armed and clean: core.hooksPath is .githooks (null for unset), HEAD's
+  // .githooks is fetched main's, .githooks has no change and the session user may execute its pre-push, unless it says
+  // otherwise; those two describe the .githooks at the worktree top, `top`, which is `cwd` unless it says otherwise.
+  // Below the top, `cwd`'s own .githooks is clean and executable, and a status pathspec reads as Git reads it: `.githooks`
+  // from `cwd`, the absolute `<top>/.githooks` as the top's, and `:/.githooks` as the top's unless GIT_LITERAL_PATHSPECS
+  // in `env`, the environment the guard runs git with, makes it a literal name no file has. Each object read carries
+  // --no-replace-objects, so an object read without it is an unexpected read.
+  // Fetched main's .githooks tree is `mainHooks`, [mode, type, oid, name] entries; the top's folder on disk is
+  // `topHooks`, the { name, file, executable } entries a recursive walk that follows no symbolic link gives, `file` false
+  // for an entry that is neither a regular file nor a folder and `executable` by default whether fetched main's mode for
+  // that name is 100755; and `edited` names the top's files whose bytes differ from fetched main's, by default those
+  // githooksStatus reports modified, so a same-size edit the index reports clean sets it alone. As Git does, an ls-tree
+  // without --full-tree from a `cwd` below the top lists only that folder's part of the tree, which holds nothing here.
+  const squashed = squash === undefined ? undefined : {
+    commit: SQUASH_COMMIT, origHead: HEAD_COMMIT, origHeadRefs: '', parents: [settingOid], trees: ['d'.repeat(40), 'd'.repeat(40)], ancestor: true,
+    hooksPath: '.githooks', githooks: ['c'.repeat(40), 'c'.repeat(40)], githooksStatus: '', indexTag: 'H', fsmonitor: false, prePushExecutable: true, top: cwd,
+    mainHooks: [['100755', 'blob', '5'.repeat(40), 'pre-push']], topHooks: [{ name: 'pre-push', file: true }], ...squash,
+  };
+  if (squashed !== undefined && squashed.edited === undefined) {
+    squashed.edited = [...squashed.githooksStatus.matchAll(/^ M \.githooks\/(.+)$/gm)].map(([, name]) => name);
+  }
+  // The executable probe: whether the session user may execute a file, asked only of a pre-push by its absolute path.
+  const executable = (path) => {
+    calls.push(`executable ${path}`);
+    if (squashed !== undefined && path === join(squashed.top, '.githooks', 'pre-push')) return squashed.prePushExecutable;
+    if (squashed !== undefined && path === join(cwd, '.githooks', 'pre-push')) return true;
+    throw new Error(`unexpected read: executable ${path}`);
+  };
+  // The hooks folder walk, asked of a .githooks folder by its absolute path; `cwd`'s own below the top is fetched main's.
+  const mainExecutable = (name) => squashed.mainHooks.some(([mode, , , listed]) => listed === name && mode === '100755');
+  const listHooks = (folder) => {
+    calls.push(`listHooks ${folder}`);
+    if (squashed !== undefined && folder === join(squashed.top, '.githooks')) return squashed.topHooks.map((entry) => ({ executable: mainExecutable(entry.name), ...entry }));
+    if (squashed !== undefined && folder === join(cwd, '.githooks')) return squashed.mainHooks.map(([, , , name]) => ({ name, file: true, executable: mainExecutable(name) }));
+    throw new Error(`unexpected read: listHooks ${folder}`);
+  };
   const git = (args) => {
     const call = `git ${args.join(' ')}`;
+    // Legacy setting-read assertions that filter `git rev-parse` see only the fetched-main pin.
+    if (call === 'git rev-parse HEAD') {
+      pinnedReads?.push(call);
+      return `${localHead}\n`;
+    }
     calls.push(call);
+    if (pinnedReads && call === 'git rev-parse --show-toplevel') return `${gitTop ?? squashed?.top ?? cwd}\n`;
+    if (pinnedReads && call === 'git rev-parse --show-object-format') return `${objectFormat}\n`;
+    // Git hashes the raw bytes of each top hook file under --no-filters, in the order given: fetched main's oid unless
+    // `edited` names it.
+    if (squashed !== undefined && call.startsWith('git hash-object --no-filters -- ')) {
+      const folder = `${join(squashed.top, '.githooks')}${sep}`;
+      const paths = args.slice(3);
+      if (paths.every((path) => path.startsWith(folder))) {
+        return paths.map((path) => {
+          const name = path.slice(folder.length).split(sep).join('/');
+          const entry = squashed.mainHooks.find(([, , , listed]) => listed === name);
+          if (entry === undefined) throw new Error(`unexpected read: ${call}`);
+          return `${squashed.edited.includes(name) ? '6'.repeat(40) : entry[2]}\n`;
+        }).join('');
+      }
+    }
+    if (args[0] === 'hash-object' && args.includes('--no-filters')) {
+      return args.slice(1).filter((arg) => arg !== '--no-filters' && arg !== '--').map((path) => `${blobHash(readFileSync(resolve(cwd, path)))}\n`).join('');
+    }
+    // Git exits 0 with no output where ANSWERED_COMMIT is an ancestor of HEAD, and 1 where it is not.
+    if (answeredAncestor !== undefined && call === `git merge-base --is-ancestor ${ANSWERED_COMMIT} ${HEAD_COMMIT}`) {
+      if (answeredAncestor) return '';
+      throw Object.assign(new Error(`Command failed: ${call}`), { status: 1 });
+    }
+    if (squashed !== undefined) {
+      if (call === 'git --no-replace-objects for-each-ref --format=%(refname) refs/ORIG_HEAD refs/tags/ORIG_HEAD refs/heads/ORIG_HEAD refs/remotes/ORIG_HEAD refs/remotes/ORIG_HEAD/HEAD') return squashed.origHeadRefs;
+      if (call === 'git --no-replace-objects rev-parse --verify --quiet ORIG_HEAD^{commit}') {
+        if (squashed.origHead === null) throw Object.assign(new Error(`Command failed: ${call}`), { status: 1 });
+        return `${squashed.origHead}\n`;
+      }
+      if (call === CHECKED_SQUASH_READ) return `${[squashed.commit, ...squashed.parents].join(' ')}\n`;
+      if (call === 'git --no-replace-objects rev-parse --verify --quiet refs/remotes/origin/main^{commit}') return `${settingOid}\n`;
+      if (call === `git --no-replace-objects rev-parse HEAD^{tree} ${squashed.origHead}^{tree}`) return `${squashed.trees.join('\n')}\n`;
+      if (call === `git --no-replace-objects merge-base --is-ancestor ${squashed.parents[0]} ${squashed.origHead}`) {
+        if (squashed.ancestor) return '';
+        throw Object.assign(new Error(`Command failed: ${call}`), { status: 1 });
+      }
+      // Git ends the value with one NUL under --null, and exits 1 with no output where the key is unset.
+      if (call === 'git config --null --get core.hooksPath') {
+        if (squashed.hooksPath === null) throw Object.assign(new Error(`Command failed: ${call}`), { status: 1 });
+        return `${squashed.hooksPath}\0`;
+      }
+      if (call === 'git --no-replace-objects rev-parse HEAD:.githooks refs/remotes/origin/main:.githooks') return `${squashed.githooks.join('\n')}\n`;
+      if (call === 'git rev-parse --show-toplevel') return `${squashed.top}\n`;
+      // Git ends each entry `<mode> <type> <oid>\t<name>` with a NUL under -z.
+      if (`git ${args.filter((arg) => arg !== '--full-tree').join(' ')}` === 'git --no-replace-objects ls-tree -r -z refs/remotes/origin/main:.githooks') {
+        if (!args.includes('--full-tree') && cwd !== squashed.top) return '';
+        return squashed.mainHooks.map(([mode, type, oid, name]) => `${mode} ${type} ${oid}\t${name}\0`).join('');
+      }
+      // As Git does: an assume-unchanged or skip-worktree entry, and a core.fsmonitor that reports no change, hide an edit
+      // from status, and `-c core.fsmonitor=false` makes the status read ask the file system itself; `ls-files -v` tags
+      // an entry `h` for assume-unchanged, `S` for skip-worktree and `H` otherwise.
+      const status = call.replace('git -c core.fsmonitor=false status', 'git status');
+      const hidden = squashed.indexTag !== 'H' || (squashed.fsmonitor && status === call);
+      const statusOf = (text) => (hidden ? '' : text);
+      if (status === 'git status --porcelain --untracked-files=all -- .githooks') return cwd === squashed.top ? statusOf(squashed.githooksStatus) : '';
+      if (status === 'git status --porcelain --untracked-files=all -- :/.githooks') return env.GIT_LITERAL_PATHSPECS === '1' ? '' : statusOf(squashed.githooksStatus);
+      if (status === `git status --porcelain --untracked-files=all -- ${join(squashed.top, '.githooks')}`) return statusOf(squashed.githooksStatus);
+      if (call === `git ls-files -v -- ${join(squashed.top, '.githooks')}`) return `${squashed.indexTag} .githooks/pre-push\n`;
+    }
     if (call === 'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}') {
       if (settingError === 'ref') throw new Error('synthetic-setting-secret https://synthetic.invalid/private');
       return `${settingOid}\n`;
@@ -1510,22 +1708,47 @@ function preApprovedRun({
     if (call === `gh repo view --json id,nameWithOwner,defaultBranchRef -- ${ORIGIN_URL}`) return JSON.stringify({ id: ORIGIN_ID, nameWithOwner: 'acme/widgets', defaultBranchRef: { name: 'main' }, ...repository });
     if (call === 'gh repo view --json id') return JSON.stringify({ id: unscopedId });
     if (call === PR_VIEW) {
-      return JSON.stringify({ state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', headRepository: { id: ORIGIN_ID, name: 'widgets' }, isCrossRepository: false, ...pullRequest });
+      return JSON.stringify({ state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', headRepository: { id: ORIGIN_ID, name: 'widgets' }, isCrossRepository: false, headRefOid: HEAD_COMMIT, ...pullRequest });
+    }
+    if (call === `gh pr view ${pinnedNumber} --json body`) {
+      if (pullBody instanceof Error) throw pullBody;
+      return JSON.stringify({ body: pullBody });
+    }
+    if (isPrList(call)) {
+      if (openPulls instanceof Error) throw openPulls;
+      return JSON.stringify(openPulls);
+    }
+    if (pinnedPull !== undefined) {
+      if (call === REQUIRED_BRANCH_READ) return JSON.stringify({ protection: { required_status_checks: { contexts: ['test'] } } });
+      if (call === REQUIRED_RULES_READ) return JSON.stringify([[]]);
+      if (call === `gh pr checks ${pinnedNumber} --required --json name,bucket,link`) return JSON.stringify(requiredChecks);
     }
     if (isGraphql(call)) {
+      if (pinnedReads) {
+        const query = args[3]?.replace(/\s/g, '') ?? '';
+        const variables = (number) => args.length === 10
+          && args.slice(0, 3).join(' ') === 'api graphql -f'
+          && args.slice(4).join(' ') === `-f owner=acme -f name=widgets -F number=${number}`;
+        const selection = PINNED_PR_SELECTION.replace(/\s/g, '');
+        if (pinnedPull !== undefined && variables(pinnedNumber) && query.replace(/^query=query[^{]*\{/, '').replace('baseRefOid', '') === `${selection}}`) {
+          if (pinnedPull instanceof Error) throw pinnedPull;
+          return JSON.stringify({ data: { repository: { id: repository.id ?? ORIGIN_ID, pullRequest: pinnedPull } } });
+        }
+        if (!variables(7) || !query.includes('issue(number:$number){')) throw new Error(`unexpected read: ${call}`);
+      }
       if (graphqlError) throw new Error(graphqlError);
       return JSON.stringify({
         data: {
-          viewer: { login: 'zain' },
+          viewer: { login: viewer },
           repository: {
             id: repositoryId,
             issue: {
               state: 'OPEN',
               title: 'Show the logo',
               lastEditedAt: null,
+              labels: labelsOf(),
               ...issue,
-              timelineItems: { nodes: closedAt.map((createdAt) => ({ createdAt })) },
-              comments: { pageInfo: { hasNextPage }, nodes: comments },
+              comments: { pageInfo: { hasNextPage: false }, nodes: comments },
             },
           },
         },
@@ -1533,43 +1756,29 @@ function preApprovedRun({
     }
     throw new Error(`unexpected read: ${call}`);
   };
-  return { calls, preApproved: { start, tracker, env, exec, git, platform: 'linux' } };
+  return { calls, cwd, preApproved: { start, tracker, boundCard, env, exec, git, executable, listHooks, platform } };
 }
 
 const judged = (command, fixture, options = {}) => {
   const run = preApprovedRun(fixture);
-  return { reason: blockReason(command, inJob, { preApproved: run.preApproved, ...options }), calls: run.calls };
+  return { reason: blockReason(command, { ...inJob, cwd: run.cwd }, { preApproved: run.preApproved, ...options }), calls: run.calls };
 };
 
-test('ANTI-REGRESSION: a pre-approved run session refuses git push, gh pr create, ready and merge without a valid advance approval for its own card, and admits the delivery forms with one', () => {
+test('ANTI-REGRESSION: a pre-approved run session publishes the delivery forms of its own card with no approval record while fetched main sets waitForOwner to when-needed', () => {
+  // The card holds no approval record, only the run's own claim, and the saved write-up of HEAD holds no wait reason.
   for (const command of DELIVERY) {
-    assert.equal(
-      judged(command, { comments: [record({ body: 'Looks good to me' })] }).reason,
-      `${NOT_APPROVED}no record`,
-      command,
-    );
-    assert.equal(judged(command, { graphqlError: 'HTTP 502: Bad Gateway' }).reason, `${UNAVAILABLE}HTTP 502: Bad Gateway`, command);
-    // A run's refusal never carries the record text, so the run is never handed a record to post.
-    const voided = {
-      'an edited record': { comments: [record({ lastEditedAt: '2026-11-03T09:30:00Z' })] },
-      'a card edited after its record': { issue: { lastEditedAt: '2026-11-03T09:30:00Z' }, comments: [record()] },
-      'another author': { comments: [record({ author: { login: 'mallory' } })] },
-      'a stale edited value': { issue: { lastEditedAt: '2026-11-02T09:00:00Z' }, comments: [record({ body: 'Approved: card=7 edited=2026-11-01T08:00:00Z' })] },
-      'a record created after the run started': { comments: [record({ createdAt: '2026-11-04T12:00:01Z' })] },
-      'a record created before the last close': { closedAt: ['2026-11-03T10:00:00Z'] },
-    };
-    for (const [label, fixture] of Object.entries(voided)) {
-      assert.equal(judged(command, fixture).reason, `${NOT_APPROVED}no valid record`, `${command}, ${label}`);
-    }
+    assert.equal(judged(command).reason, '', command);
+    // The card read stays: a card it cannot read, a closed card or a proposal publishes nothing.
+    const unread = judged(command, { graphqlError: 'HTTP 502: Bad Gateway' }).reason;
+    assert.ok(unread.startsWith(PRE_APPROVED) && unread.endsWith('HTTP 502: Bad Gateway'), `${command}: ${JSON.stringify(unread)}`);
     const ineligible = {
-      'a closed card': [{ issue: { state: 'CLOSED' }, closedAt: ['2026-11-02T10:00:00Z'] }, 'the card is closed'],
+      'a closed card': [{ issue: { state: 'CLOSED' } }, 'the card is closed'],
       'a proposed card': [{ issue: { title: 'Proposed: Show the logo' } }, 'the card is still a proposal'],
     };
     for (const [label, [fixture, why]] of Object.entries(ineligible)) {
-      assert.equal(judged(command, fixture).reason, `${NOT_APPROVED}${why}`, `${command}, ${label}`);
+      const { reason } = judged(command, fixture);
+      assert.ok(reason.startsWith(PRE_APPROVED) && reason.endsWith(why), `${command}, ${label}: ${JSON.stringify(reason)}`);
     }
-    const nextPage = judged(command, { hasNextPage: true }).reason;
-    assert.ok(nextPage.startsWith(UNAVAILABLE), `${command}, a next page: ${JSON.stringify(nextPage)}`);
     for (const start of ['', '2026-11-04 12:00:00']) {
       const { reason, calls } = judged(command, { start });
       assert.ok(reason.startsWith(PRE_APPROVED), `${command}, mark ${JSON.stringify(start)}: ${JSON.stringify(reason)}`);
@@ -1590,11 +1799,154 @@ test('ANTI-REGRESSION: a pre-approved run session refuses git push, gh pr create
   const otherBranch = judged('git push -u origin job/9');
   assert.ok(otherBranch.reason.startsWith(PRE_APPROVED), JSON.stringify(otherBranch.reason));
   assert.deepEqual(otherBranch.calls.filter(isGh), []);
-  for (const command of DELIVERY) {
+});
+
+// A reason is named when its key stands on its own, so `check` inside `checked` or `checkout` names nothing.
+const namesReason = (reason, key) => new RegExp(`(?<![\\w-])${key}(?![\\w-])`).test(reason);
+
+test('ANTI-REGRESSION: a pre-approved run session marks ready or merges nothing while a wait reason holds for its head, and the refusal names each reason', (t) => {
+  const cleanup = (remove) => t.after(remove);
+  const allFive = [
+    ['Failed: none', 'Failed: lint, cause unknown'],
+    ['no visual change\n\n', ''],
+    ['Nothing', '- The Windows suite was skipped.'],
+    ['tier=code', 'tier=sign-off'],
+    [UNDO_EASY, UNDO_HARD],
+  ].reduce((body, [from, to]) => edit(body, from, to), CLEAR);
+  const holding = [
+    ['a failed check', { 'body.md': edit(CLEAR, 'Failed: none', 'Failed: lint, cause unknown') }, ['check']],
+    ['work on screen with no screenshot', { 'body.md': ON_SCREEN }, ['screenshot']],
+    ['a screenshot not attached to the pull request', { 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, ['screenshot']],
+    ['a Not done item', { 'body.md': edit(CLEAR, 'Nothing', '- The Windows suite was skipped.') }, ['beyond-card']],
+    ['a sign-off review tier', { 'body.md': edit(CLEAR, 'tier=code', 'tier=sign-off') }, ['sign-off']],
+    ['an Undo answer of hard', { 'body.md': edit(CLEAR, UNDO_EASY, UNDO_HARD) }, ['hard-to-undo']],
+    ['all five', { 'body.md': allFive }, WAIT_KEYS],
+  ];
+  for (const [label, files, held] of holding) {
+    const cwd = sessionDirectory(files, cleanup);
+    for (const command of [READY, MERGE]) {
+      const { reason } = judged(command, { cwd });
+      assert.ok(reason.startsWith(PRE_APPROVED), `${label}, ${command}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(WAIT_KEYS.filter((key) => namesReason(reason, key)), held, `${label}, ${command}: ${JSON.stringify(reason)}`);
+    }
+  }
+  const attached = sessionDirectory({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, cleanup);
+  for (const command of [READY, MERGE]) {
     assert.equal(judged(command).reason, '', command);
-    const editedCard = { issue: { lastEditedAt: '2026-11-03T08:00:00Z' }, comments: [record({ body: 'Approved: card=7 edited=2026-11-03T08:00:00Z' })] };
-    assert.equal(judged(command, editedCard).reason, '', command);
-    assert.equal(judged(command, {}, { runSession: true }).reason, REASON_RUN_SESSION, command);
+    assert.equal(judged(command, { cwd: attached, pullBody: ATTACHED_BODY }).reason, '', command);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session marks ready or merges nothing while its published pull request body holds a wait reason', (t) => {
+  // The saved write-up of HEAD is clear in each case unless a case gives its own; the published body is what differs.
+  const published = [
+    ['a failed check', edit(CLEAR, 'Failed: none', 'Failed: lint, cause unknown'), ['check']],
+    ['an untested item', edit(CLEAR, 'Untested: none', 'Untested: Windows runner'), ['check']],
+    ['work on screen with no screenshot', ON_SCREEN, ['screenshot']],
+    ['a Not done item', edit(CLEAR, 'Nothing', '- The Windows suite was skipped.'), ['beyond-card']],
+    ['a sign-off review tier', edit(CLEAR, 'tier=code', 'tier=sign-off'), ['sign-off']],
+    ['an Undo answer of hard', edit(CLEAR, UNDO_EASY, UNDO_HARD), ['hard-to-undo']],
+  ];
+  const localHard = sessionDirectory({ 'body.md': edit(CLEAR, UNDO_EASY, UNDO_HARD) }, (remove) => t.after(remove));
+  for (const command of [READY, MERGE]) {
+    for (const [label, pullBody, held] of published) {
+      const { reason, calls } = judged(command, { pullBody });
+      assert.ok(reason.startsWith(PRE_APPROVED), `${label}, ${command}: ${JSON.stringify(reason)}`);
+      assert.deepEqual(WAIT_KEYS.filter((key) => namesReason(reason, key)), held, `${label}, ${command}: ${JSON.stringify(reason)}`);
+      assert.equal(calls.filter((call) => call === 'gh pr view 12 --json body').length, 1, `${label}, ${command}: the body is read once`);
+    }
+    // The held reasons are the union of the two, in WAIT_REASONS order.
+    const both = judged(command, { cwd: localHard, pullBody: published[0][1] }).reason;
+    assert.ok(both.startsWith(PRE_APPROVED) && both.endsWith(': check, hard-to-undo'), `${command}, both: ${JSON.stringify(both)}`);
+    // A published body the judge cannot read, or cannot fetch, refuses and names the cause.
+    const unreadable = judged(command, { pullBody: edit(CLEAR, 'Failed: none\n', '') }).reason;
+    assert.equal(unreadable, `${PRE_APPROVED}publishes nothing: the published body of pull request #12 has no Failed: line`, command);
+    const unfetched = judged(command, { pullBody: new Error('HTTP 502: Bad Gateway') }).reason;
+    assert.equal(unfetched, `${PRE_APPROVED}publishes nothing: could not read the published body of pull request #12: HTTP 502: Bad Gateway`, command);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session pushes nothing while its pull request is ready or has a merge queued', () => {
+  // GitHub keeps a queued auto-merge after a push by someone with write access, so the pushed commit would merge unjudged.
+  const QUEUED = { enabledAt: '2026-11-04T13:00:00Z', mergeMethod: 'SQUASH' };
+  const REFUSED = `${PRE_APPROVED}pushes nothing while pull request #12 is ready or has a merge queued, since GitHub would merge the pushed commit unjudged: take it back to draft with \`gh pr ready 12 --undo\` first, and where its merge stays queued the owner turns it off with \`gh pr merge --disable-auto 12\``;
+  for (const command of [PUSH, 'git push --force-with-lease origin job/7']) {
+    for (const pull of [{ isDraft: false, autoMergeRequest: null }, { isDraft: false, autoMergeRequest: QUEUED }, { isDraft: true, autoMergeRequest: QUEUED }]) {
+      assert.equal(judged(command, { openPulls: [{ number: 12, isCrossRepository: false, ...pull }] }).reason, REFUSED, `${command}, ${JSON.stringify(pull)}`);
+    }
+    // The first push, before any pull request exists, and a push to a draft with nothing queued are admitted.
+    for (const openPulls of [[], [{ number: 12, isDraft: true, autoMergeRequest: null, isCrossRepository: false }]]) {
+      const { reason, calls } = judged(command, { openPulls });
+      assert.equal(reason, '', `${command}, ${JSON.stringify(openPulls)}`);
+      assert.ok(calls.some(isPrList), `${command}: ${JSON.stringify(calls)}`);
+    }
+    // A pull request from a fork with the same head name cannot be updated by this push, so it never refuses it.
+    const own = { number: 12, isDraft: true, autoMergeRequest: null, isCrossRepository: false };
+    const fork = { number: 31, isDraft: false, autoMergeRequest: null, isCrossRepository: true };
+    for (const openPulls of [[fork], [fork, own], [{ ...fork, autoMergeRequest: QUEUED }, own]]) {
+      const { reason, calls } = judged(command, { openPulls });
+      assert.equal(reason, '', `${command}, ${JSON.stringify(openPulls)}`);
+      assert.ok(calls.some((call) => isPrList(call) && call.includes('isCrossRepository')), `${command}: ${JSON.stringify(calls)}`);
+    }
+    // This repository's own ready pull request still refuses, whichever order it is listed in beside a fork's draft.
+    const forkDraft = { ...fork, number: 31, isDraft: true };
+    for (const openPulls of [[{ ...own, isDraft: false }, forkDraft], [forkDraft, { ...own, isDraft: false }]]) {
+      assert.equal(judged(command, { openPulls }).reason, REFUSED, `${command}, ${JSON.stringify(openPulls)}`);
+    }
+    // A list it cannot read refuses, as other read failures do.
+    const unread = {
+      'a failed read': new Error('HTTP 502: Bad Gateway'),
+      'a pull request with no draft state': [{ number: 12 }],
+      'a reply that is no list': { number: 12 },
+      'a pull request with no cross-repository state': [{ number: 12, isDraft: true, autoMergeRequest: null }],
+    };
+    for (const [label, openPulls] of Object.entries(unread)) {
+      const { reason } = judged(command, { openPulls });
+      assert.ok(reason.startsWith(`${PRE_APPROVED}publishes nothing: `), `${command}, ${label}: ${JSON.stringify(reason)}`);
+    }
+    // gh lists 30 by default, and --head matches a branch name in any repository, so forks could push the run's own queued
+    // pull request out of the reply: the listing asks for 100 and a reply of 100 may be cut short, so it is unreadable.
+    const drafts = (count) => Array.from({ length: count }, (_, index) => ({ number: 100 + index, isDraft: true, autoMergeRequest: null, isCrossRepository: true }));
+    assert.ok(judged(command, { openPulls: [] }).calls.some((call) => isPrList(call) && call.includes(' --limit 100')), `${command}: the listing names --limit 100`);
+    const cutShort = judged(command, { openPulls: drafts(100) }).reason;
+    assert.ok(cutShort.startsWith(`${PRE_APPROVED}publishes nothing: `), `${command}, 100 pull requests: ${JSON.stringify(cutShort)}`);
+    assert.equal(judged(command, { openPulls: drafts(99) }).reason, '', `${command}, 99 pull requests`);
+  }
+});
+
+test('ANTI-REGRESSION: a pre-approved run session publishes only a card whose newest claim its GitHub account made during the run', () => {
+  // The owner's answer "Yes, only its own": a session that strays onto another card's branch, or a card claimed before
+  // the run started, publishes nothing and waits for the owner's yes. The acting account is owner; the run started at RUN_START.
+  const ONLY_OWN = `${PRE_APPROVED}publishes only a card its GitHub account claimed during this run, and`;
+  const WAITS = "so the card waits for the owner's yes";
+  const refused = {
+    'no claim': [[cardComment('owner', '2026-11-04T12:01:00Z', 'Building this now.')], `${ONLY_OWN} card 7 has no Claim comment, ${WAITS}`],
+    'the newest claim by another account': [[claimBy('bob', '2026-11-04T12:05:00Z')], `${ONLY_OWN} the newest claim on card 7 was made by bob, not owner, ${WAITS}`],
+    'the newest claim made before the run start': [[claimBy('owner', '2026-11-04T11:59:59Z')], `${ONLY_OWN} the newest claim on card 7 was made at 2026-11-04T11:59:59Z, not at or after this run's start at ${RUN_START}, ${WAITS}`],
+    'an own claim followed by a newer claim by another account': [[claimBy('owner', '2026-11-04T12:05:00Z'), claimBy('bob', '2026-11-04T12:10:00Z')], `${ONLY_OWN} the newest claim on card 7 was made by bob, not owner, ${WAITS}`],
+  };
+  for (const command of [PUSH, READY]) {
+    for (const [label, [comments, reason]] of Object.entries(refused)) {
+      assert.equal(judged(command, { comments }).reason, reason, `${command}, ${label}`);
+    }
+    assert.equal(judged(command, { comments: [claimBy('owner', RUN_START)] }).reason, '', `${command}, an own claim at the run start exactly`);
+  }
+});
+
+test("ANTI-REGRESSION: a lead's continue, bound to its card under an earlier run's start, publishes only that card", () => {
+  // A continue runs under the start of the run that claimed its card, 2026-11-01, and the fixture's claim is at 11-04.
+  // The binding is the card the continue's phase names; every read in the fixture names card 7, the card of job/7.
+  const start = '2026-11-01T09:00:00Z';
+  const BOUND = `${PRE_APPROVED}publishes only its bound card`;
+  for (const command of DELIVERY) {
+    assert.equal(judged(command, { start }).reason, '', `${command}, no binding`);
+    assert.equal(judged(command, { start, boundCard: '7' }).reason, '', `${command}, bound to card 7`);
+    // A binding that is any other card, or no card number as the guard reads one, refuses before any gh call.
+    for (const boundCard of ['8', '', '07', 'job/7']) {
+      const { reason, calls } = judged(command, { start, boundCard });
+      assert.equal(reason, BOUND, `${command}, bound to ${JSON.stringify(boundCard)}`);
+      assert.deepEqual(calls.filter(isGh), [], `${command}, bound to ${JSON.stringify(boundCard)}`);
+    }
   }
 });
 
@@ -1631,7 +1983,6 @@ test('ANTI-REGRESSION: a merge or ready captured by a leading assignment is refu
   ];
   for (const [command, refusal] of forms) {
     assert.equal(blockReason(command, inJob), refusal, command);
-    assert.equal(blockReason(command, inJob, { runSession: true }), REASON_RUN_SESSION, command);
     const { reason, calls } = judged(command);
     assert.equal(reason, `${PRE_APPROVED}publishes only a plain command, with no assignment before it`, command);
     assert.deepEqual(calls, [], command);
@@ -1744,7 +2095,7 @@ test('ANTI-REGRESSION: a pre-approved run session publishes only as a command on
   }
 });
 
-test('ANTI-REGRESSION: a pre-approved run session never pushes to main, even with a valid record, and pushes its own branch with --force-with-lease', () => {
+test('ANTI-REGRESSION: a pre-approved run session no coordinator started never pushes to main, even with a valid record, and pushes its own branch with --force-with-lease', () => {
   const toMain = judged('git push origin HEAD:main');
   assert.equal(toMain.reason, `${PRE_APPROVED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`);
   assert.deepEqual(toMain.calls.filter(isGh), []);
@@ -1793,36 +2144,6 @@ test('a pre-approved run session refuses a command holding -C, --git-dir or --wo
   }
 });
 
-test('ANTI-REGRESSION: every agent session refuses any command that writes or quotes an advance approval record, and a run session keeps its own refusal', () => {
-  const quoting = [
-    'gh issue comment 7 --body "Approved: card=7 edited=none"',
-    "gh issue comment 7 --body-file - <<'EOF'\nApproved: card=7 edited=none\nEOF",
-    "printf 'Approved: card=7 edited=none' > record.md",
-    'grep -rn "Approved:" .claude/worklog',
-  ];
-  for (const command of quoting) {
-    const runSession = blockReason(command, inJob, { runSession: true });
-    assert.ok(runSession.startsWith('a product manager run session '), `${command}: ${JSON.stringify(runSession)}`);
-    const { reason, calls } = judged(command);
-    assert.ok(reason.startsWith(PRE_APPROVED), `${command}: ${JSON.stringify(reason)}`);
-    assert.deepEqual(calls, [], command);
-    const ordinary = blockReason(command, inJob);
-    assert.ok(ordinary.startsWith('an agent session does not write or quote an advance approval record'), `${command}: ${JSON.stringify(ordinary)}`);
-    const unmarked = blockReason(command, inJob, { runSession: false });
-    assert.ok(unmarked.startsWith('an agent session does not write or quote an advance approval record'), `${command}: ${JSON.stringify(unmarked)}`);
-  }
-  // The rule takes nothing else: an ordinary command and the approval check itself pass in every session.
-  for (const command of ['git status', 'node scripts/board.mjs --approval check 7']) {
-    assert.equal(blockReason(command, inJob), '', command);
-    assert.equal(blockReason(command, inJob, { runSession: true }), '', command);
-    const { reason, calls } = judged(command);
-    assert.equal(reason, '', command);
-    assert.deepEqual(calls, [], command);
-  }
-  // The Summary's `Approved in advance:` line is not a record.
-  assert.equal(blockReason('gh pr create --draft --title t --body "Approved in advance: https://github.com/o/r/issues/7#issuecomment-1"', inJob), '');
-});
-
 test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin repository and only where the tracker is GitHub issues', () => {
   for (const command of DELIVERY) {
     for (const [name, value] of [['GH_REPO', 'x/y'], ['GH_HOST', 'github.example.com']]) {
@@ -1859,7 +2180,7 @@ test('ANTI-REGRESSION: a pre-approved run session publishes only to the origin r
     assert.ok(graphqlRepository.startsWith(UNAVAILABLE), `${command}, GraphQL repository: ${JSON.stringify(graphqlRepository)}`);
     const jira = judged(command, { tracker: 'jira' });
     assert.ok(
-      jira.reason.startsWith(PRE_APPROVED) && jira.reason.includes("advance approval needs GitHub issues; this repository's tracker is jira"),
+      jira.reason.startsWith(PRE_APPROVED) && jira.reason.includes("a run needs GitHub issues; this repository's tracker is jira"),
       `${command}, jira: ${JSON.stringify(jira.reason)}`,
     );
     assert.deepEqual(jira.calls, [], `${command}, jira`);
@@ -1886,8 +2207,12 @@ test('ANTI-REGRESSION: advance approval origin lookup errors keep remote credent
     [`${BIN}\\git.exe`, ['remote', 'get-url', 'origin']],
     [`${BIN}\\gh.exe`, ['repo', 'view', '--json', 'id,nameWithOwner,defaultBranchRef', '--', unsafeUrl]],
   ];
+  const sentinel = 'FH_PRIVATE_PROVIDER_METADATA_577';
+  const credential = 'https://fixture-user:fixture-password@fixture.invalid/private-577';
+  const malformedMetadata = JSON.stringify({ id: '', nameWithOwner: 'acme/widgets',
+    defaultBranchRef: { name: 'main' }, private: sentinel, privateUrl: credential });
   const calls = [];
-  let malformedJson = false;
+  let responseMode = 'lookup-error';
   const originalExecFileSync = childProcess.execFileSync;
   const wrapped = t.mock.method(childProcess, 'execFileSync', (file, args, options) => {
     calls.push([file, args]);
@@ -1895,15 +2220,16 @@ test('ANTI-REGRESSION: advance approval origin lookup errors keep remote credent
     if (index === 0) return 'job/7\n';
     if (index === 1 || index === 2) return `${unsafeUrl}\n`;
     if (index === 3) {
-      if (malformedJson) return `{invalid JSON: ${unsafeUrl}`;
+      if (responseMode === 'invalid-metadata') return malformedMetadata;
+      if (responseMode === 'invalid-json') return `{invalid JSON: ${unsafeUrl}`;
       throw Object.assign(new Error(`GitHub lookup failed for ${unsafeUrl}`), { stderr: `cannot access ${unsafeUrl}\n`, status: 1 });
     }
     return originalExecFileSync(file, args, options);
   });
   try {
     syncBuiltinESMExports();
-    for (const malformed of [false, true]) {
-      malformedJson = malformed;
+    for (const mode of ['lookup-error', 'invalid-json', 'invalid-metadata']) {
+      responseMode = mode;
       calls.length = 0;
       const reason = blockReason(PUSH, here, { preApproved: {
         start: RUN_START,
@@ -1916,7 +2242,12 @@ test('ANTI-REGRESSION: advance approval origin lookup errors keep remote credent
       for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
         assert.ok(!reason.includes(secret), `remote credentials leaked in ${JSON.stringify(reason)}`);
       }
-      if (malformedJson) {
+      if (responseMode === 'invalid-metadata') {
+        assert.equal(reason, `${PRE_APPROVED}publishes nothing: unreadable origin repository: GitHub CLI returned invalid repository metadata`);
+        for (const secret of [malformedMetadata, sentinel, credential, 'fixture-user', 'fixture-password']) {
+          assert.ok(!reason.includes(secret), `private provider metadata leaked in ${JSON.stringify(reason)}`);
+        }
+      } else if (responseMode === 'invalid-json') {
         assert.equal(reason, `${PRE_APPROVED}publishes nothing: unreadable origin repository: GitHub CLI returned invalid JSON`);
       } else {
         assert.equal(reason, `${PRE_APPROVED}publishes nothing: unreadable origin repository: the GitHub CLI lookup failed; check that gh is installed on PATH and can access the repository`);
@@ -2007,77 +2338,1061 @@ test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.
   );
 });
 
-test('a pre-approved run session may take its own job pull request back to draft after its record is revoked', () => {
-  const revoked = { comments: [record({ body: 'Revoked: card=7 edited=none', lastEditedAt: '2026-11-04T08:00:00Z' })] };
-  const ready = judged(READY, revoked).reason;
-  assert.ok(ready.startsWith(NOT_APPROVED), JSON.stringify(ready));
+test('ANTI-REGRESSION: a pre-approved run session may take its own pull request back to draft while a wait reason holds', (t) => {
+  const held = { cwd: sessionDirectory({ 'body.md': edit(CLEAR, UNDO_EASY, UNDO_HARD) }, (remove) => t.after(remove)) };
+  const ready = judged(READY, held).reason;
+  assert.ok(ready.startsWith(PRE_APPROVED) && namesReason(ready, 'hard-to-undo'), JSON.stringify(ready));
   for (const command of ['gh pr ready 12 --undo', 'gh pr ready --undo 12']) {
-    const { reason, calls } = judged(command, revoked);
+    const { reason, calls } = judged(command, held);
     assert.equal(reason, '', command);
     assert.ok(calls.includes(PR_VIEW), `${command}: ${JSON.stringify(calls)}`);
     assert.deepEqual(calls.filter(isGraphql), [], command);
   }
 });
 
-// ── carried push yes session ────────────────────────────────────────────────
-// The owner's yes the coordinator carried to the session of one card: its mark is that card alone, with the same
-// runner injections and no run start or tracker. The expected outcomes come from the pre-approved delivery forms
-// above, the direct-route push deliver.md names and card #596's exact-card criterion.
+// The expected outcomes come from card #757's first acceptance criterion and the guard change the owner signed off:
+// the owner's show-me-first label holds a card at every level, on-screen also holds work on screen, a card whose
+// labels cannot all be read publishes nothing, and taking its own pull request back to draft stays open.
+test('ANTI-REGRESSION: a run session marks ready and merges nothing while its card carries show-me-first or, at on-screen, its work is on screen', (t) => {
+  const onScreenLevel = '{"version":1,"waitForOwner":"on-screen"}';
+  const marked = { issue: { labels: labelsOf('enhancement', 'show-me-first') } };
+  const screenWork = {
+    settingText: onScreenLevel,
+    cwd: sessionDirectory({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, (remove) => t.after(remove)),
+    pullBody: ATTACHED_BODY,
+  };
+  // The saved write-up says no visual change while the published body shows the work on screen with its screenshot
+  // attached: both must say no visual change before on-screen admits it.
+  const publishedScreenWork = {
+    settingText: onScreenLevel,
+    cwd: sessionDirectory({ 'body.md': CLEAR, 'screenshot-1.png': SHOT_1 }, (remove) => t.after(remove)),
+    pullBody: ATTACHED_BODY,
+  };
+  // Admitted, held naming the reasons the refusal lists, or any other refusal whole.
+  const verdict = (reason) => {
+    if (reason === '') return 'admitted';
+    const held = /wait reason holds for HEAD: (.+)$/.exec(reason)?.[1];
+    return held === undefined ? reason : `held: ${held}`;
+  };
+  const rows = [
+    ...[READY, MERGE].flatMap((command) => [
+      [`when-needed, a card carrying show-me-first: ${command}`, command, marked, 'held: show-me-first'],
+      [`when-needed, a card carrying another label only: ${command}`, command, { issue: { labels: labelsOf('enhancement') } }, 'admitted'],
+      [`on-screen, an unmarked card with work on screen: ${command}`, command, screenWork, 'held: on-screen'],
+      [`when-needed, a card carrying Show-Me-First: ${command}`, command, { issue: { labels: labelsOf('enhancement', 'Show-Me-First') } }, 'held: show-me-first'],
+      [`on-screen, a write-up saying no visual change and a published body with work on screen: ${command}`, command, publishedScreenWork, 'held: on-screen'],
+    ]),
+    ...DELIVERY.map((command) => [`on-screen, an unmarked card with no visual change: ${command}`, command, { settingText: onScreenLevel }, 'admitted']),
+    ...['gh pr ready 12 --undo', 'gh pr ready --undo 12'].map((command) => [`a card carrying show-me-first: ${command}`, command, marked, 'admitted']),
+  ];
+  const outcomes = (pick) => Object.fromEntries(rows.map((row) => [row[0], pick(row)]));
+  assert.deepEqual(outcomes(([, command, fixture]) => verdict(judged(command, fixture).reason)), outcomes((row) => row[3]));
+  const unreadable = {
+    'labels absent': { labels: undefined },
+    'labels not an array': { labels: { pageInfo: { hasNextPage: false }, nodes: 'show-me-first' } },
+    'a label name that is not text': { labels: { pageInfo: { hasNextPage: false }, nodes: [{ name: 7 }] } },
+    'a second page of labels': { labels: { pageInfo: { hasNextPage: true }, nodes: [{ name: 'enhancement' }] } },
+  };
+  for (const [label, issue] of Object.entries(unreadable)) {
+    for (const command of [READY, MERGE]) {
+      const { reason } = judged(command, { issue });
+      assert.ok(reason.startsWith(PRE_APPROVED) && reason.includes('publishes nothing: '), `${label}, ${command}: ${JSON.stringify(reason)}`);
+    }
+  }
+});
 
-const CARRIED = 'a carried push yes session ';
-const carriedJudged = (command, fixture, carried = '7') => {
-  const run = preApprovedRun(fixture);
-  const { env, exec, git, platform } = run.preApproved;
-  return { reason: blockReason(command, inJob, { carriedYes: { carried, env, exec, git, platform } }), calls: run.calls };
+// ── owner answers ───────────────────────────────────────────────────────────
+// The expected outcomes come from card #758's records and fix path, which the owner signed off: a held card's ready or
+// merge is admitted on the newest owner answer by the acting account for the saved card at the pull request head, or
+// on an answer to an earlier head that a fix line by that account built on, within the fix path's bounds. Every
+// identity is blobHash's, and every refusal is the held refusal, followed, where an answer holds, after `, and ` by why
+// it does not admit the head.
+
+const SIGN_OFF = edit(CLEAR, 'tier=code', 'tier=sign-off');
+// The identity of a saved card: the blob hash of its body.md, then of each screenshot in numeric order, comma-joined.
+const identityOf = (...texts) => texts.map(blobHash).join(',');
+const ownerAnswer = (head, identity, words) => `Owner answer: job/7 at ${head} ${identity}: ${words}`;
+const fixBuilt = (from, words) => `Fix built: job/7 at ${HEAD_COMMIT} from ${from}: ${words}`;
+// The held refusal of `command` naming `reasons`, then, where the fix path gives one, its reason `tail`.
+const heldRefusal = (command, reasons, tail) => `${PRE_APPROVED}${command === READY ? 'marks ready' : 'merges'} nothing while a wait reason holds for HEAD: ${reasons.join(', ')}${tail === undefined ? '' : `, and ${tail}`}`;
+// Each row, as [label, fixture, held reasons or undefined where it is admitted, the fix path's reason], judged for
+// READY and MERGE, against its expected reason.
+const ownerAnswerOutcomes = (rows) => {
+  const outcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => rows.map((row) => [`${row[0]}: ${command}`, pick(command, row)])));
+  return {
+    actual: outcomes((command, [, fixture]) => judged(command, fixture).reason),
+    expected: outcomes((command, [, , reasons, tail]) => (reasons === undefined ? '' : heldRefusal(command, reasons, tail))),
+  };
 };
 
-test('ANTI-REGRESSION: a carried push yes session publishes only the delivery forms of its own card without an approval record, and refuses every other publish and any approval text', () => {
-  for (const command of [...DELIVERY, 'git push --force-with-lease origin job/7']) {
-    const { reason, calls } = carriedJudged(command, { comments: [] });
-    assert.equal(reason, '', command);
-    assert.deepEqual(calls.filter(isGraphql), [], `${command} reads no approval record`);
+test('ANTI-REGRESSION: a pre-approved run session marks ready or merges a held card only where the card records an owner answer by its own account for the version at the pull request head', (t) => {
+  assert.equal(blobHash(SHOT_1), SHOT_1_HASH, "blobHash gives Git's own blob hash");
+  const cleanup = (remove) => t.after(remove);
+  const held = { cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup), pullBody: SIGN_OFF };
+  const atHead = ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), 'yes');
+  const answered = (login, body) => [OWN_CLAIM, cardComment(login, '2026-11-04T12:30:00Z', body)];
+  const marked = { issue: { labels: labelsOf('show-me-first') } };
+  // A matching record, then a newer comment by owner whose first line begins as a record for job/7 and does not parse.
+  const superseded = (body) => ({ ...held, comments: [...answered('owner', atHead), cardComment('owner', '2026-11-04T12:40:00Z', body)] });
+  const editedByBob = (comment) => ({ ...comment, editor: { login: 'bob' }, lastEditedAt: '2026-11-04T12:50:00Z' });
+  const { actual, expected } = ownerAnswerOutcomes([
+    ['no record', held, ['sign-off']],
+    ['a record by owner at HEAD with its identity', { ...held, comments: answered('owner', atHead) }],
+    ['a record by another account', { ...held, comments: answered('bob', atHead) }, ['sign-off']],
+    ['a record by a deleted account', { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), author: null }] }, ['sign-off']],
+    ['a record for job/8', { ...held, comments: answered('owner', atHead.replace('job/7', 'job/8')) }, ['sign-off']],
+    ['a record with blank words', { ...held, comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), '  ')) }, ['sign-off']],
+    ['a record quoted after other text on its first line', { ...held, comments: answered('owner', `The owner wrote ${atHead}`) }, ['sign-off']],
+    [
+      'a record with one identity hash changed',
+      { ...held, comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(CLEAR), 'yes')) },
+      ['sign-off'],
+      `the newest owner answer on card 7 does not name the saved card at ${HEAD_COMMIT}`,
+    ],
+    [
+      'a matching record, then a newer one naming ANSWERED_COMMIT and no fix line',
+      {
+        cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup, { 'body.md': SIGN_OFF }),
+        pullBody: SIGN_OFF,
+        comments: [
+          OWN_CLAIM,
+          cardComment('owner', '2026-11-04T12:30:00Z', atHead),
+          cardComment('owner', '2026-11-04T12:40:00Z', ownerAnswer(ANSWERED_COMMIT, identityOf(SIGN_OFF), 'shorten the title and merge it')),
+        ],
+      },
+      ['sign-off'],
+      `the newest owner answer on card 7 names ${ANSWERED_COMMIT}, and no fix built from it by owner names ${HEAD_COMMIT}`,
+    ],
+    [
+      'a matching record, then a newer one by owner with its words on the second line',
+      superseded(`Owner answer: job/7 at ${HEAD_COMMIT} ${identityOf(SIGN_OFF)}:\nhold it`),
+      ['sign-off'],
+    ],
+    ['a matching record, then a newer one by owner naming a truncated head', superseded(ownerAnswer(HEAD_COMMIT.slice(0, 12), identityOf(SIGN_OFF), 'hold it')), ['sign-off']],
+    [
+      'a matching record that another account last edited',
+      { ...held, comments: [OWN_CLAIM, editedByBob(cardComment('owner', '2026-11-04T12:30:00Z', atHead))] },
+      ['sign-off'],
+    ],
+    [
+      'a matching record that owner last edited',
+      { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), editor: { login: 'owner' }, lastEditedAt: '2026-11-04T12:50:00Z' }] },
+    ],
+    [
+      'a matching record that an account GitHub no longer names last edited',
+      { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), lastEditedAt: '2026-11-04T12:50:00Z' }] },
+      ['sign-off'],
+    ],
+    [
+      'a matching record, and an earlier comment by owner that another account last edited',
+      { ...held, comments: [OWN_CLAIM, editedByBob(cardComment('owner', '2026-11-04T12:20:00Z', 'Verdict: the review found nothing.')), cardComment('owner', '2026-11-04T12:30:00Z', atHead)] },
+      ['sign-off'],
+    ],
+    ['a show-me-first card with the record', { ...held, ...marked, comments: answered('owner', atHead) }],
+    ['a show-me-first card without the record', { ...held, ...marked }, ['sign-off', 'show-me-first']],
+    [
+      'on-screen, the work on screen with its screenshot attached, with the record',
+      {
+        settingText: '{"version":1,"waitForOwner":"on-screen"}',
+        cwd: sessionDirectory({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, cleanup),
+        pullBody: ATTACHED_BODY,
+        comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(ON_SCREEN, SHOT_1), 'yes')),
+      },
+    ],
+  ]);
+  // A matching record never admits a reason held at HEAD that the saved card it names does not hold, which only the
+  // published body adds. Each row, as [label, fixture, held reasons], is refused naming those reasons; what follows
+  // them is the guard's own wording, so only the reasons are compared.
+  const shownOnScreen = edit(ON_SCREEN, 'tier=code', 'tier=sign-off');
+  const unseen = [
+    [
+      'a matching record and a published body adding hard-to-undo',
+      { ...held, pullBody: edit(SIGN_OFF, UNDO_EASY, UNDO_HARD), comments: answered('owner', atHead) },
+      ['sign-off', 'hard-to-undo'],
+    ],
+    [
+      'a matching record and a saved screenshot the published body does not attach',
+      {
+        cwd: sessionDirectory({ 'body.md': shownOnScreen, 'screenshot-1.png': SHOT_1 }, cleanup),
+        pullBody: shownOnScreen,
+        comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(shownOnScreen, SHOT_1), 'yes')),
+      },
+      ['screenshot', 'sign-off'],
+    ],
+  ];
+  const heldNaming = (reasons) => `held: ${reasons.join(', ')}`;
+  const unseenOutcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => unseen.map((row) => [`${row[0]}: ${command}`, pick(command, row)])));
+  assert.deepEqual(
+    { ...actual, ...unseenOutcomes((command, [, fixture, reasons]) => {
+      const { reason } = judged(command, fixture);
+      return reason.startsWith(heldRefusal(command, reasons)) ? heldNaming(reasons) : reason;
+    }) },
+    { ...expected, ...unseenOutcomes((command, [, , reasons]) => heldNaming(reasons)) },
+  );
+});
+
+test('ANTI-REGRESSION: an owner answer asking for a fix admits the fixed head only from a fix built on the answered head by the same account holding no new wait reason', (t) => {
+  assert.equal(blobHash(SHOT_1), SHOT_1_HASH, "blobHash gives Git's own blob hash");
+  const cleanup = (remove) => t.after(remove);
+  const failed = edit(SIGN_OFF, 'Failed: none', 'Failed: lint, cause unknown');
+  const answerTo = (body) => cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(ANSWERED_COMMIT, identityOf(body), 'shorten the title and merge it'));
+  const fixBy = (login, createdAt, from = ANSWERED_COMMIT) => cardComment(login, createdAt, fixBuilt(from, 'shortened the title'));
+  const FIX = fixBy('owner', '2026-11-04T12:45:00Z');
+  // The H1-to-H2 example: the owner answered at ANSWERED_COMMIT, whose saved write-up is `answered` (null for no
+  // folder there), a fix line names HEAD_COMMIT, whose saved write-up is `at`, and the ancestor read is true.
+  const fixed = ({ at = SIGN_OFF, answered = SIGN_OFF, comments = [OWN_CLAIM, answerTo(answered ?? SIGN_OFF), FIX], ...rest } = {}) => ({
+    cwd: sessionDirectory({ 'body.md': at }, cleanup, answered === null ? undefined : { 'body.md': answered }),
+    pullBody: at,
+    comments,
+    answeredAncestor: true,
+    ...rest,
+  });
+  const NO_FIX = `the newest owner answer on card 7 names ${ANSWERED_COMMIT}, and no fix built from it by owner names ${HEAD_COMMIT}`;
+  const { actual, expected } = ownerAnswerOutcomes([
+    ['as described', fixed()],
+    ['no fix line', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF)] }), ['sign-off'], NO_FIX],
+    ['a fix line by another account', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), fixBy('bob', '2026-11-04T12:45:00Z')] }), ['sign-off'], NO_FIX],
+    ['a fix line older than the answer', fixed({ comments: [OWN_CLAIM, fixBy('owner', '2026-11-04T12:20:00Z'), answerTo(SIGN_OFF)] }), ['sign-off'], NO_FIX],
+    ['a fix line from another head', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), fixBy('owner', '2026-11-04T12:45:00Z', 'feedface'.repeat(5))] }), ['sign-off'], NO_FIX],
+    [
+      'a fix line from ANSWERED_COMMIT naming another head',
+      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', edit(fixBuilt(ANSWERED_COMMIT, 'shortened the title'), HEAD_COMMIT, 'feedface'.repeat(5)))] }),
+      ['sign-off'],
+      NO_FIX,
+    ],
+    [
+      'a fix line for job/8 by owner, another card',
+      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', edit(fixBuilt(ANSWERED_COMMIT, 'shortened the title'), 'job/7', 'job/8'))] }),
+      ['sign-off'],
+      NO_FIX,
+    ],
+    [
+      'a fix line after other text on its first line',
+      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', `Example: ${fixBuilt(ANSWERED_COMMIT, 'shortened the title')}`)] }),
+      ['sign-off'],
+      NO_FIX,
+    ],
+    ['an answered head that is not an ancestor', fixed({ answeredAncestor: false }), ['sign-off'], `${ANSWERED_COMMIT}, which the newest owner answer on card 7 names, is not an ancestor of ${HEAD_COMMIT}`],
+    ['HEAD_COMMIT also holding hard-to-undo', fixed({ at: edit(SIGN_OFF, UNDO_EASY, UNDO_HARD) }), ['sign-off', 'hard-to-undo'], `the fix at ${HEAD_COMMIT} holds a wait reason that did not hold at ${ANSWERED_COMMIT}`],
+    ['both heads holding check', fixed({ at: failed, answered: failed }), ['check', 'sign-off'], `the fix at ${HEAD_COMMIT} has failed, untested or unsettled evidence`],
+    ['no folder at ANSWERED_COMMIT', fixed({ answered: null }), ['sign-off'], `the newest owner answer on card 7 does not name the saved card at ${ANSWERED_COMMIT}`],
+    [
+      'as described, the card now carrying show-me-first, added after the answer',
+      fixed({ issue: { labels: labelsOf('show-me-first') } }),
+      ['sign-off', 'show-me-first'],
+      `card 7 asks to see every version first, so the fix at ${HEAD_COMMIT} needs an owner answer of its own`,
+    ],
+  ]);
+  assert.deepEqual(actual, expected);
+});
+
+// ── a coordinated job's direct push ─────────────────────────────────────────
+// The expected outcomes come from card #935's acceptance criteria, deliver.md's squash (`git reset --soft <origin-main>`,
+// then `git commit`, which leaves the shown version in ORIG_HEAD) and the fifth and tenth entries of the approved guard
+// loosenings: a job a coordinator started pushes main as `git push origin HEAD:main` only where HEAD is
+// one commit on fetched main whose tree is the shown version's and whose parent is an ancestor of it, read with
+// replacement refs disabled and with no ref named ORIG_HEAD; core.hooksPath is .githooks and HEAD's .githooks is
+// fetched main's and unchanged, so the pre-push gate on the remote's main judges it; the saved write-up at that version
+// holds no wait reason; and every other push check holds. A session no coordinator started never pushes main.
+
+test('ANTI-REGRESSION: a coordinated job pushes main only as the squash of the version it shows, and no other run session pushes main', (t) => {
+  const cleanup = (remove) => t.after(remove);
+  const DIRECT = 'git push origin HEAD:main';
+  const OWN_BRANCH = `${PRE_APPROVED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`;
+  // A write-up whose only hold is the card's show-me-first label.
+  const DOCUMENT = edit(CLEAR, 'tier=code', 'tier=document');
+  const held = { cwd: sessionDirectory({ 'body.md': DOCUMENT }, cleanup), squash: {}, issue: { labels: labelsOf('show-me-first') } };
+  const reasonFor = (command, fixture, coordinated) => {
+    const run = preApprovedRun(fixture);
+    return blockReason(command, { ...inJob, cwd: run.cwd }, { preApproved: { ...run.preApproved, coordinated } });
+  };
+  // Admitted, or refused by kind and, given `cause`, naming it; any other reason whole, so a read the stand-in does not
+  // answer never passes as a refusal.
+  const verdict = (reason, cause) => {
+    if (reason === '') return 'admitted';
+    if (reason.includes('unexpected read')) return reason;
+    const kinds = [
+      ['own branch', reason === OWN_BRANCH],
+      ['own branch or main', reason.startsWith(OWN_BRANCH) && reason.endsWith('or main as `git push origin HEAD:main`')],
+      ['not the squash', reason.startsWith(`${PRE_APPROVED}pushes main only as the one commit deliver.md squashes from the version it showed: `)],
+      ['not under the gate', reason.startsWith(`${PRE_APPROVED}pushes main only where the pre-push hook on the remote's main judges it: `)],
+      ['held', reason.startsWith(`${PRE_APPROVED}pushes nothing to main while a wait reason holds for ${HEAD_COMMIT}: show-me-first`)],
+      ['publishes nothing', reason.startsWith(`${PRE_APPROVED}publishes nothing: `)],
+      ['pull request ready', reason.startsWith(`${PRE_APPROVED}pushes nothing while pull request #12 is ready or has a merge queued`)],
+    ];
+    const kind = kinds.find(([, matches]) => matches)?.[0];
+    if (kind === undefined || cause === undefined) return kind ?? reason;
+    return cause.test(reason) ? `${kind} naming ${cause.source}` : reason;
+  };
+  const squash = (fields) => ({ squash: fields });
+  // The session's shell in `src` below the worktree top, with a clear write-up readable from there too.
+  const fromSource = (fields) => {
+    const top = sessionDirectory({ 'body.md': CLEAR }, cleanup);
+    mkdirSync(join(top, 'src', REVIEW_FOLDER), { recursive: true });
+    writeFileSync(join(top, 'src', REVIEW_FOLDER, 'body.md'), CLEAR);
+    return { cwd: join(top, 'src'), squash: { top, ...fields } };
+  };
+  // [label, command, fixture, coordinated, expected verdict, cause]
+  const rows = [
+    ['1 a clear write-up at the shown version, well-formed squash', DIRECT, squash({}), true, 'admitted'],
+    ['2 the same, from a session no coordinator started', DIRECT, squash({}), false, 'own branch'],
+    ['3 a held write-up', DIRECT, held, true, 'held'],
+    ['6 trees that differ', DIRECT, squash({ trees: ['d'.repeat(40), 'e'.repeat(40)] }), true, 'not the squash'],
+    ['7 HEAD with two parents', DIRECT, squash({ parents: ['a'.repeat(40), ANSWERED_COMMIT] }), true, 'not the squash'],
+    ['8 a parent that is an ancestor of the shown version but not fetched main', DIRECT, squash({ parents: ['b'.repeat(40)] }), true, 'not the squash'],
+    ['9 fetched main as parent, not an ancestor of the shown version', DIRECT, squash({ ancestor: false }), true, 'not the squash'],
+    ['10 no ORIG_HEAD', DIRECT, squash({ origHead: null }), true, 'not the squash', /ORIG_HEAD/],
+    ['11 no write-up at the shown version', DIRECT, { cwd: sessionDirectory({}, cleanup), squash: {} }, true, 'publishes nothing', /holds no readable saved write-up/],
+    ['12 an open ready pull request from job/7', DIRECT, { squash: {}, openPulls: [{ number: 12, isDraft: false, autoMergeRequest: null, isCrossRepository: false }] }, true, 'pull request ready'],
+    ['13 main by name', 'git push origin main', {}, true, 'own branch or main'],
+    ['13 main forced', 'git push --force origin HEAD:main', {}, true, 'own branch or main'],
+    ['14 its own branch', PUSH, {}, true, 'admitted'],
+    ['15 core.hooksPath unset', DIRECT, squash({ hooksPath: null }), true, 'not under the gate', /core\.hooksPath is not \.githooks/],
+    ['16 core.hooksPath another folder', DIRECT, squash({ hooksPath: '.git/hooks' }), true, 'not under the gate', /core\.hooksPath is not \.githooks/],
+    ['17 HEAD\'s .githooks differing from fetched main\'s', DIRECT, squash({ githooks: ['c'.repeat(40), 'f'.repeat(40)] }), true, 'not under the gate', /HEAD's \.githooks is not fetched main's/],
+    ['18 .githooks with an uncommitted change', DIRECT, squash({ githooksStatus: ' M .githooks/pre-push\n' }), true, 'not under the gate', /\.githooks has uncommitted changes/],
+    ['19 a ref named ORIG_HEAD', DIRECT, squash({ origHeadRefs: 'refs/heads/ORIG_HEAD\n' }), true, 'not the squash', /a ref named ORIG_HEAD exists, so ORIG_HEAD is ambiguous/],
+    ['20 core.hooksPath .githooks with a trailing space', DIRECT, squash({ hooksPath: '.githooks ' }), true, 'not under the gate', /core\.hooksPath is not \.githooks/],
+    ['21 a pre-push the session user cannot execute', DIRECT, squash({ prePushExecutable: false }), true, 'not under the gate', /\.githooks\/pre-push is not executable/],
+    ['22 a pre-push the session user cannot execute, on win32', DIRECT, { squash: { prePushExecutable: false }, platform: 'win32' }, true, 'admitted'],
+    ['23 only a descendant of a ref named ORIG_HEAD', DIRECT, squash({ origHeadRefs: 'refs/heads/ORIG_HEAD/notes\n' }), true, 'admitted'],
+    ['24 core.hooksPath .githooks with a trailing carriage return', DIRECT, squash({ hooksPath: '.githooks\r' }), true, 'not under the gate', /core\.hooksPath is not \.githooks/],
+    ['25 only refs/remotes/ORIG_HEAD/HEAD', DIRECT, squash({ origHeadRefs: 'refs/remotes/ORIG_HEAD/HEAD\n' }), true, 'not the squash', /a ref named ORIG_HEAD exists, so ORIG_HEAD is ambiguous/],
+    ['Q1 from src, the top\'s .githooks with an uncommitted change', DIRECT, fromSource({ githooksStatus: ' M .githooks/pre-push\n' }), true, 'not under the gate', /\.githooks has uncommitted changes/],
+    ['Q2 from src, a top pre-push the session user cannot execute', DIRECT, fromSource({ prePushExecutable: false }), true, 'not under the gate', /\.githooks\/pre-push is not executable/],
+    ['S1 literal pathspecs, the top\'s .githooks with an uncommitted change', DIRECT, { env: { GIT_LITERAL_PATHSPECS: '1' }, ...squash({ githooksStatus: ' M .githooks/pre-push\n' }) }, true, 'not under the gate', /\.githooks has uncommitted changes/],
+    ['T1 the top\'s edited pre-push marked assume-unchanged', DIRECT, squash({ githooksStatus: ' M .githooks/pre-push\n', indexTag: 'h' }), true, 'not under the gate', /\.githooks/],
+    ['T2 the top\'s edited pre-push marked skip-worktree', DIRECT, squash({ githooksStatus: ' M .githooks/pre-push\n', indexTag: 'S' }), true, 'not under the gate', /\.githooks/],
+    ['T3 the top\'s edited pre-push with a core.fsmonitor that reports no change', DIRECT, squash({ githooksStatus: ' M .githooks/pre-push\n', fsmonitor: true }), true, 'not under the gate', /\.githooks/],
+    ['U1 a same-size edit to the top\'s pre-push the index reports clean', DIRECT, squash({ edited: ['pre-push'] }), true, 'not under the gate', /\.githooks has uncommitted changes/],
+    ['U2 a symbolic link in the top\'s .githooks', DIRECT, squash({ topHooks: [{ name: 'pre-push', file: false }] }), true, 'not under the gate', /\.githooks has uncommitted changes/],
+    ['U3 fetched main\'s .githooks holding a commit entry', DIRECT, squash({ mainHooks: [['100755', 'blob', '5'.repeat(40), 'pre-push'], ['160000', 'commit', '7'.repeat(40), 'vendor']] }), true, 'not under the gate', /\.githooks is not fetched main's/],
+    [
+      'V1 the top\'s pre-commit, matching fetched main\'s bytes, without the execute bit fetched main\'s mode 100755 records',
+      DIRECT,
+      squash({
+        mainHooks: [['100755', 'blob', '5'.repeat(40), 'pre-push'], ['100755', 'blob', '9'.repeat(40), 'pre-commit']],
+        topHooks: [{ name: 'pre-push', file: true }, { name: 'pre-commit', file: true, executable: false }],
+      }),
+      true,
+      'not under the gate',
+      /\.githooks has uncommitted changes/,
+    ],
+  ];
+  const outcomes = (pick) => Object.fromEntries(rows.map((row) => [row[0], pick(row)]));
+  assert.deepEqual(
+    outcomes(([, command, fixture, coordinated, , cause]) => verdict(reasonFor(command, fixture, coordinated), cause)),
+    outcomes(([, , , , expected, cause]) => (cause === undefined ? expected : `${expected} naming ${cause.source}`)),
+  );
+});
+
+// The test owns this verified context. Only the Git and provider reads cross a simulated boundary.
+function pinnedDelivery(command, fixture, { verified = true, coordinated = false, appRun = false } = {}) {
+  const pinnedReads = [];
+  const run = preApprovedRun({ ...fixture, boundCard: '7', pinnedReads });
+  const worktree = realpathSync(run.cwd);
+  const context = verified ? {
+    codexHerdr: {
+      root: realpathSync(dirname(dirname(CODE_DIRECTORY))),
+      repositoryId: ORIGIN_ID,
+      worktree,
+      card: 7,
+      runStart: RUN_START,
+      threadId: '11111111-1111-4111-8111-111111111111',
+    },
+  } : coordinated ? { coordinated: true } : {};
+  const unexpected = [];
+  const observed = (read) => (arg) => {
+    try {
+      return read(arg);
+    } catch (error) {
+      if (error.message.startsWith('unexpected read: ')) unexpected.push(error.message);
+      throw error;
+    }
+  };
+  const reason = blockReason(command, { ...inJob, cwd: run.cwd }, {
+    appRun,
+    preApproved: {
+      ...run.preApproved, ...context, git: observed(run.preApproved.git), exec: observed(run.preApproved.exec),
+      executable: observed(run.preApproved.executable), listHooks: observed(run.preApproved.listHooks),
+    },
+  });
+  assert.deepEqual(unexpected, [], command);
+  return { reason, calls: [...run.calls, ...pinnedReads] };
+}
+
+function heldPinnedVersions(t, body) {
+  const identity = identityOf(body);
+  const cwd = sessionDirectory({ 'body.md': body }, (remove) => t.after(remove));
+  const withNote = sessionDirectory({ 'body.md': body }, (remove) => t.after(remove));
+  writeFileSync(join(withNote, '.claude/worklog/job_7-owner-answer.md'), `${ownerAnswerLine(7, HEAD_COMMIT, identity, 'yes')}\n`);
+  const issue = { labels: labelsOf('show-me-first') };
+  return [
+    { label: 'the verified binding alone', fixture: { cwd, issue } },
+    {
+      label: 'an owner answer on the card',
+      fixture: {
+        cwd, issue,
+        comments: [OWN_CLAIM, cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(HEAD_COMMIT, identity, 'yes'))],
+      },
+    },
+    { label: 'the legacy local owner note', fixture: { cwd: withNote, issue } },
+  ];
+}
+
+const PINNED_MERGE = `gh pr merge --squash --delete-branch --match-head-commit ${HEAD_COMMIT} 12`;
+const PINNED_PULL = {
+  number: 12, state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', baseRefOid: 'b'.repeat(40),
+  headRepository: { id: ORIGIN_ID }, isCrossRepository: false, headRefOid: HEAD_COMMIT, isDraft: false, autoMergeRequest: null,
+  isInMergeQueue: false, isMergeQueueEnabled: false,
+};
+const pinnedPullRead = (call) => isGraphql(call) && /\bpullRequest\s*\(/.test(call) && call.endsWith('-F number=12');
+
+// The pinned merge cases for one Herdr mark, `options` as pinnedDelivery takes them: every malformed, stale, queued,
+// auto-merging, unchecked, marked, unreadable or unattached merge refuses with its cause, and the pinned merge of the
+// checked current head is admitted. Returns the admitted merge's reads.
+function pinnedMergeCases(t, options) {
+  const commandFor = (head, number) => `gh pr merge --squash --delete-branch --match-head-commit ${head} ${number}`;
+  const merge = PINNED_MERGE;
+  const pull = PINNED_PULL;
+  const providerRead = pinnedPullRead;
+  const ownPull = /(?:pull request|#12).*(?:own|number|open|job\/7|origin|draft|default branch)|only.*(?:pull request|#12)/i;
+  const pinLapse = /(?=.*\b(?:head|commit)\b)(?=.*(?:match|changed|differ|moved))/i;
+  const queueLapse = /(?:merge queue|queued|queue state)/i;
+  const syntaxLapse = /(?:merges? only|merge.*delivery form|plain command|command on its own)/i;
+  const holdLapse = /wait reason holds.*\bshow-me-first\b/;
+  const checksLapse = /(?:required checks?|required status checks?)/i;
+
+  const refusals = [];
+  const refuse = (label, command, fixture, cause, reads = []) => {
+    const verdict = pinnedDelivery(command, { pinnedPull: pull, ...fixture }, options);
+    refusals.push({ label, verdict, cause, reads });
+  };
+  for (const [label, command] of [
+    ['legacy unpinned auto-merge', MERGE],
+    ['leading-zero pull request number', commandFor(HEAD_COMMIT, '012')],
+    ['pull request number zero', commandFor(HEAD_COMMIT, '0')],
+    ['quoted pull request number', commandFor(HEAD_COMMIT, '"12"')],
+    ['abbreviated expected head', commandFor(HEAD_COMMIT.slice(0, 12), '12')],
+    ['uppercase expected head', commandFor(HEAD_COMMIT.toUpperCase(), '12')],
+    ['symbolic expected head', commandFor('HEAD', '12')],
+    ['added admin flag', `${merge} --admin`],
+    ['reordered flags', `gh pr merge --delete-branch --squash --match-head-commit ${HEAD_COMMIT} 12`],
+    ['wrapped merge', `command ${merge}`],
+    ['an extra command', `${merge} && pwd`],
+  ]) refuse(label, command, {}, syntaxLapse);
+
+  for (const [label, fields] of [
+    ['wrong provider pull request number', { number: 13 }],
+    ['another job branch', { headRefName: 'job/8' }],
+    ['another base branch', { baseRefName: 'develop' }],
+    ['another head repository', { headRepository: { id: 'R_kgDOanother' } }],
+    ['a cross-repository pull request', { isCrossRepository: true }],
+    ['a closed pull request', { state: 'CLOSED' }],
+    ['a draft pull request', { isDraft: true }],
+  ]) refuse(label, merge, { pinnedPull: { ...pull, ...fields } }, ownPull, [providerRead]);
+  refuse('different literal expected head', commandFor(ANSWERED_COMMIT, '12'), {}, pinLapse);
+  refuse('local head has moved', merge, { localHead: ANSWERED_COMMIT }, pinLapse, [(call) => call === 'git rev-parse HEAD']);
+  refuse('remote pull request head has moved', merge, { pinnedPull: { ...pull, headRefOid: ANSWERED_COMMIT } }, pinLapse, [providerRead]);
+
+  for (const field of ['isInMergeQueue', 'isMergeQueueEnabled']) {
+    for (const value of [true, undefined, 'false']) {
+      refuse(`queue field ${field} is ${value}`, merge, { pinnedPull: { ...pull, [field]: value } }, queueLapse, [providerRead]);
+    }
   }
-  const toMain = carriedJudged('git push origin HEAD:main');
-  assert.equal(toMain.reason, `${CARRIED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`);
-  assert.deepEqual(toMain.calls.filter(isGh), []);
-  const otherCard = carriedJudged('git push -u origin job/8', { branch: 'job/8' });
-  assert.equal(otherCard.reason, `${CARRIED}publishes only its carried card`);
-  assert.deepEqual(otherCard.calls.filter(isGh), []);
-  for (const command of [READY, MERGE]) {
-    const otherPullRequest = carriedJudged(command, { pullRequest: { headRefName: 'job/8' } }).reason;
-    assert.ok(otherPullRequest.startsWith(CARRIED), `${command}, head job/8: ${JSON.stringify(otherPullRequest)}`);
+  refuse('an active auto-merge', merge, { pinnedPull: { ...pull, autoMergeRequest: { enabledAt: RUN_START } } }, /auto[- ]?merge/i, [providerRead]);
+  refuse('missing auto-merge state', merge, { pinnedPull: { ...pull, autoMergeRequest: undefined } }, /auto[- ]?merge|queue/i, [providerRead]);
+  refuse('unreadable queue record', merge, { pinnedPull: new Error('merge queue state is unreadable') }, queueLapse, [providerRead]);
+
+  const checkRead = [(call) => call === REQUIRED_CHECKS_READ];
+  for (const bucket of ['fail', 'pending', 'unknown']) {
+    refuse(`the required test check is ${bucket}`, merge, {
+      requiredChecks: [{ name: 'test', bucket, link: '' }],
+    }, checksLapse, checkRead);
   }
-  const malformed = carriedJudged(PUSH, {}, '07').reason;
-  assert.ok(malformed.startsWith(CARRIED), `mark "07": ${JSON.stringify(malformed)}`);
-  const quoting = carriedJudged('gh issue comment 7 --body "Approved: card=7 edited=none"');
-  assert.ok(quoting.reason.startsWith('a carried push yes '), JSON.stringify(quoting.reason));
-  assert.deepEqual(quoting.calls, []);
-  assert.equal(carriedJudged('git status').reason, '');
-  // Each mark alone admits this push; the two together publish nothing.
-  const run = preApprovedRun();
-  const { env, exec, git, platform } = run.preApproved;
-  const carriedYes = { carried: '7', env, exec, git, platform };
-  assert.equal(blockReason(PUSH, inJob, { preApproved: run.preApproved }), '');
-  assert.equal(blockReason(PUSH, inJob, { carriedYes }), '');
-  const both = blockReason(PUSH, inJob, { preApproved: run.preApproved, carriedYes });
-  assert.match(both, /^a (?:carried push yes|pre-approved run) session /);
+  refuse('no required checks have reported', merge, { requiredChecks: [] }, checksLapse, checkRead);
+  refuse('an unrelated passing check does not supply the named check', merge, {
+    requiredChecks: [{ name: 'other', bucket: 'pass', link: '' }],
+  }, checksLapse, checkRead);
+  for (const { label, fixture } of heldPinnedVersions(t, CLEAR)) refuse(label, merge, fixture, holdLapse, [providerRead]);
+  // The saved review and the published body are hostile input: an unreadable copy refuses, and a published body that
+  // drops a saved screenshot's attachment holds under screenshot.
+  const session = (files) => sessionDirectory(files, (remove) => t.after(remove));
+  refuse('unreadable published review', merge, { pullBody: new Error('fixture provider read failed') }, /published body.*provider read failed/i);
+  refuse('malformed saved review bytes', merge, { cwd: session({ 'body.md': Buffer.from([0xff]) }) }, /saved.*(?:UTF-8|readable|invalid)|body\.md/i);
+  refuse('a published body missing a saved screenshot', merge, {
+    cwd: session({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }), pullBody: ON_SCREEN,
+  }, /wait reason holds.*\bscreenshot\b/);
+
+  const { reason, calls } = pinnedDelivery(merge, { pinnedPull: pull }, options);
+  assert.equal(reason, '', 'a Herdr job may merge the exact checked head without a hold');
+  assert.deepEqual(calls.filter(providerRead).length, 1);
+  assert.ok(!calls.includes(PR_VIEW), 'the exact route reads queue state with the head');
+  assert.ok(calls.some((call) => isGraphql(call) && call.endsWith('-F number=7')), 'the job card is an independent read');
+  for (const read of [
+    'git rev-parse HEAD', 'gh pr view 12 --json body', REQUIRED_BRANCH_READ, REQUIRED_RULES_READ, REQUIRED_CHECKS_READ,
+  ]) assert.ok(calls.includes(read), read);
+  for (const { label, verdict, cause, reads } of refusals) {
+    assert.match(verdict.reason, cause, label);
+    for (const read of reads) assert.ok(verdict.calls.some(read), `${label}: ${JSON.stringify(verdict.calls)}`);
+  }
+  return calls;
+}
+
+test('929 pins a Codex Herdr pull request merge to the checked head', (t) => {
+  const appRun = { verified: false, appRun: true };
+  const admitted = pinnedDelivery(MERGE, {}, appRun);
+  assert.equal(admitted.reason, '', 'legacy auto-merge');
+  assert.ok(admitted.calls.includes(PR_VIEW), 'legacy auto-merge reads its pull request');
+  const denied = pinnedDelivery(PINNED_MERGE, { pinnedPull: PINNED_PULL }, appRun);
+  assert.match(denied.reason, /(?:merges only|verified Codex Herdr).*--auto|(?:only|requires).*Codex Herdr/i, 'pinned merge outside verified Herdr');
+  assert.ok(!denied.calls.some(pinnedPullRead));
+  assert.match(blockReason(PINNED_MERGE, inJob), /^gh pr merge:.*(?:--auto|Codex Herdr)/i, 'ordinary unbounded merge');
+
+  assert.ok(pinnedMergeCases(t, {}).includes('git rev-parse --show-toplevel'), 'the verified route reads its bound worktree');
+});
+
+// new behaviour: a coordinated Claude Code Herdr job merges as a Codex Herdr job does, only through the pinned merge of
+// the current head once its required checks pass, the guard reading the show-me-first marker at submission; the
+// legacy `--auto` merge, a stale pin, a merge queue, an existing auto-merge, failed checks and a marker refuse.
+test('967 a Claude Code Herdr job merges only the pinned checked head', (t) => {
+  pinnedMergeCases(t, { verified: false, coordinated: true });
+});
+
+// new behaviour: a Herdr job, under either mark, publishes only the head its review named. The saved write-up and the
+// published body each carry one `Reviewed commit:` line under Evidence equal to the checked HEAD; a stale commit refuses
+// naming both commits, and a missing or doubled line refuses as naming no single reviewed commit.
+test('967 a Herdr publication needs the head its review named', (t) => {
+  // The job's commit before a same-patch rebase moved it to HEAD_COMMIT, and the commit HEAD_COMMIT adds an empty
+  // commit to.
+  const beforeRebase = 'b4ea5e00'.repeat(5);
+  const beforeEmpty = 'e3e3e3e3'.repeat(5);
+  const reviewed = `Reviewed commit: ${HEAD_COMMIT}\n`;
+  const variants = [
+    ['naming the commit before a same-patch rebase', edit(CLEAR, reviewed, `Reviewed commit: ${beforeRebase}\n`), `covered ${beforeRebase}`],
+    ['naming the commit HEAD adds an empty commit to', edit(CLEAR, reviewed, `Reviewed commit: ${beforeEmpty}\n`), `covered ${beforeEmpty}`],
+    ['without the line', edit(CLEAR, reviewed, ''), 'no single'],
+    ['with the line doubled', edit(CLEAR, reviewed, reviewed + reviewed), 'no single'],
+    ['malformed, an abbreviated commit', edit(CLEAR, reviewed, `Reviewed commit: ${HEAD_COMMIT.slice(0, 12)}\n`), 'no single'],
+    ['malformed, an upper-case commit', edit(CLEAR, reviewed, `Reviewed commit: ${HEAD_COMMIT.toUpperCase()}\n`), 'no single'],
+    ['with the line only under Review', edit(edit(CLEAR, reviewed, ''), `${REVIEW_LINE}\n`, `${REVIEW_LINE}\n${reviewed}`), 'no single'],
+  ];
+  const verdict = (reason) => {
+    if (reason === '') return 'admitted';
+    const covered = /the review covered ([0-9a-f]{40}), not ([0-9a-f]{40})/.exec(reason);
+    if (covered && covered[2] === HEAD_COMMIT) return `covered ${covered[1]}`;
+    return /names no single Reviewed commit/.test(reason) ? 'no single' : reason;
+  };
+  const actual = {};
+  const expected = {};
+  for (const [mark, options] of [['Codex Herdr', {}], ['Claude Code coordinated', { verified: false, coordinated: true }]]) {
+    const judge = (saved, published) => verdict(pinnedDelivery(PINNED_MERGE, {
+      pinnedPull: PINNED_PULL, cwd: sessionDirectory({ 'body.md': saved }, (remove) => t.after(remove)), pullBody: published,
+    }, options).reason);
+    actual[`${mark}: both bodies naming HEAD`] = judge(CLEAR, CLEAR);
+    expected[`${mark}: both bodies naming HEAD`] = 'admitted';
+    for (const [label, body, outcome] of variants) {
+      actual[`${mark}: the saved write-up ${label}`] = judge(body, CLEAR);
+      expected[`${mark}: the saved write-up ${label}`] = outcome;
+      actual[`${mark}: the published body ${label}`] = judge(CLEAR, body);
+      expected[`${mark}: the published body ${label}`] = outcome;
+    }
+  }
+  assert.deepEqual(actual, expected);
+});
+
+// new behaviour: a Herdr job's direct push to main, under either mark and in that mark's own direct form, publishes only
+// the head its review named: the saved write-up of the version the squash was made from carries one `Reviewed commit:`
+// line equal to that version, a line naming another commit refuses naming both, and a missing or doubled line refuses
+// as naming no single reviewed commit.
+test('967 a Herdr direct push to main needs the head its review named', (t) => {
+  const reviewed = `Reviewed commit: ${HEAD_COMMIT}\n`;
+  const document = edit(CLEAR, 'tier=code', 'tier=document');
+  const variants = [
+    ['naming the version the squash was made from', document, 'admitted'],
+    ['naming another commit', edit(document, reviewed, `Reviewed commit: ${ANSWERED_COMMIT}\n`), `covered ${ANSWERED_COMMIT}`],
+    ['without the line', edit(document, reviewed, ''), 'no single'],
+    ['with the line doubled', edit(document, reviewed, reviewed + reviewed), 'no single'],
+  ];
+  const verdict = (reason) => {
+    if (reason === '') return 'admitted';
+    const covered = /the review covered ([0-9a-f]{40}), not ([0-9a-f]{40})/.exec(reason);
+    if (reason.startsWith(PRE_APPROVED) && covered && covered[2] === HEAD_COMMIT) return `covered ${covered[1]}`;
+    return reason.startsWith(PRE_APPROVED) && /names no single Reviewed commit/.test(reason) ? 'no single' : reason;
+  };
+  const marks = [
+    ['Claude Code coordinated', 'git push origin HEAD:main', { verified: false, coordinated: true }],
+    ['Codex Herdr', `git push --no-follow-tags origin ${SQUASH_COMMIT}^{object}:refs/heads/main`, {}],
+  ];
+  const actual = {};
+  const expected = {};
+  for (const [mark, command, options] of marks) {
+    for (const [label, body, outcome] of variants) {
+      const cwd = sessionDirectory({ 'body.md': body }, (remove) => t.after(remove));
+      actual[`${mark}: the saved write-up ${label}`] = verdict(pinnedDelivery(command, { cwd, squash: {}, localHead: SQUASH_COMMIT }, options).reason);
+      expected[`${mark}: the saved write-up ${label}`] = outcome;
+    }
+  }
+  assert.deepEqual(actual, expected);
+});
+
+// existing behaviour: a Herdr job's unmarked card still waits on a failed check and on a missing screenshot.
+test('967 a Herdr job still holds a failed check or a missing screenshot', (t) => {
+  const pull = {
+    number: 12, state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', baseRefOid: 'b'.repeat(40),
+    headRepository: { id: ORIGIN_ID }, isCrossRepository: false, headRefOid: HEAD_COMMIT, isDraft: false, autoMergeRequest: null,
+    isInMergeQueue: false, isMergeQueueEnabled: false,
+  };
+  const pinnedMerge = `gh pr merge --squash --delete-branch --match-head-commit ${HEAD_COMMIT} 12`;
+  const marks = [
+    ['a coordinated Claude Code job', { verified: false, coordinated: true }, [[READY, { pinnedPull: { ...pull, isDraft: true } }], [pinnedMerge, { pinnedPull: pull }]]],
+    ['a Codex Herdr job', {}, [[READY, { pinnedPull: { ...pull, isDraft: true } }], [pinnedMerge, { pinnedPull: pull }]]],
+  ];
+  const holding = [
+    ['a failed check', { 'body.md': edit(CLEAR, 'Failed: none', 'Failed: lint, cause unknown') }, ['check']],
+    ['work on screen with no screenshot', { 'body.md': ON_SCREEN }, ['screenshot']],
+  ];
+  for (const [mark, options, commands] of marks) {
+    for (const [label, files, held] of holding) {
+      const cwd = sessionDirectory(files, (remove) => t.after(remove));
+      for (const [command, fixture] of commands) {
+        const { reason } = pinnedDelivery(command, { cwd, ...fixture }, options);
+        assert.ok(reason.startsWith(PRE_APPROVED), `${mark}, ${label}, ${command}: ${JSON.stringify(reason)}`);
+        assert.deepEqual(WAIT_KEYS.filter((key) => namesReason(reason, key)), held, `${mark}, ${label}, ${command}: ${JSON.stringify(reason)}`);
+      }
+    }
+  }
+});
+
+// new behaviour: in a Herdr job only the card's show-me-first marker holds finished work for the owner, so neither a
+// sign-off tier, a hard Undo answer, a Not done item nor the wait level always holds an unmarked card; a session
+// without the Herdr mark keeps today's policy, under which always publishes nothing.
+test("967 a Herdr job's unmarked card waits on no review tier or level", (t) => {
+  const always = '{"version":1,"waitForOwner":"always"}';
+  const draft = {
+    number: 12, state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', baseRefOid: 'b'.repeat(40),
+    headRepository: { id: ORIGIN_ID }, isCrossRepository: false, headRefOid: HEAD_COMMIT, isDraft: true, autoMergeRequest: null,
+    isInMergeQueue: false, isMergeQueueEnabled: false,
+  };
+  const marks = [
+    ['a coordinated Claude Code job', { verified: false, coordinated: true }, { pinnedPull: draft }],
+    ['a Codex Herdr job', {}, { pinnedPull: draft }],
+  ];
+  const writeUps = [
+    ['a sign-off review tier', edit(CLEAR, 'tier=code', 'tier=sign-off')],
+    ['an Undo answer of hard', edit(CLEAR, UNDO_EASY, UNDO_HARD)],
+    ['a Not done item', edit(CLEAR, 'Nothing', '- The Windows suite was skipped.')],
+  ];
+  for (const [label, body] of writeUps) {
+    const fixture = { cwd: sessionDirectory({ 'body.md': body }, (remove) => t.after(remove)), pullBody: body, settingText: always };
+    for (const [mark, options, pinned] of marks) {
+      assert.equal(pinnedDelivery(READY, { ...fixture, ...pinned }, options).reason, '', `${mark}, ${label}`);
+    }
+    assert.equal(
+      pinnedDelivery(READY, fixture, { verified: false }).reason,
+      `${PRE_APPROVED}publishes nothing: pre-approved run disabled on fetched main; waitForOwner must be on-screen or when-needed in .agents/factory-settings.json on main`,
+      `a session without the Herdr mark, ${label}`,
+    );
+  }
+});
+
+// new behaviour: only the owner removes the show-me-first marker, so a Herdr job's plainly written command that would
+// clear it from its card, delete or rename the label, or switch it off through the owner queue or the Queue panel is
+// refused with one message, whether gh is given -R or --repo or runs behind a plain env prefix and whether a gh api body
+// is a field or an --input file, while adding the marker, removing or editing another label, recolouring or
+// redescribing the marker, an issue write that leaves labels alone, reading labels and moving the card stay open, and a
+// session without the Herdr mark is not refused this way. LA_1 is the marker label's node id.
+test('967 a Herdr job never clears the show-me-first marker', (t) => {
+  const NEVER = 'a Herdr job never clears the show-me-first marker: the owner removes it';
+  const cwd = sessionDirectory({ 'body.md': CLEAR }, (remove) => t.after(remove));
+  writeFileSync(join(cwd, 'remove.graphql'), 'mutation { removeLabelsFromLabelable(input: { labelableId: "I_7", labelIds: ["LA_1"] }) { clientMutationId } }\n');
+  mkdirSync(join(cwd, 'folder.graphql'));
+  // `gh api --input` bodies: GraphQL requests and issue writes.
+  const bodies = {
+    'remove.json': { query: 'mutation { removeLabelsFromLabelable(input: { labelableId: "I_7", labelIds: ["LA_1"] }) { clientMutationId } }' },
+    'delete.json': { query: 'mutation { deleteLabel(input: { id: "LA_1" }) { clientMutationId } }' },
+    'rename.json': { query: 'mutation { updateLabel(input: { id: "LA_1", name: "shown" }) { label { name } } }' },
+    'labels.json': { labels: ['bug'] },
+    'title.json': { title: 'A clearer title' },
+  };
+  for (const [name, body] of Object.entries(bodies)) writeFileSync(join(cwd, name), `${JSON.stringify(body)}\n`);
+  const marks = [
+    ['a coordinated Claude Code job', { verified: false, coordinated: true }],
+    ['a Codex Herdr job', {}],
+  ];
+  const ISSUE = 'repos/acme/widgets/issues/7';
+  const QUEUE = 'node .agents/herdr/fabraik-queue/queue.mjs show-first acme/widgets#7';
+  const refused = [
+    'gh issue edit 7 --remove-label show-me-first',
+    'gh issue edit 7 --remove-label area:skills,show-me-first',
+    'gh issue edit 7 --remove-label "area:skills, show-me-first"',
+    'gh issue edit 7 --remove-label Show-Me-First',
+    'gh label delete show-me-first --yes',
+    'gh label edit show-me-first --name shown',
+    `gh api -X PUT ${ISSUE}/labels -f labels[]=bug`,
+    `gh api --method PATCH ${ISSUE}/labels -f labels[]=bug`,
+    `gh api -X DELETE ${ISSUE}/labels`,
+    `gh api -X PUT ${ISSUE}/labels/show-me-first`,
+    `gh api -X PATCH ${ISSUE}/labels/show-me-first`,
+    `gh api --method DELETE ${ISSUE}/labels/show-me-first`,
+    `gh api -X PATCH ${ISSUE} -f labels[]=bug`,
+    `gh api -X POST ${ISSUE} -f labels[]=bug`,
+    `gh api -X PATCH ${ISSUE} --input issue.json`,
+    `gh api --method POST ${ISSUE} --input issue.json`,
+    `gh api graphql -f query='mutation { removeLabelsFromLabelable(input: { labelableId: "I_7", labelIds: ["LA_1"] }) { clientMutationId } }'`,
+    `gh api graphql -f query='mutation { clearLabelsFromLabelable(input: { labelableId: "I_7" }) { clientMutationId } }'`,
+    `gh api graphql -f query='mutation { updateIssue(input: { id: "I_7", labelIds: [] }) { clientMutationId } }'`,
+    'gh api graphql -F query=@remove.graphql',
+    'gh api graphql -F query=@missing.graphql',
+    'gh api graphql -F query=@folder.graphql',
+    'gh -R acme/widgets issue edit 7 --remove-label show-me-first',
+    'gh --repo acme/widgets issue edit 7 --remove-label show-me-first',
+    'gh issue -R acme/widgets edit 7 --remove-label show-me-first',
+    'env gh issue edit 7 --remove-label show-me-first',
+    'env GH_REPO=acme/widgets gh issue edit 7 --remove-label show-me-first',
+    'gh api graphql --input remove.json',
+    'gh api graphql --input delete.json',
+    'gh api graphql --input rename.json',
+    `gh api graphql -f query='mutation { deleteLabel(input: { id: "LA_1" }) { clientMutationId } }'`,
+    `gh api graphql -f query='mutation { updateLabel(input: { id: "LA_1", name: "shown" }) { label { name } } }'`,
+    'gh api -X DELETE repos/acme/widgets/labels/show-me-first',
+    'gh api -X PATCH repos/acme/widgets/labels/show-me-first -f new_name=shown',
+    `gh api -X PATCH ${ISSUE} --input labels.json`,
+    'node scripts/owner-queue.mjs show-first --card=7 --state=off',
+    'node scripts/owner-queue.mjs show-first --card 7 --state off',
+    `${QUEUE} off --home queue-home`,
+  ];
+  const allowed = [
+    'gh issue edit 7 --add-label show-me-first',
+    'gh issue edit 7 --remove-label area:skills',
+    'gh issue edit 7 --remove-label bug',
+    'gh -R acme/widgets issue edit 7 --remove-label bug',
+    'env gh issue edit 7 --add-label show-me-first',
+    `gh api -X DELETE ${ISSUE}/labels/bug`,
+    `gh api --method DELETE ${ISSUE}/labels/bug`,
+    'gh label edit show-me-first --color ff0000',
+    'gh label edit show-me-first --description "The owner sees it first"',
+    `gh api -X PATCH ${ISSUE} --input title.json`,
+    `gh api ${ISSUE}/labels`,
+    `gh api graphql -f query='mutation { addLabelsToLabelable(input: { labelableId: "I_7", labelIds: ["LA_1"] }) { clientMutationId } }'`,
+    `${QUEUE} on --home queue-home`,
+    'node scripts/board-move.mjs 7 "In review"',
+  ];
+  const outcomes = (pick) => Object.fromEntries(marks.flatMap(([mark, options]) => [...refused, ...allowed].map((command) => [`${mark}: ${command}`, pick(command, options)])));
+  assert.deepEqual(
+    outcomes((command, options) => pinnedDelivery(command, { cwd }, options).reason),
+    outcomes((command) => (refused.includes(command) ? NEVER : '')),
+  );
+  assert.equal(pinnedDelivery('gh issue edit 7 --remove-label show-me-first', { cwd }, { verified: false }).reason, '', 'a session without the Herdr mark');
+});
+
+// new behaviour: a Herdr job reads no note, receipt or menu answer as approval: only its own card's show-me-first
+// marker holds its finished work. A marked card refuses, naming the marker alone, at ready, at the pinned merge and at a
+// coordinated job's direct push, whatever local owner-answer note, owner answer comment or fix record it holds, a note
+// the guard once refused as unreadable included; once the owner removes the marker the next repaired head is admitted.
+// A session no coordinator started never reads the note and still reads an owner answer comment.
+test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) => {
+  const cleanup = (remove) => t.after(remove);
+  const DIRECT = 'git push origin HEAD:main';
+  const identity = identityOf(CLEAR);
+  const marked = { issue: { labels: labelsOf('show-me-first') } };
+  const noteAt = (card, head, words = 'yes', named = identity) => `${ownerAnswerLine(card, head, named, words)}\n`;
+  const answerAt = (head) => cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(head, identity, 'yes'));
+  const FIX = cardComment('owner', '2026-11-04T12:45:00Z', fixBuilt(ANSWERED_COMMIT, 'shortened the title'));
+  // A session whose saved write-up is CLEAR at HEAD and at ANSWERED_COMMIT, holding `note` as its local owner-answer
+  // note where one is given.
+  const session = (note, rest = {}) => {
+    const cwd = sessionDirectory({ 'body.md': CLEAR }, cleanup, { 'body.md': CLEAR });
+    if (note !== undefined) writeFileSync(join(cwd, '.claude/worklog/job_7-owner-answer.md'), note);
+    return { cwd, ...rest };
+  };
+  // [label, fixture, admitted]: a marked card is refused whatever it records; an unmarked one is admitted.
+  const versions = [
+    ['a marked card with a note naming HEAD and its saved identity', session(noteAt(7, HEAD_COMMIT), marked), false],
+    ['a marked card with an owner answer comment naming HEAD', session(undefined, { ...marked, comments: [OWN_CLAIM, answerAt(HEAD_COMMIT)] }), false],
+    [
+      'a marked card with a note naming HEAD, an answer comment naming ANSWERED_COMMIT and a fix record from it naming HEAD',
+      session(noteAt(7, HEAD_COMMIT), { ...marked, comments: [OWN_CLAIM, answerAt(ANSWERED_COMMIT), FIX] }),
+      false,
+    ],
+    ['a marked card with a note naming ANSWERED_COMMIT and a fix record from it naming HEAD', session(noteAt(7, ANSWERED_COMMIT), { ...marked, comments: [OWN_CLAIM, FIX] }), false],
+    ['a marked card with a note naming card 8', session(noteAt(8, HEAD_COMMIT), marked), false],
+    ['a marked card with a note naming another identity', session(noteAt(7, HEAD_COMMIT, 'yes', identityOf(SIGN_OFF)), marked), false],
+    ['a marked card with a note over 4 KiB', session(noteAt(7, HEAD_COMMIT, `yes ${'x'.repeat(4096)}`), marked), false],
+    ['a marked card with a binary note', session(Buffer.from([0x00, 0xff, 0xfe, 0x00, 0x01, 0x80]), marked), false],
+    ['a marked card with a note with blank words', session(noteAt(7, HEAD_COMMIT, '  '), marked), false],
+    [
+      'the marker removed, the next repaired head after a note and an answer comment naming ANSWERED_COMMIT and a fix record from it',
+      session(noteAt(7, ANSWERED_COMMIT), { comments: [OWN_CLAIM, answerAt(ANSWERED_COMMIT), FIX] }),
+      true,
+    ],
+  ];
+  const draft = { pinnedPull: { ...PINNED_PULL, isDraft: true } };
+  const ready = { pinnedPull: PINNED_PULL };
+  const marks = [
+    ['a coordinated Claude Code job', { verified: false, coordinated: true }, [[READY, draft], [PINNED_MERGE, ready], [DIRECT, { squash: {} }]]],
+    ['a Codex Herdr job', {}, [[READY, draft], [PINNED_MERGE, ready]]],
+  ];
+  // The refusal naming only the marker, with nothing after it.
+  const markerHold = (command) => (command === DIRECT
+    ? `${PRE_APPROVED}pushes nothing to main while a wait reason holds for ${HEAD_COMMIT}: show-me-first`
+    : heldRefusal(command, ['show-me-first']));
+  const outcomes = (pick) => Object.fromEntries(marks.flatMap(([mark, options, commands]) => commands.flatMap(([command, pinned]) => versions.map(
+    ([label, fixture, admitted]) => [`${mark}, ${label}: ${command}`, pick(command, { ...fixture, ...pinned }, options, admitted)],
+  ))));
+  assert.deepEqual(
+    outcomes((command, fixture, options) => pinnedDelivery(command, fixture, options).reason),
+    outcomes((command, fixture, options, admitted) => (admitted ? '' : markerHold(command))),
+  );
+  // A session no coordinator started reads card comments as before and never the note: the note alone is the held
+  // refusal with nothing after it, and an owner answer comment admits.
+  const atHead = ownerAnswerLine(7, HEAD_COMMIT, identityOf(SIGN_OFF), 'yes');
+  const signedOff = (note, rest = {}) => {
+    const cwd = sessionDirectory({ 'body.md': SIGN_OFF }, cleanup);
+    if (note !== undefined) writeFileSync(join(cwd, '.claude/worklog/job_7-owner-answer.md'), note);
+    return { cwd, pullBody: SIGN_OFF, ...rest };
+  };
+  const uncoordinated = [
+    ['the note alone', signedOff(`${atHead}\n`)],
+    ['a comment alone', signedOff(undefined, { comments: [OWN_CLAIM, cardComment('owner', '2026-11-04T12:30:00Z', atHead)] })],
+  ];
+  const uncoordinatedOutcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => uncoordinated.map(([label, fixture]) => [`${label}: ${command}`, pick(command, label, fixture)])));
+  assert.deepEqual(
+    uncoordinatedOutcomes((command, label, fixture) => judged(command, fixture).reason),
+    uncoordinatedOutcomes((command, label) => (label === 'the note alone' ? heldRefusal(command, ['sign-off']) : '')),
+  );
+});
+
+test('929 pins a Codex Herdr direct push to the checked squash', (t) => {
+  const pushFor = (source, destination = 'refs/heads/main') => `git push --no-follow-tags origin ${source}^{object}:${destination}`;
+  const direct = pushFor(SQUASH_COMMIT);
+  const bare = `git push origin ${SQUASH_COMMIT}:refs/heads/main`;
+  const legacy = 'git push origin HEAD:main';
+  const document = edit(CLEAR, 'tier=code', 'tier=document');
+  const cwd = sessionDirectory({ 'body.md': document }, (remove) => t.after(remove));
+  const proof = { cwd, squash: {}, localHead: SQUASH_COMMIT };
+  const branchLapse = /(?:pushes only its own branch|(?:push|direct).*(?:literal|refspec|form)|plain command|command on its own)/i;
+  const sourceLapse = /(?:checked[- ]out squash|squash (?:commit|object|head)|source object|literal source)/i;
+  const gateLapse = /^a pre-approved run session pushes main only where the pre-push hook on the remote's main judges it: /;
+  const holdLapse = /wait reason holds.*\bshow-me-first\b/;
+  const squashRead = (call) => call === CHECKED_SQUASH_READ;
+
+  assert.equal(pinnedDelivery(legacy, proof, { verified: false, coordinated: true }).reason, '', 'coordinated Claude direct route');
+  assert.match(pinnedDelivery(direct, proof, { verified: false, appRun: true }).reason, branchLapse, 'bounded Desktop cannot push directly');
+  assert.match(pinnedDelivery(direct, proof, { verified: false, coordinated: true }).reason, branchLapse, 'coordinated Claude retains its legacy form');
+  for (const appRun of [false, true]) {
+    assert.equal(blockReason(legacy, inJob, { appRun }), '', 'unbounded direct push remains under the remote-main gate');
+    assert.equal(blockReason(bare, inJob, { appRun }), '', 'unbounded literal refspec remains under the remote-main gate');
+  }
+  assert.equal(pinnedDelivery(PUSH, proof).reason, '', 'the ordinary job-branch push');
+
+  const refusals = [];
+  const refuse = (label, command, fixture, cause, reads = []) => {
+    const verdict = pinnedDelivery(command, { ...proof, ...fixture });
+    refusals.push({ label, verdict, cause, reads });
+  };
+  refuse('a different full source object', pushFor(ANSWERED_COMMIT), {}, sourceLapse, [squashRead]);
+  refuse('the local checkout has moved to another full object', direct, {
+    localHead: ANSWERED_COMMIT, squash: { commit: ANSWERED_COMMIT },
+  }, sourceLapse, [squashRead]);
+  for (const [label, command] of [
+    ['legacy unpinned source and destination', legacy],
+    ['former bare direct route', bare],
+    ['bare source with tag following disabled', direct.replace('^{object}', '')],
+    ['omission leaves tag following to Git configuration', direct.replace('--no-follow-tags ', '')],
+    ['an override re-enables tag following', direct.replace(' origin ', ' --follow-tags origin ')],
+    ['alternate revision suffix', direct.replace('^{object}', '^{commit}')],
+    ['abbreviated source', pushFor(SQUASH_COMMIT.slice(0, 12))],
+    ['symbolic source', pushFor('HEAD')],
+    ['branch ref as source', pushFor('refs/heads/job/7')],
+    ['noncanonical destination', pushFor(SQUASH_COMMIT, 'main')],
+    ['shell redirection', `${direct} >/dev/null`],
+    ['an extra shell command', `${direct} && pwd`],
+  ]) refuse(label, command, {}, branchLapse);
+  refuse('unarmed gate', direct, { squash: { hooksPath: null } }, gateLapse, [(call) => call === 'git config --null --get core.hooksPath']);
+  refuse('changed pre-push hook bytes', direct, { squash: { edited: ['pre-push'] } }, gateLapse, [(call) => call.startsWith('git hash-object --no-filters -- ')]);
+  refuse('an unresolved ready pull request', direct, {
+    openPulls: [{ number: 12, isDraft: false, autoMergeRequest: null, isCrossRepository: false }],
+  }, /pull request #12 is ready or has a merge queued/, [isPrList]);
+  for (const { label, fixture } of heldPinnedVersions(t, document)) refuse(label, direct, fixture, holdLapse, [squashRead]);
+
+  const { reason, calls } = pinnedDelivery(direct, proof);
+  assert.equal(reason, '', 'verified Codex Herdr may push the exact checked squash without a hold');
+  for (const read of [
+    'git rev-parse --show-toplevel', CHECKED_SQUASH_READ,
+    'git --no-replace-objects rev-parse --verify --quiet ORIG_HEAD^{commit}',
+    `git --no-replace-objects rev-parse HEAD^{tree} ${HEAD_COMMIT}^{tree}`,
+    'git --no-replace-objects rev-parse HEAD:.githooks refs/remotes/origin/main:.githooks',
+    `executable ${join(cwd, '.githooks', 'pre-push')}`,
+  ]) assert.ok(calls.includes(read), read);
+  assert.ok(calls.some(isPrList), 'the direct route checks for an unresolved pull request');
+  for (const { label, verdict, cause, reads } of refusals) {
+    assert.match(verdict.reason, cause, label);
+    for (const read of reads) assert.ok(verdict.calls.some(read), `${label}: ${JSON.stringify(verdict.calls)}`);
+  }
+
+  const sha256Squash = '5f842a7104c9b3de6a20f58b1c4d796e0a21c5b87d9e3f4069a17c2f8d5b0e36';
+  const sha256Head = 'b'.repeat(64);
+  const sha256Tree = 'd'.repeat(64);
+  const sha256HooksTree = 'c'.repeat(64);
+  writeSavedBody(cwd, edit(document, `Reviewed commit: ${HEAD_COMMIT}\n`, `Reviewed commit: ${sha256Head}\n`), sha256Head);
+  assert.equal(
+    pinnedDelivery(pushFor(sha256Squash), {
+      cwd,
+      objectFormat: 'sha256',
+      settingOid: 'a'.repeat(64),
+      localHead: sha256Squash,
+      squash: {
+        commit: sha256Squash,
+        origHead: sha256Head,
+        trees: [sha256Tree, sha256Tree],
+        githooks: [sha256HooksTree, sha256HooksTree],
+        mainHooks: [['100755', 'blob', '5'.repeat(64), 'pre-push']],
+      },
+    }).reason,
+    '',
+    'verified Codex Herdr may push the full SHA-256 ID of the checked squash',
+  );
+});
+
+const savedBodyPath = (cwd, head = HEAD_COMMIT) => join(cwd, REVIEW_FOLDER.replace(HEAD_COMMIT, head), 'body.md');
+function writeSavedBody(cwd, body, head) {
+  const file = savedBodyPath(cwd, head);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, body);
+}
+
+// Git runs a hook only where the session user may execute it, so the guard's own probe, not the stand-in, judges a real
+// pre-push in a temporary checkout: 0o611 gives group and other an execute bit but not the owner, the session user, so
+// only an access probe withholds it. Root may execute the 0o611 file, since Linux grants root execute access where any
+// execute bit is set, and Windows runs a hook without a bit.
+const probeSkip = process.platform === 'win32'
+  ? 'Windows has no execute permission for Git to check'
+  : process.getuid?.() === 0 && 'root may execute the 0o611 pre-push, since group and other hold the execute bit and Linux grants root execute access where any execute bit is set';
+test('the direct push\'s pre-push probe asks for execute access as the session user', { skip: probeSkip }, (t) => {
+  const judgedWith = (mode) => {
+    const cwd = sessionDirectory({ 'body.md': CLEAR }, (remove) => t.after(remove));
+    mkdirSync(join(cwd, '.githooks'));
+    writeFileSync(join(cwd, '.githooks/pre-push'), '#!/bin/sh\n');
+    chmodSync(join(cwd, '.githooks/pre-push'), mode);
+    const { executable, ...preApproved } = preApprovedRun({ cwd, squash: {} }).preApproved;
+    return blockReason('git push origin HEAD:main', { ...inJob, cwd }, { preApproved: { ...preApproved, coordinated: true } });
+  };
+  assert.deepEqual(
+    { executable: judgedWith(0o755), withheld: judgedWith(0o611) },
+    { executable: '', withheld: `${PRE_APPROVED}pushes main only where the pre-push hook on the remote's main judges it: .githooks/pre-push is not executable` },
+  );
+});
+
+// The guard's own folder walk, not the stand-in, lists a real top .githooks: nested regular files match fetched main's
+// tree by their slash-separated names and modes, and neither a pre-push that is a symbolic link to an executable file
+// nor a .githooks that is a symbolic link to a matching folder is followed. Windows makes a symbolic link only for an
+// account allowed to create one, so a linked case is left out only where Windows refuses the link.
+test('the direct push\'s hooks folder walk lists nested regular files and refuses a linked pre-push', async (t) => {
+  const judgedWith = (build) => {
+    const cwd = sessionDirectory({ 'body.md': CLEAR }, (remove) => t.after(remove));
+    build(cwd);
+    const mainHooks = [['100755', 'blob', '5'.repeat(40), 'pre-push'], ['100644', 'blob', '8'.repeat(40), 'sub/x']];
+    const { listHooks, ...preApproved } = preApprovedRun({ cwd, squash: { mainHooks } }).preApproved;
+    return blockReason('git push origin HEAD:main', { ...inJob, cwd }, { preApproved: { ...preApproved, platform: process.platform, coordinated: true } });
+  };
+  // Each file's disk bits match the mode fetched main's tree records for it.
+  const writeAt = (path, text, mode) => {
+    writeFileSync(path, text);
+    chmodSync(path, mode);
+  };
+  // A hooks folder holding sub/x, and a pre-push unless `prePush` is false.
+  const hooksAt = (folder, prePush = true) => {
+    mkdirSync(join(folder, 'sub'), { recursive: true });
+    writeAt(join(folder, 'sub', 'x'), 'x\n', 0o654);
+    if (prePush) writeAt(join(folder, 'pre-push'), '#!/bin/sh\n', 0o755);
+  };
+  const linked = (st, target, path, type) => {
+    try {
+      symlinkSync(target, path, type);
+      return true;
+    } catch (error) {
+      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+      st.skip('this Windows account may not create symbolic links (EPERM)');
+      return false;
+    }
+  };
+  const UNCOMMITTED = `${PRE_APPROVED}pushes main only where the pre-push hook on the remote's main judges it: .githooks has uncommitted changes`;
+  await t.test('regular files', () => {
+    assert.equal(judgedWith((cwd) => hooksAt(join(cwd, '.githooks'))), '');
+  });
+  await t.test('a linked pre-push', (st) => {
+    let made = false;
+    const reason = judgedWith((cwd) => {
+      hooksAt(join(cwd, '.githooks'), false);
+      writeAt(join(cwd, 'linked-pre-push'), '#!/bin/sh\n', 0o755);
+      made = linked(st, join(cwd, 'linked-pre-push'), join(cwd, '.githooks', 'pre-push'), 'file');
+    });
+    if (made) assert.equal(reason, UNCOMMITTED);
+  });
+  await t.test('a linked .githooks', (st) => {
+    let made = false;
+    const reason = judgedWith((cwd) => {
+      hooksAt(join(cwd, 'linked-hooks'));
+      made = linked(st, join(cwd, 'linked-hooks'), join(cwd, '.githooks'), 'dir');
+    });
+    if (made) assert.equal(reason, UNCOMMITTED);
+  });
+});
+
+// ── the former approval record and chat approval ────────────────────────────
+// No rule names them any more, so each command meets only the rules it would meet without them. The record prefix
+// and the hook's file name are built in pieces so no shell command written while editing this file holds them.
+
+const RECORD_PREFIX = 'Appr' + 'oved:';
+const HOOK_FILE = '.claude/hooks/approve-ahead' + '.mjs';
+
+test('the guard judges a command holding the former record prefix, or naming the former chat approval files, like any other command', () => {
+  const line = `${RECORD_PREFIX} card=7 edited=none`;
+  const ordinary = [
+    `gh issue comment 7 --body "${line}"`,
+    `gh issue comment 7 --body-file - <<'EOF'\n${line} merge=screenshot\nEOF`,
+    `echo '${line}' > record.md`,
+    `grep -rn "${RECORD_PREFIX}" .claude/worklog`,
+    `node ${HOOK_FILE} < x`,
+    `node -e "import('./scripts/lib/chat-approval.mjs')"`,
+    'node --test scripts/lib/chat-approval.test.mjs',
+  ];
+  const sessions = {
+    'an unmarked session': (command) => ({ reason: blockReason(command, inJob), calls: [] }),
+    'a pre-approved run session': (command) => judged(command),
+    'a session whose run mark cannot be read': (command) => ({ reason: blockReason(command, inJob, { runMarkUnreadable: 'its transcript could not be read (ENOENT)' }), calls: [] }),
+  };
+  for (const command of ordinary) {
+    for (const [session, judge] of Object.entries(sessions)) {
+      const { reason, calls } = judge(command);
+      assert.equal(reason, '', `${session}: ${JSON.stringify(command)}`);
+      assert.deepEqual(calls, [], `${session}: ${JSON.stringify(command)}`);
+    }
+  }
+  // A command the guard gates meets its own rule, whatever record text it carries.
+  assert.equal(blockReason(`gh pr create --title t --body "${line}"`, inJob), REASON_CREATE);
+  assert.equal(blockReason(`git commit --no-verify -m "${line}"`, inJob), REASON_COMMIT_NO_VERIFY);
+  assert.equal(judged(`gh pr create --draft --title t --body "${line}"`).reason, CREATE_ONLY);
 });
 
 // The launcher repeats this matrix to protect its separate wire.
-test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', async (t) => {
-  const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
+test('ANTI-REGRESSION: fetched-main waitForOwner gates publication', async (t) => {
+  const disabled = 'pre-approved run disabled on fetched main; waitForOwner must be on-screen or when-needed in .agents/factory-settings.json on main';
   const unavailable = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
   const behind = `pre-approved run setting unreadable by the checkout at ${dirname(dirname(CODE_DIRECTORY))}, which is older than fetched main; bring that checkout up to date with fetched main, then retry`;
-  const enabled = '{"version":1,"preApprovedRun":true}';
-  const off = '{"version":1,"preApprovedRun":false}';
-  const newerKey = '{"version":1,"preApprovedRun":true,"synthetic-setting-secret":true}';
+  const enabled = '{"version":1,"waitForOwner":"when-needed"}';
+  const off = '{"version":1,"waitForOwner":"always"}';
+  const newerKey = '{"version":1,"waitForOwner":"when-needed","synthetic-setting-secret":true}';
   const cases = [
     { name: '40-digit OID true', fixture: {} },
     { name: '64-digit OID true', fixture: { settingOid: 'c'.repeat(64) } },
     { name: 'executable regular mode', fixture: { settingMode: '100755\n' } },
-    { name: 'absent file', fixture: { settingMode: '' }, error: disabled },
-    { name: 'absent key', fixture: { settingText: '{"version":1}' }, error: disabled },
-    { name: 'false', fixture: { settingText: off }, error: disabled },
+    { name: 'absent key means always', fixture: { settingText: '{"version":1}' }, error: disabled },
+    { name: 'absent file means always', fixture: { settingMode: '' }, error: disabled },
+    { name: 'always', fixture: { settingText: off }, error: disabled },
+    { name: 'retired preApprovedRun true', fixture: { settingText: '{"version":1,"preApprovedRun":true}' }, error: unavailable },
+    { name: 'retired preApprovedRun false', fixture: { settingText: '{"version":1,"preApprovedRun":false}' }, error: unavailable },
     { name: 'unreadable ref', fixture: { settingError: 'ref' }, error: unavailable },
     { name: 'unreadable tree', fixture: { settingError: 'tree' }, error: unavailable },
     { name: 'unreadable blob', fixture: { settingError: 'blob' }, error: unavailable },
@@ -2087,9 +3402,9 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', asy
     { name: 'malformed JSON', fixture: { settingText: '{synthetic-setting-secret' }, error: unavailable },
     { name: 'nonobject JSON', fixture: { settingText: '["synthetic-setting-secret"]' }, error: unavailable },
     { name: 'null JSON', fixture: { settingText: 'null' }, error: unavailable },
-    { name: 'wrong value', fixture: { settingText: '{"version":1,"preApprovedRun":"synthetic-setting-secret"}' }, error: unavailable },
-    { name: 'near key', fixture: { settingText: '{"version":1,"preApprovedRuns":true}' }, error: unavailable },
-    { name: 'invalid schema', fixture: { settingText: '{"version":2,"preApprovedRun":true}' }, error: unavailable },
+    { name: 'wrong value', fixture: { settingText: '{"version":1,"waitForOwner":"synthetic-setting-secret"}' }, error: unavailable },
+    { name: 'near key', fixture: { settingText: '{"version":1,"waitForOwners":"always"}' }, error: unavailable },
+    { name: 'invalid schema', fixture: { settingText: '{"version":2,"waitForOwner":"when-needed"}' }, error: unavailable },
     // The guard runs the code of the root checkout from a job worktree whose branch is ahead of fetched main.
     { name: 'newer key, code checkout behind, session checkout ahead', fixture: { settingText: newerKey, ancestry: '0\t3\n', sessionAncestry: '1\t0\n' }, error: behind },
     { name: 'newer key, code checkout current, session checkout behind', fixture: { settingText: newerKey, ancestry: '0\t0\n', sessionAncestry: '0\t3\n' }, error: unavailable },
@@ -2111,8 +3426,48 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', asy
       }
     });
   }
+  // Run from a pinned workflow version, the running code is the recorded commit, so that commit, never the
+  // integration checkout's HEAD, is what is older than fetched main. Real commits: fetched main adds a newer key one
+  // commit past the other of the two.
+  for (const [name, pinBehind] of [['pinned commit behind, integration checkout current', true], ['pinned commit current, integration checkout behind', false]]) {
+    await t.test(`${PUSH}: newer key read from a pinned workflow version, ${name}`, { skip: withoutClaude }, async (st) => {
+      const pin = pinnedWorkflow(st);
+      gitIn(pin.repo, ['switch', '-q', '-c', 'next']);
+      mkdirSync(join(pin.repo, '.agents'), { recursive: true });
+      writeFileSync(join(pin.repo, '.agents/factory-settings.json'), newerKey);
+      gitIn(pin.repo, ['add', '.agents/factory-settings.json']);
+      gitIn(pin.repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'newer key']);
+      const fetched = gitIn(pin.repo, ['rev-parse', 'HEAD']);
+      gitIn(pin.repo, ['update-ref', 'refs/remotes/origin/main', fetched]);
+      gitIn(pin.repo, ['switch', '-q', 'main']);
+      let root = pin.root;
+      if (pinBehind) gitIn(pin.repo, ['merge', '-q', '--ff-only', 'next']);
+      else {
+        const log = st.mock.method(console, 'log', () => {});
+        repairWorkflowSnapshot({ cwd: pin.repo, commit: fetched });
+        log.mock.restore();
+        root = join(workflowStore(pin.repo), fetched);
+      }
+      const { blockReason: pinnedBlockReason } = await import(pathToFileURL(join(root, 'scripts/lib/unsafe-git.mjs')).href);
+      const run = preApprovedRun({ cwd: pin.repo });
+      // The settings and ancestry reads meet the real repository; every other read keeps its fixture answer.
+      const realGit = (args) => {
+        const read = childProcess.spawnSync('git', args, { cwd: pin.worktree, encoding: 'utf8' });
+        if (read.status !== 0) throw new Error(`git ${args.join(' ')}: ${read.stderr}`);
+        return read.stdout;
+      };
+      const real = (args) => ['-C', 'rev-list', 'merge-base', 'ls-tree', 'show', 'cat-file'].includes(args[0])
+        || args.join(' ') === 'rev-parse --verify --quiet refs/remotes/origin/main^{commit}';
+      const git = (args) => (real(args) ? realGit(args) : run.preApproved.git(args));
+      const verify = ({ drift }) => verifyJobPin({ env: { FABRAIK_WORKFLOW_ROOT: root }, cwd: pin.repo, drift });
+      const reason = pinnedBlockReason(PUSH, { ...inJob, cwd: run.cwd }, { preApproved: { ...run.preApproved, git, coordinated: true, verifyJobPin: verify } });
+      const verdict = reason.includes(unavailable) ? 'fetch advice'
+        : reason.includes(root) && reason.includes('older than fetched main') ? 'names the older pin' : reason;
+      assert.equal(verdict, pinBehind ? 'names the older pin' : 'fetch advice');
+    });
+  }
   for (const [name, text, jobText, error] of [
-    ['job true main false', off, enabled, disabled], ['job false main true', enabled, off, undefined],
+    ['job when-needed main always', off, enabled, disabled], ['job always main when-needed', enabled, off, undefined],
   ]) await t.test(name, () => {
     const run = preApprovedRun({ settingText: text });
     const git = (args) => args.join(' ') === 'show HEAD:.agents/factory-settings.json' ? jobText : run.preApproved.git(args);
@@ -2162,18 +3517,283 @@ test('ANTI-REGRESSION: fetched-main pre-approved setting gates publication', asy
       });
     }
   }
-  await t.test('unmarked and product manager paths retain their verdicts without setting reads', () => {
-    for (const command of DELIVERY) {
-      assert.equal(blockReason(command, inJob), '');
-      assert.equal(judged(command, { settingError: 'ref' }, { runSession: true }).reason, REASON_RUN_SESSION);
-    }
+  await t.test('the unmarked path retains its verdict without setting reads', () => {
+    for (const command of DELIVERY) assert.equal(blockReason(command, inJob), '');
   });
 });
 
 test('the pre-approved setting check can require the Herdr add-on', () => {
-  const check = (settingText, options = {}) => () => requirePreApprovedRun({ git: preApprovedRun({ settingText }).preApproved.git, ...options });
-  assert.throws(check('{"version":1,"preApprovedRun":true}', { herdr: true }), { message: /\bherdr\b/ }, 'absent herdr key');
-  assert.throws(check('{"version":1,"preApprovedRun":true,"herdr":false}', { herdr: true }), { message: /\bherdr\b/ }, 'herdr false');
-  assert.doesNotThrow(check('{"version":1,"preApprovedRun":true,"herdr":true}', { herdr: true }), 'herdr true');
-  assert.doesNotThrow(check('{"version":1,"preApprovedRun":true}'), 'no herdr option');
+  const check = (settingText, options = {}) => () => requireMergeOnEvidence({ git: preApprovedRun({ settingText }).preApproved.git, ...options });
+  assert.throws(check('{"version":1,"waitForOwner":"when-needed"}', { herdr: true }), { message: /\bherdr\b/ }, 'absent herdr key');
+  assert.throws(check('{"version":1,"waitForOwner":"when-needed","herdr":false}', { herdr: true }), { message: /\bherdr\b/ }, 'herdr false');
+  assert.doesNotThrow(check('{"version":1,"waitForOwner":"when-needed","herdr":true}', { herdr: true }), 'herdr true');
+  assert.doesNotThrow(check('{"version":1,"waitForOwner":"when-needed"}'), 'no herdr option');
+});
+
+// ── a coordinated Claude job's workflow version ──────────────────────────────
+// The expected outcomes come from the plan's frozen rule: in a session the Claude guard entry sees marked
+// FABRAIK_COORDINATED_JOB=1, every publish form and every merge-watch form needs `verifyJobPin` to pass before any
+// publish check reads, with `drift` false for its own `gh pr ready <n> --undo`, false for the exact one-argument
+// merge-watch cleanup and true for everything else; a missing FABRAIK_WORKFLOW_ROOT refuses with the recovery message;
+// and merge-watch runs only as `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs"`. At blockReason the guard
+// entry's verifier arrives as `preApproved.verifyJobPin`, here S1's own function over a real repository and its real
+// snapshot. Sessions without the mark, and Codex Herdr jobs, keep today's outcomes.
+
+const INSTALLED_ROOT = resolve(CODE_DIRECTORY, '../..');
+const withoutClaude = !presentRuntimes(INSTALLED_ROOT).includes('claude') && 'the settings file names no claude runtime';
+const NO_PIN = 'this job has no recorded workflow version; resume it through the coordinator';
+const PINNED_WATCH = '$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs';
+const watch = (args) => `node "${PINNED_WATCH}" ${args}`;
+const CLEANUP = watch('12');
+const HOLD = watch('--hold-delivery');
+const UNDO = 'gh pr ready 12 --undo';
+const GUARD_MARKS = ['FABRAIK_WORKFLOW_ROOT', 'FABRAIK_COORDINATED_JOB', 'PRE_APPROVED_RUN_SESSION', 'PRE_APPROVED_RUN_CARD', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_PROJECT_DIR'];
+
+const gitIn = (cwd, args) => {
+  const run = childProcess.spawnSync('git', args, { cwd, encoding: 'utf8' });
+  assert.equal(run.status, 0, `git ${args.join(' ')}: ${run.stderr}`);
+  return run.stdout.trim();
+};
+
+// Gives back the write bits a read-only snapshot took, so a case can damage it or the fixture can be removed.
+const unlock = (path) => {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  chmodSync(path, (stat.mode & 0o7777) | 0o200);
+  if (stat.isDirectory()) for (const name of readdirSync(path)) unlock(join(path, name));
+};
+
+// A repository whose one commit holds this checkout's installed Claude guard, the library it loads, the merge watch
+// and the three shared contracts, with a job worktree, the review folder of a clear HEAD and that commit's verified
+// snapshot at its canonical store path, `root`.
+function pinnedWorkflow(t) {
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'pinned-workflow-')));
+  t.after(() => {
+    unlock(repo);
+    rmSync(repo, { recursive: true, force: true });
+  });
+  const library = readdirSync(join(INSTALLED_ROOT, 'scripts/lib')).filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs'));
+  for (const path of ['.claude/settings.json', '.claude/hooks/block-unsafe-git.mjs', 'scripts/merge-watch.mjs', ...library.map((name) => `scripts/lib/${name}`)]) {
+    mkdirSync(dirname(join(repo, path)), { recursive: true });
+    copyFileSync(join(INSTALLED_ROOT, path), join(repo, path));
+  }
+  writeFileSync(join(repo, 'scripts/lib/delivery-lane-contract.test.mjs'), '// The fixture delivery-lane contract.\n');
+  gitIn(repo, ['init', '-q', '-b', 'main']);
+  gitIn(repo, ['add', '-A']);
+  gitIn(repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'workflow']);
+  const commit = gitIn(repo, ['rev-parse', 'HEAD']);
+  const worktree = join(repo, '.claude/worktrees/job');
+  gitIn(repo, ['worktree', 'add', '-q', '-b', 'job/7', worktree]);
+  mkdirSync(join(repo, REVIEW_FOLDER), { recursive: true });
+  writeFileSync(join(repo, REVIEW_FOLDER, 'body.md'), CLEAR);
+  const log = t.mock.method(console, 'log', () => {});
+  repairWorkflowSnapshot({ cwd: repo, commit });
+  log.mock.restore();
+  return { repo, worktree, commit, root: join(workflowStore(repo), commit) };
+}
+
+// The judgment of a coordinated Claude session whose guard entry verifies `env`'s pin in `pin.repo`. Its ready and
+// merge read pull request 12 on the exact publication path, a draft before ready and ready before the pinned merge.
+const coordinatedJudged = (pin, command, { env = { FABRAIK_WORKFLOW_ROOT: pin.root }, fixture = {} } = {}) => {
+  const pinnedPull = command === READY ? { ...PINNED_PULL, isDraft: true } : PINNED_PULL;
+  const run = preApprovedRun({ cwd: pin.repo, pinnedReads: [], pinnedPull, ...fixture });
+  const verify = ({ drift }) => verifyJobPin({ env, cwd: pin.repo, drift });
+  const reason = blockReason(command, { ...inJob, cwd: run.cwd }, { preApproved: { ...run.preApproved, coordinated: true, verifyJobPin: verify } });
+  return { reason, calls: run.calls };
+};
+
+// The Claude PreToolUse Bash guard definition, as Claude Code runs it.
+const guardDefinition = () => JSON.parse(readFileSync(join(INSTALLED_ROOT, '.claude/settings.json'), 'utf8'))
+  .hooks.PreToolUse.find((entry) => entry.matcher === 'Bash').hooks.map((hook) => hook.command)
+  .find((command) => command.includes('/.claude/hooks/block-unsafe-git.mjs'));
+
+// The PreToolUse input Claude Code gives a Bash call in `cwd`.
+const toolInput = (command, cwd) => JSON.stringify({
+  session_id: 'pinned-session', transcript_path: join(cwd, 'no-transcript.jsonl'), cwd, permission_mode: 'default',
+  hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command, description: 'a pinned delivery call' },
+});
+
+// The environment Claude Code runs the job's hooks in: the integration root as the project, plus `marks`.
+const guardEnvironment = (pin, marks) => ({
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !GUARD_MARKS.includes(key))),
+  CLAUDE_PROJECT_DIR: pin.repo,
+  ...marks,
+});
+const COORDINATED_MARKS = { PRE_APPROVED_RUN_SESSION: RUN_START, PRE_APPROVED_RUN_CARD: '7', FABRAIK_COORDINATED_JOB: '1' };
+
+// Whether the Claude guard definition lets `command` go ahead in the job worktree under `marks`.
+const guardVerdict = (pin, command, marks) => {
+  const shell = posixShell();
+  assert.ok(shell, 'a POSIX shell is required: install Git for Windows');
+  const run = childProcess.spawnSync(shell, ['-c', guardDefinition()], {
+    cwd: pin.worktree, encoding: 'utf8', input: toolInput(command, pin.worktree), env: guardEnvironment(pin, marks),
+  });
+  if (run.status === 0 && !run.stdout.includes('"permissionDecision":"deny"')) return 'admitted';
+  return run.stderr.includes(NO_PIN) ? 'refused: no recorded version' : `exit ${run.status}: ${run.stderr}${run.stdout}`;
+};
+
+// Damages the snapshot's merge watch, which the guard itself never loads.
+const damageWatch = (pin, text) => {
+  unlock(join(pin.root, 'scripts'));
+  writeFileSync(join(pin.root, 'scripts/merge-watch.mjs'), text);
+};
+
+test("ANTI-REGRESSION: coordinated publication needs the job's verified workflow version", { skip: withoutClaude }, (t) => {
+  const pin = pinnedWorkflow(t);
+  const damaged = join(pin.root, 'scripts/merge-watch.mjs');
+  const drifted = 'scripts/lib/workflow-pin.mjs';
+  // Admitted, admitted after the publish check read, refused with no publish read naming `cause`, or the whole reason.
+  const verdict = ({ reason, calls }, cause) => {
+    if (reason === '') return calls.length > 0 ? 'admitted after the publish check' : 'admitted';
+    if (calls.length > 0) return `refused after the publish check: ${reason}`;
+    return cause !== undefined && reason.includes(cause) ? `refused naming ${cause}` : reason;
+  };
+  const outcomes = {};
+  const expected = {};
+  const row = (label, actual, want) => {
+    outcomes[label] = actual;
+    expected[label] = want;
+  };
+
+  // A coordinated job merges only through the pinned merge, so its delivery forms end with that merge.
+  const coordinatedDelivery = [PUSH, CREATE, READY, PINNED_MERGE];
+  for (const command of coordinatedDelivery) row(`verified: ${command}`, verdict(coordinatedJudged(pin, command)), 'admitted after the publish check');
+  const closed = coordinatedJudged(pin, PUSH, { fixture: { issue: { state: 'CLOSED' } } });
+  row('verified: a closed card meets the existing checks', closed.reason.startsWith(PRE_APPROVED) && closed.reason.endsWith('the card is closed') && closed.calls.length > 0, true);
+  row(`verified: ${UNDO}`, verdict(coordinatedJudged(pin, UNDO)), 'admitted after the publish check');
+  for (const command of [CLEANUP, HOLD]) row(`verified: ${command}`, verdict(coordinatedJudged(pin, command)), 'admitted');
+
+  // The integration checkout's copy of a shared contract moves on from the pinned commit.
+  const contract = readFileSync(join(pin.repo, drifted));
+  writeFileSync(join(pin.repo, drifted), Buffer.concat([contract, Buffer.from('// moved on\n')]));
+  row(`drift: ${UNDO}`, verdict(coordinatedJudged(pin, UNDO)), 'admitted after the publish check');
+  row(`drift: ${CLEANUP}`, verdict(coordinatedJudged(pin, CLEANUP)), 'admitted');
+  for (const command of [...coordinatedDelivery, HOLD]) row(`drift: ${command}`, verdict(coordinatedJudged(pin, command), drifted), `refused naming ${drifted}`);
+  writeFileSync(join(pin.repo, drifted), contract);
+
+  for (const command of [...coordinatedDelivery, UNDO, CLEANUP, HOLD]) {
+    row(`no recorded version: ${command}`, verdict(coordinatedJudged(pin, command, { env: {} }), NO_PIN), `refused naming ${NO_PIN}`);
+  }
+  // Only a pre-pin job meets the recovery message, through the launch root's guard.
+  row(`guard, marked with no recorded version: ${CLEANUP}`, guardVerdict(pin, CLEANUP, COORDINATED_MARKS), 'refused: no recorded version');
+
+  damageWatch(pin, '// not the pinned merge watch\n');
+  for (const command of [PUSH, UNDO, CLEANUP]) row(`damaged: ${command}`, verdict(coordinatedJudged(pin, command), damaged), `refused naming ${damaged}`);
+
+  // Without the mark, a session keeps today's outcomes whatever pin its environment names.
+  const named = { FABRAIK_WORKFLOW_ROOT: pin.root };
+  for (const command of [...DELIVERY, UNDO, CLEANUP, HOLD]) {
+    const run = preApprovedRun({ cwd: pin.repo, env: named });
+    row(`unmarked run session: ${command}`, blockReason(command, { ...inJob, cwd: run.cwd }, { preApproved: run.preApproved }), '');
+  }
+  for (const [label, marks] of [['ordinary session', named], ['unmarked run session', { ...named, PRE_APPROVED_RUN_SESSION: RUN_START, PRE_APPROVED_RUN_CARD: '7' }]]) {
+    for (const command of [CLEANUP, HOLD]) row(`guard, ${label} naming a damaged pin: ${command}`, guardVerdict(pin, command, marks), 'admitted');
+  }
+  for (const command of [PUSH, CLEANUP, HOLD]) row(`Codex Herdr naming a damaged pin: ${command}`, pinnedDelivery(command, { env: named }).reason, '');
+
+  assert.deepEqual(outcomes, expected);
+});
+
+test("pinned delivery code runs only from the job's workflow version", { skip: withoutClaude }, (t) => {
+  const pin = pinnedWorkflow(t);
+  const elsewhere = [`${pin.repo}/scripts/merge-watch.mjs`, `${pin.worktree}/scripts/merge-watch.mjs`];
+  const outcomes = {};
+  const expected = {};
+  for (const args of ['12', '--hold-delivery']) {
+    for (const path of ['scripts/merge-watch.mjs', ...elsewhere]) {
+      const command = `node ${path} ${args}`;
+      const { reason } = coordinatedJudged(pin, command);
+      outcomes[`coordinated: ${command}`] = reason !== '' && reason.includes(PINNED_WATCH) ? `refused naming ${PINNED_WATCH}` : reason;
+      expected[`coordinated: ${command}`] = `refused naming ${PINNED_WATCH}`;
+      for (const [label, judge] of [
+        ['unmarked run session', () => blockReason(command, inJob, { preApproved: preApprovedRun({ cwd: pin.repo }).preApproved })],
+        ['ordinary session', () => blockReason(command, inJob)],
+      ]) {
+        outcomes[`${label}: ${command}`] = judge();
+        expected[`${label}: ${command}`] = '';
+      }
+    }
+    outcomes[`coordinated: ${watch(args)}`] = coordinatedJudged(pin, watch(args)).reason;
+    expected[`coordinated: ${watch(args)}`] = '';
+  }
+  // A text search that names the merge watch executes only the search.
+  const search = "rg -n 'node scripts/merge-watch.mjs' .agents/skills";
+  outcomes[`coordinated: ${search}`] = coordinatedJudged(pin, search).reason;
+  expected[`coordinated: ${search}`] = '';
+  // A syntax check reads the script without running it.
+  for (const syntaxCheck of ['node --check scripts/merge-watch.mjs', 'node -c scripts/merge-watch.mjs', 'node.exe --check scripts/merge-watch.mjs']) {
+    outcomes[`coordinated: ${syntaxCheck}`] = coordinatedJudged(pin, syntaxCheck).reason;
+    expected[`coordinated: ${syntaxCheck}`] = '';
+  }
+  // An apostrophe in a comment, a heredoc body or a $'...' string quotes nothing, and a quoted command word still runs.
+  for (const command of [
+    "# Start the PR's watch\nnode scripts/merge-watch.mjs 12\n# wait until it's done",
+    "echo dont && node scripts/merge-watch.mjs 12 # it's",
+    "cat <<EOF\ndon't\nEOF\nnode scripts/merge-watch.mjs 12\necho 'a b'",
+    "echo $'a\\' b' ; node scripts/merge-watch.mjs 12 ; echo 'c'",
+    "echo 'a #b'\nnode scripts/merge-watch.mjs 12\necho 'c d'",
+    '"node" scripts/merge-watch.mjs 12',
+    'cat <<EOF\n$(node scripts/merge-watch.mjs 12)\nEOF',
+    'cat <<EOF\n`node scripts/merge-watch.mjs 12`\nEOF',
+    // A live heredoc with no terminator line runs to the end of the input, its substitution included.
+    "cat <<EOF\nit's\n$(node scripts/merge-watch.mjs 12)\nthat's",
+    // A preload option beside a syntax check loads code before the check, so the command is no syntax check.
+    'node -c --import ./scripts/merge-watch.mjs scripts/merge-watch.mjs 12',
+    'node --require=./scripts/merge-watch.mjs -c scripts/merge-watch.mjs 12',
+    'node --check --import ./scripts/merge-watch.mjs scripts/merge-watch.mjs 12 --held-delivery',
+    'node -c --import=./scripts/merge-watch.mjs scripts/merge-watch.mjs 12',
+    // NODE_OPTIONS preloads run under a syntax check too.
+    'NODE_OPTIONS=--import=./scripts/merge-watch.mjs node --check scripts/merge-watch.mjs 12 --held-delivery',
+    'NODE_OPTIONS="--import ./scripts/merge-watch.mjs" node --check scripts/merge-watch.mjs 12 --held-delivery',
+    'export NODE_OPTIONS=--import=./scripts/merge-watch.mjs; node --check scripts/merge-watch.mjs 12 --held-delivery',
+    'env NODE_OPTIONS=--require=./scripts/merge-watch.mjs node -c scripts/merge-watch.mjs 12',
+    // The shell can assemble that name or source a file that exports it, so only the bare check is exempt.
+    'v=NODE; export ${v}_OPTIONS=--import=./scripts/merge-watch.mjs; node --check scripts/merge-watch.mjs 12 --held-delivery',
+    '. ./pre.sh; node --check scripts/merge-watch.mjs 12',
+    // Brace and glob expansion can turn a syntax check's one word into a preload option.
+    'node --check {--import=./scripts/merge-watch.mjs,scripts/merge-watch.mjs,12,--held-delivery}',
+    'node.exe -c {--require=./scripts/merge-watch.mjs,scripts/merge-watch.mjs,12}',
+    'node --check [-]*merge-watch.mjs',
+  ]) {
+    const { reason } = coordinatedJudged(pin, command);
+    outcomes[`coordinated: ${command}`] = reason !== '' && reason.includes(PINNED_WATCH) ? `refused naming ${PINNED_WATCH}` : reason;
+    expected[`coordinated: ${command}`] = `refused naming ${PINNED_WATCH}`;
+  }
+  // An apostrophe that opens a quote holds the rest of the line, its `#` included, as one argument of echo.
+  const quotedTail = "echo don't && node scripts/merge-watch.mjs 12 # it's";
+  outcomes[`coordinated: ${quotedTail}`] = coordinatedJudged(pin, quotedTail).reason;
+  expected[`coordinated: ${quotedTail}`] = '';
+  // A quoted heredoc delimiter makes the body literal, so its substitution runs nothing.
+  const literalBody = "cat <<'EOF'\n$(node scripts/merge-watch.mjs 12)\nEOF";
+  outcomes[`coordinated: ${literalBody}`] = coordinatedJudged(pin, literalBody).reason;
+  expected[`coordinated: ${literalBody}`] = '';
+  assert.deepEqual(outcomes, expected);
+});
+
+test('ANTI-REGRESSION: pinned delivery code is verified before it runs', { skip: withoutClaude }, (t) => {
+  const pin = pinnedWorkflow(t);
+  damageWatch(pin, "process.stderr.write('MARKER\\n');\n");
+  const shell = posixShell();
+  assert.ok(shell, 'a POSIX shell is required: install Git for Windows');
+  // Claude's dispatch: the command runs only when the guard exits 0 with no deny decision on its standard output.
+  const dispatch = [
+    'out=$(printf \'%s\' "$TOOL_INPUT" | eval "$GUARD"); s=$?',
+    'printf \'%s\' "$out"',
+    '[ "$s" -eq 0 ] || exit "$s"',
+    'case $out in *\'"permissionDecision":"deny"\'*) exit 2 ;; esac',
+    'eval "$TOOL_COMMAND"',
+  ].join('\n');
+  const run = childProcess.spawnSync(shell, ['-c', dispatch], {
+    cwd: pin.worktree,
+    encoding: 'utf8',
+    env: {
+      ...guardEnvironment(pin, { ...COORDINATED_MARKS, FABRAIK_WORKFLOW_ROOT: pin.root }),
+      GUARD: guardDefinition(), TOOL_COMMAND: HOLD, TOOL_INPUT: toolInput(HOLD, pin.worktree),
+    },
+  });
+  assert.deepEqual(
+    { status: run.status, namesTheWatch: run.stderr.includes(join(pin.root, 'scripts/merge-watch.mjs')), ran: run.stderr.includes('MARKER') },
+    { status: 2, namesTheWatch: true, ran: false },
+    run.stderr,
+  );
 });

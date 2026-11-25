@@ -32,58 +32,68 @@ flowchart TB
     subgraph Owner["The owner"]
         O1["Bring an idea"]
         O2["Agree the breakdown into cards"]
-        O3["Work-pick: pick one card"]
+        O3["Work-pick: queue or pick a card"]
         O6["Plan approval: one yes to the completed plan, only where the repository turns it on"]
-        O4["Decide, only if the outcome or a trade-off changed"]
-        O5["Push authorisation: one yes to the decision card and its screenshot"]
+        O4["Decide, only on an owner action the card does not name, or a changed outcome or trade-off"]
+        O5["Push authorisation: one yes to the decision card and its screenshot, where the work waits"]
     end
     subgraph Agents["The agents"]
         A1["Interview, write the spec, propose cards"]
-        A2["Report which cards can start"]
+        A2["Take the top of Ready or claim the picked card"]
         A3["Plan"]
         A4["Build in bounded slices"]
         A5["Verify and review"]
         A6["Write the pull request body"]
-        A7["Deliver: draft pull request, checks, auto-merge"]
+        A7["Deliver: draft pull request, checks, merge"]
         A8["Close out: card to Done, worktree removed"]
     end
     O1 --> A1
     A1 --> O2
-    O2 --> A2
-    A2 --> O3
-    O3 --> A3
+    O2 --> O3
+    O3 --> A2
+    A2 --> A3
     A3 --> A4
     A4 --> A5
     A5 --> A6
     A6 --> O5
     O5 --> A7
+    A6 -.-> A7
     A7 --> A8
     A4 -.-> O4
+    A3 -.-> O4
     O4 -.-> A4
     A3 -.-> O6
     O6 -.-> A4
 ```
 
 The diagram sets the owner's steps beside the agents' steps for one piece of work, from an idea to a merged change.
-Solid arrows show the usual path. The dotted pair from planning applies only where the repository turns plan approval
-on. The dotted pair from building applies only when the approved outcome or a trade-off changes during the build.
+Solid arrows show the path of work that waits for the owner's yes. Where the settings allow it and no wait reason holds,
+work merges on its evidence instead. It follows the dotted arrow from the pull request body straight to delivery, and
+the owner sees the decision card after the merge. The dotted pair from planning applies only where the repository turns
+plan approval on. The dotted arrows into that decision apply only in two cases. From planning, the plan needs an owner
+action the card does not name, asked once before the build. From building, the approved outcome or a trade-off changes
+during the build.
 
-In order, the path runs like this. The owner brings an idea. The agents interview the owner, write the spec and
-propose cards, and the owner agrees the breakdown. The agents report which cards can start, and the owner picks one:
-that pick is work-pick, the first decision. The agents plan, build in bounded slices, verify, review and write the
-pull request body. The owner reads a short decision card taken from that body, with a screenshot when the change is
-visible. The owner may ask to see the whole body. The owner's yes is push authorisation, the second decision, and the
-owner has not accepted a material limit the card leaves out. The agents then deliver and close out without asking
-again.
+In order, the path runs like this. The owner brings an idea. The agents interview the owner, write the spec and propose
+cards, and the owner agrees the breakdown. The owner can queue cards in Ready, and a session takes the top startable
+card there unasked. The owner can also name a card or pick from the agents' table; a startable GitHub card is claimed
+directly. That pick is work-pick, the first decision. The agents plan, build in bounded slices, verify, review and write
+the pull request body. The owner reads a short decision card taken from that body, with a screenshot when the change is
+visible. The owner may ask to see the whole body. Where the work waits, the owner reads the card before delivery, and
+the owner's yes is push authorisation, the second decision. The card records that yes as the owner's answer for the
+version shown. Where the work merges on its evidence, the agents deliver first and the owner reads the card after the
+merge. The owner's yes does not accept a material limit the card leaves out. The agents then deliver and close out
+without asking again.
 
-Between the two decisions, a question goes back to the owner in two cases only. Where the repository turns plan
-approval on, the agents present the completed plan and build nothing until the owner says yes. When the approved
-outcome or a trade-off changes during the build, the agents ask before they build it. A change the repository's own
-gate admits whole goes straight to `main` on the same yes, with no pull request.
+Between the two decisions, a question goes back to the owner in three cases only. Where the repository turns plan
+approval on, the agents present the completed plan and build nothing until the owner says yes. A plan may need an owner
+action the card does not name, such as spending the owner's money or acting on the owner's account. The agents then list
+every such action with its limit and ask once, before they build. When the approved outcome or a trade-off changes
+during the build, the agents ask before they build it. A change the repository's own gate admits whole goes straight to
+`main` on the same yes, with no pull request.
 
 [`AGENTS.md`](../AGENTS.md#owner-gates) owns what each decision approves, what turns plan approval on and what still
-needs its own approval, under "Owner gates". Where the repository turns product manager mode on, the owner may hand
-work-pick to a product manager run, which [The life of one change](AI-WORKFLOW-job.md) describes. Underneath this path,
+needs its own approval, under "Owner gates". Underneath this path,
 every job runs in its own worktree and every check logs its exit code. A short list of machine guards holds what a
 sentence could not.
 
@@ -107,6 +117,8 @@ files are always in the same place.
 | What the owner decides, and when | [The map](#the-map), then [`AGENTS.md`](../AGENTS.md#owner-gates) under "Owner gates" |
 | Why the workflow has this shape, from requirements to maintenance | [Why it is shaped this way](#why-it-is-shaped-this-way) |
 | How an approved card becomes a merged commit | [The life of one change](AI-WORKFLOW-job.md) |
+| How a Herdr coordinator takes cards and delivers its jobs | [Runs a Herdr coordinator starts](AI-WORKFLOW-job.md#runs-a-herdr-coordinator-starts) |
+| How the documentation stays true between jobs | [From requirements to maintenance](#from-requirements-to-maintenance) |
 | Who does what, and how one agent hands work to another | [The seats](AI-WORKFLOW-seats.md) |
 | How the agents file, track and move planned work, on GitHub or another board | [The board](AI-WORKFLOW-board.md) |
 | What a machine refuses, and what rests on an instruction alone | [Enforcement and instruction](AI-WORKFLOW-enforcement.md) |
@@ -150,14 +162,14 @@ spec, the cards and their acceptance criteria, the plan, the commits and the rec
 - **Requirements.** When an idea needs its requirements found, the owner can start [the `grill-me`
   skill](../.agents/skills/grill-me/SKILL.md). It interviews the owner in rounds, each question with a recommended
   answer, until both sides confirm a shared understanding. [The `to-spec` skill](../.agents/skills/to-spec/SKILL.md)
-  then writes the spec from that conversation. [The `to-issues` skill](../.agents/skills/to-issues/SKILL.md) cuts the
+  then writes the spec from that conversation. [The `to-tickets` skill](../.agents/skills/to-tickets/SKILL.md) cuts the
   spec into thin vertical slices, each demonstrable on its own and sized to one bounded build. The owner approves that
   breakdown before the agents file any card. A single bug or idea can instead become one card through the same
-  approval. The owner judges outcomes, never code: `to-issues` owns what the agents ask the owner and what they decide,
-  under ["Specification entry"](../.agents/skills/to-issues/SKILL.md#specification-entry). [The issue tracker
+  approval. The owner judges outcomes, never code: `to-tickets` owns what the agents ask the owner and what they decide,
+  under ["Specification entry"](../.agents/skills/to-tickets/SKILL.md#specification-entry). [The issue tracker
   page](ISSUE-TRACKER.md) says where the spec and its cards live.
 - **Delivery.** The owner picks a card at work-pick. The agents plan it, build it in bounded slices, verify it, review
-  the final tree and repair what the review finds. They deliver it on the owner's push authorisation. [The life of one
+  the final tree and repair what the review finds. They deliver it once push authorisation holds: the owner's yes, or its evidence where nothing makes it wait. [The life of one
   change](AI-WORKFLOW-job.md) follows it stage by stage.
 - **Maintenance.** The agents plan and review each feature against the same standing documents as the last, as [How
   focused work stays coherent](#how-focused-work-stays-coherent) explains. When the owner chooses, [the
@@ -165,6 +177,16 @@ spec, the cards and their acceptance criteria, the plan, the commits and the rec
   that makes the code hard to test or to navigate. It explains each candidate and recommends one, and the owner chooses
   which to explore. Nothing schedules it. [The `diagnosing-bugs` skill](../.agents/skills/diagnosing-bugs/SKILL.md)
   recommends it when a bug has no good place for a test, or its cause is architectural.
+- **Documentation.** Where a repository runs them, the weekly documentation sweep, which `docs/DOC-SWEEP.md` runs by,
+  repairs explanations of behaviour the repository already has. It edits only existing documents its manual permits, and
+  never creates, deletes or moves a file, designs or decides. Its day-after triage, which `docs/SWEEP-TRIAGE.md` runs
+  by, gives each finding the sweep reported one verdict: already covered, fixed, or a card. Each may merge its own pull
+  request with no review line and no person reading it first, but only under the sweep manual's landing rule. The rule
+  needs the run's own pushed head, with the required `test` and `sweep-scope` checks passed on it, and `main` unmoved
+  since the run's base. It also needs the run's branch prefix, so that the `sweep-scope` check judged the diff instead
+  of skipping it. Otherwise the pull request stays open. The `sweep-scope` check holds their branches to scope. The
+  weekly retro, where it runs, files proposal cards and changes nothing else, as [The
+  board](AI-WORKFLOW-board.md#proposals-from-the-weekly-retro) explains.
 
 ### How focused work stays coherent
 
@@ -190,10 +212,9 @@ hold the narrow pieces together, each with a cost, and narrow contexts still los
   says which seats read them. They cost upkeep, and they help only as far as plans and reviews apply them.
 - **Independent review challenges what a writer cannot see.** A writer rarely finds the plausible mistakes in its own
   work. A model of the same family tends to make the same ones. A plan-first card's plan gets a read-only review before any
-  build. At the `code` and `sign-off` tiers, the model family that did not write the change reviews the
-  final tree. That reviewer derives the claims from the card and the final diff before it reads the selected evidence,
-  as [the testing strategy](TESTING-STRATEGY.md#4-construction-modes) says. A detail a handoff lost, or an assumption
-  the writer and the plan shared, can still surface that way. Where [the external review
+  build. On the normal authorized dual-runtime route, the other family's primary and supplemental reviewers independently read the final tree.
+  Each derives the claims from the card and final diff before reading the selected evidence, as
+  [the testing strategy](TESTING-STRATEGY.md#construction-modes) says. A lost detail or shared assumption can surface that way. Where [the external review
   add-on](#the-external-review-add-on) is on, a `sign-off` change gets one more review. When the other family cannot
   review, the same charter runs on the writer's own family, and the pull request body says so. [The `resume`
   skill](../.agents/skills/resume/SKILL.md#6-verify-and-review) owns when that happens, under "6. Verify and review".
@@ -206,8 +227,7 @@ cannot show.
 
 ## The rules that hold everywhere
 
-Eight things hold in every repository that carries the workflow. They are what transfers to another product, so a
-reader adapting the workflow looks for them first. Each item names the idea, and its link leads to the home that
+Eight things hold in every repository that carries the workflow. They are what transfers to another product, and the first thing you look for when you adapt the workflow. Each item names the idea, and its link leads to the home that
 states the rule:
 
 1. One contract file every runtime reads, with skills for the steps and hooks for the guards:
@@ -219,7 +239,7 @@ states the rule:
 4. Narrow seats, bounded handoffs and judgment settled in the plan:
    [`AGENTS.md`](../AGENTS.md#runtime-notes) under "Runtime notes".
 5. One construction mode per claim, with exit codes a script records: [the testing strategy](TESTING-STRATEGY.md).
-6. One fresh review of the final tree, its depth set by two questions about risk:
+6. The selected tier's required reviews of the final tree, chosen by two questions about risk:
    [`AGENTS.md`](../AGENTS.md#review-and-visual-verification) under "Review and visual verification".
 7. A board, git and documentation as three distinct stores, reconciled rather than assumed consistent:
    [`AGENTS.md`](../AGENTS.md#sources-of-truth) under "Sources of truth".
@@ -247,7 +267,7 @@ evidence in the same body.
 | Not done | Anything skipped, deferred or uncertain |
 | Merge Danger | The two answers the tier was chosen from, each with its reason. For a change whose parts answer the two questions differently, they are the answers of the part that set the tier, named in each reason, with one sentence on what the other parts take |
 | Evidence | A before and an after, the screenshots of a visual change among them, and the plain Passed, Failed and Untested lines. Then, collapsed, the receipts a script wrote and any record of a carried receipt |
-| Review | The review line and any declaration of how a review ran. Then, collapsed, the fresh reviewer's verdict, every finding with its disposition, and one usage line for each reviewer pass the Usage view cannot show, as the `cross-review` skill specifies; raw usage blocks stay out of the body. A third collapsed part keeps the decision card the owner answered, which the weekly retro's card check reads |
+| Review | The review line and any declaration of how a review ran. Then, collapsed, each reviewing seat's verdict, every finding with its disposition, and one usage line for each reviewer pass the Usage view cannot show, as the `cross-review` skill specifies; raw usage blocks stay out of the body. A third collapsed part keeps the decision card the owner answered, which the weekly retro's card check reads |
 
 The `pr` skill carries a template of its own. Where it differs from `.github/pull_request_template.md`, the
 repository's template wins. [The `resume` skill](../.agents/skills/resume/SKILL.md#7-push-authorisation-owner-gate-two)
@@ -256,9 +276,9 @@ owns that rule, under "7. Push authorisation".
 ### The external review add-on
 
 The external review is an optional add-on, off unless the repository's settings file holds `"greptile": true`. It adds
-a second, independent review of a `sign-off` tier change by Greptile, an outside review service. The session requests
-it on the draft pull request after the cross-family review. A repository with the add-on off carries none of the
-add-on's files, and requests and waits for no external review. Its `sign-off` tier is the cross-family review alone,
+an independent review of a `sign-off` tier change by Greptile, an outside review service. The session requests
+it on the draft pull request after the required cross-family reviews. A repository with the add-on off carries none of the
+add-on's files, and requests and waits for no external review. Its `sign-off` tier ends with the required cross-family reviews,
 and its review line holds the six base fields.
 
 The owner chooses the add-on at install, after connecting the repository to Greptile in Greptile's own dashboard. No

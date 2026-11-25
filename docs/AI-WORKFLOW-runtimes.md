@@ -71,6 +71,26 @@ Which runtime owns a file follows its path. Everything shared under `.claude/`, 
 Everything under `.codex/` belongs to Codex. `scripts/lib/runtimes.mjs` names the few scripts tied to one runtime.
 Without a `runtimes` key, a repository runs both.
 
+### Native early compaction
+
+For Codex, [project configuration](../.codex/config.toml) requests native history compaction at 200000 tokens with
+`model_auto_compact_token_limit_scope = "total"`. A stricter owner threshold may trigger it earlier.
+The [OpenAI configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) defines this trigger;
+`total` counts the full active context, including the carried compaction-window prefix.
+Compaction runs inside Codex, without a workflow hook or replacement launcher.
+
+A fresh local session in a trusted project loads its configuration.
+The app shares configuration with the command-line interface (CLI) and editor extension, as
+[OpenAI's app configuration](https://learn.chatgpt.com/docs/developer-settings#agent-configuration) explains.
+[Configuration precedence](https://learn.chatgpt.com/docs/config-file/config-basic#configuration-precedence) lets CLI overrides and nearer project configuration take priority.
+Untrusted projects skip project configuration, and owners can edit this file.
+[Shared ownership and runtime selection](../.agents/skills/shared-files/SKILL.md#repository-settings-and-requirements)
+explains the shared-file boundary; this project configuration remains owner-controlled.
+
+The threshold is a trigger, not a hard request cap or a guaranteed overshoot bound.
+Large inputs, tool results or provider failures can prevent the intended headroom.
+Configuration alone proves neither a native compaction nor retained job state or savings; those need observed session evidence.
+
 ### Vendored skills and libraries
 
 Some skills come whole from other repositories. Each upstream repository has its own folder under `.agents/upstream/`,
@@ -182,8 +202,8 @@ The Bash guard looks for the literal `fabraik-app-run` stem in a submitted comma
 wrappers, substitutions and access outside the command can evade that check. Where both connection records are gone and
 git proves them absent, the guard judges later commands as ordinary ones. The guard refuses direct removal of the
 records while the connection is bound or unavailable. It is a safeguard for direct commands, not a security boundary.
-[The run reference](../.agents/skills/resume/references/runs.md#native-codex-app-run) owns the steps, and keeps the
-terminal and Claude Code routes.
+[The run reference](../.agents/skills/resume/references/runs.md#native-codex-app-run) owns the native pre-approved steps.
+Claude Code retains its own routes.
 
 ### Native phone notifications
 
@@ -199,7 +219,7 @@ sender tool for itself. A missing sender tool does not show that the app lacks m
 [OpenAI remote connections](https://learn.chatgpt.com/docs/remote-connections) documents mobile access, and task or
 attention notifications, for supported connected hosts and accounts. The documented route pairs the mobile app through
 a supported desktop app host. That host stays awake and online, signed in to the same ChatGPT account and workspace.
-You set it up through the desktop app, not the command line. Its host requirements do not show that every other context
+Setup goes through the desktop app, not the command line. Its host requirements do not show that every other context
 or account lacks notifications. [Notification controls](https://learn.chatgpt.com/docs/notifications) vary by surface.
 Command-line notifications and outside programs do not establish a native phone route by themselves.
 
@@ -430,15 +450,19 @@ cloud session control and the release of a cloud claim.
 - `scripts/factory-sync.mjs` and `scripts/lib/factory-sync.mjs`: recording fingerprints, applying seat settings and
   checking the manifest.
 - `scripts/lib/runtimes.mjs`: which shared path belongs to which runtime, which paths the settings leave out, and the
-  check of the settings file's keys, `preApprovedRun` included.
+  check of the settings file's keys, `waitForOwner` included.
 - `scripts/merge-watch.mjs`: with `--draft`, the local session's wait for a cloud build's draft.
-- `scripts/product-manager-run.mjs` and `scripts/lib/product-manager-run.mjs`: the Codex run launcher. It starts each
-  card session and the end session in turn, and queues result references to the selected owner chat. `--pre-approved`
-  marks sessions with one run start time, and the `--claude-card` mode runs one Claude Code card session. Neither route
-  sets a factory expiry. A manual interruption still attempts bounded cleanup, and a native tool timeout leaves
-  unresolved activity to handle.
-- `scripts/lib/advance-approval.mjs`: reads the owner's advance approval on a card, and judges whether a pre-approved
-  run session may publish. The `--approval check` mode of `scripts/board.mjs` prints its lines.
+- `scripts/pre-approved-run.mjs` and `scripts/lib/pre-approved-run.mjs`: bind a managed Codex app chat, prepare
+  its phase and check admission. A terminal `--pre-approved` invocation directs the owner to the Codex app.
+- Claude Code pre-approved runs use the desktop sidebar. The Herdr coordinator starts kept jobs in separate tabs.
+  [The pre-approved run reference](../.agents/skills/resume/references/pre-approved-run.md) describes the launch
+  routes. [The Herdr coordinator reference](../.agents/skills/resume/references/herdr-lead.md#coordinator) describes
+  Herdr opens, recovery and delivery.
+- `scripts/lib/merge-evidence.mjs`: reads the `waitForOwner` level, a card's saved write-up and its `show-me-first` marker, and judges whether
+  finished work merges on its evidence or waits for the owner, and whether a pre-approved run session may publish.
+  The `--waits` mode of `scripts/board.mjs` prints its judgement.
+  [The merge-on-evidence reference](../.agents/skills/resume/references/merge-on-evidence.md) owns the level and the
+  wait reasons.
 
 ## Where to go next
 

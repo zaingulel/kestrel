@@ -1,5 +1,5 @@
 // linear-card.mjs — the card operations of a Linear board: the card and board reads resume judges a claim by,
-// the card text to-issues reads back, filing, and the claim's assignee and comment writes.
+// the card text to-tickets reads back, filing, and the claim's assignee and comment writes.
 //
 // Each operation returns its output as rows, and the command prints each row as one JSON.stringify line, so no
 // card text can break a line or pass as another row. An operation returns only once every page it reads is in,
@@ -135,7 +135,7 @@ export function parseCardArgs(args) {
       }
       if (!PICKABLE_STATUSES.includes(flags['--status'])) throw new Error(`--status must be one of ${PICKABLE_STATUSES.join(', ')}`);
       if (!Object.hasOwn(KIND_LABELS, flags['--kind'])) throw new Error(`--kind must be one of ${Object.keys(KIND_LABELS).join(', ')}`);
-      const blockedBy = '--blocked-by' in flags ? flags['--blocked-by'].split(',').map((id) => issueId(id, '--blocked-by')) : [];
+      const blockedBy = '--blocked-by' in flags ? /** @type {string} */ (flags['--blocked-by']).split(',').map((id) => issueId(id, '--blocked-by')) : [];
       if (new Set(blockedBy).size !== blockedBy.length) throw new Error('--blocked-by names an issue twice');
       return {
         name,
@@ -172,7 +172,7 @@ function readBodyFile(path) {
   try {
     return readFileSync(path, 'utf8');
   } catch (error) {
-    throw new Error(`the body file ${path} could not be read: ${error.code ?? error.message}`);
+    throw new Error(`the body file ${path} could not be read: ${/** @type {NodeJS.ErrnoException} */ (error).code ?? /** @type {NodeJS.ErrnoException} */ (error).message}`);
   }
 }
 
@@ -349,7 +349,7 @@ function create({ title: newTitle, bodyFile, status, kind, parent, blockedBy }, 
     ({ issue } = exec(ISSUE_CREATE, { input }).issueCreate);
     if (issue === null) throw new Error('Linear answered issueCreate with no issue');
   } catch (error) {
-    throw new Error(`${error.message}; re-running create is safe, because it first looks for an issue with this exact title in team ${team.key}`, { cause: error });
+    throw new Error(`${/** @type {Error} */ (error).message}; re-running create is safe, because it first looks for an issue with this exact title in team ${team.key}`, { cause: error });
   }
   const rows = [['created', issue.identifier]];
   for (const [index, blocker] of blockers.entries()) {
@@ -357,7 +357,7 @@ function create({ title: newTitle, bodyFile, status, kind, parent, blockedBy }, 
       exec(RELATION_CREATE, { issueId: blocker.id, relatedIssueId: issue.id });
     } catch (error) {
       const remaining = blockers.slice(index).map((rest) => `node scripts/linear-card.mjs block ${issue.identifier} --by ${rest.identifier}`);
-      throw new Error(`created ${issue.identifier}, then the relation making ${blocker.identifier} block it failed: ${error.message}\nnothing further was sent; run the blocks that remain:\n${remaining.join('\n')}`, { cause: error });
+      throw new Error(`created ${issue.identifier}, then the relation making ${blocker.identifier} block it failed: ${/** @type {Error} */ (error).message}\nnothing further was sent; run the blocks that remain:\n${remaining.join('\n')}`, { cause: error });
     }
     rows.push(['block', issue.identifier, blocker.identifier]);
   }

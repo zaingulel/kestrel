@@ -1,3 +1,4 @@
+// @ts-nocheck
 // board-linear.test.mjs — tests of the Linear board reader.
 // Run: node --test scripts/lib/board-linear.test.mjs
 //

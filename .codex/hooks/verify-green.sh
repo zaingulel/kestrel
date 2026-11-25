@@ -4,12 +4,12 @@
 # enforced at 100% instead of by memory. Tests stay at pre-push and CI — this hook lints only, to
 # keep the per-turn cost in seconds.
 # First, an executable scripts/gates/stop (the product gate) runs on every Stop, its output on stderr;
-# it owns its own trigger. Lint then runs only when src/ has pending changes, so conversation-only
-# and docs-only turns are untouched by it. A change outside `src/` gets no Stop-time lint; pre-push
-# and CI lint it.
+# it owns its own trigger. Applicable same-state evidence reuses lint; otherwise lint runs when src/
+# has pending changes. Conversation-only and docs-only turns are untouched by it. A change outside
+# `src/` gets no Stop-time lint; pre-push and CI lint it.
 #
 # One convention for a deliberate pass, shared with the Claude twin:
-#   exit 0, silent        — nothing to verify (recursion re-entry, no pending src/ change);
+#   exit 0, silent        — no pending check or applicable lint evidence;
 #                           an absent product gate changes nothing, and a passing one adds only its own output
 #   exit 0, stated reason — could not verify (no Git work tree, a root git cannot inspect, a
 #                           required tool absent, or lint unable to evaluate): the applicable
@@ -94,6 +94,44 @@ if [ -z "$eslint_bin" ]; then
   echo "Stop gate: the installed ESLint executable is unavailable, so the lint observation is unavailable." >&2
   exit 0
 fi
+
+reuse_root=$root
+reuse_mode=dirty
+reuse_lint=no
+# Self-contained hooks repeat this bridge; reusableLocalChecks owns receipt policy.
+if reuse_probe=$(node --input-type=module -e '
+  import { pathToFileURL } from "node:url";
+  const { reusableLocalChecks } = await import(pathToFileURL(process.argv[2]).href);
+  const value = reusableLocalChecks({ allowDirty: process.argv[3] === "dirty" });
+  if (!(value.head === null || (typeof value.head === "string" && /^[0-9a-f]{40}$/.test(value.head))) ||
+      typeof value.lint !== "boolean" || typeof value.scripts !== "boolean") process.exit(2);
+  console.log(`${value.head ?? "unknown"} ${value.lint ? "yes" : "no"} ${value.scripts ? "yes" : "no"}`);
+' -- . "$reuse_root/scripts/run-log.mjs" "$reuse_mode" </dev/null 2>/dev/null); then
+  case "$reuse_probe" in
+    *'
+'*) ;;
+    *)
+      if IFS=' ' read -r probe_head probe_lint probe_scripts probe_extra <<REUSE
+$reuse_probe
+REUSE
+      then
+        case "$probe_head" in
+          ''|*[!0-9a-f]*) ;;
+          *)
+            if [ "${#probe_head}" -eq 40 ] && [ -z "$probe_extra" ]; then
+              case "$probe_lint:$probe_scripts" in
+                yes:yes|yes:no|no:yes|no:no)
+                  reuse_lint=$probe_lint
+                  ;;
+              esac
+            fi
+            ;;
+        esac
+      fi
+      ;;
+  esac
+fi
+[ "$reuse_lint" = yes ] && exit 0
 
 out=$(npm run lint 2>&1)
 lint_status=$?

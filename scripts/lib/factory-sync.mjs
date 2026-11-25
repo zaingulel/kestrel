@@ -108,7 +108,7 @@ export function readManifest(root) {
   try {
     text = readFileSync(join(root, MANIFEST_PATH), 'utf8');
   } catch (error) {
-    throw new Error(`cannot read ${MANIFEST_PATH} (${error.code ?? error.message})`, { cause: error });
+    throw new Error(`cannot read ${MANIFEST_PATH} (${/** @type {NodeJS.ErrnoException} */ (error).code ?? /** @type {Error} */ (error).message})`, { cause: error });
   }
   return parseManifest(text, MANIFEST_PATH);
 }
@@ -132,7 +132,7 @@ export function parseManifest(text, label) {
   try {
     manifest = JSON.parse(text);
   } catch (error) {
-    throw new Error(`${label} is not valid JSON (${error.message})`);
+    throw new Error(`${label} is not valid JSON (${/** @type {Error} */ (error).message})`);
   }
   const { canonical, entries } = manifest ?? {};
   if (!REPOSITORY.test(canonical) || !Array.isArray(entries)) {
@@ -204,7 +204,7 @@ export function honoursFileModes(root) {
   const run = spawnSync('git', ['-C', root, 'config', '--type=bool', 'core.fileMode'], { encoding: 'utf8', env: gitEnvironment() });
   if (run.status === 0) return run.stdout.trim() !== 'false';
   if (run.status === 1) return true;
-  throw new Error(`cannot read core.fileMode in ${root} (${run.error?.code ?? run.stderr.trim().split('\n')[0]})`);
+  throw new Error(`cannot read core.fileMode in ${root} (${/** @type {NodeJS.ErrnoException | undefined} */ (run.error)?.code ?? run.stderr.trim().split('\n')[0]})`);
 }
 
 // null where the disk holds the executable bit; otherwise each indexed path's git mode, keyed by path, since a
@@ -234,7 +234,7 @@ export function entryState(root, entry, modes = indexModes(root)) {
   try {
     stat = lstatSync(full);
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { problem: 'missing' };
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' || /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOTDIR') return { problem: 'missing' };
     throw error;
   }
   if (!stat.isFile()) return { problem: `not a regular file (${kindOf(stat)})` };
@@ -273,7 +273,7 @@ function overriddenSeatValue(root, entry, named = {}, recorded = {}) {
   try {
     restored = substituteSeatSettings(entry.path, readFileSync(join(root, entry.path)), recorded);
   } catch (error) {
-    return error.message;
+    return /** @type {Error} */ (error).message;
   }
   const value = sha256(restored.data);
   const rendered = Object.entries(named).every(([name, namedValue]) => restored.replaced[name] === namedValue);
@@ -324,7 +324,7 @@ let localEnvVars;
 export function gitEnvironment() {
   if (!localEnvVars) {
     const list = spawnSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' });
-    if (list.status !== 0) throw new Error(`cannot list git's repository-scoped variables (${list.error?.code ?? list.stderr.trim()})`);
+    if (list.status !== 0) throw new Error(`cannot list git's repository-scoped variables (${/** @type {NodeJS.ErrnoException | undefined} */ (list.error)?.code ?? list.stderr.trim()})`);
     localEnvVars = list.stdout.split('\n').filter(Boolean);
   }
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -352,7 +352,7 @@ function clear(full) {
   try {
     stat = lstatSync(full);
   } catch (error) {
-    if (error.code === 'ENOENT') return;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return;
     throw error;
   }
   if (stat.isDirectory()) rmdirSync(full);

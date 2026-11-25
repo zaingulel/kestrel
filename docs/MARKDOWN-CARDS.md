@@ -57,6 +57,7 @@ Kind: {{KIND}}
 Workstream: {{WORKSTREAM}}           (only when the board has a routing field; then required)
 Parent: {{NUMBER}}                   (optional)
 Blocked by: {{NUMBER}}, {{NUMBER}}   (optional)
+Show me first: yes                   (optional)
 
 {{BODY}}
 
@@ -75,6 +76,7 @@ Blocked by: {{NUMBER}}, {{NUMBER}}   (optional)
 | Routing line | Yes, where the board has a routing field | The line `ROUTING_FIELD` names, holding one value of `ROUTING_OPTIONS`. The starter's line is `Workstream`, with Go-to-market, Product or Platform |
 | `Parent` | No | An existing card, never the card itself |
 | `Blocked by` | No | Existing cards, never the card itself, as distinct numbers separated by a comma and a space |
+| `Show me first` | No | Exactly `yes`; any other value is refused. The card never merges on its evidence, as [merge-on-evidence](../.agents/skills/resume/references/merge-on-evidence.md) says. It reads as the label `show-me-first` where this checkout's copy or `origin/main`'s carries the line |
 | Comments | No | A single `## Comments` heading ends the body. Each `### ` line inside it starts a comment, and its heading is free, such as the host and date |
 
 - `KIND_LABELS`, `ROUTING_FIELD` and `ROUTING_OPTIONS` come from `board-config.mjs`, so the table gives the starter's
@@ -167,9 +169,10 @@ Filing is writing the file, then checking it.
 
 1. Number the card one more than the highest `{{NUMBER}}` among the card files on the branch that holds it. The
    first card is 1.
-2. Write `.agents/cards/{{NUMBER}}.md` in [the card file](#the-card-file) form, with `Status: Backlog` or
-   `Status: Ready` and one `Kind:`. Add `Parent:` and `Blocked by:` lines for its links. Where the board has a routing
-   field, add the routing line.
+2. Write `.agents/cards/{{NUMBER}}.md` in [the card file](#the-card-file) form, with `Status: Backlog`, or
+   `Status: Ready` only where `to-tickets` step 6b allows it, and one `Kind:`. Add `Parent:` and `Blocked by:` lines for
+   its links. Where the board has a routing field, add the routing line. To hold the card for the owner's look before it
+   merges, add `Show me first: yes`.
 3. Run `node scripts/verify-issue-publish.mjs {{NUMBER}} [{{CHILD_NUMBER}}...]`. It reads the card files and prints
    that the card files, the statuses and routing values, and exactly one kind are verified. For one number it also
    prints whether the card is standalone or has children. For an epic with its children it prints that the child set
@@ -207,12 +210,14 @@ stays the same.
 
 | Step | Markdown |
 |---|---|
-| Read a card (`resume` intake and start, `to-issues`, the `architect` and `reviewer` charters) | Read `.agents/cards/{{NUMBER}}.md` in the job worktree, and the pick view and card summary from `node scripts/board.mjs --intake {{FOLDER}}`, with the card's full text in the file its summary names. `cross-review` puts the file's text into the review prompt where it puts `gh issue view` output, and copies the file where it writes the plan review's card file |
+| Read a card (`resume` intake and start, `to-tickets`, the `architect` and `reviewer` charters) | Read `.agents/cards/{{NUMBER}}.md` in the job worktree, and the board line and card summary from `node scripts/board.mjs --intake {{FOLDER}}`, with the card's full text in the file its summary names. `cross-review` puts the file's text into the review prompt where it puts `gh issue view` output, and copies the file where it writes the plan review's card file |
 | Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses a markdown install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the rows of this table |
 | Is the card free (`resume`, "3. Start the job") | After the post-selection fetch, `node scripts/board.mjs --intake {{FOLDER}}` is the one read. The card is free when it is in Backlog or Ready and its summary reads `claim: none`. A card in another column or with a claim is not free, and a failed or incomplete read is could not confirm; `resume` handles both |
 | Claim: assignee, `Claim:` comment, re-read | None of them. Create the worktree and `job/{{NUMBER}}` branch from the recorded `origin/main`, then run `node scripts/board-move.mjs {{NUMBER}} "In progress"` in the worktree. A refusal means another branch holds the card: start nothing, remove the worktree and branch this session created, and tell the owner |
 | Awaiting push (`resume`, "7. Push authorisation") | The closing edit comes first: before the fresh review, run `node scripts/board-move.mjs {{NUMBER}} Done` in the job worktree and commit the card file. Then `board-move {{NUMBER}} "Awaiting push"` checks it |
-| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | A `### Verdict: ...` entry in the card file, committed on `job/{{NUMBER}}` in its worktree, on a carried yes by the carried session once the check "Saved write-up" gives has passed, and on any other carried answer by the carried session once the carry has started. On a yes, before "8. Deliver", where it is a commit added on top under Receipt reuse. A later batch review accepts a review folder whose head differs from `HEAD` only by such commits, proved by `git diff --name-only {{FOLDER_HEAD}} HEAD` printing that card file alone and `git diff {{FOLDER_HEAD}} HEAD -- {{CARD_FILE}}` adding only `### Verdict:` entries and blank lines and removing nothing. A Markdown claim names no machine, so a batch review's condition on the newest claim reads instead that the intake document prints `claim: branch job/<N> (local)`: a waiting job is unpushed, and a branch also on `origin` may be newer than this copy. On a no, with the `### Needs owner:` entry, after `board-move {{NUMBER}}` to the card's published status takes back the closing edit, so the branch reads In progress. Read a held card from the branch copy as the Needs owner row says. The read lists unmerged refs with `git branch -a --no-merged origin/main --format='%(refname)'`, and reads each card's entries from one copy, its unmerged branch where one is listed and otherwise `origin/main`, in file order, which decides which is newer; a failed read is unavailable evidence. An approved push is a card whose file reads Done on `origin/main`. Entries name no author, so the read checks none. The share of suggested cards accepted reads `not measurable: declined suggestions leave no record in a Markdown tracker` |
+| Batch review (`resume`, "7. Push authorisation") | A later batch review accepts a review folder whose head differs from `HEAD` only by commits of card-file entries, proved by `git diff --name-only {{FOLDER_HEAD}} HEAD` printing that card file alone and `git diff {{FOLDER_HEAD}} HEAD -- {{CARD_FILE}}` adding only `### Owner answer:` and `### Fix built:` entries and blank lines and removing nothing. A Markdown claim names no machine, so a batch review's condition on the newest claim reads instead that the intake document prints `claim: branch job/<N> (local)`: a waiting job is unpushed, and a branch also on `origin` may be newer than this copy. On a no, the `### Needs owner:` entry is committed after `board-move {{NUMBER}}` to the card's published status takes back the closing edit, so the branch reads In progress. Read a held card from the branch copy as the Needs owner row says. |
+| Owner answer (`resume`, "7. Push authorisation") | A `### Owner answer: job/{{NUMBER}} at <head> <identity>: <words>` entry in the card file, committed on `job/{{NUMBER}}` in its worktree by the session in whose chat the owner answered, before it acts, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives. The queue panel writes none on this tracker. A later batch review accepts it on top of the shown head as the Batch review row gives |
+| Fix built (`resume`, "7. Push authorisation") | A `### Fix built: job/{{NUMBER}} at <new head> from <answered head>: <what changed>` entry, committed the same way by the session that built the fix, before its push |
 | The `Closes #{{ISSUE}}` line | `Card: .agents/cards/{{NUMBER}}.md`. A closing word never precedes a `#{{NUMBER}}`, because `#{{NUMBER}}` names a GitHub item. A markdown job always takes the pull request route of "8. Deliver", because the card file is outside the documentation locations the direct route admits |
 | Draft opened, In review | When the draft opens and the branch is pushed, run `board-move {{NUMBER}} "In review"`; it is a check, not a move |
 | `handoff`, step 5 | Nothing to move: the card stays a claim by its branch, and its draft reads In review |
@@ -222,11 +227,13 @@ stays the same.
 | `closeout`, Leftover rule, card state and most recent claim | The state is the `Status:` line of `origin/main`'s copy. The claim is the branch itself: `job/{{NUMBER}}` locally or on origin. Unmerged work stays live, as the rule says |
 | Release an unfinished claim | Only as [Releasing a claim](#releasing-a-claim) says |
 | `gh issue create` and `board-add` | Write the card file as [Filing a card](#filing-a-card) says; `board-add` refuses |
-| Suggested card (`resume`, "2. Work-pick") | No run files one: a card publishes only by a merged change and a run pushes nothing, so the summary names each as offered and not filed. The owner's own message files it under [Filing a card](#filing-a-card), with no prefix and with the `Product manager run:` line. Declined suggestions leave no record, so the share accepted is unavailable here |
+| Move a picked card to the top of `Ready` (`resume`, "2. Work-pick") | None: a card's column changes only through a merged change, so a picked card starts from its own column and its job branch is the claim. The intake orders `Ready` by card number, so the top of `Ready` is the lowest-numbered startable card there |
+| Suggested card (`resume`, "2. Work-pick") | No run files one: a card publishes only by a merged change and a run pushes nothing, so the summary names each as offered and not filed. The owner's own message files it under [Filing a card](#filing-a-card), with no prefix |
 | Blocked-by and sub-issue links | The `Blocked by:` and `Parent:` lines |
 | Label edits | The `Kind:` line, one value |
+| Hold a card for a look (`show-me-first`) | The line `Show me first: yes`, which `node scripts/board.mjs --waits <card>` reads from this checkout's copy or `origin/main`'s; a merged change publishes it, like any edit |
 | Comments | A `### ` entry under `## Comments` in the card file. A merged change publishes it, like any edit |
-| Return a card to Backlog or Ready outside a job | `board-move {{NUMBER}} Backlog` or `Ready` in a worktree on `cards/{{SLUG}}`, delivered as its own change |
+| Return a card to Backlog or Ready outside a job | `board-move {{NUMBER}} Backlog` or `Ready` in a worktree on `cards/{{SLUG}}`, delivered as its own change; `Ready` only on the owner's word, as the `resume` skill says under "1. Find where things stand" |
 | Needs owner (`resume`, "2. Work-pick") | A comment cannot publish without a merge, so the hold lives on local `job/{{NUMBER}}`. A job commits the `### Needs owner: ...` entry on its branch and moves nothing. An unstarted card gets a branch from the recorded `origin/main` with only that entry, and the session removes its worktree afterwards. The branch is the claim that keeps the card out of picks, and the card reads `In progress`, so expect the stalled-claim advisory for it. The intake document does not carry a branch's comment, so wherever `resume` names, counts or summarizes held cards, read each local `job/{{NUMBER}}` branch's copy with `git show job/{{NUMBER}}:.agents/cards/{{NUMBER}}.md` first. In the run's waiting check, a parked job's machine is the one its branch copy's `Job:` names, since Markdown claims name none; a missing `Job:` or another machine is a stop. A parked job's entry is on this machine's own branch, so the account and comment-number reads of `resume` do not apply: the parked-job checks read its `Job:` alone, and the session edits the entry there. The owner returns an unstarted card by deleting that branch |
 | Cloud build | None: a markdown install starts no cloud build |
 | Documentation sweep | None: init asks no sweep question on markdown and refuses `docSweep: true` |

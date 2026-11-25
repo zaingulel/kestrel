@@ -11,9 +11,9 @@ seat does what in a job, and how work passes from one seat to another. Before yo
 review, read it, so each piece of work reaches the seat built for it. The seat files hold each charter, and the
 [`resume`](../.agents/skills/resume/SKILL.md) skill says when the session dispatches each seat.
 
-The session that talks to the owner coordinates and never builds. It plans the cards that need no architect, hands
-every edit to a builder seat, settles reviews and delivers. [`AGENTS.md`](../AGENTS.md#runtime-notes) sets that out
-under "Runtime notes".
+The session that talks to the owner coordinates and never builds, except that it edits a wording-only change itself.
+It plans the cards that need no architect, hands every other edit to a builder seat, settles reviews and delivers.
+[`AGENTS.md`](../AGENTS.md#runtime-notes) sets that out, and defines a wording-only change, under "Runtime notes".
 
 ## Mental model
 
@@ -26,6 +26,7 @@ under "Runtime notes".
 | `builder` | Builds one bounded slice whose plan leaves no consequential judgment | Yes | `final on-disk state = ...` |
 | `builder-max` | The builder charter at higher capability, chosen first where uncertainty or the cost of a defect warrants it | Yes | `final on-disk state = ...` |
 | `reviewer` | Challenges the final diff and its evidence: correctness, honesty, dead code, grounding and conformance to the card | No | `review delivered in full` |
+| `reviewer-supplemental` | Independently applies the primary reviewer charter on the normal authorized dual-runtime route | No | `review delivered in full` |
 | `security-reviewer` | Reviews a change that widens a surface the `security review` row of the Surfaces table names | No | `security review delivered in full` |
 | `oracle` | Reasons through one named unresolved problem: a novel design, an independent derivation or a stalled diagnosis | No | `brief delivered in full` |
 
@@ -39,7 +40,7 @@ the agents choose a seat by the judgment a slice still holds.
 ```mermaid
 flowchart LR
     accTitle: Who hands what to whom between the seats
-    accDescr: The coordinating session hands work to the architect, plan reviewer, builder and reviewer, and calls the security reviewer, explorer and oracle only when their condition holds.
+    accDescr: The coordinating session hands work to the architect, plan reviewer, builder and primary reviewer. The normal authorized dual-runtime route also calls the supplemental reviewer. Security reviewer, explorer and oracle dispatches remain conditional.
     O[Coordinating session]
     O -->|planner handoff| A[architect]
     A -->|fixed plan, where a plan review is required| PR[plan-reviewer]
@@ -48,6 +49,8 @@ flowchart LR
     B -->|diff and focused evidence| O
     O -->|final tree| R[reviewer]
     R -->|findings| O
+    O -.->|normal authorized dual-runtime route: same frozen tree| RS[reviewer-supplemental]
+    RS -.->|independent findings| O
     O -.->|trust perimeter widened| S[security-reviewer]
     O -.->|locate only| E[explorer]
     O -.->|named escalation| X[oracle]
@@ -58,6 +61,7 @@ flowchart LR
     click PR href "/.claude/agents/plan-reviewer"
     click B href "/.claude/agents/builder"
     click R href "/.claude/agents/reviewer"
+    click RS href "/.claude/agents/reviewer-supplemental"
     click S href "/.claude/agents/security-reviewer"
     click E href "/.claude/agents/explorer"
     click X href "/.claude/agents/oracle"
@@ -69,7 +73,10 @@ coordinating session is the only seat that talks to every other seat. It sends t
 goes to the [plan reviewer](../.claude/agents/plan-reviewer.md). A [builder-lite](../.claude/agents/builder-lite.md),
 [builder](../.claude/agents/builder.md) or [builder-max](../.claude/agents/builder-max.md) receives one slice and
 returns its diff with focused evidence. The [reviewer](../.claude/agents/reviewer.md) reads the final tree and returns
-findings rather than fixes. A dotted arrow carries a dispatch only when its condition holds. A widened trust perimeter
+findings rather than fixes. On the normal authorized dual-runtime route, the
+[supplemental reviewer](../.claude/agents/reviewer-supplemental.md) independently reads the same frozen tree and returns findings.
+[The review route](../.agents/skills/cross-review/SKILL.md#1-dispatch-the-required-seats-as-configured) owns how both passes stay independent.
+A dotted arrow carries a dispatch only when its condition holds. A widened trust perimeter
 calls the [security reviewer](../.claude/agents/security-reviewer.md), a location question the
 [explorer](../.claude/agents/explorer.md), and a named escalation the [oracle](../.claude/agents/oracle.md). The three
 dotted arrows into the explorer exist on Claude Code alone.
@@ -111,6 +118,9 @@ Each seat has one charter, written once for Claude Code under `.claude/agents/` 
 `.codex/agents/`. The two bodies must match, except for how each runtime invokes a skill: `/{{NAME}}` on Claude Code,
 `${{NAME}}` on Codex. A check compares them and checks the runtime settings around each body on their own. A repository's
 own custom seat needs no counterpart on the other runtime, but the check still validates its definition.
+
+The supplemental seats point to the primary reviewer charter body for their runtime. Each keeps its own settings,
+so sharing the review lenses does not replace the primary model or change the supplemental model.
 
 ### Plan review across model families
 

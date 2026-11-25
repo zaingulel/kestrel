@@ -1,22 +1,22 @@
 // runtimes.test.mjs — which runtime each shared path belongs to, and how the settings file names the runtimes present.
-// The path table, the pinned five and the pinned six are written out by hand; the live-manifest tests read the manifest from disk.
+// The path table, the pinned seven and the pinned six are written out by hand; the live-manifest tests read the manifest from disk.
 // Run: node --test scripts/lib/runtimes.test.mjs   (or `npm run test:scripts`)
-// Price tag: sixteen temporary folders, and two reads of the manifest.
+// Price tag: sixteen temporary folders, and four reads of the manifest, and one parse of every installed shared module the Herdr add-on does not own.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installs, isGreptilePath, leftOutCause, needNotResolveCause, presentRuntimes, readRuntimes, readSettingsHeader, RUNTIMES, runtimeOf, SEATS, SETTINGS_PATH, sweepOmits, sweepOn, treeSettings } from './runtimes.mjs';
+import { EFFORT_LEVELS, installs, isGreptilePath, isHerdrPath, leftOutCause, needNotResolveCause, presentRuntimes, readRuntimes, readSettingsHeader, RUNTIMES, runtimeOf, SEATS, SETTINGS_PATH, sweepOmits, sweepOn, treeSettings } from './runtimes.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
 
 const header = (extra) => readSettingsHeader(JSON.stringify({ version: 1, ...extra }), 'settings.json');
-// Both runtimes, both add-ons on and the sweep off: a tree with these settings leaves out the sweep's files and no other.
-const SWEEP_ALONE_OFF = header({ greptile: true, herdr: true, docSweep: false });
+// Both runtimes, both add-ons and the docs site on and the sweep off: a tree with these settings leaves out the sweep's files and no other.
+const SWEEP_ALONE_OFF = header({ greptile: true, herdr: true, docSweep: false, docsSite: 'online' });
 
 // A scratch tree holding the settings file `text`, or none where it is undefined.
 function tree(t, text) {
@@ -40,6 +40,7 @@ test('the runtimes and their seat folders are fixed', () => {
 });
 
 test('a path belongs to the runtime whose folder or file it is, and to every install otherwise', () => {
+  /** @type {[string, string | null][]} */
   const table = [
     ['.claude/agents/builder.md', 'claude'],
     ['.claude/hooks/block-unsafe-git.mjs', 'claude'],
@@ -108,7 +109,7 @@ test('the settings file names the runtimes present: no file means both, and an u
     ['[]', 'file: must hold one JSON object; found []'],
     ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "extra"; ${RECOVERY}`],
   ];
   for (const [text, message] of refused) {
     assert.throws(() => presentRuntimes(tree(t, text)), { message: `.agents/factory-settings.json: ${message}` }, text);
@@ -124,7 +125,7 @@ test('planApproval: true or false is admitted, no key is valid, and any other va
     assert.throws(() => header({ planApproval: value }), { message: `settings.json: planApproval: must be true or false; found ${found}` });
   }
   for (const key of ['PlanApproval', 'plan_approval', 'planApprovals']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -137,7 +138,7 @@ test('greptile: true or false is admitted, no key is valid, and any other value 
     assert.throws(() => header({ greptile: value }), { message: `settings.json: greptile: must be true or false; found ${found}` });
   }
   for (const key of ['Greptile', 'greptile_review', 'greptiles']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -153,7 +154,7 @@ test('herdr: true or false is admitted, no key means off, and any other value or
     assert.throws(() => header({ herdr: value }), { message: `settings.json: herdr: must be true or false; found ${found}` });
   }
   for (const key of ['Herdr', 'herdr_setup', 'herdrs']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
   }
 
   assert.equal(treeSettings(tree(t, undefined)).herdr, false, 'no settings file');
@@ -171,12 +172,25 @@ test('docSweep: true or false is admitted, no key means on, and any other value 
     assert.throws(() => header({ docSweep: value }), { message: `settings.json: docSweep: must be true or false; found ${found}` });
   }
   for (const key of ['DocSweep', 'doc_sweep', 'docsweep', 'sweep']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+  }
+});
+
+test('docsSite: off, local or online is admitted, no key means off, and any other value is still refused by name', () => {
+  for (const level of ['off', 'local', 'online']) assert.equal(header({ docsSite: level }).docsSite, level);
+  assert.equal(header({}).docsSite, 'off');
+  assert.equal(readSettingsHeader(undefined, 'settings.json').docsSite, 'off', 'no settings file');
+  assert.deepEqual(header({ docsSite: 'online', runtimes: ['codex'] }).runtimes, ['codex']);
+  for (const [value, found] of [[true, 'true'], [false, 'false'], ['true', '"true"'], ['on', '"on"'], ['Local', '"Local"'], ['', '""'], [1, '1'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
+    assert.throws(() => header({ docsSite: value }), { message: `settings.json: docsSite: must be off, local or online; found ${found}` });
+  }
+  for (const key of ['DocsSite', 'docs_site', 'docssite', 'docSite']) {
+    assert.throws(() => header({ [key]: 'local' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
   }
 });
 
 test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both runtimes run, and any other value, a file naming one runtime and a near spelling are still refused by name', () => {
-  const keyList = 'version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun';
+  const keyList = 'version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator';
   assert.equal(header({}).crossFamilyReview, false);
   assert.equal(header({ crossFamilyReview: true }).crossFamilyReview, true);
   assert.equal(header({ crossFamilyReview: true, runtimes: ['claude', 'codex'] }).crossFamilyReview, true);
@@ -191,46 +205,83 @@ test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both run
   }
 });
 
-test('ANTI-REGRESSION: productManager is admitted as true or false whichever runtimes run, no key means off, and any other value or a near spelling is still refused by name', () => {
-  for (const extra of [{ productManager: true }, { productManager: false }, {}]) {
-    assert.deepEqual(header(extra).runtimes, ['claude', 'codex'], JSON.stringify(extra));
-  }
-  assert.deepEqual(header({ productManager: true, runtimes: ['claude'] }).runtimes, ['claude']);
-  assert.deepEqual(header({ productManager: true, runtimes: ['codex'] }).runtimes, ['codex']);
-  for (const [value, found] of [['true', '"true"'], [1, '1'], [0, '0'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
-    assert.throws(() => header({ productManager: value }), { message: `settings.json: productManager: must be true or false; found ${found}` });
+test('ANTI-REGRESSION: a settings file that still holds productManager is told the run is retired and to remove the line, and a near spelling is still refused by name', () => {
+  for (const value of [true, false, 'true']) {
+    assert.throws(() => header({ productManager: value }), { message: 'settings.json: productManager is retired with the product manager run: remove it; a pre-approved run builds from Ready' }, String(value));
   }
   for (const key of ['ProductManager', 'product_manager', 'productManagers', 'productmanager']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
   }
 });
 
-test('ANTI-REGRESSION: preApprovedRun is admitted as true or false whichever runtimes run, no key means off, and any other value or a near spelling is still refused by name', () => {
-  for (const extra of [{ preApprovedRun: true }, { preApprovedRun: false }, {}]) {
+test('ANTI-REGRESSION: waitForOwner is admitted as always, on-screen or when-needed whichever runtimes run, no file or no key means always, and any other value, a retired value, a near spelling or the retired preApprovedRun is refused by name', () => {
+  for (const extra of [{ waitForOwner: 'always' }, { waitForOwner: 'on-screen' }, { waitForOwner: 'when-needed' }, {}]) {
     assert.deepEqual(header(extra).runtimes, ['claude', 'codex'], JSON.stringify(extra));
   }
-  assert.deepEqual(header({ preApprovedRun: true, runtimes: ['claude'] }).runtimes, ['claude']);
-  assert.deepEqual(header({ preApprovedRun: true, runtimes: ['codex'] }).runtimes, ['codex']);
-  for (const [value, found] of [['true', '"true"'], [1, '1'], [0, '0'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
-    assert.throws(() => header({ preApprovedRun: value }), { message: `settings.json: preApprovedRun: must be true or false; found ${found}` });
+  assert.deepEqual(header({ waitForOwner: 'when-needed', runtimes: ['claude'] }).runtimes, ['claude']);
+  assert.deepEqual(header({ waitForOwner: 'when-needed', runtimes: ['codex'] }).runtimes, ['codex']);
+  assert.equal(header({ waitForOwner: 'always' }).waitForOwner, 'always');
+  assert.equal(header({ waitForOwner: 'on-screen' }).waitForOwner, 'on-screen');
+  assert.equal(header({ waitForOwner: 'when-needed' }).waitForOwner, 'when-needed');
+  assert.equal(header({}).waitForOwner, 'always');
+  assert.equal(readSettingsHeader(undefined, 'settings.json').waitForOwner, 'always');
+  for (const [value, found] of [['everything', '"everything"'], ['only-when-i-say', '"only-when-i-say"'], ['true', '"true"'], [true, 'true'], [false, 'false'], ['Always', '"Always"'], ['when needed', '"when needed"'], ['anything-with-a-screen', '"anything-with-a-screen"'], ['', '""'], [1, '1'], [null, 'null'], [[], '[]'], [{}, '{}']]) {
+    assert.throws(() => header({ waitForOwner: value }), { message: `settings.json: waitForOwner: must be always or on-screen or when-needed; found ${found}` });
   }
-  for (const key of ['PreApprovedRun', 'pre_approved_run', 'preApprovedRuns', 'preapprovedrun']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "${key}"; ${RECOVERY}` });
+  for (const key of ['WaitForOwner', 'wait_for_owner', 'waitForOwners', 'waitforowner']) {
+    assert.throws(() => header({ [key]: 'always' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+  }
+  for (const retired of [true, false, 'always']) {
+    assert.throws(() => header({ preApprovedRun: retired }), { message: 'settings.json: preApprovedRun is retired: remove it; waitForOwner sets when finished work waits for you' }, String(retired));
+    assert.throws(() => header({ preApprovedRun: retired, waitForOwner: 'when-needed' }), { message: 'settings.json: preApprovedRun is retired: remove it; waitForOwner sets when finished work waits for you' }, String(retired));
   }
 });
 
 test('the settings keys are exactly the keys the settings reader admits', async () => {
   const { SETTINGS_KEYS } = await import('./runtimes.mjs');
-  assert.deepEqual(SETTINGS_KEYS, ['version', 'runtimes', 'seats', 'planApproval', 'greptile', 'herdr', 'docSweep', 'crossFamilyReview', 'productManager', 'preApprovedRun']);
+  assert.deepEqual(SETTINGS_KEYS, ['version', 'runtimes', 'seats', 'planApproval', 'greptile', 'herdr', 'docSweep', 'docsSite', 'crossFamilyReview', 'waitForOwner', 'coordinator']);
   assert.equal(Object.isFrozen(SETTINGS_KEYS), true);
-  const valid = { version: 1, runtimes: ['claude', 'codex'], seats: {}, planApproval: true, greptile: true, herdr: true, docSweep: true, crossFamilyReview: true, productManager: true, preApprovedRun: true };
+  const valid = { version: 1, runtimes: ['claude', 'codex'], seats: {}, planApproval: true, greptile: true, herdr: true, docSweep: true, docsSite: 'local', crossFamilyReview: true, waitForOwner: 'always', coordinator: { model: 'opus', effort: 'medium' } };
   for (const key of SETTINGS_KEYS) {
     assert.doesNotThrow(() => readSettingsHeader(JSON.stringify({ version: 1, [key]: valid[key] }), 'settings.json'), key);
   }
-  assert.throws(() => header({ preApprovedRuns: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, crossFamilyReview, productManager and preApprovedRun; found "preApprovedRuns"; ${RECOVERY}` });
+  assert.throws(() => header({ waitForOwners: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "waitForOwners"; ${RECOVERY}` });
+});
+
+test('coordinator settings default to opus at medium and refuse any other shape', () => {
+  const coordinatorRule = (place, cause, found) => ({ message: `settings.json: ${place}: ${cause}; found ${found}` });
+  assert.deepEqual(EFFORT_LEVELS, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(header({}).coordinator, { runtime: 'claude', model: 'opus', effort: 'medium' });
+  assert.deepEqual(header({ coordinator: {} }).coordinator, { runtime: 'claude', model: 'opus', effort: 'medium' });
+  assert.deepEqual(header({ coordinator: { model: 'sonnet' } }).coordinator, { runtime: 'claude', model: 'sonnet', effort: 'medium' });
+  assert.deepEqual(header({ coordinator: { effort: 'xhigh' } }).coordinator, { runtime: 'claude', model: 'opus', effort: 'xhigh' });
+  assert.deepEqual(readSettingsHeader(undefined, 'settings.json').coordinator, { runtime: 'claude', model: 'opus', effort: 'medium' });
+  for (const effort of EFFORT_LEVELS) assert.equal(header({ coordinator: { effort } }).coordinator.effort, effort);
+  for (const value of [true, 'opus', ['opus'], null, 1]) {
+    assert.throws(() => header({ coordinator: value }), coordinatorRule('coordinator', 'must be an object with optional runtime, model and effort', JSON.stringify(value)));
+  }
+  assert.throws(() => header({ coordinator: { modle: 'opus' } }), coordinatorRule('coordinator', 'holds a key besides runtime, model and effort', '"modle"'));
+  for (const model of ['', '-opus', 'opus 4', 'a/b', 7, null]) {
+    assert.throws(() => header({ coordinator: { model } }), /^Error: settings\.json: coordinator\.model: must be a model name/);
+  }
+  for (const effort of ['', 'Medium', 'huge', 3, null]) {
+    assert.throws(() => header({ coordinator: { effort } }), coordinatorRule('coordinator.effort', 'must be low, medium, high, xhigh, max', JSON.stringify(effort)));
+  }
+});
+
+test('929 validates the coordinator runtime setting', () => {
+  assert.deepEqual(header({}).coordinator, { runtime: 'claude', model: 'opus', effort: 'medium' });
+  assert.deepEqual(header({ coordinator: { model: 'sonnet', effort: 'xhigh' } }).coordinator, {
+    runtime: 'claude', model: 'sonnet', effort: 'xhigh',
+  });
+  assert.deepEqual(header({ coordinator: { runtime: 'codex' } }).coordinator, {
+    runtime: 'codex', model: 'opus', effort: 'medium',
+  });
+  assert.throws(() => header({ coordinator: { runtime: 'unknown' } }), /^Error: settings\.json: coordinator\.runtime:/);
 });
 
 test('a path belongs to the Greptile add-on only under its skill folders and its configuration folder, and the add-on is on only where the settings file holds true', (t) => {
+  /** @type {[string, boolean][]} */
   const table = [
     ['.agents/skills/greptile/SKILL.md', true],
     ['.agents/skills/greptile/references/billing.md', true],
@@ -297,6 +348,40 @@ test('a path belongs to the documentation sweep only where it is one of the six 
   }
 });
 
+test('a path belongs to the docs site under its folder and its publishing workflow, a tree holds the site only where docsSite is local or online and the workflow only where it is online, and no value means off', () => {
+  const siteOff = 'the settings file does not turn the docs site on';
+  const notOnline = 'the settings file does not turn the docs site online';
+  const workflow = '.github/workflows/docs-site-deploy.yml';
+  const siteFiles = ['docs-site/build.mjs', 'docs-site/open.mjs', 'docs-site/package-lock.json', 'docs-site/src/theme/Footer/index.js'];
+  // The comparison is exact: a look-alike is not the docs site's.
+  const nearMisses = [
+    'docs-site',
+    'docs-sitex/build.mjs',
+    'Docs-site/build.mjs',
+    'docs/site/build.mjs',
+    'site/build.mjs',
+    'scripts/docs-site/build.mjs',
+    '.github/workflows/docs-site-deploy.yaml',
+    '.github/workflows/docs-deploy.yml',
+    '.github/workflows/sweep-scope.yml',
+  ];
+  // Every other setting on, so the docs site is the only cause a row can give.
+  const everythingElseOn = { runtimes: ['claude', 'codex'], greptile: true, herdr: true, docSweep: true };
+  /** @type {[string, { runtimes: readonly string[], greptile: boolean, herdr: boolean, docSweep: boolean }, string | null, string | null][]} */
+  const levels = [
+    ['no docsSite value', everythingElseOn, siteOff, siteOff],
+    ['no docsSite key', header({ greptile: true, herdr: true }), siteOff, siteOff],
+    ['off', header({ greptile: true, herdr: true, docsSite: 'off' }), siteOff, siteOff],
+    ['local', header({ greptile: true, herdr: true, docsSite: 'local' }), null, notOnline],
+    ['online', header({ greptile: true, herdr: true, docsSite: 'online' }), null, null],
+  ];
+  for (const [name, settings, site, published] of levels) {
+    for (const path of siteFiles) assert.equal(leftOutCause(settings, path), site, `${name}: ${path}`);
+    assert.equal(leftOutCause(settings, workflow), published, `${name}: ${workflow}`);
+    for (const path of nearMisses) assert.equal(leftOutCause(settings, path), null, `${name}: ${path}`);
+  }
+});
+
 test('ANTI-REGRESSION: a path a tree must hold nothing at and a path a reference need not resolve to are two answers, and neither stands in for the other', () => {
   const noCodex = 'the settings file names no codex runtime';
   const noClaude = 'the settings file names no claude runtime';
@@ -306,11 +391,8 @@ test('ANTI-REGRESSION: a path a tree must hold nothing at and a path a reference
   const herdrSkillCopy = '.claude/skills/herdr-setup/SKILL.md';
   const sweepOff = 'the settings file turns the documentation sweep off';
   const everythingOn = { greptile: true, docSweep: true };
-  const pageCause = "the direction page is the owner's own and a repository may hold none";
-  const page = 'docs/PRODUCT-DIRECTION.md';
   // [settings, path, why the tree must hold nothing there, why a reference to it need not resolve]
   const table = [
-    [{}, page, null, pageCause],
     [{ greptile: false }, '.greptile/config.json', addOnOff, null],
     [{}, '.agents/skills/greptile/SKILL.md', addOnOff, null],
     [{}, herdrSkill, herdrOff, null],
@@ -330,9 +412,6 @@ test('ANTI-REGRESSION: a path a tree must hold nothing at and a path a reference
     [{ runtimes: ['codex'] }, 'CLAUDE.md', noClaude, noClaude],
     [{}, 'AGENTS.md', null, null],
     [{ runtimes: ['codex'], docSweep: false }, 'docs/README.md', null, null],
-    [{ productManager: true }, page, null, pageCause],
-    [{ runtimes: ['codex'], docSweep: false }, page, null, pageCause],
-    [{}, 'docs/PRODUCT-DIRECTION.md.bak', null, null],
     [everythingOn, '.greptile/config.json', null, null],
     [everythingOn, 'docs/DOC-SWEEP.md', null, null],
     [everythingOn, 'scripts/sweep-scope-check.mjs', null, null],
@@ -360,13 +439,28 @@ test('the Herdr add-on owns the queue panel files', () => {
     'scripts/lib/owner-queue.mjs',
     'scripts/lib/owner-queue.test.mjs',
     'scripts/lib/herdr-queue.test.mjs',
+    'scripts/coordinator.mjs',
+    'scripts/lib/coordinator.mjs',
+    'scripts/lib/coordinator.test.mjs',
+    'scripts/lib/delivery-lane-contract.test.mjs',
+    'scripts/lib/cap-lock.mjs',
+    'scripts/local-retro.mjs',
+    'scripts/lib/local-retro.mjs',
+    'scripts/lib/local-retro.test.mjs',
   ];
   const herdrOff = 'the settings file does not turn the Herdr add-on on';
   for (const path of queue) {
     assert.equal(leftOutCause(header({ herdr: false }), path), herdrOff, `off: ${path}`);
     assert.equal(leftOutCause(header({ herdr: true }), path), null, `on: ${path}`);
   }
+  const entries = JSON.parse(readFileSync(join(ROOT, '.agents/factory-manifest.json'), 'utf8')).entries;
+  for (const path of ['scripts/lead.mjs', 'scripts/lib/lead.test.mjs']) {
+    assert.equal(leftOutCause(header({ herdr: false }), path), herdrOff, `historical omission: ${path}`);
+    assert.ok(!entries.some((entry) => entry.path === path), `retired from the current manifest: ${path}`);
+  }
   assert.equal(leftOutCause(header({ herdr: false }), 'scripts/lib/board-read.mjs'), null, 'board.mjs needs the board reader in every tree');
+  const codexDelivery = '.agents/herdr/fabraik-codex-delivery.mjs';
+  assert.ok(!entries.some((entry) => entry.path === codexDelivery), `retired from the current manifest: ${codexDelivery}`);
 });
 
 // The manifest is read from disk and the five scripts are written out here, so neither is judged through runtimeOf.
@@ -411,4 +505,31 @@ test('the shared paths of the documentation sweep are exactly the pinned six and
     assert.equal(runtimeOf(path), null, path);
     assert.equal(isGreptilePath(path), false, path);
   }
+});
+
+// The scan reads only the manifest entries this tree installs: the manifest lists every release file, so an entry the
+// settings leave out is not on disk here and is skipped. A shared file that imports a Herdr add-on file is found without
+// trusting the importer's own account, and the Herdr set is the install rule.
+test('ANTI-REGRESSION: no shared file every install receives imports a Herdr add-on file', async (t) => {
+  // The parser is a development package, which an installed copy may lack: there this check skips and the rest still runs.
+  let espree;
+  try {
+    espree = await import('espree');
+  } catch {
+    t.skip('espree is not installed, so the source structure check cannot run here');
+    return;
+  }
+  const entries = JSON.parse(readFileSync(join(ROOT, '.agents/factory-manifest.json'), 'utf8')).entries;
+  const settings = treeSettings(ROOT);
+  const violations = [];
+  for (const { path } of entries) {
+    if (!path.endsWith('.mjs') || isHerdrPath(path) || leftOutCause(settings, path) !== null) continue;
+    const tree = espree.parse(readFileSync(join(ROOT, path), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module' });
+    const sources = tree.body.filter((node) => ['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration'].includes(node.type) && node.source).map((node) => node.source.value);
+    for (const spec of sources.filter((value) => value.startsWith('./') || value.startsWith('../'))) {
+      const resolved = posix.join(posix.dirname(path), spec);
+      if (isHerdrPath(resolved)) violations.push(`${path} imports ${resolved}`);
+    }
+  }
+  assert.deepEqual(violations, []);
 });

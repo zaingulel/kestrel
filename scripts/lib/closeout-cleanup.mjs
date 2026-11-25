@@ -1,3 +1,4 @@
+// @ts-nocheck
 // closeout-cleanup.mjs — the checks and removals behind scripts/closeout-cleanup.mjs.
 //
 // Every external call goes through one injected `run`, and each answers only the argument vectors this file
@@ -18,9 +19,11 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { isGithubRepository } from './factory-sync.mjs';
+import { processesUsing, runFolderPrefix, stopProcesses } from './run-folder.mjs';
 import { LINEAR_IDENTIFIER } from './tracker.mjs';
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
@@ -216,7 +219,7 @@ function wholeRunRefusal(mainRecord, job, worktree, seams) {
   return null;
 }
 
-// Job mode: the job's containers, named scratch, worktree, Codex's empty outer folder and branch, each removed only when every check passes.
+// Job mode: the job's containers, run folders and the processes carrying them, named scratch, worktree, Codex's empty outer folder and branch, each removed only when every check passes.
 export function cleanupJob(request, seams) {
   const job = `job/${request.issue}`;
   const git = (...args) => seams.run(seams.git.command, args, { env: seams.git.env });
@@ -265,6 +268,11 @@ export function cleanupJob(request, seams) {
   }
 
   const context = { seams, git, records, worktree, docker, containers, note: report.line };
+  if (worktree?.canonical) {
+    // A retained run folder keeps the worktree, so a later closeout can still compute the folder's prefix from it.
+    const runFolderRetained = removeRunFolders(worktree.canonical, context, report);
+    if (runFolderRetained) retainWorktree(runFolderRetained);
+  }
   for (const path of request.scratch) {
     const { absent, retained, forms } = removeScratch(path, context);
     if (absent) {
@@ -993,15 +1001,16 @@ export function parseLsof(stdout) {
   return processes;
 }
 
-// The rows of `ps -ww -A -o pid= -o ppid= -o tty= -o args=`, right-aligned numbers, the terminal name left-aligned
-// (`?` on Linux and `??` on macOS when there is none) then the arguments, each { pid, ppid, tty, args }; null when
-// any row is unreadable.
+// The rows of `ps -ww -A -o pid= -o ppid= -o pgid= -o tpgid= -o tty= -o args=`, right-aligned numbers, the terminal's
+// name, then the arguments, each { pid, ppid, pgid, tpgid, tty, args }; tpgid is the foreground process group of the
+// process's terminal, -1 or 0 when it has none; tty is `?` or `??` when ps cannot name the terminal; null when any
+// row is unreadable.
 export function parsePs(stdout) {
   const rows = [];
   for (const line of stdout.split('\n').filter(Boolean)) {
-    const row = /^ *(\d+) +(\d+) +(\S+)(?: +(.*))?$/.exec(line);
+    const row = /^ *(\d+) +(\d+) +(\d+) +(-?\d+) +(\S+)(?: +(.*))?$/.exec(line);
     if (!row) return null;
-    rows.push({ pid: row[1], ppid: row[2], tty: row[3], args: row[4] ?? '' });
+    rows.push({ pid: row[1], ppid: row[2], pgid: row[3], tpgid: row[4], tty: row[5], args: row[6] ?? '' });
   }
   return rows;
 }
@@ -1296,6 +1305,44 @@ function removeWorktree({ git, worktree, records, seams }, regenerated, retainWo
   return undefined;
 }
 
+// The job's own run folders, the ones in the temporary folder whose name carries the prefix of its worktree: the
+// processes carrying each are stopped, then the folder goes through the scratch checks. A process that survives its
+// stop retains the folder; off Linux, where carriers cannot be listed, the scratch in-use check alone decides.
+// Returns the reason the worktree is retained when a run folder, or the temporary folder itself, is; else null.
+function removeRunFolders(canonicalRoot, context, report) {
+  const { tmpdir: folder = tmpdir(), procRoot, platform, kill, sleep } = context.seams;
+  const prefix = runFolderPrefix(canonicalRoot);
+  let entries;
+  try {
+    entries = readdirSync(folder).filter((entry) => entry.startsWith(prefix));
+  } catch (error) {
+    report.retained('run folders', folder, `could not be read: ${error.code ?? error.message}`);
+    return `its run folders in ${folder} could not be read`;
+  }
+  let worktreeRetained = null;
+  for (const path of entries.map((entry) => join(folder, entry))) {
+    const scan = () => processesUsing(path, { platform, procRoot });
+    const carriers = scan();
+    let retained = null;
+    if (carriers !== 'unchecked' && carriers.length) {
+      const { stopped, survivors } = stopProcesses(carriers, { kill, processesUsing: scan, sleep });
+      for (const pid of stopped) report.line(`stopped pid ${pid}`);
+      if (survivors.length) retained = `still carried after SIGKILL by pid ${survivors.join(', pid ')}`;
+    }
+    if (!retained) {
+      const scratch = removeScratch(path, context);
+      if (scratch.absent) report.absent('run folder', path);
+      else if (!scratch.retained) report.removed('run folder', path);
+      retained = scratch.retained ?? null;
+    }
+    if (retained) {
+      report.retained('run folder', path, retained);
+      worktreeRetained ??= `its run folder ${path} is retained`;
+    }
+  }
+  return worktreeRetained;
+}
+
 // One named scratch target, stopping at the first check that fails: { absent: true }, or { retained, forms } where
 // retained is the reason it was kept or null once it is removed, and forms are the target as given and canonical.
 function removeScratch(path, context) {
@@ -1330,13 +1377,13 @@ function readTarget(path) {
 
 // Whether anything uses the target, in the order a removal checks: { reason, inUse } for the first container,
 // lsof or process check that holds it (inUse when it found a use, else it could not tell), or null. A sitting shell
-// on a terminal with no child is passed over with a note.
+// leading its terminal's foreground with no child is passed over with a note.
 //
 // lsof lists only processes using the target and may escape bytes of the names it prints, so every row it returns is a
 // use whatever its names read, except a sitting shell, whose every file lsof lists is its working directory. `-x f`
-// makes +D cross into file systems mounted below the target. ps then rules a sitting shell idle: it has a terminal, is
-// no process's parent and was started as a plain interactive shell. A shell with no ps row has exited or is not yet
-// listed, so it holds and is waited out to the next run.
+// makes +D cross into file systems mounted below the target. ps then rules a sitting shell idle: it is no process's
+// parent, leads its terminal's foreground process group and was started as a plain interactive shell. A shell with no
+// ps row has exited or is not yet listed, so it holds and is waited out to the next run.
 function useChecks(path, forms, inside, directory, { seams, docker, containers, note }) {
   const container = containerRetention(forms, inside, { docker, containers });
   if (container) return container;
@@ -1350,13 +1397,12 @@ function useChecks(path, forms, inside, directory, { seams, docker, containers, 
   const parents = new Set(ps.rows.map(({ ppid }) => ppid));
   const withChild = lsof.processes.find(({ pid }) => parents.has(pid));
   if (withChild) return uses(withChild);
-  const terminals = new Map(ps.rows.map(({ pid, tty }) => [pid, tty]));
-  const withoutTerminal = lsof.processes.find(({ pid }) => ['?', '??', undefined].includes(terminals.get(pid)));
-  if (withoutTerminal) return uses(withoutTerminal);
+  const rowOf = new Map(ps.rows.map((row) => [row.pid, row]));
+  const notLeading = lsof.processes.find(({ pid }) => !leadsForeground(rowOf.get(pid)));
+  if (notLeading) return uses(notLeading);
   const naming = processRetention(forms, ps.rows, seams.pid);
   if (naming) return naming;
-  const argumentsOf = new Map(ps.rows.map(({ pid, args }) => [pid, args]));
-  const notPlain = lsof.processes.find(({ pid }) => !plainInteractiveStart(argumentsOf.get(pid)));
+  const notPlain = lsof.processes.find(({ pid }) => !plainInteractiveStart(rowOf.get(pid).args));
   if (notPlain) return uses(notPlain);
   for (const { pid, command } of lsof.processes) note(`idle shell pid ${pid} (${command}) in ${path} is not a hold`);
   return null;
@@ -1426,6 +1472,11 @@ function containerRetention(forms, inside, { docker, containers }) {
 const sittingShell = ({ command, files }) =>
   SHELLS.has(command.replace(/^-/, '')) && files.length > 0 && files.every(({ fd }) => fd === 'cwd');
 
+// Whether a ps row leads its terminal's foreground process group, as a shell at its prompt does; no row, no terminal
+// or a terminal ps cannot name never leads.
+const leadsForeground = (row) =>
+  row !== undefined && row.pgid === row.pid && row.tpgid === row.pid && row.tty !== '?' && row.tty !== '??';
+
 // Whether ps arguments are a shell started with nothing to run: the shell program, a path or a login form's leading
 // `-` aside, followed only by `-i`, `-l` or `--login`. A script or command string means the shell is working.
 const plainInteractiveStart = (args) => {
@@ -1436,7 +1487,8 @@ const plainInteractiveStart = (args) => {
 // Every process, read from a ps run that exited 0: { rows }, or { retain } with the reason when ps is absent, failed
 // or printed a row that could not be read.
 function readPs(run) {
-  const ps = run('ps', ['-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'tty=', '-o', 'args=']);
+  const columns = ['pid=', 'ppid=', 'pgid=', 'tpgid=', 'tty=', 'args='];
+  const ps = run('ps', ['-ww', '-A', ...columns.flatMap((column) => ['-o', column])]);
   if (ps.absent) return { retain: 'no process check: ps is not installed' };
   if (ps.failed) return { retain: `ps failed: ${ps.failed}` };
   if (ps.status !== 0) return { retain: `ps failed: ${describe(ps)}` };

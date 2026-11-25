@@ -15,7 +15,7 @@ test('Azure configuration refuses ambiguous mappings and secret-bearing input', 
       Bug: { Backlog: 'New', Ready: 'Ready', 'In progress': 'Active', 'Awaiting push': 'Awaiting Push', 'In review': 'In Review', Done: 'Closed' },
     },
   };
-  const fresh = () => structuredClone(configured);
+  const fresh = () => /** @type {{ organization: string, project: string, workItemTypes: Record<string, unknown>, states: Record<string, Record<string, unknown>> }} */ (structuredClone(configured));
   assert.deepEqual(validateAzureConfig(configured), configured);
   const exact = fresh();
   exact.organization = 'Example-Org';
@@ -84,7 +84,7 @@ test('Azure configuration refuses ambiguous mappings and secret-bearing input', 
   for (const type of ['Epic', 'User Story', 'Task', 'Bug']) {
     for (const invalid of [null, [], 'mapping']) {
       const value = fresh();
-      value.states[type] = invalid;
+      /** @type {Record<string, unknown>} */ (value.states)[type] = invalid;
       refuse(value, 'states');
     }
     for (const column of ['Backlog', 'Ready', 'In progress', 'Awaiting push', 'In review', 'Done']) {

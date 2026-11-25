@@ -83,7 +83,10 @@ keys, including within the maps. Every ID is a positive decimal string without l
 
 An issue in any `done` category is closed. An unmapped status has no column, and the board reports it as drift. Correct
 the mapping or native workflow before proceeding. Each filed card carries exactly one configured `KIND_LABELS` value,
-with the issue type mapped to that kind.
+with the issue type mapped to that kind. To hold a card for the owner's look before it merges, add the label
+`show-me-first` to the issue; Jira needs no setup for a label. The card never merges on its evidence, and
+`node scripts/board.mjs --waits <identifier>` reports `show-me-first` for it. A labels field the read cannot take as a
+list is a read failure, never an unmarked card.
 
 The GitHub project number, routing field and parked lane are null, and routing options are empty. Jira has no
 Workstream routing or parked lane in this adapter. Documentation sweep and cloud card builds are unavailable. Repeated
@@ -243,16 +246,18 @@ remain in their authoritative skills. This table also replaces Linear-specific a
 | Free-card and claim reads | `jira-card.mjs view {{KEY}}` and `view {{KEY}} --board`, with the completeness and identity checks of [Claims and withdrawal](#claims-and-withdrawal) |
 | Assign, claim or withdraw | The account-ID operations in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs {{KEY}} "Awaiting push"` before requesting push authorization |
-| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `jira-card.mjs comment {{KEY}} --body "{{LINE}}"`. Read with `node scripts/board.mjs --all`, then `jira-card.mjs text {{KEY}}` for each card it lists, one call per card, taking `comment` rows whose body starts `Verdict:`. Compare each row's account with the `viewer` line of `jira-card.mjs view {{KEY}}`. An approved push is a card in Done on that listing. A failed read leaves the first two measures not measurable, naming the card. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json` and the same `text` calls, applying the same title and body tests, and gives those counts as the cards it could read, with the share itself `not measurable: a card a board read leaves out is not counted`; a failed read leaves no counts, naming the card |
+| Owner answer (`resume`, "7. Push authorisation") | Post the record's one line with `jira-card.mjs comment {{KEY}} --body-file {{FILE}}`, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives, from the account the session publishes as. The queue panel writes none on this tracker, so the session in whose chat the owner answered writes it before it acts |
+| Fix built (`resume`, "7. Push authorisation") | Post the fix line the same way, once the fix is built and before its push |
 | Closing line and branch | Standalone `Closes {{KEY}}` and `job/{{KEY}}`; always the pull request route |
 | Draft opened | Leave the card at its explicit current column; opening a draft does not move it to In review |
 | Pull request marked ready | When the pull request is marked ready, explicitly run `board-move.mjs {{KEY}} "In review"`, not on draft opening |
 | Handoff | `board-move.mjs {{KEY}} Ready` under handoff's existing publication and parking steps |
-| File, edit, parent or block | Use the corresponding `jira-card.mjs` command; blocker read-back is the complete `blockedBy` row from `text` |
-| Suggested card (`resume`, "2. Work-pick") | File with `jira-card.mjs create --title 'Proposed: {{TITLE}}' --body-file {{FILE}} --status Backlog --kind {{KIND}}`. A yes is `jira-card.mjs edit {{KEY}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no is `board-move.mjs {{KEY}} Done`, keeping the title |
+| File, edit, parent or block | Use the corresponding `jira-card.mjs` command; `create` takes `--status Backlog`, or `--status Ready` only where `to-tickets` step 6b allows it; blocker read-back is the complete `blockedBy` row from `text` |
+| Move a picked card to the top of `Ready` (`resume`, "2. Work-pick") | `board-move.mjs {{KEY}} Ready`, without `--top`, which needs the GitHub Projects tracker. The intake reads no rank from Jira and orders `Ready` by issue key, so the top of `Ready` is the startable card with the lowest key there |
+| Suggested card (`resume`, "2. Work-pick") | A yes is `jira-card.mjs edit {{KEY}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no is `board-move.mjs {{KEY}} Done`, keeping the title |
 | Verify publication | `node scripts/verify-issue-publish.mjs {{KEY}} [{{CHILD_KEY}} ...]`; validates kind, mapped type/status, parent and the exact supplied set of all visible direct children. Missing, extra, duplicate or foreign child evidence refuses success |
 | Completion or review comments | `jira-card.mjs comment {{KEY}} --body-file {{FILE}}`; edit only one's own comment with its issue key and native comment ID |
-| Backlog or other explicit move | `board-move.mjs {{KEY}} "{{COLUMN}}"`, not a GitHub issue close or Linear automation check |
+| Backlog or other explicit move | `board-move.mjs {{KEY}} "{{COLUMN}}"`, not a GitHub issue close or Linear automation check; a move to `Ready` only on the owner's word, as the `resume` skill says under "1. Find where things stand" |
 | Merge closeout | Confirm the pull request merged, then explicitly move its resolved Jira card to Done and run `board.mjs --closeout` |
 | Parent closeout | Obtain complete direct-child evidence and prove every child is Done before explicitly moving the parent to Done |
 | Deferred cleanup | Jira has no counterpart for the GitHub pending-record comment. Report retained targets under closeout's existing non-GitHub rule |

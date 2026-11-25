@@ -40,9 +40,6 @@ started its builder, and its refusal names the record to remove if that dispatch
     cell/communication interval and tool limits. Inspect each result and finish on `exit_code`. Only after the cell
     yields as running, call `wait` on its cell ID, again within the remaining deadline.
 
-## Parking
+## Pre-approved runs
 
-For a Linux background Codex whole-job return after a park or settled workflow stop, follow the held-comment and
-identity checks and owner return in [held-cards.md](held-cards.md#parking-a-parked-job-comes-back).
-Then delegate through `--continue-card` as [references/pre-approved-run.md](pre-approved-run.md) directs. This
-replaces the ordinary worktree, claim and job continuation steps. The managed worker alone resumes and edits the job.
+A pre-approved start from a plain terminal refuses; use the [native Codex app route](runs.md#native-codex-app-run) at the repository root so every card has a visible chat.

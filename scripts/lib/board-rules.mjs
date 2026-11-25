@@ -73,15 +73,37 @@ export function openInTerminalDrift(card) {
   return row(card, `issue open but card in "${card.status}" — close the issue or move the card back to ${PICKABLE_PHRASE}`);
 }
 
-// 3. Work that cannot proceed should not look available or claimed. Reads GitHub's
-// NATIVE blockedBy dependencies only (normalizeItem has already dropped the closed
-// ones) — never the issue body's prose, which is not a contract. Advisory: a blocker
-// can close minutes later, so this informs the next pick rather than failing a merge.
+// 3. Work that cannot proceed should not look claimed. Reads GitHub's NATIVE blockedBy
+// dependencies only (normalizeItem has already dropped the closed ones) — never the issue
+// body's prose, which is not a contract. Ready is exempt: approved work waits there for its
+// turn and start selection never takes a Ready card with an open blocker (readyOnBoard);
+// rule 3b judges that wait. Advisory: a blocker can close minutes later, so this informs
+// the next pick rather than failing a merge.
 export function blockedClaimDrift(card) {
   if (card.state !== 'OPEN' || card.openBlockers.length === 0) return null;
-  if (card.status === BACKLOG || TERMINAL_STATUSES.includes(card.status)) return null;
+  if (PICKABLE_STATUSES.includes(card.status) || TERMINAL_STATUSES.includes(card.status)) return null;
   const blockers = card.openBlockers.map(cardRef).join(', ');
   return advisory(card, `in "${column(card.status)}" but blocked by open ${blockers} — move it to ${BACKLOG} until the blockers close`);
+}
+
+// 3b. A Ready card's wait ends only while each open blocker is itself in Ready or in flight. A blocker anywhere
+// else (Backlog, Done, no column, off this board, another repository) leaves it waiting forever unsaid. Board-level,
+// because the blocker's column is another card's fact. A blocker in another repository is never a card here, so its
+// number leaves the list before the rest match this board's cards by number; it is named with its repository, and
+// only this board's blockers are offered a move to Ready.
+function strandedReadyDrift(cards) {
+  const moving = new Set(cards.filter((card) => card.status === READY || isInFlight(card.status)).map((card) => card.number));
+  return cards.flatMap((card) => {
+    if (card.state !== 'OPEN' || card.status !== READY) return [];
+    const foreign = card.foreignBlockers ?? [];
+    const own = [...card.openBlockers];
+    for (const blocker of foreign) own.splice(own.indexOf(blocker.number), 1);
+    const movable = own.filter((number) => !moving.has(number)).map(cardRef);
+    const stranded = [...movable, ...foreign.map((blocker) => `${blocker.repository}#${blocker.number}`)];
+    if (stranded.length === 0) return [];
+    const repair = movable.length > 0 ? `move ${movable.join(', ')} to ${READY} or this card to ${BACKLOG}` : `move this card to ${BACKLOG}`;
+    return [advisory(card, `in "${READY}" waiting on open ${stranded.join(', ')}, in neither ${READY} nor an in-progress column, so it would wait forever — ${repair}`)];
+  });
 }
 
 // 4. An active card with no assignee names no one accountable: the board shows work in
@@ -252,6 +274,7 @@ function formatIdentities(numbers) {
 // EXPLANATION is, never whether the scan reports what it found (a misfiring hypothesis
 // must not cost facts).
 export function unfieldedDrift(cards) {
+  /** @type {Record<string, unknown[]>} */
   const missing = { Status: [], ...(ROUTING_FIELD ? { [ROUTING_FIELD]: [] } : {}) };
   for (const card of cards) {
     if (!card.status) missing.Status.push(card.number ?? null);
@@ -315,6 +338,8 @@ export function scanBoard(items) {
       if (found) drifted.push(found);
     }
   }
+  // Rule 3b reads a blocker's absence as fact, so it needs the whole board: an unreadable item may be that blocker.
+  if (unreadable.length === 0) drifted.push(...strandedReadyDrift(cards));
   drifted.push(...unfieldedDrift(cards));
   return { drifted, unreadable };
 }
@@ -325,15 +350,20 @@ export function scanBoard(items) {
 // are right for a drift row and wrong here, where an exempt claim is still one the owner
 // must see. A card with no number cannot be looked up, so it is counted, never dropped.
 export function intakeCards(items) {
-  const picks = sortForDisplay(pickable(items)).map(normalizeItem);
+  const ordered = sortForDisplay(pickable(items));
+  const picks = ordered.map(normalizeItem);
   const claimed = items.map(normalizeItem)
     .filter((card) => isInFlight(card.status) && card.closingPullRequests.length === 0);
   const numbered = (cards) => cards.filter((card) => card.number != null);
   const candidates = numbered(picks);
   const claims = numbered(claimed).sort((a, b) => compareCardIds(a.number, b.number));
+  const unplaced = candidates
+    .filter((card) => card.status === READY && !Number.isInteger(ordered[picks.indexOf(card)].boardPosition))
+    .map((card) => card.number);
   return {
     candidates,
     claims,
+    unplaced,
     numberless: picks.length + claimed.length - candidates.length - claims.length,
   };
 }
@@ -395,6 +425,7 @@ export function intakeOutcome({ drifted, unreadable, details }) {
   const unread = [...details.values()].filter(detailUnread);
   const drift = drifted.length > 0;
   const incomplete = unread.length > 0 || unreadable.length > 0;
+  /** @type {number} */
   let exitCode = INTAKE_EXIT.complete;
   if (drift && incomplete) exitCode = INTAKE_EXIT.driftAndIncomplete;
   else if (drift) exitCode = INTAKE_EXIT.drift;

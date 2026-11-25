@@ -32,7 +32,12 @@ two modes is two handoffs.
 owns staged dispatch. For strict work, use the existing plan, files, evidence and stop fields to declare either
 the test-only stage or the implementation stage. The former names independently grounded expectations and expected
 red; the latter carries the coordinator-validated red receipt and frozen test contract. Expected-red and stopped
-reports state their actual on-disk state; `fixed` is reserved for completed implementation. No new label is needed.
+reports state their actual on-disk state; `fixed` is reserved for completed implementation.
+
+A `strict-tdd` handoff carries exactly one `Stage:` line holding `test-only` or `implementation`. An implementation
+handoff also carries one `Frozen test: <file> :: <full title>` line per frozen test and one or more
+`Red receipt:` lines, each a failing run-log receipt copied whole from the job worktree's run log, together naming
+every frozen test; its `Working directory` is that worktree. The hooks refuse a strict handoff without them.
 -->
 ---8<---
 Slice: {{SLICE_TITLE}}

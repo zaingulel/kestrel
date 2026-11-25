@@ -10,12 +10,14 @@ adoption"; this skill owns how shared files are fingerprinted, pinned and kept, 
 runs the workflow.
 
 **How shared files are kept.** The manifest's `canonical` repository authors each shared file under `src/` and keeps an
-installed copy at its root with its fingerprint in the same commit; a test in its suite refuses a difference.
-[Canonical recording](#canonical-recording) below owns how that fingerprint is recorded. Each adopter holds a copy
-pinned at the named release it installed or last updated to, and a release update records that release in the
-adopter's manifest. A shared file edited without its manifest hash following fails the contract test. Shared files
-are real files, never symlinks, since a symlink reaches a Windows checkout as plain text: a skill lives in
-`.agents/skills/` and is copied whole to `.claude/skills/`, and each hook directory carries its own `.gitattributes` so hooks keep LF endings wherever
+installed copy at its root with its fingerprint in the same commit; a test in its suite refuses a difference. That root
+is also the copy every install reads, so in a tree whose `src/` holds the source of every shared file the contract test
+requires every manifest entry at the root, whatever its settings file leaves out. [Canonical
+recording](#canonical-recording) below owns how that fingerprint is recorded. Each adopter holds a copy pinned at the
+named release it installed or last updated to, and a release update records that release in the adopter's manifest. A
+shared file edited without its manifest hash following fails the contract test. Shared files are real files, never
+symlinks, since a symlink reaches a Windows checkout as plain text: a skill lives in `.agents/skills/` and is copied
+whole to `.claude/skills/`, and each hook directory carries its own `.gitattributes` so hooks keep LF endings wherever
 line endings are converted; the contract test fails on a symlink, a copy that differs from its source, or a missing
 rule. A git hook's run permission is its committed file mode. The skills vendored from upstream repositories, each
 repository's kept with its licence in its own folder under `.agents/upstream/`, are verbatim copies: they are never
@@ -103,7 +105,8 @@ owner connects or disconnects the repository in the service's dashboard, which n
 **How a repository turns the Herdr add-on on or off.** The same settings file may carry `herdr`, `true` or `false`;
 without it, as with `false`, the add-on is off. The add-on runs the repository's work in Herdr, a terminal app. Its own
 files are the `herdr-setup` skill, that skill's `.claude/skills/` copy, the queue panel, the queue reader with its library
-and tests, and the lead with its library and tests; `scripts/lib/runtimes.mjs` names their paths. An install and a release update write them only where the add-on
+and tests, the coordinator with its cap and process library and tests, and the weekly local retro with its library
+and tests. `scripts/lib/runtimes.mjs` names their paths. An install and a release update write them only where the add-on
 is on and keep every entry in the manifest, and
 the contract test requires each of their paths to hold nothing where it is off and refuses anything found there; a
 consumer that turns the add-on on is held to every one of its files. The add-on is chosen at install, by the `herdr`
@@ -125,16 +128,37 @@ table, so a routine's pull request in such a repository is a finding. No instruc
 there, whatever its Conventions table says: each instruction that reads that table's documentation
 routines row also reads this key. The repository still keeps that row truthful, as its own record of what is
 scheduled. The sweep is chosen at install, by the `docSweep` answer of
-`fabraik init`, off unless answered `true`, and changed later the same way as the runtimes; the update writes or removes
-the sweep's shared files to match, while the two manuals and the format pages are the repository's own files, which no
-update writes or removes.
+`fabraik init`, which an answers file for a GitHub board may leave out to turn it on, as a settings file without the
+key does, and changed later the same way as the runtimes; the update writes or removes the sweep's shared files to
+match, while the two manuals and the format pages are the repository's own files, which no update writes or removes.
+
+**How a repository turns the docs site on.** The same settings file may carry `docsSite`, `off`, `local` or
+`online`; without it, as with `off`, the docs site is off, and the settings check refuses any other value. The docs
+site renders the repository's own documents as one website. `local` installs the `docs-site/` folder: the site's
+build, its page, link and search checks, and one command, `npm --prefix docs-site run docs:open`, which installs the
+site's locked packages, builds the site inside that folder and opens it on the owner's machine. It needs no account,
+credential, sign-in or publishing workflow, reads no published release, and says so on every page, linking no hosted
+site. `online` installs the same and the publishing workflow `docs-site-deploy.yml` under the repository's workflows,
+which runs only on a push to `main` and builds with no secret. `off` installs none of them.
+`scripts/lib/runtimes.mjs` names their paths. An install and a release update write them only where the setting asks
+for them and keep every entry in the manifest, and the contract test requires each of their paths to hold nothing
+where the setting leaves it out and refuses anything found there. The setting is chosen at install, by the
+`docsSite` answer of `fabraik init`, off unless answered, and changed later the same way as the runtimes: the update
+writes or removes the files to match, removing a file only where it still matches the trusted release and refusing
+an edited one. Before turning it `online`, read [the docs site reference](references/docs-site.md).
+
+**How Herdr selects a coordinator runtime.** Set `coordinator.runtime` to `claude` or `codex` in the project's
+settings on `main`. Install and update validate this setting. If omitted, it defaults to `claude` even on a
+Codex-only install. The opener refuses a runtime absent from the installed list. A Codex-only project can set
+`codex` as the default or choose it for one open. The one-off choice leaves the saved setting intact. The
+[Herdr coordinator reference](../resume/references/herdr-lead.md#coordinator) gives the launch commands and controls.
 
 **What else the settings file may hold.** A consumer's settings file may hold `planApproval`, `true` or `false`,
 which the settings check then admits: no script acts on the value, so it changes no byte an update writes, no seat
-and no runtime a repository runs. It may hold `productManager` on the same terms. It may hold `preApprovedRun`,
-`true` or `false`, without changing update bytes, seats or runtimes; the launcher, board approval check and
-publication guard enforce its explicit fetched-main opt-in. Only true lets a record replace an ordinary pick or push
-yes, as [resume](../resume/SKILL.md#2-work-pick-owner-gate-one) says. A consumer's settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
+and no runtime a repository runs. It may not hold `productManager`: the product manager run is retired, and the settings check refuses the key by name and says to remove it. It may hold `waitForOwner`,
+`when-needed`, `on-screen` or `always`, without changing update bytes, seats or runtimes; the launcher, the `--waits`
+judgement and the publication guard read it on fetched `main`, as
+[resume](../resume/references/merge-on-evidence.md) says. A consumer's settings file may hold `"crossFamilyReview": true` where both runtimes run, which the settings check then admits, any
 other value and a file naming one runtime still refused: no update, check or hook acts on the value, so it changes no
 byte an update writes, no seat and no runtime; `fabraik init` writes it only on a yes to its cross-family disclosure,
 and a session reads it on `main` as the owner's standing authorization for the reviews the tiers call cross-family.
@@ -233,3 +257,15 @@ permission configuration before expanded use. Updating a job alone leaves its op
 incomplete update, stale root or unavailable activation keeps expanded use unavailable: report the cause and use
 the update's existing recovery, preserving intentional edits and restoring the trusted baseline before retrying an
 incomplete update. An intentional adopter exception needs owner agreement and lives outside the shared files.
+
+A coordinated Claude Code Herdr job is pinned to the workflow version recorded when it started: its hook definitions
+run that version's copy, as `$FABRAIK_WORKFLOW_ROOT/.claude/hooks/<x>`, and its publication and merge-watch commands
+run only from that copy, as [Deliver](../resume/references/deliver.md#delivery) spells them. The pin covers the
+`hooks` of `.claude/settings.json`, `scripts/lib/workflow-pin.mjs` and the delivery-lane contract, the blob of
+its test file. An update whose changed paths name any of them defers and reports
+while a Herdr job record of the repository, a `ready.json` reservation or a watcher record, live or retained,
+exists; a lane change also defers on a retained receipt and goes to the owner. Codex jobs are not pinned.
+
+Two limits stay accepted. A pinned job checks itself, so a frozen copy replaced by accident, the owner-menu writer
+included, is caught only at the next start or resume, where it is repaired. A bypassed drain can briefly split the
+delivery lock until local `main` is moved back.

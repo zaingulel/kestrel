@@ -1,3 +1,4 @@
+// @ts-nocheck
 // linear-api.test.mjs — tests of the Linear transport.
 // Run: node --test scripts/lib/linear-api.test.mjs
 //

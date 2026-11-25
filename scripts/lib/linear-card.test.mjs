@@ -50,6 +50,7 @@ const TEAM = {
   },
 };
 
+/** @type {(nodes: unknown[], endCursor?: string | null) => { nodes: unknown[], pageInfo: { hasNextPage: boolean, endCursor: string | null } }} */
 const page = (nodes, endCursor = null) => ({ nodes, pageInfo: { hasNextPage: endCursor !== null, endCursor } });
 
 // Answers each request from the first route whose marker the query holds, and records it. A request no route
@@ -183,12 +184,12 @@ test('comment and edit-comment post and replace a comment body from --body or --
   const answer = { id: uuid(5), url: 'https://linear.app/acme/issue/ENG-12#comment-5' };
   // The viewer's own comment on ENG-12, which edit-comment reads before it writes.
   const own = ['comment(', () => ({ viewer: { id: 'user-me' }, comment: { user: { id: 'user-me' }, issue: { identifier: 'ENG-12', team: { key: 'ENG' } } } })];
-  const cases = [
+  const cases = /** @type {[string[], string, Record<string, string>[]][]} */ ([
     [['comment', 'ENG-12', '--body', 'Claim: inline'], 'commentCreate', [{ id: 'ENG-12' }, { issueId: 'id-ENG-12', body: 'Claim: inline' }]],
     [['comment', 'ENG-12', '--body-file', file], 'commentCreate', [{ id: 'ENG-12' }, { issueId: 'id-ENG-12', body: 'Claim: from a file\nwith two lines\n' }]],
     [['edit-comment', uuid(5), '--body', 'Withdrawn: inline'], 'commentUpdate', [{ id: uuid(5) }, { id: uuid(5), body: 'Withdrawn: inline' }]],
     [['edit-comment', uuid(5), '--body-file', file], 'commentUpdate', [{ id: uuid(5) }, { id: uuid(5), body: 'Claim: from a file\nwith two lines\n' }]],
-  ];
+  ]);
   for (const [args, mutation, variables] of cases) {
     const { exec, calls } = fakeLinear([[mutation, () => ({ [mutation]: { comment: answer } })], own, inTeam]);
 
@@ -368,6 +369,7 @@ const TEAM_ISSUES = Object.fromEntries([
 const relationCreated = () => ({ issueRelationCreate: { issueRelation: { id: 'relation' } } });
 
 // Routes are tried in order, so each marker a later route's query could also hold comes first.
+/** @type {(options?: { assignee?: { id: string, displayName: string } | null, comments?: Record<string, unknown>, sameTitle?: unknown[], onRelation?: typeof relationCreated }) => ReturnType<typeof fakeLinear>} */
 function cardWorld({ assignee = null, comments = {}, sameTitle = [], onRelation = relationCreated } = {}) {
   return fakeLinear([
     ['issueCreate', () => ({ issueCreate: { issue: { id: 'id-ENG-20', identifier: 'ENG-20' } } })],
@@ -394,14 +396,14 @@ const mutationsOf = (calls) => calls.filter(({ query }) => query.startsWith('mut
 test('every card command refuses an issue of another team or one Linear answers under a different identifier, before any write', () => {
   writeFileSync(bodyFile, 'Body.\n');
   const create = (...extra) => ['create', '--title', 'New card', '--body-file', bodyFile, '--status', 'Ready', '--kind', 'task', ...extra];
-  const targets = [
+  const targets = /** @type {[string, RegExp][]} */ ([
     ['OPS-3', /OPS-3 belongs to team OPS, not the configured team ENG/],
     ['WEB-7', /Linear answered the identifier ENG-30 for WEB-7/],
-  ];
+  ]);
   const results = [];
   const expected = [];
   for (const [target, refusal] of targets) {
-    const cases = [
+    const cases = /** @type {[string[], Parameters<typeof cardWorld>[0]?][]} */ ([
       [['view', target]],
       [['view', target, '--board']],
       [['text', target]],
@@ -415,7 +417,7 @@ test('every card command refuses an issue of another team or one Linear answers 
       [['block', 'ENG-12', '--by', target]],
       [create('--parent', target)],
       [create('--parent', 'ENG-1', '--blocked-by', `ENG-3,${target}`)],
-    ];
+    ]);
     for (const [args, world] of cases) {
       const { exec, calls } = cardWorld(world);
       const sent = run(args, exec);

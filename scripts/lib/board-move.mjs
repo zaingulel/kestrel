@@ -16,6 +16,9 @@
 // query that reads off the issue side instead of paging the whole board. `moveCards`
 // batches N pairs behind one status-field resolve, dropping a move to ~3 points.
 
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY, PARKED_LANE, ROUTING_FIELD,
 } from './board-config.mjs';
@@ -35,7 +38,7 @@ export function singleSelectFieldQuery(fieldName) {
 
 // Read the issue side once, with the current field value, or the board read's card fields so an
 // archived item parses like a listed card, only when requested.
-export function issueItemQuery(issueNumber, { fieldName = null, card = false } = {}) {
+export function issueItemQuery(issueNumber, { fieldName = /** @type {string | null} */ (null), card = false } = {}) {
   const value = fieldName == null ? ''
     : `value: fieldValueByName(name: "${fieldName}") { ... on ProjectV2ItemFieldSingleSelectValue { name } } `;
   const cardFields = card ? `${BOARD_CARD_FIELDS} ` : '';
@@ -75,11 +78,32 @@ export function optionIdFor(options, statusName, fieldName = 'Status') {
   return opt.id;
 }
 
+// Whether a Status name is Ready, normalised as optionIdFor does.
+export function isReady(statusName) {
+  return String(statusName).trim().toLowerCase() === 'ready';
+}
+
+// Wakes the project's coordinator after a move to Ready. `command` is a path, not an import, so a toolkit
+// copied without coordinator.mjs wakes nothing. Returns undefined when woken, when there is no coordinator
+// to wake (exit 4) or when the command is absent, else the cause the caller prints; it never throws.
+/**
+ * @param {string} [command]
+ * @param {(file: string, args: string[], options: { encoding: 'utf8' }) => { error?: Error, status: number | null, signal: string | null, stdout: string | null }} [run]
+ * @returns {string | undefined}
+ */
+export function wakeCoordinator(command = fileURLToPath(new URL('../coordinator.mjs', import.meta.url)), run = spawnSync) {
+  if (!existsSync(command)) return undefined;
+  const result = run(process.execPath, [command, 'wake'], { encoding: 'utf8' });
+  if (result.error) return result.error.message;
+  if (result.status === 0 || result.status === 4) return undefined;
+  return String(result.stdout ?? '').trim() || `coordinator.mjs wake ended with ${result.status ?? result.signal}`;
+}
+
 // The board item is the one on the configured owner's project of the configured number, since
 // another owner's project can share that number. A complete nonmatching connection means absence;
 // an unreadable one, a count that disagrees with its items, or two items on the board refuses.
 // Archived items stay visible here because the board read lists unarchived cards only.
-export function lookupIssueBoardItem(number, exec, { fieldName = null, card = false } = {}) {
+export function lookupIssueBoardItem(number, exec, { fieldName = /** @type {string | null} */ (null), card = false } = {}) {
   const graphqlResponse = exec(['api', 'graphql', '-f', `query=${issueItemQuery(number, { fieldName, card })}`]);
   let payload;
   try {
@@ -224,12 +248,57 @@ export function moveCards(pairs, exec, fieldName = 'Status') {
     } catch (err) {
       const done = completed.map((c) => `#${c.issueNumber} → ${c.statusName}`).join(', ') || 'none';
       throw new Error(
-        `failed to move #${issueNumber} → "${statusName}" (already completed: ${done}) — ${err.message}`,
+        `failed to move #${issueNumber} → "${statusName}" (already completed: ${done}) — ${/** @type {Error} */ (err).message}`,
         { cause: err },
       );
     }
   }
   return completed;
+}
+
+// The project item id of a card on the board. A card that is not there is refused before any write.
+function boardItemIdFor(number, exec) {
+  const { item } = lookupIssueBoardItem(number, exec);
+  if (!item) throw new Error(`issue #${number} is not on the board`);
+  return item.id;
+}
+
+// Put the card in the project's order: after afterNumber's card, or first when afterNumber is null.
+// updateProjectV2ItemPosition without afterId moves the item to the top; the ids travel as variables,
+// never spliced into the query text. afterNumber is validated because it is interpolated into the
+// board item probe's query text, as issueNumber is.
+export function placeCardAfter(issueNumber, afterNumber, exec) {
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    throw new Error(`invalid issue number: ${issueNumber}`);
+  }
+  if (afterNumber !== null && (!Number.isInteger(afterNumber) || afterNumber <= 0)) {
+    throw new Error(`invalid issue number: ${afterNumber}`);
+  }
+  const { projectId } = parseSingleSelectField(
+    exec(['api', 'graphql', '-f', `query=${singleSelectFieldQuery('Status')}`]),
+  );
+  const itemId = boardItemIdFor(issueNumber, exec);
+  const afterItemId = afterNumber === null ? null : boardItemIdFor(afterNumber, exec);
+  const mutation = afterItemId === null
+    ? 'mutation($project: ID!, $item: ID!) { updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item}) { clientMutationId } }'
+    : 'mutation($project: ID!, $item: ID!, $after: ID!) { updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item, afterId: $after}) { clientMutationId } }';
+  const reply = exec([
+    'api', 'graphql',
+    '-f', `query=${mutation}`,
+    '-f', `project=${projectId}`,
+    '-f', `item=${itemId}`,
+    ...(afterItemId === null ? [] : ['-f', `after=${afterItemId}`]),
+  ]);
+  let payload;
+  try {
+    payload = typeof reply === 'string' ? JSON.parse(reply) : reply;
+  } catch {
+    throw new Error('position write GraphQL response is not valid JSON');
+  }
+  const written = payload?.data?.updateProjectV2ItemPosition;
+  if (written == null || typeof written !== 'object' || Array.isArray(written)) {
+    throw new Error('position write GraphQL response has no updateProjectV2ItemPosition object');
+  }
 }
 
 // Park each `{ issueNumber, statusName }` pair's card in the parked lane's field, or
@@ -239,5 +308,5 @@ export function moveLanes(pairs, exec) {
   if (!PARKED_LANE) {
     throw new Error('--lane needs a parked lane, but scripts/lib/board-config.mjs sets PARKED_LANE = null');
   }
-  return moveCards(pairs, exec, PARKED_LANE.field);
+  return moveCards(pairs, exec, /** @type {{ field: string }} */ (PARKED_LANE).field);
 }

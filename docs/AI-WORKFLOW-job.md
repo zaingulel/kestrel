@@ -25,10 +25,10 @@ and [The seats](AI-WORKFLOW-seats.md) shows which agent it hands each piece of w
 |---|---|---|---|
 | Start | The owner picks the card; the session confirms it is free and claims it | A worktree on its own branch, a claim comment and the card in In progress | The git guard refuses branching and committing in the root checkout |
 | Plan | The architect or the session, with a plan review where the card needs one | A plan naming each slice's files and claim | The handoff hook refuses an incomplete architect handoff on Claude Code |
-| Build | A builder seat, one slice at a time | A commit for every green slice and a receipt for every check | The handoff hook refuses an incomplete builder handoff, and the green check refuses a turn that ends on a lint error |
-| Review | The reviewer at the tier the change needs, and the security reviewer when the trust perimeter widens | Settled findings and a review line | Nothing: review rests on instruction |
-| Push authorisation | The owner | One yes to the decision card and its screenshot | Nothing: the yes rests on instruction |
-| Delivery | The session, then the platform | A draft pull request, checks on the merge result and a squash merge; or a push straight to `main` | The git guard refuses a pull request that is not a draft, an unsafe force push and every merge form but auto-merge |
+| Build | A builder seat, one slice at a time, or the session for a wording-only change | A commit for every green slice and a receipt for every check | The handoff hook refuses an incomplete builder handoff, and the green check refuses a turn that ends on a lint error |
+| Review | The reviewers required by the selected tier, and the security reviewer when the trust perimeter widens | Settled findings and a review line | Nothing: review rests on instruction |
+| Push authorisation | The session's judgement of the saved write-up, then the owner where a wait reason holds | Work that merges on its evidence, or the card in Awaiting push with its wait reasons and one yes to the decision card and its screenshot | In a run session the git guard refuses a ready or merge the judgement holds; elsewhere the judgement and the yes rest on instruction |
+| Delivery | The session, then the platform | A draft pull request, checks on the merge result and a squash merge; or a push straight to `main` | The git guard refuses a pull request that is not a draft, an unsafe force push and every merge form but auto-merge and, for a Herdr job, the pinned squash merge |
 | Closeout | The session | The issue closed, the card in Done and the job's worktree and branch removed where checks pass | The cleanup command keeps every target its checks or git hold back |
 
 Responsibility moves between the owner, the job, git and GitHub as the job runs.
@@ -60,25 +60,25 @@ unavailable result. Neither arrow style means a machine enforces the step.
 flowchart TD
     accTitle: One card from the owner pick to closeout
     accDescr: A card moves from the owner's pick through a worktree, plan, build, review and push authorisation to a merged change or a direct push, and then closeout.
-    C[Card in Ready] --> WP[Work-pick: the owner picks the card]
+    C[Startable card] --> WP[Work-pick: the owner picks the card or queues it in Ready]
     WP --> WT[Worktree on its own branch, card to In progress]
     WT --> PL[Plan, with a plan review where the card needs one]
     PL --> BD[Build in bounded slices, every check logged]
     PL -.->|plan approval on| AP[The owner approves the completed plan]
     AP -.-> BD
-    BD --> VR[Verify, then one fresh review of the final tree]
-    VR --> PA[Push authorisation: card to Awaiting push, the owner answers the decision card]
+    BD --> VR[Verify, then the tier's required reviews of the final tree]
+    VR --> PA[Push authorisation: merges on its evidence, or waits in Awaiting push for the owner's yes]
     PA -->|pull request route| DR[Draft pull request, card to In review]
     PA -->|direct route: the gate admits the whole change| FF[Push straight to main]
     DR --> RD[Marked ready: checks run on the merge result]
     DR -.->|sign-off tier, add-on on| ER[External review settled]
     ER -.-> RD
-    RD -->|required checks green| MG[Platform auto-merge, squashed, branch deleted]
+    RD -->|required checks green| MG[Squash merge, branch deleted]
     MG --> CO[Closeout: issue closed, card to Done, cleanup checked]
     FF --> CO
 ```
 
-The preceding diagram follows one card from the owner's pick to closeout. Solid arrows show the usual path. The dotted
+The preceding diagram follows one card from the owner's pick to closeout. After bounded building, the job verifies the result and completes its tier's required reviews. Solid arrows show the usual path. The dotted
 pair after planning applies only where the repository turns plan approval on. The dotted pair after the draft applies
 only to a `sign-off` change where the external review add-on is on. The direct route skips the pull request and joins
 the usual path at closeout.
@@ -89,9 +89,12 @@ Intake reads the board, the open pull requests and the local state together, the
 separates a failed board read, drift between the stores and a card whose details it could not read. Intake never
 offers such a card as startable, and a failed read stops selection rather than reading as an empty board.
 
-The owner's pick approves the card's outcome and acceptance criteria as written. Fresh checks still confirm that the
-card is free before anything starts. Each card then gets its own git worktree on its own branch, and the root checkout
-stays on `main`. Two cards in two terminals never share a working file.
+The owner picks by putting cards in Ready, and a session takes the top startable card there unasked. On GitHub Projects
+that is the top of the column; on other trackers it is the lowest card number. Where Ready holds none, or the owner
+asks, the session shows a table of every candidate. The session claims a startable GitHub card picked from it, or named by the owner, directly against the intake. Other trackers follow their own pick procedure. The owner's pick approves the
+card's outcome and acceptance criteria as written. Fresh checks still confirm that the card is free before
+anything starts. Each card then gets its own git worktree on its own branch, and the root checkout stays on `main`. Two
+cards in two terminals never share a working file.
 
 A job branch stays local until the push, so another machine cannot see it. The session therefore posts a claim comment
 on the issue, which every machine can read. On the GitHub Projects tracker one command, `node scripts/board-claim.mjs`,
@@ -118,8 +121,8 @@ No guard holds this gate.
 
 ### Building
 
-Builder seats build one slice at a time from a filled handoff, and the session never edits. Two slices with disjoint
-files may run at once. The second runs in its own worktree cut from the job branch and merged back into it. A runtime's
+Builder seats build one slice at a time from a filled handoff. The session edits only a wording-only change, which
+[`AGENTS.md`](../AGENTS.md#runtime-notes) defines under "Runtime notes". Two slices with disjoint files may run at once. The second runs in its own worktree cut from the job branch and merged back into it. A runtime's
 own subagent worktree branches from `main` rather than the job branch, so no builder runs in one.
 
 Every check runs through a logger, `scripts/run-log.mjs`, which writes its real exit code to the job's worklog. The pull
@@ -137,12 +140,12 @@ such an artifact by hand, and the hooks keep it from landing stale.
 Before review, the session drives visual work and shows a current screenshot in chat. Any further check the Surfaces
 table names for a touched surface runs here too.
 
-Then one fresh review reads the final tree. Its depth follows two questions: can the change be undone, and how far
-does the damage reach if it is wrong. The answers choose the `document`, `code` or `sign-off` tier that
+Then the selected tier's required reviews read the final tree. Two questions choose the tier: can the change be undone,
+and how far does the damage reach if it is wrong? The answers choose the `document`, `code` or `sign-off` tier that
 [the review line](AI-WORKFLOW.md#the-review-line) records. A builder repairs a true finding, the session verifies it
 again, and a pass scoped to the repair reviews it. The session dismisses a false finding with a reason.
 [The `resume` skill](../.agents/skills/resume/SKILL.md#6-verify-and-review) owns the tiers, the reviewer routes and the
-repair rounds, under "6. Verify and review".
+repair rounds, under "6. Verify and review". [The cross-review route](../.agents/skills/cross-review/SKILL.md) explains the independent paired passes.
 
 ### An example journey
 
@@ -159,17 +162,27 @@ three behaviours again. The decision card then cites the checks that ran, not th
 
 ### Push authorisation and delivery
 
-At push authorisation the card moves to Awaiting push, and the owner reads a decision card taken from the pull request
-body. The owner's yes covers the whole delivery sequence, repairs and rebases within its scope included.
-[`AGENTS.md`](../AGENTS.md#owner-gates) owns what that yes approves, under "Owner gates".
+At push authorisation the session judges the saved write-up and the card's marker. A direct local GitHub pick also
+needs the owner's explicit pick and the still-held successful claim as [the eligibility procedure](../.agents/skills/resume/references/merge-on-evidence.md) says.
+Where no wait reason holds and the
+settings set `waitForOwner` to `on-screen` or `when-needed`, the work merges on its evidence. The owner then sees the decision card and its screenshots after the merge. Otherwise the card moves to Awaiting push with the reasons that held it. The owner then reads a decision card taken from the pull request body. A job a Herdr coordinator started, on either runtime, ignores `waitForOwner` and most wait reasons. Only a failed or missing required check, a missing screenshot and the `show-me-first` marker hold it. So an unmarked card merges with no question, repairs included. The owner's yes covers the whole delivery sequence, repairs and
+rebases within its scope included. [`AGENTS.md`](../AGENTS.md#owner-gates) owns what that yes approves, under "Owner
+gates", and [the merge-on-evidence reference](../.agents/skills/resume/references/merge-on-evidence.md) owns the wait
+reasons.
+
+The owner's answer to a waiting card reaches the session that acts only as a record. On most routes the record is a card comment. An `Owner answer:` comment names the version the owner saw, and a `Fix built:` comment names a fix built from it. The session in whose chat the owner answered, or the queue panel, writes the answer. The session that built a fix writes the fix line. A job a Herdr coordinator started reads no record as approval. The owner removes the `show-me-first` marker, himself or by telling the coordinator. The answer `I removed the marker` in its question menu only wakes the job. A fix
+merges without a second look only where it adds no new reason to wait and the card is not marked `show-me-first`.
+[The owner answer reference](../.agents/skills/resume/references/owner-answer.md) owns the records and who acts on
+each.
 
 On the pull request route, the session rebases onto `main`, pushes the branch and opens a draft. A `sign-off` change
 settles the external review on the draft where that add-on is on. Marking the draft ready starts continuous integration
-on the merge result. The session always queues the merge as the platform's squashed auto-merge, which completes only
-once the required checks pass.
+on the merge result. The session queues the merge as the platform's squashed auto-merge, which completes only once the required checks
+pass. A Herdr job instead waits for the required checks on its head, then merges exactly that head with a pinned squash merge. That head is the one the write-up's `Reviewed commit:` line names.
 
-A queued merge is not a merge. After queuing it the session waits on one command, `scripts/merge-watch.mjs`, which only
-reads GitHub. It exits 0 only when the pull request has merged, and otherwise ends with its reason. A failed read is
+A queued merge is not a merge. After queuing it, the session waits on one command, `scripts/merge-watch.mjs`. The command
+waits on GitHub events through a short-lived forwarding webhook on the repository and one local stall deadline, with no
+timed reads. It exits 0 only when the pull request has merged, and otherwise ends with its reason. A failed read is
 neither a merge nor a failure of the code.
 
 The direct route sends a qualifying change straight to `main`, with no pull request or hosted checks. Only
@@ -199,7 +212,7 @@ review record. On the direct route it is the fetched history and the pushed tree
 
 The same session then confirms the issue closed, moves the card to Done and advances local `main` only by a provably
 safe fast-forward. It leaves a dirty, active or uncertain checkout untouched. One command,
-`scripts/closeout-cleanup.mjs`, removes the job's containers, named scratch, worktree and branch where its checks pass.
+`scripts/closeout-cleanup.mjs`, stops processes still running from the job's run folders and removes the job's containers, run folders, named scratch, worktree and branch where its checks pass.
 It keeps every other target and reports why.
 
 The session judges what is its own scratch, and stops a server only once it shows the server is its own. It reports a
@@ -223,38 +236,73 @@ through git and the handoff, and checks which receipts still hold on the current
 
 ### Runs without a pick
 
-Two optional modes let a run take cards without a pick for each one. Each is off unless the settings file on the
-fetched `main` turns it on. No guard holds either mode, except the git guard inside a run's own sessions.
+A pre-approved run takes cards without a pick for each one. It is on only where the settings file on the fetched
+`main` sets `waitForOwner` to `on-screen` or `when-needed`. No guard holds the mode, except the git guard inside a run's own sessions. The run takes only cards in Ready, from the top of the column down. On GitHub Projects the top is the owner's board order. On other trackers, or where GitHub's listing leaves a Ready card out, the run goes by lowest card number and says so. A run starts nothing from Backlog, even when Ready holds no card it may build. A reorder while a card builds changes only which card comes next.
 
-- **Product manager run.** The owner hands each work-pick to a run, which starts a fresh session for each card and
-  builds it to Awaiting push. This matters to the owner because push authorisation stays the owner's yes for every
-  job, so a run never ships work alone. A card that needs the owner goes back to Backlog, and a card the run suggests
-  waits for the owner's answer.
-- **Pre-approved run.** The owner approves cards ahead of the work, one record on each card, and the run merges each
-  with no yes at push. This matters because the record is the only approval, so editing the card or its record
-  withdraws it. A job that touches an owner-directed or sign-off surface, or shows a failure or an unfixed finding,
-  still stops for the owner.
+The run builds the cards in Ready and merges each on its evidence, with no yes at push.
+This matters because a card's place in Ready approves automatic pickup. The owner holds a card back from pickup by leaving it out of Ready. After an explicit direct start, the owner holds delivery by marking the card `show-me-first`. Setting `waitForOwner` to `always` holds every card, and at `on-screen`, work on screen waits too. A job a wait reason holds waits in Awaiting push for the owner's yes. Wait reasons include a failure, an untested check, work beyond the card, a sign-off review and a change that is hard to undo. A Herdr job waits only on a failed or missing required check, a missing screenshot or the `show-me-first` marker. A run session merges it only
+once the card records the owner's answer for that version. Work on screen merges with its screenshots attached to its
+pull request.
+[The merge-on-evidence reference](../.agents/skills/resume/references/merge-on-evidence.md) owns the level and the
+wait reasons.
 
-[The run reference](../.agents/skills/resume/references/runs.md) owns both runs: the
-[product manager run](../.agents/skills/resume/references/product-manager-run.md), the
-[pre-approved run](../.agents/skills/resume/references/pre-approved-run.md), the
-[stage 2 measures](../.agents/skills/resume/references/runs.md#stage-2-evidence) and the
+[The run reference](../.agents/skills/resume/references/runs.md) owns the run: the
+[pre-approved run](../.agents/skills/resume/references/pre-approved-run.md) and the
 [native Codex app route](../.agents/skills/resume/references/runs.md#native-codex-app-run).
 [Two runtimes, one contract](AI-WORKFLOW-runtimes.md) explains what changes in native run chats, for phone
 notifications and in a cloud build.
+
+A session the pre-approved run starts with a fixed phase prompt reads two shared files: the
+[card session steps](../.agents/skills/resume/references/card-session.md) and the
+[phase rules](../.agents/skills/resume/references/pre-approved-phase.md). The table in the phase rules names any further
+file for that prompt. A card session a run opens in the Claude desktop app's sidebar reads the
+[sidebar rules](../.agents/skills/resume/references/pre-approved-sidebar.md) too. The run's coordinator reads every run
+reference.
+
+### Runs a Herdr coordinator starts
+
+Herdr is a terminal app, and the Herdr add-on runs a repository's work in it. The add-on is off unless the settings
+file holds `"herdr": true`. Where it is on, the Herdr coordinator takes startable Ready cards in board order with no
+pick. The owner opens the coordinator from the repository root or from the queue panel, as
+[the Herdr coordinator reference](../.agents/skills/resume/references/herdr-lead.md#coordinator) says. It runs in the
+`Coordinator` tab, and each job it starts gets its own visible tab. The queue panel shows in Herdr what the owner's
+agents wait on.
+
+The coordinator keeps no board watcher or polling timer. With no startable card and no job running, it ends its turn.
+The owner's message wakes it, as do its jobs' notes and the line `A card moved to Ready.`. The `board-move` and
+`board-add` commands type that line after a move to Ready, but only into a coordinator ready to read it. A coordinator
+that is not, such as one asking the owner, reads the board at its next wake. A move made on GitHub's own board page
+types nothing, and the coordinator sees it at its next wake. Its alarm and its loss watch wake it too when they end.
+
+Its jobs hold only for a failed or missing required check, a missing screenshot or the `show-me-first` marker. They
+ignore `waitForOwner` and every other wait reason. The owner removing the marker, himself or by telling the
+coordinator, is his only yes, and it clears only the marker's hold. A job delivers by a pull request merged at the exact reviewed
+head with a pinned squash merge. For a change the repository's gate admits whole, it instead pushes a squash with the
+same tree onto the fetched base.
+
+The recorded reason is the card's place in Ready. [`AGENTS.md`](../AGENTS.md#owner-gates) says under "Owner gates"
+that this place approves every action the card's outcome and acceptance criteria need. So a job merges with no owner
+question unless its card carries the marker, as [the Herdr job reference](../.agents/skills/resume/references/herdr-job.md#the-merge-route)
+says. No source records why the coordinator keeps no polling timer.
 
 ## Where the rules live
 
 - [The `resume` skill](../.agents/skills/resume/SKILL.md): every step from intake to the queued merge, the review tiers
   and parking.
+- [The pick table](../.agents/skills/resume/references/pick-table.md): the candidate table, its two forms and its
+  closing line.
 - [The delivery reference](../.agents/skills/resume/references/deliver.md): both delivery routes, receipt reuse and the
   merge watch.
-- [The run reference](../.agents/skills/resume/references/runs.md): product manager and pre-approved runs.
+- [The run reference](../.agents/skills/resume/references/runs.md): the pre-approved run.
+- [The card session steps](../.agents/skills/resume/references/card-session.md) and
+  [the phase rules](../.agents/skills/resume/references/pre-approved-phase.md): the rules a run's card and phase
+  sessions read, and which further file each fixed phase prompt reads.
+- [The Herdr coordinator reference](../.agents/skills/resume/references/herdr-lead.md) and [the Herdr job reference](../.agents/skills/resume/references/herdr-job.md): the coordinator's opens, wakes and recovery, and how its jobs deliver.
 - [The `closeout` skill](../.agents/skills/closeout/SKILL.md): every step after the merge, deferred cleanup, the
   cleanup authority and the Leftover rule.
 - [`AGENTS.md`](../AGENTS.md#owner-gates) under "Owner gates": what each owner decision approves.
-- [`AGENTS.md`](../AGENTS.md#review-and-visual-verification) under "Review and visual verification": the one fresh
-  review and the visual check.
+- [`AGENTS.md`](../AGENTS.md#review-and-visual-verification) under "Review and visual verification": the selected tier's
+  required reviews and the visual check.
 - [`AGENTS.md`](../AGENTS.md#publication-and-machinery) under "Publication and machinery": the pull request route and
   the direct route.
 - The Surfaces table in [`AGENTS.md`](../AGENTS.md) and the Conventions table in
@@ -301,6 +349,8 @@ succeeded.
 
 - `.agents/skills/resume/SKILL.md` and `.agents/skills/closeout/SKILL.md`: the steps.
 - `.agents/skills/resume/references/deliver.md` and `.agents/skills/resume/references/runs.md`: delivery and runs.
+- `.agents/skills/resume/references/card-session.md` and `.agents/skills/resume/references/pre-approved-phase.md`: the
+  rules a run's sessions read, the second naming any further file for each phase prompt.
 - `.github/pull_request_template.md`: the pull request body the decision card comes from.
 - `scripts/run-log.mjs`: the logger every check runs through.
 - `scripts/merge-watch.mjs`: the one waiting command after the session queues the merge.

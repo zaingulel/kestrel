@@ -58,7 +58,9 @@ export const TOOLKIT_LIB = [
   'jira-card.mjs',
   // The markdown reader's route to the repository and the cards folder.
   'posix-shell.mjs',
-  'advance-approval.mjs',
+  'merge-evidence.mjs',
+  'run-marks.mjs',
+  'workflow-pin.mjs',
   'factory-sync.mjs',
   'runtimes.mjs',
   'seat-settings.mjs',
@@ -196,7 +198,7 @@ function eslintInstalled() {
     createRequire(import.meta.url).resolve('eslint');
     return true;
   } catch (error) {
-    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'MODULE_NOT_FOUND') throw error;
     return false;
   }
 }

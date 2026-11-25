@@ -24,9 +24,9 @@ function job(name) {
   return m[1];
 }
 
-test('current Kestrel test jobs select Node 26.13.0', () => {
+test('current Kestrel test jobs select Node 26.13.1', () => {
   for (const name of ['quality', 'hooks_windows']) {
-    assert.match(job(name), /^      - uses: actions\/setup-node@[^\n]+\n        with:\n          node-version: '26\.13\.0'$/m);
+    assert.match(job(name), /^      - uses: actions\/setup-node@[^\n]+\n        with:\n          node-version: '26\.13\.1'$/m);
   }
 });
 

@@ -1,4 +1,5 @@
-// closeout-cleanup.test.mjs: the closeout cleanup command removes a job's containers, named scratch, worktree, the
+// @ts-nocheck
+// closeout-cleanup.test.mjs: the closeout cleanup command removes a job's containers, run folders, named scratch, worktree, the
 // empty folder Codex made around the worktree and branch only when every check passes, and retains each target a check or a refusal holds back, with its reason.
 //
 // In-process cases run `main` with a fake `run` that answers only the command's own argument vectors over small
@@ -21,6 +22,7 @@ import assert from 'node:assert/strict';
 import { runCommand } from './closeout-cleanup.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { main } from '../closeout-cleanup.mjs';
+import { runFolderPrefix } from './run-folder.mjs';
 
 const USAGE = 'usage: node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...';
 const GIT = { command: 'git', env: { GIT_TERMINAL_PROMPT: '0' } };
@@ -107,7 +109,8 @@ function withoutDockerSelection(invoke) {
 // A job worktree at <root>/wt on job/23 beside a main checkout at <root>/main, and a fake `run` answering only the
 // command's argument vectors from `state`: `docker` or `lsof` set to null is not installed, and any other call is
 // recorded in `unexpected` and answers status 99. The fake worktree removal deletes the directory, as git does;
-// `tracked` lists each worktree's tracked paths, `lsof.open` the files processes hold and `processes` the ps rows;
+// `tracked` lists each worktree's tracked paths, `lsof.open` the files processes hold and `processes` the ps rows, pgid defaulting to the pid and tpgid to -1, no terminal,
+// and tty to `pts/0` when tpgid is positive and `?` (a terminal ps cannot name) otherwise;
 // `processStatus` is the status of this process (no no_new_privs flag unless set), `mountinfo` the mount table (only
 // the root mount unless set) and `privileged` answers both the
 // direct sudo and the user service manager route. `host` is the endpoint docker selects, PROOF_HOST unless set, and
@@ -264,9 +267,10 @@ function scenario(t, worktreeParts = ['wt']) {
       }
     }
     if (name === 'lsof' && (key === '-nP -iTCP -sTCP:LISTEN -Fpc' || lsofTarget(args))) return { absent: true };
-    if (name === 'ps' && key === '-ww -A -o pid= -o ppid= -o tty= -o args=') {
+    if (name === 'ps' && key === '-ww -A -o pid= -o ppid= -o pgid= -o tpgid= -o tty= -o args=') {
       state.onPs?.();
-      const rows = state.processes.map(({ pid, ppid, tty, args: line }) => `${String(pid).padStart(7)} ${String(ppid).padStart(7)} ${String(tty ?? '?').padEnd(8)} ${line}\n`);
+      const rows = state.processes.map(({ pid, ppid, pgid = pid, tpgid = -1, tty = tpgid > 0 ? 'pts/0' : '?', args: line }) =>
+        `${[pid, ppid, pgid, tpgid].map((n) => String(n).padStart(7)).join(' ')} ${tty} ${line}\n`);
       return state.ps ?? reply(0, rows.join(''));
     }
     return undefined;
@@ -280,13 +284,16 @@ function scenario(t, worktreeParts = ['wt']) {
     unexpected.push([name, ...args]);
     return reply(99);
   };
+  const fixtureTmpdir = join(root, 'fixture-tmp');
+  mkdirSync(fixtureTmpdir);
+  const kill = (pid, signal) => { throw new Error(`unexpected signal ${signal} to pid ${pid}`); };
   const cleanup = async (args = ['23'], seams = {}) => {
     const out = [];
     const err = [];
     const output = { log: (line) => out.push(line), error: (line) => err.push(line) };
     const exitCode = withoutDockerSelection(() => main(args, {
       output, run, platform: 'linux', cwd: mainDir, home: root, codexHome: '', pid: process.pid,
-      scriptPath: join(mainDir, 'scripts', 'closeout-cleanup.mjs'), git: GIT, ...seams,
+      scriptPath: join(mainDir, 'scripts', 'closeout-cleanup.mjs'), git: GIT, tmpdir: fixtureTmpdir, kill, ...seams,
     }));
     return { exitCode, out, err };
   };
@@ -691,37 +698,49 @@ test('a non-listening process using the worktree retains it and the branch', { s
 
 test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a busy shell or any other use does', { skip: SKIP_POSIX }, async (t) => {
   const lines = (...fields) => `${fields.join('\n')}\n`;
-  const terminal = (tty, args = 'zsh') => ({ pid: 4242, ppid: 1000, tty, args });
+  const leader = (args = 'zsh') => ({ pid: 4242, ppid: 1000, pgid: 4242, tpgid: 4242, args });
   // An idle shell lsof lists before the pid under test, so a check that judged only the first listed process would pass.
   const idleFirst = (w) => lines('p4200', 'cbash', 'fcwd', `n${w}`);
-  const idleRow = { pid: 4200, ppid: 1000, tty: 'pts/2', args: 'bash' };
+  const idleRow = { pid: 4200, ppid: 1000, pgid: 4200, tpgid: 4200, args: 'bash' };
   // Each case: its name, the lsof listing for the worktree, the extra ps rows (null: unreadable ps) and the retention reason.
   const retained = [
     ['busy', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
-      [idleRow, terminal('pts/3', 'bash'), { pid: 4300, ppid: 4242, tty: 'pts/3', args: 'claude' }], 'pid 4242 (bash) uses it'],
-    ['file open', (w) => idleFirst(w) + lines('p4242', 'czsh', 'fcwd', `n${w}`, 'f3', `n${w}/notes.md`), [idleRow, terminal('pts/3')], 'pid 4242 (zsh) uses it'],
-    ['non-shell', (w) => idleFirst(w) + lines('p4242', 'cvim', 'fcwd', `n${w}`), [idleRow, terminal('pts/3', 'vim')], 'pid 4242 (vim) uses it'],
-    ['renamed program', (w) => lines('p4242', 'cnode', 'fcwd', `n${w}`), [terminal('pts/3', 'bash')], 'pid 4242 (node) uses it'],
-    ['script', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), [terminal('pts/3', 'bash /home/owner/run.sh')], 'pid 4242 (bash) uses it'],
-    ['command string', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`), [idleRow, terminal('pts/3', 'bash -c read answer')],
+      [idleRow, leader('bash'), { pid: 4300, ppid: 4242, pgid: 4300, tpgid: 4242, args: 'claude' }], 'pid 4242 (bash) uses it'],
+    ['file open', (w) => idleFirst(w) + lines('p4242', 'czsh', 'fcwd', `n${w}`, 'f3', `n${w}/notes.md`), [idleRow, leader()], 'pid 4242 (zsh) uses it'],
+    ['non-shell', (w) => idleFirst(w) + lines('p4242', 'cvim', 'fcwd', `n${w}`), [idleRow, leader('vim')], 'pid 4242 (vim) uses it'],
+    ['renamed program', (w) => lines('p4242', 'cnode', 'fcwd', `n${w}`), [leader('bash')], 'pid 4242 (node) uses it'],
+    ['shell name, other program', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), [leader('python3 -i')], 'pid 4242 (bash) uses it'],
+    ['script', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), [leader('bash /home/owner/run.sh')], 'pid 4242 (bash) uses it'],
+    ['command string', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`), [idleRow, leader('bash -c read answer')],
       'pid 4242 (bash) uses it'],
-    ['arguments', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), (w) => [terminal('pts/3', `bash --rcfile ${w}/.bashrc`)],
+    ['arguments', (w) => lines('p4242', 'cbash', 'fcwd', `n${w}`), (w) => [leader(`bash --rcfile ${w}/.bashrc`)],
       'pid 4242 names it in its arguments'],
-    ['fd unknown', (w) => lines('p4242', 'czsh', `n${w}`), [terminal('pts/3')], 'pid 4242 (zsh) uses it'],
-    ['no files', () => lines('p4242', 'czsh'), [terminal('pts/3')], 'pid 4242 (zsh) uses it'],
+    ['fd unknown', (w) => lines('p4242', 'czsh', `n${w}`), [leader()], 'pid 4242 (zsh) uses it'],
+    ['no files', () => lines('p4242', 'czsh'), [leader()], 'pid 4242 (zsh) uses it'],
     ['ps unreadable', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), null, 'ps printed a row that could not be read'],
-    ['no terminal', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`), [idleRow, { pid: 4242, ppid: 1, tty: '?', args: 'bash' }],
-      'pid 4242 (bash) uses it'],
-    ['no terminal, macOS form', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), [{ pid: 4242, ppid: 1, tty: '??', args: 'zsh' }],
+    ['no terminal', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
+      [idleRow, { pid: 4242, ppid: 1, pgid: 4242, tpgid: -1, args: 'bash' }], 'pid 4242 (bash) uses it'],
+    ['no terminal, macOS form', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 0, args: 'zsh' }],
       'pid 4242 (zsh) uses it'],
+    ['unnamed terminal', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
+      [idleRow, { pid: 4242, ppid: 1000, pgid: 4242, tpgid: 4242, tty: '?', args: 'bash' }], 'pid 4242 (bash) uses it'],
+    ['unnamed terminal, macOS form', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`),
+      [{ pid: 4242, ppid: 1000, pgid: 4242, tpgid: 4242, tty: '??', args: 'zsh' }], 'pid 4242 (zsh) uses it'],
     ['no ps row', (w) => lines('p4242', 'czsh', 'fcwd', `n${w}`), [], 'pid 4242 (zsh) uses it'],
+    ['detached subshell', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
+      [idleRow, { pid: 4250, ppid: 1000, pgid: 4250, tpgid: 4250, args: 'bash' }, { pid: 4242, ppid: 4250, pgid: 4242, tpgid: 4250, args: 'bash' }],
+      'pid 4242 (bash) uses it'],
+    ['shell name, not the group leader', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
+      [idleRow, { pid: 4250, ppid: 1000, pgid: 4250, tpgid: 4300, args: 'bash' }, { pid: 4300, ppid: 4250, pgid: 4300, tpgid: 4300, args: 'npm run dev' },
+        { pid: 4242, ppid: 4300, pgid: 4300, tpgid: 4300, args: 'bash' }],
+      'pid 4242 (bash) uses it'],
   ];
 
   const idle = scenario(t);
   idle.state.lsof.l3Target = idle.worktree;
   idle.state.lsof.l3 = reply(0, lines('p4242', 'c-zsh', 'fcwd', `n${idle.worktree}`, 'p4243', 'cbash', 'fcwd', `n${idle.worktree}/src`));
   idle.state.processes.push(
-    { pid: 1000, ppid: 1, tty: '?', args: 'alacritty' }, terminal('pts/3', '-zsh'), { pid: 4243, ppid: 1000, tty: 'pts/4', args: '/usr/bin/bash -l' },
+    { pid: 1000, ppid: 1, args: 'alacritty' }, leader('-zsh'), { pid: 4243, ppid: 1000, pgid: 4243, tpgid: 4243, args: '/usr/bin/bash -l' },
   );
   assert.deepEqual(await idle.cleanup(), {
     exitCode: 0,
@@ -748,11 +767,16 @@ test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a bus
   const s = scenario(t);
   const folder = dirname(placeFile(join(s.root, 'scratch', 'notes.md')));
   s.state.lsof.l3Target = folder;
-  s.state.lsof.l3 = reply(0, lines('p4242', 'czsh', 'fcwd', `n${folder}`));
-  s.state.processes.push(terminal('pts/3'));
+  s.state.lsof.l3 = reply(0, lines('p612', 'czsh', 'fcwd', `n${folder}`));
+  s.state.processes.push(
+    { pid: 1, ppid: 0, pgid: 1, tpgid: 0, tty: '??', args: '/sbin/launchd' },
+    { pid: 600, ppid: 1, pgid: 600, tpgid: 0, tty: '??', args: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' },
+    { pid: 611, ppid: 600, pgid: 611, tpgid: 612, tty: 'ttys000', args: 'login -pf owner' },
+    { pid: 612, ppid: 611, pgid: 612, tpgid: 612, tty: 'ttys000', args: '-zsh' },
+  );
   assert.deepEqual(await s.cleanup(['--check', folder]), {
     exitCode: 0,
-    out: [`unused path ${folder}: idle shell pid 4242 (zsh) in ${folder} is not a hold`, SUMMARY(1, 0, 0, 0)],
+    out: [`unused path ${folder}: idle shell pid 612 (zsh) in ${folder} is not a hold`, SUMMARY(1, 0, 0, 0)],
     err: [],
   });
   assertNothingChanged(s);
@@ -2113,7 +2137,7 @@ const DOCKER_EMPTY = `${DOCKER_LOCAL}[ "$*" = "container ls --all --quiet --no-t
 const DOCKER_DOWN = `${DOCKER_LOCAL}echo '${DAEMON_DOWN}' >&2\nexit 1\n`;
 // lsof prints nothing and exits 1 when nothing matches; any other call prints a line the command retains on.
 const LSOF_FAKE = 'case "$*" in\n  "-nP -iTCP -sTCP:LISTEN -Fpc"|"-nP -Fpcfn /"*|"-nP -Fpcfn -x f +D /"*) exit 1 ;;\nesac\necho "unexpected lsof call: $*" >&2\nexit 1\n';
-const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o tty= -o args=" ] || exit 99\necho \'      1       0 ?        /sbin/init splash\'\n';
+const PS_FAKE = '[ "$*" = "-ww -A -o pid= -o ppid= -o pgid= -o tpgid= -o tty= -o args=" ] || exit 99\necho \'      1       0       1      -1 ? /sbin/init splash\'\n';
 
 // A real repository with job/23 checked out in a linked worktree that holds an ignored node_modules, an outside
 // scratch file, sh fakes for docker, lsof and ps first on PATH, and GIT_DIR naming a decoy repository the command's
@@ -2794,7 +2818,7 @@ function checkWithNoNewPrivs(t, overrides = {}) {
     [ROUTED_STAT]: reply(0, DAEMON_PROC_STAT),
     [nativeKey('docker', '--host', PROOF_HOST, 'container', 'ls', '--all', '--quiet', '--no-trunc')]: reply(0),
     [nativeKey('lsof', '-nP', '-Fpcfn', target)]: reply(1),
-    [nativeKey('ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'tty=', '-o', 'args=')]: reply(0, '      1       0 ?        /sbin/init\n'),
+    [nativeKey('ps', '-ww', '-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'tpgid=', '-o', 'tty=', '-o', 'args=')]: reply(0, '      1       0       1      -1 ? /sbin/init\n'),
     ...overrides,
   };
   const request = {
@@ -3164,7 +3188,7 @@ test('native Linux socket observations bind a listener to its descriptor and fil
       return reply(0, `${executable}\n`);
     }
     if (command === 'lsof') return reply(1);
-    if (command === 'ps') return reply(0, '1 0 ? /sbin/init\n');
+    if (command === 'ps') return reply(0, '1 0 1 -1 /sbin/init\n');
     const result = runCommand(command, args, options);
     observations.push({ command, args, result });
     return result;
@@ -4472,4 +4496,132 @@ test('macOS: a folder spelled through the Data volume is the same folder', { ski
     assert.equal(existsSync(scratch), false);
     assert.deepEqual(s.unexpected, []);
   });
+});
+
+// The job's run folders and another job's sit in a fixture tmpdir, and the processes carrying them in a fixture
+// procRoot, one entry per pid holding its environ. The injected kill records each signal and ends the process by
+// removing its entry, unless its pid is in `holds`, which outlives every signal, and then runs the pid's `spawns`
+// entry, if any, as it ends; the injected sleep records each wait.
+// The sweep runs the command's main through the scenario harness with these seams.
+function runFolderScenario(t) {
+  const s = scenario(t);
+  const temp = join(s.root, 'tmp');
+  const procRoot = join(s.root, 'proc');
+  mkdirSync(temp);
+  mkdirSync(procRoot);
+  const runFolder = (canonicalRoot, suffix) => {
+    const path = join(temp, `${runFolderPrefix(canonicalRoot)}${suffix}`);
+    mkdirSync(path);
+    writeFileSync(join(path, 'left-behind.txt'), '');
+    return path;
+  };
+  const environ = (pid, text) => {
+    mkdirSync(join(procRoot, pid));
+    writeFileSync(join(procRoot, pid, 'environ'), text);
+  };
+  const carry = (pid, ...pairs) => environ(pid, pairs.map((pair) => `${pair}\0`).join(''));
+  const kills = [];
+  const sleeps = [];
+  const holds = new Set();
+  const spawns = new Map();
+  const sweep = async () => {
+    const { exitCode, out, err } = await s.cleanup(['23'], {
+      tmpdir: temp,
+      procRoot,
+      kill: (pid, signal) => {
+        kills.push([pid, signal]);
+        if (holds.has(pid)) return;
+        rmSync(join(procRoot, String(pid)), { recursive: true, force: true });
+        spawns.get(pid)?.();
+      },
+      sleep: (ms) => sleeps.push(ms),
+    });
+    return { exitCode, lines: [...out, ...err] };
+  };
+  return { ...s, procRoot, runFolder, environ, carry, kills, sleeps, holds, spawns, sweep };
+}
+
+test('closeout stops its own run folder process and removes the folder', { skip: SKIP_POSIX }, async (t) => {
+  const s = runFolderScenario(t);
+  const own = s.runFolder(s.worktree, 'a1b2c3');
+  s.carry('4242', 'PATH=/usr/bin', `TMPDIR=${own}`);
+  const { lines, exitCode } = await s.sweep();
+  assert.deepEqual(s.kills, [[4242, 'SIGTERM']]);
+  assert.equal(existsSync(own), false);
+  assert.ok(lines.includes('stopped pid 4242'), lines.join('\n'));
+  assert.ok(lines.includes(`removed run folder ${own}`), lines.join('\n'));
+  assert.equal(exitCode, 0);
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('closeout reports every carrier it stopped, a replacement included', { skip: SKIP_POSIX }, async (t) => {
+  const s = runFolderScenario(t);
+  const own = s.runFolder(s.worktree, 'a1b2c3');
+  s.carry('301', `TMPDIR=${own}`);
+  // 301 starts 302 in the same folder as it ends.
+  s.spawns.set(301, () => s.carry('302', `TMPDIR=${own}`));
+  const { lines, exitCode } = await s.sweep();
+  assert.deepEqual(s.kills, [[301, 'SIGTERM'], [302, 'SIGTERM']]);
+  assert.deepEqual(lines.filter((line) => line.startsWith('stopped pid')), ['stopped pid 301', 'stopped pid 302']);
+  assert.ok(lines.includes(`removed run folder ${own}`), lines.join('\n'));
+  assert.equal(exitCode, 0);
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('closeout leaves another job run folder and process alone', { skip: SKIP_POSIX }, async (t) => {
+  const s = runFolderScenario(t);
+  const own = s.runFolder(s.worktree, 'a1b2c3');
+  const other = s.runFolder(join(s.root, 'other-job'), 'd4e5f6');
+  s.carry('5151', `TMPDIR=${other}`);
+  const { lines } = await s.sweep();
+  assert.ok(lines.includes(`removed run folder ${own}`), lines.join('\n'));
+  assert.equal(existsSync(other), true);
+  assert.equal(existsSync(join(s.procRoot, '5151')), true);
+  assert.deepEqual(s.kills, []);
+  assert.deepEqual(lines.filter((line) => line.includes(other) || line.includes('5151')), []);
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('an unreadable or malformed process environment never stops a process', { skip: SKIP_POSIX }, async (t) => {
+  const s = runFolderScenario(t);
+  const own = s.runFolder(s.worktree, 'a1b2c3');
+  // Unreadable: environ is a directory, or the pid entry has none.
+  mkdirSync(join(s.procRoot, '4301', 'environ'), { recursive: true });
+  mkdirSync(join(s.procRoot, '4302'));
+  // Malformed: the folder only in another variable, a TMPDIR without `=`, and pid entries that are not pids.
+  s.carry('4303', `XTMPDIR=${own}`, `NOTE=TMPDIR=${own}`);
+  s.environ('4304', `TMPDIR${own}`);
+  s.carry('0043', `TMPDIR=${own}`);
+  s.carry('self', `TMPDIR=${own}`);
+  const { lines } = await s.sweep();
+  assert.deepEqual(s.kills, []);
+  assert.deepEqual(lines.filter((line) => line.startsWith('stopped pid')), []);
+  assert.ok(lines.includes(`removed run folder ${own}`), lines.join('\n'));
+  assert.equal(existsSync(own), false);
+  assert.deepEqual(s.unexpected, []);
+});
+
+test('a retained run folder keeps the worktree and the branch until a later closeout removes them all', { skip: SKIP_POSIX }, async (t) => {
+  const s = runFolderScenario(t);
+  const own = s.runFolder(s.worktree, 'a1b2c3');
+  s.carry('4242', `TMPDIR=${own}`);
+  s.holds.add(4242);
+  const first = await s.sweep();
+  assert.deepEqual(s.kills, [[4242, 'SIGTERM'], [4242, 'SIGKILL']]);
+  assert.ok(first.lines.includes(`retained run folder ${own}: still carried after SIGKILL by pid 4242`), first.lines.join('\n'));
+  assert.ok(first.lines.includes(`retained worktree ${s.worktree}: its run folder ${own} is retained`), first.lines.join('\n'));
+  assert.ok(first.lines.includes('retained branch job/23: its worktree is retained'), first.lines.join('\n'));
+  assert.equal(first.exitCode, 4);
+  assert.equal(existsSync(own), true);
+  assert.equal(existsSync(s.worktree), true);
+  // The hold clears: the process ends on its own.
+  rmSync(join(s.procRoot, '4242'), { recursive: true, force: true });
+  const retry = await s.sweep();
+  assert.ok(retry.lines.includes(`removed run folder ${own}`), retry.lines.join('\n'));
+  assert.ok(retry.lines.includes(`removed worktree ${s.worktree}`), retry.lines.join('\n'));
+  assert.ok(retry.lines.includes('removed branch job/23'), retry.lines.join('\n'));
+  assert.equal(retry.exitCode, 0);
+  assert.equal(existsSync(own), false);
+  assert.equal(existsSync(s.worktree), false);
+  assert.deepEqual(s.unexpected, []);
 });

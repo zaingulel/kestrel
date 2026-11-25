@@ -1,3 +1,4 @@
+// @ts-nocheck
 // board-portability.test.mjs — the adoption contract for the board toolkit.
 // Run: node --test scripts/lib/board-portability.test.mjs
 //
@@ -51,7 +52,7 @@ function adoptToolkit(t, configSource) {
   return toolkit.root;
 }
 
-// A board with no routing field, as AlpGuard's is.
+// A board with no routing field.
 const NO_ROUTING_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
 export const BOARD_PROJECT_NUMBER = 7;
@@ -86,7 +87,7 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }, is
     if (args[0] === 'project' && args[1] === 'item-edit') return '';
     const query = args.find((arg) => arg.startsWith('query=')).slice('query='.length);
     // The repository issue walk finds no card the listing lacks.
-    if (boardRequestKind(args) === 'issues') return JSON.stringify([issuesPage([])]);
+    if (['issues', 'closedIssues'].includes(boardRequestKind(args))) return JSON.stringify([issuesPage([])]);
     if (args.includes('--paginate')) return JSON.stringify([boardPage]);
     const field = query.match(/field\(name:"([^"]+)"\)/);
     if (field) {
@@ -347,7 +348,7 @@ test('with a Workstream configured, a card missing it is still reported and boar
   assert.deepEqual(sent, []);
 });
 
-// A board with no routing field and a parked lane, as AlpGuard's is.
+// A board with no routing field and a parked lane.
 const PARKED_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
 export const BOARD_PROJECT_NUMBER = 7;
@@ -375,7 +376,7 @@ const query = args.find((arg) => arg.startsWith('query=')) ?? '';
 const lane = process.env.FAKE_LANE ? JSON.parse(process.env.FAKE_LANE) : null;
 const itemReply = lane?.items[query.match(/issue\\(number:(\\d+)\\)/)?.[1]];
 import(${JSON.stringify(new URL('./board-fixtures.mjs', import.meta.url).href)}).then(({ boardRequestKind }) => {
-  if (boardRequestKind(args) === 'issues') {
+  if (['issues', 'closedIssues'].includes(boardRequestKind(args))) {
     process.stdout.write(process.env.FAKE_ISSUES);
   } else if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
     process.stdout.write(process.env.FAKE_BOARD);
@@ -764,10 +765,12 @@ test('markdown board: intake shows the columns derived from real local, origin a
     'claim: branch job/7 (origin)',
   ]);
   assert.ok(document.includes('open blockers: #1'), run.stdout);
+  // Each card is named in its summary alone: no listing row repeats it.
+  assert.deepEqual(document.filter((line) => /^#\d+ \[/.test(line)), [], run.stdout);
   // The summary names each card's file; the body is in the file alone.
   assert.equal(document.includes('| Body of the card.'), false, run.stdout);
   assert.deepEqual(readdirSync(folder).sort(), ['1.txt', '2.txt', '3.txt', '5.txt', '7.txt']);
-  assert.ok(document.includes(`card text: ${join(folder, '3.txt')}, 10 line(s)`), run.stdout);
+  assert.ok(document.includes(`card text: ${join(folder, '3.txt')}, 11 line(s)`), run.stdout);
   assert.ok(readFileSync(join(folder, '3.txt'), 'utf8').split('\n').includes('| Body of the card.'));
   // The two pushed branches with no counted draft are the stalled claims; the Awaiting push card is not.
   const stalled = (number, word) =>
@@ -854,6 +857,12 @@ test('markdown board-move: a status the tracker cannot write or check, and a lan
     unknown.stderr,
     'board-move: failed to move #1 → "Parked" (already completed: none) — unknown Status "Parked" — valid options: Backlog, Ready, Done, In progress, Awaiting push, In review\n',
   );
+  const top = runScript(toolkit.root, 'board-move.mjs', ['--top', '1', 'Ready']);
+
+  assert.equal(top.status, 1, top.stderr);
+  assert.equal(top.stdout, '');
+  assert.equal(top.stderr, "board-move: --top needs the GitHub Projects tracker; this repository's tracker is markdown\n");
+  assert.deepEqual(readFileSync(join(toolkit.root, CARDS_DIR, '1.md')), cardBefore);
   const batch = runScript(toolkit.root, 'board-move.mjs', ['--batch', '1:Ready', '1:Parked']);
   assert.equal(batch.status, 1, batch.stderr);
   assert.equal(batch.stdout, '');
@@ -1221,10 +1230,18 @@ test('linear board: the copied CLI prints the pick view and the intake document 
   ]);
   assert.ok(document.includes('parent: ENG-2'), intake.stdout);
   assert.ok(document.includes('open blockers: ENG-2'), intake.stdout);
+  // Linear's read keeps no column order, so the document says Ready is by card number.
+  assert.equal(
+    document[document.findIndex((line) => line.startsWith('Card summaries: ')) + 1],
+    "Ready order: by card number, as this tracker's read keeps no column order; Backlog follows by card number.",
+    intake.stdout,
+  );
+  // Each card is named in its summary alone: no listing row repeats it.
+  assert.deepEqual(document.filter((line) => line.startsWith('ENG-')), [], intake.stdout);
   // The summary names each card's file; the body and the comments are in the file alone.
   assert.equal(document.includes('| Do the twelve thing.'), false, intake.stdout);
   assert.deepEqual(readdirSync(folder).sort(), ['ENG-11.txt', 'ENG-12.txt', 'ENG-2.txt']);
-  assert.ok(document.includes(`card text: ${join(folder, 'ENG-12.txt')}, 11 line(s)`), intake.stdout);
+  assert.ok(document.includes(`card text: ${join(folder, 'ENG-12.txt')}, 12 line(s)`), intake.stdout);
   const cardFileLines = readFileSync(join(folder, 'ENG-12.txt'), 'utf8').split('\n');
   assert.ok(cardFileLines.includes('| Do the twelve thing.'), cardFileLines.join('\n'));
   assert.ok(cardFileLines.includes('| Comment on ENG-12'), cardFileLines.join('\n'));
@@ -1374,7 +1391,7 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   const ready = { state: states.Todo };
   const claimed = { state: states['In Progress'], assignee: 'me', comments: [claimComment] };
 
-  // File: to-issues creates the card, checks its publication and reads its blockers back.
+  // File: to-tickets creates the card, checks its publication and reads its blockers back.
   const bodyFile = join(root, 'body.md');
   writeFileSync(bodyFile, BODY);
   assert.deepEqual(card(['create', '--title', 'Card thirteen', '--body-file', bodyFile, '--status', 'Backlog', '--kind', 'task', '--parent', 'ENG-2', '--blocked-by', 'ENG-12'], filed), [

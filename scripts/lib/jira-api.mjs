@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Only the short-lived child reads Jira credentials; request data crosses stdin and JSON crosses stdout.
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';

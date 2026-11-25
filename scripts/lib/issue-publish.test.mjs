@@ -1,3 +1,4 @@
+// @ts-nocheck
 // issue-publish.test.mjs — mutation-proof contract tests for issue publication.
 // Run: node --test scripts/lib/issue-publish.test.mjs
 
@@ -274,7 +275,7 @@ function boardRead(nodes, { probeProjects = [], probeResponse, children = [], ch
     const query = command.find((arg) => arg.startsWith('query='));
     queries.push(query);
     // The repository issue walk finds no card the listing lacks; it asks for projectItems too, so it is told apart first.
-    if (boardRequestKind(command) === 'issues') return JSON.stringify([issuesPage([])]);
+    if (['issues', 'closedIssues'].includes(boardRequestKind(command))) return JSON.stringify([issuesPage([])]);
     // One slurped page: the array shape the real `--paginate --slurp` walk hands fetchBoard (#1155).
     if (query.includes('projectV2')) return JSON.stringify([leanBoardPage(nodes)]);
     if (query.includes('projectItems')) return probeResponse ?? graphProbe(probeProjects);
@@ -643,7 +644,7 @@ test('issue-publish: passes an issue with exactly one kind label among other lab
 function typesBoardRead(nodes, { probeResponse } = {}) {
   const ghExec = (command) => {
     const query = command.find((arg) => arg.startsWith('query='));
-    if (boardRequestKind(command) === 'issues') return JSON.stringify([typesIssuesPage([])]);
+    if (['issues', 'closedIssues'].includes(boardRequestKind(command))) return JSON.stringify([typesIssuesPage([])]);
     if (query.includes('projectV2')) return JSON.stringify([typesLeanBoardPage(nodes)]);
     if (query.includes('projectItems')) return probeResponse ?? graphProbe();
     return graphChildren([]);

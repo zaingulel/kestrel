@@ -1,3 +1,4 @@
+// @ts-nocheck
 // factory-sync.test.mjs — tests for the factory manifest reader, its drift verification, the render of an adopter's
 // seat settings and the CLI.
 // Run: node --test scripts/lib/factory-sync.test.mjs   (or `npm run test:scripts`)
@@ -690,6 +691,57 @@ test('ANTI-REGRESSION: a tree that turns the documentation sweep off verifies wi
     [{ path: SWEEP_PATHS[0], expected: SWEEP_OFF_CAUSE, actual: HELLO_SHA256 }],
     'codex alone, the sweep off: the sweep is the cause at a sweep file',
   );
+});
+
+// One docs site file and the publishing workflow, written out by hand; each fixture file holds hello, so no hash is
+// computed by the code under test.
+const SITE_FILE = 'docs-site/build.mjs';
+const SITE_WORKFLOW = '.github/workflows/docs-site-deploy.yml';
+const SITE_PATHS = [SITE_FILE, SITE_WORKFLOW];
+const SITE_OFF_CAUSE = 'absent (the settings file does not turn the docs site on)';
+const SITE_NOT_ONLINE_CAUSE = 'absent (the settings file does not turn the docs site online)';
+
+test('ANTI-REGRESSION: a tree whose docs site is off or local verifies without the files it leaves out and refuses anything at their paths, and a tree that turns it online still refuses a missing or changed docs site file', (t) => {
+  const tree = (settings) => featureTree(t, SITE_PATHS.map((path) => ({ path, sha256: HELLO_SHA256 })), settings);
+  // Puts the recorded bytes, then other bytes, at a path the tree must leave out, and expects each refused for `cause`.
+  const refusesAt = (root, path, cause, name) => {
+    put(root, path, 'hello\n');
+    assert.deepEqual(verifyManifest(root), [{ path, expected: cause, actual: HELLO_SHA256 }], `${name}: the recorded bytes at ${path}`);
+    put(root, path, OTHER_TEXT);
+    assert.deepEqual(verifyManifest(root), [{ path, expected: cause, actual: OTHER_SHA256 }], `${name}: other bytes at ${path}`);
+    rmSync(join(root, path));
+  };
+  // Takes away, then changes, a file the tree must hold, and expects each refused against its recorded bytes.
+  const refusesMissingOrChanged = (root, path, name) => {
+    rmSync(join(root, path));
+    assert.deepEqual(verifyManifest(root), [{ path, expected: HELLO_SHA256, actual: 'missing' }], `${name}: ${path} missing`);
+    put(root, path, OTHER_TEXT);
+    assert.deepEqual(verifyManifest(root), [{ path, expected: HELLO_SHA256, actual: OTHER_SHA256 }], `${name}: ${path} changed`);
+    put(root, path, 'hello\n');
+  };
+
+  for (const [name, settings] of [
+    ['no settings file', undefined],
+    ['no docsSite key', { version: 1, seats: {} }],
+    ['docsSite off', { version: 1, seats: {}, docsSite: 'off' }],
+  ]) {
+    const off = tree(settings);
+    assert.deepEqual(verifyManifest(off), [], `${name}: none of the docs site's files`);
+    for (const path of SITE_PATHS) refusesAt(off, path, SITE_OFF_CAUSE, name);
+    rmSync(join(off, 'docs/a.txt'));
+    assert.deepEqual(verifyManifest(off), [{ path: 'docs/a.txt', expected: HELLO_SHA256, actual: 'missing' }], `${name}: a missing file of every install`);
+  }
+
+  const local = tree({ version: 1, seats: {}, docsSite: 'local' });
+  put(local, SITE_FILE, 'hello\n');
+  assert.deepEqual(verifyManifest(local), [], 'local: the site file present and no workflow');
+  refusesAt(local, SITE_WORKFLOW, SITE_NOT_ONLINE_CAUSE, 'local');
+  refusesMissingOrChanged(local, SITE_FILE, 'local');
+
+  const online = tree({ version: 1, seats: {}, docsSite: 'online' });
+  for (const path of SITE_PATHS) put(online, path, 'hello\n');
+  assert.deepEqual(verifyManifest(online), [], 'online: every docs site file present');
+  for (const path of SITE_PATHS) refusesMissingOrChanged(online, path, 'online');
 });
 
 test('verifyManifest judges a tree by the settings it is handed, and by its own settings file when handed none', (t) => {

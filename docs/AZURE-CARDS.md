@@ -98,7 +98,9 @@ Runtime reads validate the exact project, enabled native types, state metadata a
 state in the native Completed category; other columns cannot map to Completed or Removed. Unknown types or states
 are mapping drift, never guessed completion. Every card carries exactly one configured `KIND_LABELS` value in
 `System.Tags` and its configured native type; writes preserve unrelated tags. Missing or multiple kind tags are drift
-and fail publication verification.
+and fail publication verification. To hold a card for the owner's look before it merges, add the tag `show-me-first` to
+the work item. The card never merges on its evidence, and `node scripts/board.mjs --waits <identifier>` reports
+`show-me-first` for it.
 
 The GitHub project number, routing field and parked lane are null, and routing options are empty. Azure has no
 Workstream or parked lane in this adapter. Documentation sweep, cloud card builds and direct-main documentation
@@ -277,17 +279,19 @@ publication and cleanup gate.
 | Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses an Azure install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the rows of this table |
 | Free-card, assignment, claim or withdrawal | The complete reads and native-UUID protocol in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs {{AB_ID}} "Awaiting push"` before requesting push authorization |
-| Verdict and Stage 2 evidence (`resume`, "7. Push authorisation") | Post with `azure-card.mjs comment {{AB_ID}} --body-file {{FILE}}`. Read with `node scripts/board.mjs --all`, then `azure-card.mjs text {{AB_ID}}` for each card it lists, one call per card, reviewing complete native comments. Compare authorship with the viewer evidence of `azure-card.mjs view {{AB_ID}}`. A comment whose native text wraps `Verdict:` counts as not matching the form. An approved push is a card in Done on that listing. A failed read leaves the first two measures not measurable, naming the card. The share of suggested cards accepted reads with `node scripts/board.mjs --all --json` and the same `text` calls, applying the same title test and finding the line contained in the description, and gives those counts as the cards it could read, with the share itself `not measurable: a card a board read leaves out is not counted`; a failed read leaves no counts, naming the card |
+| Owner answer (`resume`, "7. Push authorisation") | Post the record's one line with `azure-card.mjs comment {{AB_ID}} --body-file {{FILE}}`, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives, from the account the session publishes as. The queue panel writes none on this tracker, so the session in whose chat the owner answered writes it before it acts |
+| Fix built (`resume`, "7. Push authorisation") | Post the fix line the same way, once the fix is built and before its push |
 | Closing line and branch | `job/{{AB_ID}}` and both standalone body lines that follow this table; always the pull request route |
 | Draft opened | Keep the card's current explicit column; draft creation does not move it to In review |
 | Pull request marked ready | When the pull request is marked ready, explicitly run `board-move.mjs {{AB_ID}} "In review"` |
 | Handoff | `board-move.mjs {{AB_ID}} Ready` after handoff's existing publication steps |
-| File or fold approved work | `azure-card.mjs create` or `edit`; preserve metadata and native relationships on a fold |
-| Suggested card (`resume`, "2. Work-pick") | File with `azure-card.mjs create --title 'Proposed: {{TITLE}}' --body-file {{FILE}} --status Backlog --kind {{KIND}}`. A yes is `azure-card.mjs edit {{AB_ID}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no is `board-move.mjs {{AB_ID}} Done`, keeping the title |
+| File or fold approved work | `azure-card.mjs create` or `edit`; `create` takes `--status Backlog`, or `--status Ready` only where `to-tickets` step 6b allows it; preserve metadata and native relationships on a fold |
+| Move a picked card to the top of `Ready` (`resume`, "2. Work-pick") | `board-move.mjs {{AB_ID}} Ready`, without `--top`, which needs the GitHub Projects tracker. The intake reads no backlog order from Azure Boards and orders `Ready` by work item ID, so the top of `Ready` is the startable card with the lowest ID there |
+| Suggested card (`resume`, "2. Work-pick") | A yes is `azure-card.mjs edit {{AB_ID}} --title '{{TITLE_WITHOUT_PREFIX}}'`. A no is `board-move.mjs {{AB_ID}} Done`, keeping the title |
 | Parent or blocker | `azure-card.mjs parent` or `block`; reread `parent` and the complete `blockedBy` row through `text`, including closed blockers |
 | Verify filing | `node scripts/verify-issue-publish.mjs {{AB_ID}} [{{CHILD_AB_ID}} ...]`; exact kind/type/status, parent and supplied complete direct-child set |
 | Completion or review comment | `azure-card.mjs comment {{AB_ID}} --body-file {{FILE}}`; edit only the viewer's own comment |
-| Backlog or another explicit column | `board-move.mjs {{AB_ID}} "{{COLUMN}}"` |
+| Backlog or another explicit column | `board-move.mjs {{AB_ID}} "{{COLUMN}}"`; a move to `Ready` only on the owner's word, as the `resume` skill says under "1. Find where things stand" |
 | Merge closeout | Confirm the authorized pull request merged, explicitly move its Azure card to Done, then run `board.mjs --closeout` |
 | Parent closeout | `azure-card.mjs children {{AB_ID}}` must return complete child identities with `completed` equal to `total` before explicitly moving the parent to Done |
 | Deferred cleanup | No Azure pending-record mechanism; report retained targets under closeout's existing non-GitHub scope |

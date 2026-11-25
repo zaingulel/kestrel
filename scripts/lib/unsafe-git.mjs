@@ -1,33 +1,51 @@
+// @ts-nocheck
 // unsafe-git.mjs: Git refusals shared by the Claude and Codex PreToolUse(Bash) guards, plus
 // cleanup-specific permission for the Claude root hook. The hooks supply checkout facts; direct unit
 // tests cover the policy and subprocess tests cover its wiring. The rules read nothing, except that a
-// pre-approved run or carried push yes session's publish is judged on git and GitHub reads (advance-approval.mjs).
+// pre-approved run session's publish is judged on git and GitHub reads (merge-evidence.mjs), and a Herdr job's
+// `gh api` call reads the body file it names.
 //
-// Seventeen plain rules, judged on the actual command segments of an agent's shell call:
-//   a command holding `Approved:`, in every session
-//                            -> no agent session writes or quotes an advance approval record, so
-//                                nothing an agent types can become one: only the owner posts one,
-//                                outside any agent session. The text is read anywhere in the raw
-//                                command, quoted spans and heredoc bodies included, so a record in
-//                                a body file another tool wrote, or one the shell assembles from
-//                                pieces, is not seen
-//   git push / gh pr create / ready / merge in a product manager run session
-//                            -> a run session does not publish, whatever the form; judged only when
-//                                the hook passes `{ runSession: true }`, which both hooks do for a
-//                                session the launcher marked
+// Sixteen plain rules, judged on the actual command segments of an agent's shell call:
 //   git push / gh pr create / ready / merge in a pre-approved run session
 //                            -> admitted only as a plain delivery form, the whole command, from the
-//                                session's own working directory, for its own job/<n> card with a
-//                                valid advance approval read from its origin repository; taking its
-//                                own job pull request back to draft needs no approval. Judged only
-//                                when the hook passes `{ preApproved }`; when both marks are set the
-//                                run session rule wins.
-//   git push / gh pr create / ready / merge in a carried push yes session
-//                            -> admitted only as the same delivery forms, for the one card the owner's
-//                                carried yes names, from its job/<n> branch and with no approval
-//                                record; a push to main is refused. Judged only when the hook passes
-//                                `{ carriedYes }`; with the pre-approved mark as well every publish is
-//                                refused
+//                                session's own working directory, for its own job/<n> card, open and
+//                                not a proposal in its origin repository, whose newest claim its
+//                                GitHub account made during the run, while fetched main sets
+//                                waitForOwner to on-screen or when-needed, a level a Herdr job
+//                                ignores; a push also needs none of
+//                                the origin repository's open pull requests from that branch to be
+//                                ready or have a merge queued, a ready or merge also needs neither
+//                                the saved write-up at HEAD nor the published body to hold a wait
+//                                reason, the card's show-me-first label and, at on-screen, work on
+//                                screen among them, unless the card's recorded owner answer admits
+//                                that head outside a Herdr job, and every label of the card readable;
+//                                a coordinated Claude job's push to main is held by any wait reason. In a
+//                                Herdr job only check, screenshot and the label are wait reasons. A
+//                                Herdr job marks ready and merges on its exact pull request, and holds
+//                                without using either legacy answer; verified Codex Herdr delivery
+//                                also checks the bound worktree and version. Taking its own
+//                                job pull request back to draft is always admitted. Judged only when
+//                                the hook passes `{ preApproved }`.
+//   git push / gh pr create / ready / merge and node …/merge-watch.mjs in a coordinated Claude job
+//                            -> first needs the job's workflow version to verify, with the shared
+//                                contracts unchanged except for its own `gh pr ready <number> --undo`
+//                                and the one-argument merge-watch cleanup; the merge watch runs only
+//                                as `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" <arguments>`,
+//                                the whole command. Judged only when the hook passes `verifyJobPin`.
+//   a Herdr job's plainly written command that clears its card's show-me-first marker
+//                            -> only the owner removes it: `gh issue edit --remove-label` naming
+//                                it, `gh label delete` naming it or `edit` renaming it, `gh api`
+//                                PUT, PATCH or DELETE on an issue's labels or on the marker among
+//                                them, PATCH or DELETE on the repository's marker label, PATCH or
+//                                POST on an issue with a `labels` field or an `--input` body whose
+//                                labels leave it out, a GraphQL query, inline, `query=@<file>` or
+//                                an `--input` body, that removes, clears, deletes or edits labels
+//                                or sets an issue's `labelIds`, and the `show-first` off forms of
+//                                scripts/owner-queue.mjs and the Queue panel's queue.mjs; a gh
+//                                command is read through a plain `env` prefix and without `-R` or
+//                                `--repo`, and a body file the guard cannot read counts as clearing.
+//                                Judged only for a `coordinated` or `codexHerdr` job, or a Codex
+//                                Herdr terminal whose binding could not be read.
 //   git commit --no-verify   -> skips the pre-commit gates
 //   git push --no-verify     -> skips the lint pre-push hook
 //   git -c core.hooksPath=… / git --config-env core.hooksPath=… /
@@ -58,10 +76,10 @@
 //                                given twice, a locked worktree
 //   gh pr create / new (no --draft)
 //                            -> skips the draft stage before the metered suite
-//   gh pr merge              -> only `gh pr merge --auto --squash --delete-branch <number>`, alone
-//                                in its segment, is allowed: an admin token merges regardless of
-//                                checks, and --auto lets GitHub merge only once the required test
-//                                check is green
+//   gh pr merge              -> ordinary and legacy jobs use `gh pr merge --auto --squash --delete-branch <number>`
+//                                alone in its segment, so GitHub waits for green checks. A Herdr job,
+//                                coordinated Claude Code or verified Codex, uses a standalone
+//                                `--match-head-commit` merge with checks green
 //   gh pr ready              -> only `gh pr ready <number>`, with or without --undo, alone in its
 //                                segment, is allowed
 //   git commit / checkout / switch / branch <new> / merge (not --ff-only) / cherry-pick / revert /
@@ -236,27 +254,167 @@
 // `.claude/worktrees/` is itself quoted or behind a variable; a `>` after a blank inside a `${...}`
 // expansion is read as a redirection with its target; a process substitution nested inside another
 // hides the invocation its redirection precedes; and `git worktree move --force` is not judged.
-import { posix, win32 } from 'node:path';
-import { publishCheck } from './advance-approval.mjs';
+import { posix, resolve as resolvePath, win32 } from 'node:path';
+import { boundedBytes, COMMIT_TEXT, publishCheck, SHOW_FIRST } from './merge-evidence.mjs';
+import { watchDriftAllowed } from './workflow-pin.mjs';
+
+export const CODEX_HERDR_UNAVAILABLE = 'a Codex Herdr job binding is unavailable';
+const PINNED_MERGE = new RegExp(`^gh pr merge --squash --delete-branch --match-head-commit (${COMMIT_TEXT}) ([1-9]\\d*)$`);
+const PINNED_PUSH = new RegExp(String.raw`^git push --no-follow-tags origin (${COMMIT_TEXT})\^\{object\}:refs/heads/main$`);
+// Each place a node run of any merge-watch.mjs starts, its command word bare or quoted (`"node"`); and the one pinned
+// form. A syntax check is exempt only as `SYNTAX_CHECK`, the whole command: preloads from the command line or the
+// environment still run under `--check`, and the shell can build or source that environment. Its path holds only plain
+// path characters, since brace and glob expansion could otherwise turn it into options.
+const MERGE_WATCH_RUN = /(?<=^|[\s;&|(`'"/])(?=(["']?)node(?:\.exe)?\1[ \t][^\n;&|]*?merge-watch\.mjs(?![\w.-]))/g;
+const SYNTAX_CHECK = /^node(?:\.exe)? (?:--check|-c) [\w./][\w./-]*$/;
+const PINNED_WATCH = '`node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" <arguments>`';
+const PINNED_WATCH_RUN = /^node "\$FABRAIK_WORKFLOW_ROOT\/scripts\/merge-watch\.mjs"((?: [\w./:@+,=-]+)*)$/;
+const NEVER_CLEARS_MARKER = `a Herdr job never clears the ${SHOW_FIRST} marker: the owner removes it`;
+// The `gh api` options that take the next word as their value.
+const API_VALUE_OPTIONS = ['-X', '--method', '-H', '--header', '-f', '--raw-field', '-F', '--field', '--input', '-q', '--jq', '-t', '--template', '--hostname', '--cache', '-p', '--preview'];
+// A GraphQL label mutation. A label's node id does not show whether it is the marker, so deleting or editing any label
+// counts.
+const LABEL_MUTATION = /\b(?:removeLabelsFromLabelable|clearLabelsFromLabelable|deleteLabel|updateLabel)\b/;
+const isMarker = (name) => name.trim().toLowerCase() === SHOW_FIRST;
+
+// Whether a Herdr job's command, as `words` split into `segments` of plain words, clears its card's show-me-first
+// marker, as the plainly written forms the header lists do; `cwd` is where a `gh api` body file is read from. A segment
+// is read without a plain leading `env` and its assignments, and a gh segment without gh's `-R` or `--repo` option
+// wherever it sits. The marker name is matched trimmed and in any letter case, also inside a comma list.
+function clearsMarker(segments, cwd) {
+  return segments.some((segment) => {
+    let words = segment[0] === 'env' ? segment.slice(1) : segment;
+    while (/^\w+=/.test(words[0] ?? '')) words = words.slice(1);
+    if (/^(?:\S*\/)?gh$/i.test(words[0] ?? '')) {
+      const repo = (word) => word === '-R' || word === '--repo';
+      words = words.filter((word, at) => !repo(word) && !repo(words[at - 1]) && !word.startsWith('--repo='));
+      const [, noun, verb, ...rest] = words;
+      if (noun === 'issue' && verb === 'edit') {
+        return rest.some((word, at) => {
+          const value = word === '--remove-label' ? rest[at + 1] : /^--remove-label=([\s\S]*)$/.exec(word)?.[1];
+          return value !== undefined && value.split(',').some(isMarker);
+        });
+      }
+      if (noun === 'label' && verb === 'delete') return rest.some(isMarker);
+      // Recolouring or redescribing the marker leaves it on the card; renaming it does not.
+      if (noun === 'label' && verb === 'edit') return rest.some(isMarker) && rest.some((word) => /^(?:-n|--name(?:=|$))/.test(word));
+      if (noun === 'api') return apiClearsMarker(words.slice(2), cwd);
+    }
+    const script = words.findIndex((word) => /(?:^|\/)(?:owner-)?queue\.mjs$/.test(word));
+    if (script === -1) return false;
+    const after = words.slice(script + 1);
+    if (/owner-queue\.mjs$/.test(words[script])) {
+      return after.includes('show-first') && after.some((word, at) => word === '--state=off' || (word === '--state' && after[at + 1] === 'off'));
+    }
+    const operands = after.filter((word, at) => !word.startsWith('-') && after[at - 1] !== '--home');
+    return operands[0] === 'show-first' && operands.includes('off');
+  });
+}
+
+// Whether `gh api` with `args` clears the marker: a write to an issue's labels that removes it or replaces them all, an
+// issue write whose labels leave it out, a delete or edit of the marker label itself, or a GraphQL label mutation. A
+// body file, `query=@<file>` or `--input <file>`, is read as a bounded regular file, and one the guard cannot read or,
+// for `--input`, parse as JSON counts as clearing.
+function apiClearsMarker(args, cwd) {
+  const fields = [];
+  let method;
+  let endpoint;
+  let input;
+  for (let at = 0; at < args.length; at += 1) {
+    const word = args[at];
+    if (!word.startsWith('-')) {
+      endpoint ??= word;
+      continue;
+    }
+    const [option, glued] = word.startsWith('--') ? word.split(/=([\s\S]*)/) : [word.slice(0, 2), word.slice(2) || undefined];
+    const value = glued ?? (API_VALUE_OPTIONS.includes(option) ? args[(at += 1)] : undefined);
+    if (option === '-X' || option === '--method') method = value?.toUpperCase();
+    else if (option === '--input') input = value ?? '';
+    else if (['-f', '--raw-field', '-F', '--field'].includes(option) && value !== undefined) {
+      const [key, text = ''] = value.split(/=([\s\S]*)/);
+      fields.push({ key, text, file: (option === '-F' || option === '--field') && text.startsWith('@') });
+    }
+  }
+  method ??= fields.length || input !== undefined ? 'POST' : 'GET';
+  // The text of body file `file`, or undefined where the guard cannot read it.
+  const read = (file) => {
+    if (!cwd) return undefined;
+    try {
+      return boundedBytes(resolvePath(cwd, file)).toString('utf8');
+    } catch {
+      return undefined;
+    }
+  };
+  // The `--input` body parsed as JSON, or undefined where it cannot be read or parsed.
+  const inputBody = () => {
+    try {
+      return JSON.parse(read(input) ?? '');
+    } catch {
+      return undefined;
+    }
+  };
+  // Whether a label named in the path, percent-encoded or not, is the marker; a malformed encoding counts as it.
+  const namesMarker = (name) => {
+    try {
+      return isMarker(decodeURIComponent(name));
+    } catch {
+      return true;
+    }
+  };
+  const path = (endpoint ?? '').replace(/[?#][\s\S]*$/, '');
+  const issueLabel = /(?:^|\/)issues\/\d+\/labels(?:\/([^/]+))?$/.exec(path);
+  if (issueLabel) return ['PUT', 'PATCH', 'DELETE'].includes(method) && (issueLabel[1] === undefined || namesMarker(issueLabel[1]));
+  const repoLabel = /(?:^|\/)repos\/[^/]+\/[^/]+\/labels\/([^/]+)$/.exec(path);
+  if (repoLabel) return ['PATCH', 'DELETE'].includes(method) && namesMarker(repoLabel[1]);
+  if (/(?:^|\/)issues\/\d+$/.test(path)) {
+    if (!['PATCH', 'POST'].includes(method)) return false;
+    if (fields.some(({ key }) => /^labels(?:\[|$)/.test(key))) return true;
+    if (input === undefined) return false;
+    const body = inputBody();
+    if (body === null || typeof body !== 'object') return true;
+    if (!Object.hasOwn(body, 'labels')) return false;
+    const name = (label) => (typeof label === 'string' ? label : label?.name);
+    return !(Array.isArray(body.labels) && body.labels.some((label) => typeof name(label) === 'string' && isMarker(name(label))));
+  }
+  if (path !== 'graphql') return false;
+  const queries = fields.filter(({ key }) => key === 'query').map(({ text, file }) => (file ? read(text.slice(1)) : text));
+  if (input !== undefined) {
+    const body = inputBody();
+    queries.push(typeof body?.query === 'string' ? body.query : undefined);
+  }
+  return queries.some((query) => query === undefined || LABEL_MUTATION.test(query) || (/\bupdateIssue\b/.test(query) && /\blabelIds\b/.test(query)));
+}
 
 // Returns a reason string when `cmd` should be blocked, or "" when it's allowed. `checkout` is the
 // hook's working-directory context, `{ cwd, isRootCheckout(dir), platform }`, whose platform picks the
 // path rules the walk resolves with; without it the root-checkout rule is not judged, and every other
-// rule is unchanged. `runSession` identifies a product manager run. `preApproved`, `{ start, tracker }`
-// plus the optional `appJob` and runner injections publishCheck takes, identifies a pre-approved run.
-// `carriedYes`, `{ carried }` plus the same runner injections, identifies a carried push yes session.
-// `appRun` marks an enrolled native session; `runUnavailable` is a refusal used for publication and
-// approval records when native classification failed. Either protects the reserved metadata name.
-export function blockReason(cmd, checkout, { runSession = false, preApproved = null, carriedYes = null, appRun = false, runUnavailable = '' } = {}) {
+// rule is unchanged. `preApproved`, `{ start, tracker, boundCard, coordinated }`
+// plus the optional `appJob`, `codexHerdr` and runner injections publishCheck takes, identifies a pre-approved run.
+// `coordinated` marks a Claude Herdr job and `codexHerdr` carries the verified Codex job binding. `verifyJobPin({ drift })`,
+// which the Claude guard supplies to a coordinated Claude job, throws when the job's workflow version does not verify.
+// `appRun` marks an enrolled native session; `runUnavailable` is a refusal used for publication when
+// native classification failed. Either protects the reserved metadata name.
+// `runMarkUnreadable` is the cause where a desktop app session's first message, which may hold a run mark, cannot
+// be read: that session publishes nothing. `herdrTerminal` marks a Codex Herdr job terminal whose binding could not be
+// read: it publishes nothing, as `runUnavailable` says, and still never clears the show-me-first marker.
+export function blockReason(cmd, checkout, { preApproved = null, appRun = false, runUnavailable = '', runMarkUnreadable = '', herdrTerminal = false } = {}) {
   cmd = cmd ?? "";
+  const codexHerdr = preApproved?.codexHerdr;
+  const herdrJob = codexHerdr || preApproved?.coordinated;
+  const verifyJobPin = preApproved?.verifyJobPin;
+  // The verified workflow version `{ commit, root }`, or the cause `verifyJobPin` throws.
+  const pinCheck = (drift) => {
+    try {
+      return { pin: verifyJobPin({ drift }), cause: '' };
+    } catch (error) {
+      return { cause: error.message };
+    }
+  };
+  const codexHerdrUnavailable = runUnavailable.startsWith(CODEX_HERDR_UNAVAILABLE);
+  const recognizesWrappedPush = codexHerdr || codexHerdrUnavailable;
   // Check submitted text, including quoted paths, without importing the Git-spawning checkout module.
   if ((appRun || runUnavailable) && cmd.includes('fabraik-app-run')) {
     return 'a native app run session must leave its binding metadata to the coordinator';
-  }
-  // No agent session writes or quotes an approval record, so nothing an agent types can become one.
-  if (cmd.includes('Approved:')) {
-    const session = runSession ? 'a product manager run session' : preApproved ? 'a pre-approved run session' : carriedYes ? 'a carried push yes session' : 'an agent session';
-    return runUnavailable || `${session} does not write or quote an advance approval record: only the owner posts one, outside any agent session, so a command holding \`Approved:\` is refused`;
   }
   // Widen each letter of a name to its own class rather than using a regex `i` flag, which would
   // also loosen every option match in the same expression (`-F` for `-f`, `-D` for `-d`).
@@ -266,6 +424,28 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     let run = 0;
     while (text[at - 1 - run] === '\\') run += 1;
     return run % 2 === 1;
+  };
+  // The text each `$(…)` and backtick pair in `body` runs, a `$(…)` read to the matching `)` by counting parentheses
+  // alone and a backslash-escaped `$(` or backtick being text that opens or closes neither.
+  const substitutions = (body) => {
+    const texts = [];
+    for (let index = 0; index < body.length; index += 1) {
+      const backtick = body[index] === '`';
+      if ((!backtick && !body.startsWith('$(', index)) || escapedAt(body, index)) continue;
+      const start = index + (backtick ? 1 : 2);
+      let end = start;
+      if (backtick) {
+        while (end < body.length && (body[end] !== '`' || escapedAt(body, end))) end += 1;
+      } else {
+        for (let depth = 1; end < body.length; end += 1) {
+          if (body[end] === '(') depth += 1;
+          else if (body[end] === ')' && (depth -= 1) === 0) break;
+        }
+      }
+      texts.push(body.slice(start, end));
+      index = end;
+    }
+    return texts;
   };
   // A `#` here would start a word, and so a comment, at the start of `text` or after an unescaped
   // blank or operator. A backslash-newline pair joins two lines, so the character before the pairs
@@ -298,8 +478,11 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
   // which is paired by the part it read, so the lines between the shell's terminator and a later line
   // of that part are dropped as a body and not seen, a heredoc operator straight after an escaped `<`
   // (`\<<<EOF`), and a heredoc inside "$(…)", which the shell re-parses and this scan does not
-  // re-enter.
+  // re-enter. The body of a heredoc whose delimiter is unquoted, where the shell runs substitutions, is kept aside for
+  // the merge-watch rule; with no terminator line the shell reads that body to the end of the input, and so does the
+  // scan.
   const HEREDOC_OPERATOR = /^<<-?[ \t]*(['"]?)(\w+)\1/;
+  const liveHeredocBodies = [];
   const deheredoc = (() => {
     let out = '';
     let index = 0;
@@ -332,7 +515,7 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
       ) {
         const operator = HEREDOC_OPERATOR.exec(cmd.slice(index));
         if (operator) {
-          pending.push(operator[2]);
+          pending.push({ word: operator[2], live: operator[1] === '' });
           out += '<<HEREDOC';
           index += operator[0].length;
           continue;
@@ -341,9 +524,13 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
       out += ch;
       index += 1;
       if (ch === '\n' && !inSingle && !inDouble && pending.length) {
-        for (const word of pending) {
+        for (const { word, live } of pending) {
           const hit = new RegExp('^[ \\t]*' + word + '[ \\t]*\\r?$', 'm').exec(cmd.slice(index));
-          if (!hit) break;
+          if (!hit) {
+            if (live) liveHeredocBodies.push(cmd.slice(index));
+            break;
+          }
+          if (live) liveHeredocBodies.push(cmd.slice(index, index + hit.index));
           index += hit.index + hit[0].length;
         }
         pending = [];
@@ -363,7 +550,9 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
   // `out=$(gh pr merge ...)`), then the whole segment, before assignment stripping, must be the delivery form.
   const GH_PR_MERGE = new RegExp(String.raw`(?:^|[\s(\`&])${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*merge\b`);
   const GH_PR_READY = new RegExp(String.raw`(?:^|[\s(\`&])${GH_EXEC}\s+(?:${GH_REPO_OPT})*pr\s+(?:${GH_REPO_OPT})*ready\b`);
-  const REASON_MERGE = "gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused";
+  const REASON_MERGE = herdrJob
+    ? 'gh pr merge: a Herdr job merges only with `gh pr merge --squash --delete-branch --match-head-commit <head> <number>` as a plain command on its own, so GitHub checks the pinned head'
+    : "gh pr merge: only the delivery form `gh pr merge --auto --squash --delete-branch <number>`, alone in its command segment, is allowed; --auto lets GitHub merge once the required test check is green, and because the allow list runs that prefix unprompted anything else in the segment (--admin, a reordered or missing flag, a quoted, substituted or variable word, a wrapper) is refused";
   const REASON_READY = "gh pr ready: only `gh pr ready <number>` and `gh pr ready <number> --undo`, alone in their command segment, are allowed; the allow list runs that prefix unprompted, so anything else in the segment (a quoted, substituted or variable word, a redirection, a wrapper) is refused";
   // Git reads a configuration key in any letter case. A quoted span keeps the hooks-path key where
   // a carrier puts it, so the hooks-path rule reads the usual quoted spellings; a value stays
@@ -422,33 +611,30 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
   const ESCAPED = String.raw`\\[\s\S]`;
   const QUOTED_SPAN = String.raw`'[^']*'|"(?:[^"\\]|\\[\s\S])*"`;
   const WORD_PIECE = String.raw`${ESCAPED}|${QUOTED_SPAN}|[^\s;&|<>()]`;
+  // A word as the shell hands it on: each escaped character, quoted span and bare character of it, unquoted and joined.
+  const unquoteWord = (word) => word.replace(new RegExp(WORD_PIECE, 'g'), (piece) => (piece.length === 1 ? piece : piece[0] === '\\' ? piece[1] : piece.slice(1, -1)));
+  // A Herdr job's command is read as segments of such words, split at each unquoted separator, with the assignments
+  // that lead a segment left out.
+  if (herdrJob || herdrTerminal) {
+    const segments = [[]];
+    for (const [, word] of deheredoc.matchAll(new RegExp(String.raw`((?:${WORD_PIECE})+)|[;&|()\n]`, 'g'))) {
+      if (word === undefined) segments.push([]);
+      else if (segments.at(-1).length || !/^\w+=/.test(word)) segments.at(-1).push(unquoteWord(word));
+    }
+    if (clearsMarker(segments, checkout?.cwd)) return NEVER_CLEARS_MARKER;
+  }
   const payloadKeyed = deheredoc.replace(new RegExp(String.raw`${ESCAPED}|(?<=^|[\s(\`&;|])(${CONFIG_PARAMETERS_NAME}=)((?:${WORD_PIECE})*)|${QUOTED_SPAN}`, 'g'), (match, name, value) => {
     if (name === undefined) return match;
-    const payload = value.replace(new RegExp(WORD_PIECE, 'g'), (piece) => (piece.length === 1 ? piece : piece[0] === '\\' ? piece[1] : piece.slice(1, -1)));
+    const payload = unquoteWord(value);
     return HOLDS_HOOKS_PATH_ENTRY.test(payload) ? `${name}core.hooksPath` : match;
   });
   const wordsUnquoted = payloadKeyed.replace(/\\[\s\S]|(['"])(gh|pr|merge|ready)\1/g, (match, quote, word) => (word ? `${word} ` : match));
   const sanitized = wordsUnquoted.replace(new RegExp(String.raw`${ESCAPED}|${QUOTED_SPAN}`, 'g'), (span, offset, whole) => {
     if (span[0] === '\\') return span;
     if (span[0] === '"' && !span.includes('<<')) {
-      const body = span.slice(1, -1);
-      for (let index = 0; index < body.length; index += 1) {
-        const backtick = body[index] === '`';
-        if ((!backtick && !body.startsWith('$(', index)) || escapedAt(body, index)) continue;
-        const start = index + (backtick ? 1 : 2);
-        let end = start;
-        if (backtick) {
-          while (end < body.length && (body[end] !== '`' || escapedAt(body, end))) end += 1;
-        } else {
-          for (let depth = 1; end < body.length; end += 1) {
-            if (body[end] === '(') depth += 1;
-            else if (body[end] === ')' && (depth -= 1) === 0) break;
-          }
-        }
-        const text = body.slice(start, end);
+      for (const text of substitutions(span.slice(1, -1))) {
         substitutedReason ||= (GH_PR_MERGE.test(text) && REASON_MERGE) || (GH_PR_READY.test(text) && REASON_READY) || '';
         substitutedTexts.push(text);
-        index = end;
       }
     }
     if (/(?:^|[\s;&|(])(?:cd|-C)[ \t]+$/.test(whole.slice(0, offset)) && /^(?:[\s;&|)]|$)/.test(whole.slice(offset + span.length))) {
@@ -468,6 +654,8 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
   const GIT_INVOCATION_PREFIX = String.raw`${GIT_START}\s+(?:${GIT_OPT_WITH_ARG}|-\S+\s+)*`;
   const GIT_COMMIT = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}commit\b`);
   const GIT_PUSH = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}push\b`);
+  const GIT_WRAPPED_PUSH = new RegExp(String.raw`(?:^|[\s(\`&])${GIT_EXEC}\s+(?:${GIT_OPT_WITH_ARG}|-\S+\s+)*push\b`);
+  const isPush = (text) => GIT_PUSH.test(text) || (recognizesWrappedPush && GIT_WRAPPED_PUSH.test(text));
   const GIT_FILTER_BRANCH = new RegExp(String.raw`${GIT_INVOCATION_PREFIX}filter-branch\b`);
   // The worktree rules find every invocation anywhere in a segment, after a blank, `(`, a backtick or
   // `&`, as the merge and ready rules do, so a wrapper, a lone `&`, a subshell or an earlier harmless
@@ -578,14 +766,12 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     const passedOver = [...text.matchAll(WORKTREE_PROCESS_SUBSTITUTION)].map((substitution) => worktreeReason(substitution[1]));
     return [...reasons, ...passedOver].find(Boolean) ?? '';
   };
-  // A pre-approved run or carried push yes session publishes only a plain delivery form, as the whole command,
-  // from its own working directory.
-  // These refusals read nothing; publishCheck then reads the branch, origin and, for a run, the approval.
+  // A pre-approved run session publishes only a plain delivery form, as the whole command, from its own working
+  // directory. These refusals read nothing; publishCheck then reads the branch, origin, the setting, the card and, for
+  // a ready or merge, the saved write-up at HEAD and any saved card an owner answer on the card names.
   const boundedReason = (s, raw) => {
-    const refuse = (why) => `${carriedYes ? 'a carried push yes' : 'a pre-approved run'} session ${why}`;
-    // The launcher sets at most one publishing mark, so a session holding both is refused, not judged by either.
-    if (preApproved && carriedYes) return refuse('publishes nothing while the pre-approved run mark is also set');
-    const kind = GIT_PUSH.test(s) ? 'push' : GH_PR_CREATE.test(s) ? 'create' : GH_PR_READY.test(raw) ? 'ready' : 'merge';
+    const refuse = (why) => `a pre-approved run session ${why}`;
+    const kind = isPush(s) ? 'push' : GH_PR_CREATE.test(s) ? 'create' : GH_PR_READY.test(raw) ? 'ready' : 'merge';
     // Git for Windows reads an environment variable name in any letter case.
     const named = /\b(?:GH_REPO|GH_HOST|GIT_DIR|GIT_WORK_TREE)\b/i.exec(cmd)?.[0];
     if (named) return refuse(`publishes nothing from a command naming ${named}, which can point git or gh away from origin`);
@@ -601,16 +787,29 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     // The lone-command refusal above already keeps any `cd` from preceding it.
     if (/(?:^|\s)(?:-C|--git-dir|--work-tree)/.test(s)) return refuse('publishes nothing from a command holding -C, --git-dir or --work-tree, which can move it out of its own working directory');
     if (kind === 'ready' && !DELIVERY_READY.test(raw)) return refuse('marks ready only with `gh pr ready <number>`, with or without --undo');
-    if (kind === 'merge' && !DELIVERY_MERGE.test(raw)) return refuse('merges only with `gh pr merge --auto --squash --delete-branch <number>`');
-    return publishCheck(kind, raw, { ...(preApproved ?? carriedYes), cwd: checkout.cwd });
+    let pinnedMerge;
+    if (kind === 'merge') {
+      if (herdrJob) {
+        const pin = cmd === raw && PINNED_MERGE.exec(cmd);
+        if (!pin || !Number.isSafeInteger(Number(pin[2]))) return REASON_MERGE;
+        pinnedMerge = { head: pin[1], number: pin[2] };
+      } else if (!DELIVERY_MERGE.test(raw)) {
+        return refuse('merges only with `gh pr merge --auto --squash --delete-branch <number>`');
+      }
+    }
+    const pinnedSource = kind === 'push' && codexHerdr && cmd === raw ? PINNED_PUSH.exec(cmd)?.[1] : undefined;
+    // Only taking its own pull request back to draft stays open while a shared contract has moved on.
+    const { pin: workflowPin, cause: unpinned } = verifyJobPin ? pinCheck(!(kind === 'ready' && /--undo/.test(raw))) : { cause: '' };
+    if (unpinned) return refuse(`publishes nothing without its job's verified workflow version: ${unpinned}`);
+    return publishCheck(kind, raw, { ...preApproved, pinnedMerge, pinnedSource, workflowPin, cwd: checkout.cwd });
   };
   const ruleReason = (s, raw) => {
-    const publishes = GIT_PUSH.test(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(raw) || GH_PR_READY.test(raw);
-    if (runSession && publishes) {
-      return "a product manager run session does not publish: a built job waits for the owner's yes to push";
+    const publishes = isPush(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(raw) || GH_PR_READY.test(raw);
+    if (runMarkUnreadable && publishes) {
+      return `a desktop app session whose run mark cannot be read publishes nothing: ${runMarkUnreadable}`;
     }
     // An admitted publish still meets every rule below.
-    const boundedRefusal = (preApproved || carriedYes) && publishes ? boundedReason(s, raw) : '';
+    const boundedRefusal = preApproved && publishes ? boundedReason(s, raw) : '';
     if (boundedRefusal) return boundedRefusal;
     if (GIT_COMMIT.test(s) && NO_VERIFY.test(s)) {
       return "git commit --no-verify skips the pre-commit gates";
@@ -635,8 +834,9 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
       return "gh pr create without --draft skips the draft stage: open it as a draft (--draft/-d) so it is settled before CI runs";
     }
     // Auto-merge is GitHub's own wait-for-green: the agent's owner-authorised merge is queued, never
-    // forced. The allow list runs these two prefixes unprompted, so only the exact forms pass.
-    if (GH_PR_MERGE.test(raw) && !DELIVERY_MERGE.test(raw)) {
+    // forced. The allow list runs these two prefixes unprompted, so only the exact forms pass. A Herdr
+    // job's pinned merge form is judged in boundedReason.
+    if (GH_PR_MERGE.test(raw) && !herdrJob && !DELIVERY_MERGE.test(raw)) {
       return REASON_MERGE;
     }
     if (GH_PR_READY.test(raw) && !DELIVERY_READY.test(raw)) {
@@ -720,6 +920,28 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     if (!at.some((dir) => dir !== null && checkout.isRootCheckout(dir))) return '';
     return `git ${subcommand} in the integration checkout: the root stays on main and nothing is branched, switched, or committed there — open a job checkout with git worktree add and run it from there`;
   };
+  // A coordinated Claude job runs the merge watch only from its verified workflow version, so the delivery code that
+  // runs is the version the job started on; only the one-argument cleanup stays open while a shared contract has moved on.
+  // Runs and quoted spans are read on the text the quote reader reads, where a heredoc body is gone and a comment ends
+  // at its newline, with a `$'...'` string read as one span through its backslash escapes. A run whose `node` sits
+  // inside a quoted span holding a blank is that span's text, an argument of another command, unless a substitution in
+  // a double-quoted span or in the body of a heredoc with an unquoted delimiter runs it; a quoted word alone, such as
+  // `"node"`, is still the command. The scan above reads a `$'...'` string as a plain single-quoted one, so after one
+  // that holds an escaped quote its comment and heredoc reading can be wrong, as for every other rule.
+  const runsWatch = () => {
+    const textSpans = [...deheredoc.matchAll(new RegExp(String.raw`${ESCAPED}|\$'(?:[^'\\]|\\[\s\S])*'|${QUOTED_SPAN}`, 'g'))]
+      .filter((span) => span[0][0] !== '\\' && /\s/.test(span[0]));
+    const inText = (at) => textSpans.some((span) => span.index < at && at < span.index + span[0].length);
+    if (SYNTAX_CHECK.test(cmd.trim())) return false;
+    return [...deheredoc.matchAll(MERGE_WATCH_RUN)].some((run) => !inText(run.index))
+      || [...substitutedTexts, ...liveHeredocBodies.flatMap(substitutions)].some((text) => text.search(MERGE_WATCH_RUN) !== -1);
+  };
+  if (verifyJobPin && runsWatch()) {
+    const pinned = PINNED_WATCH_RUN.exec(cmd);
+    if (!pinned) return `a coordinated job runs the merge watch only as ${PINNED_WATCH}, the whole command, with plain arguments`;
+    const { cause: unpinned } = pinCheck(!watchDriftAllowed(pinned[1].split(' ').slice(1)));
+    if (unpinned) return `a coordinated job runs no merge watch without its verified workflow version: ${unpinned}`;
+  }
   // The separator AFTER each segment is kept: the integration-checkout walk needs to know whether a
   // `cd` that fails would stop the chain (`&&`) or let it run on where it was (`;`, a newline, `||`),
   // or ran in a pipeline subshell that moved nothing (`|`). First match wins.
@@ -735,6 +957,10 @@ export function blockReason(cmd, checkout, { runSession = false, preApproved = n
     }
     const hit = rootCheckoutReason(s) || ruleReason(s, raw);
     if (hit) return hit;
+  }
+  if (recognizesWrappedPush && substitutedTexts.some(isPush)) {
+    return codexHerdrUnavailable ? runUnavailable
+      : 'a pre-approved run session pushes only as a plain command on its own, so the checked destination stays bound';
   }
   return substitutedReason || substitutedTexts.map(worktreeReason).find(Boolean) || '';
 }

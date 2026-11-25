@@ -22,7 +22,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   try {
     command = parseCardArgs(args);
   } catch (err) {
-    output.error(`linear-card: ${err.message}\n${USAGE}`);
+    output.error(`linear-card: ${/** @type {Error} */ (err).message}\n${USAGE}`);
     return 2;
   }
   try {
@@ -32,7 +32,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     for (const row of rows) output.log(JSON.stringify(row));
     return 0;
   } catch (err) {
-    output.error(`linear-card: ${err.message}`);
+    output.error(`linear-card: ${/** @type {Error} */ (err).message}`);
     return 1;
   }
 }

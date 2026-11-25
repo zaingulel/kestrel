@@ -6,20 +6,25 @@
 // Each receipt also records the commit, the working-tree state and a fingerprint of the uncommitted changes (diff=); an unknown state never reads as clean.
 // Resolution of bare npm/npx runs with the platform set to win32, so removing it turns the npm/npx subtest red on every platform.
 // As the shim does, a CLI under the global prefix npm-prefix.js prints wins; always use the CLI beside the shim and the prefix subtest goes red.
-// Most subtests call `main` in-process and start no process; the command-line subtests keep Git off PATH; only the subtests of the clean tree, the untracked file and the diff fingerprint start real Git, because only real Git shows what its status flags and file contents report.
+// Each run gets its own temporary folder, removed afterwards and counted in the receipt's temp= field. The run-folder
+// cases point the parent temporary folder at a fresh folder no other process writes, so an entry there is the run's own.
+// Most subtests call `main` in-process; command-line cases keep Git off PATH unless the claim needs real repository state. Receipt applicability and fingerprint cases use real Git to observe commits, status and file content.
 
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn as spawnChild, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { main } from '../run-log.mjs';
+import { main, parseReceipt } from '../run-log.mjs';
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../run-log.mjs');
 const TEST_ENV = { ...process.env };
 delete TEST_ENV.RUN_LOG_RERUN_REASON;
+delete TEST_ENV.RUN_LOG_TEMP;
 const NO_POSIX_SIGNALS = process.platform === 'win32' && 'POSIX signals and /bin/sh do not exist on Windows; a killed child exits 1 there';
 
 function withDir(fn) {
@@ -49,7 +54,10 @@ function notFound() {
 
 // A spawnSync stand-in for `main`: `git` answers every Git call (node's own spawnSync gives real Git) and `child`
 // answers everything else. `calls` records each call's file, arguments and options.
+/** @typedef {(file: string, args: string[], options?: object) => { status?: number | null, signal?: string | null, error?: Error, stdout?: string | Buffer, stderr?: string | Buffer }} SpawnStub */
+/** @param {{ git?: SpawnStub, child?: SpawnStub }} [stubs] */
 function fakeSpawn({ git = notFound, child = () => ({ status: 0 }) } = {}) {
+  /** @type {{ file: string, args: string[], options?: object }[]} */
   const calls = [];
   const spawn = (file, args, options) => {
     calls.push({ file, args, options });
@@ -166,7 +174,9 @@ function runReal(repo, label, child) {
     spawnSync: fakeSpawn({ git: spawnSync, child }).spawnSync,
   });
   assert.equal(r.exitCode, 0, r.stderr);
-  return logLines(repo).at(-1);
+  const line = logLines(repo).at(-1);
+  assert.ok(line, 'the run wrote no receipt line');
+  return line;
 }
 
 const HEX16 = /^[0-9a-f]{16}$/;
@@ -186,13 +196,13 @@ function logLines(repo, file = 'job_42.md') {
 
 // Every stored receipt must retain complete timing, including unsuccessful child outcomes.
 function receiptFields(line) {
-  const match = line.match(/^- ([^ ]+) \| (.*?) \| `([^`]*)` \| (.*?) \| completed=([^ ]+) \| elapsedMs=(\d+(?:\.\d+)?) \| rerunReason=`([^`]*)` \| (head=.* tree=.*)$/);
+  const match = line.match(/^- ([^ ]+) \| (.*?) \| `([^`]*)` \| (.*?) \| completed=([^ ]+) \| elapsedMs=(\d+(?:\.\d+)?) \| rerunReason=`([^`]*)` \| (?:temp=(\S+) \| )?(?:scope=(?:root|unknown) \| )?(head=.* tree=.*)$/);
   assert.ok(match, line);
-  const [, started, label, argv, outcome, completed, elapsedMs, reason, state] = match;
+  const [, started, label, argv, outcome, completed, elapsedMs, reason, temp, state] = match;
   for (const timestamp of [started, completed]) {
     assert.equal(new Date(timestamp).toISOString(), timestamp, 'timestamps must be canonical UTC');
   }
-  return { started, label, command: JSON.parse(argv), outcome, completed, elapsedMs: Number(elapsedMs), rerunReason: JSON.parse(reason), state };
+  return { started, label, command: JSON.parse(argv), outcome, completed, elapsedMs: Number(elapsedMs), rerunReason: JSON.parse(reason), temp, state };
 }
 
 // Both clocks start fixed and move only when told. Each attempted Git call, even one that fails to start, advances them by a distinct, excluded amount.
@@ -242,7 +252,7 @@ test('command receipt contract', async (t) => {
         assert.deepEqual(receipt.command, command);
         assert.equal(receipt.outcome, outcome);
         assert.equal(receipt.elapsedMs, 137.5, 'the child advances 137.5 milliseconds; each Git call advances a separate second');
-        assert.equal(new Date(receipt.completed) - new Date(receipt.started), 2000, 'only the child advances UTC by two seconds');
+        assert.equal(new Date(receipt.completed).getTime() - new Date(receipt.started).getTime(), 2000, 'only the child advances UTC by two seconds');
         assert.equal(receipt.rerunReason, null, 'absent context must not imply a first run');
       }
     });
@@ -270,9 +280,12 @@ test('command receipt contract', async (t) => {
         assert.equal(r.exitCode, 0, r.stderr);
         const lines = logLines(dir, 'detached.md');
         const line = lines.at(-1);
+        assert.ok(line, 'the invocation wrote no receipt line');
         assert.equal(lines.length, index + 1, 'each invocation adds exactly one receipt line');
         assert.equal([...line.matchAll(/`/g)].length, 4, 'only the command and reason delimiters remain');
-        const field = line.match(/\| rerunReason=`([^`]*)` \|/)[1];
+        const reasonMatch = line.match(/\| rerunReason=`([^`]*)` \|/);
+        assert.ok(reasonMatch, 'the receipt line has no rerunReason field');
+        const field = reasonMatch[1];
         assert.doesNotMatch(field, /[|<>&\u007f-\u009f\u2028\u2029]/);
         assert.equal(receiptFields(line).rerunReason, reason);
       }
@@ -350,9 +363,10 @@ test('command receipt contract', async (t) => {
       withFakeNpm((npmDir) => {
         const hrtimeBigint = process.hrtime.bigint;
         const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+        assert.ok(platform, 'process.platform has no property descriptor');
         const savedEnv = { PATH: process.env.PATH, RUN_LOG_RERUN_REASON: process.env.RUN_LOG_RERUN_REASON };
         const ticks = [1000000000n, 1137500000n];
-        process.hrtime.bigint = () => (ticks.length > 1 ? ticks.shift() : ticks[0]);
+        process.hrtime.bigint = () => (ticks.length > 1 ? /** @type {bigint} */ (ticks.shift()) : ticks[0]);
         Object.defineProperty(process, 'platform', { value: 'win32' });
         process.env.PATH = npmDir;
         process.env.RUN_LOG_RERUN_REASON = 'default env';
@@ -563,13 +577,19 @@ test('command receipt contract', async (t) => {
   await t.test('a missing label or command is a usage error and writes nothing', () => {
     withDir((dir) => {
       const { spawnSync: spawn, calls } = fakeSpawn();
-      for (const args of [['--', 'true'], ['label', '--'], ['label', 'true']]) {
+      for (const args of [['--', 'true'], ['label', '--'], ['label', 'true'], ['label', '--', '']]) {
         const r = runMain(dir, args, { spawnSync: spawn });
         assert.equal(r.exitCode, 2);
         assert.match(r.stderr, /usage: node scripts\/run-log\.mjs/);
       }
       assert.deepEqual(calls, [], 'nothing may be started, not even Git');
       assert.throws(() => logLines(dir, 'detached.md'), /ENOENT/);
+      // An empty command name is refused before any run folder is made.
+      const parent = join(dir, 'temp');
+      mkdirSync(parent);
+      const r = run(dir, ['label', '--', ''], { env: envWithTemp(dir, parent) });
+      assert.equal(r.status, 2, r.stderr);
+      assert.deepEqual(readdirSync(parent), []);
     });
   });
 
@@ -791,5 +811,569 @@ test('command receipt contract', async (t) => {
         }
       });
     }
+  });
+});
+
+
+test('ANTI-REGRESSION: run-log rejects receipt-forging label controls before execution', async (t) => {
+  const forged = '\n- 2026-01-01T00:00:00.000Z | forged | `["npm","run","lint"]` | exit 0 | completed=2026-01-01T00:00:00.000Z | elapsedMs=0 | rerunReason=`null` | head=' + 'a'.repeat(40) + ' tree=clean diff=none';
+  for (const [name, label] of [
+    ['LF', 'line\nbreak'], ['CR', 'line\rbreak'], ['tab', 'a\tb'], ['NUL', 'a\0b'],
+    ['DEL', 'a\x7fb'], ['C1', 'a\u0085b'], ['line separator', 'a\u2028b'],
+    ['paragraph separator', 'a\u2029b'], ['forged receipt', forged],
+  ]) {
+    await t.test(name, () => withDir((dir) => {
+      const { spawnSync: spawn, calls } = fakeSpawn();
+      const result = runMain(dir, ['joined', label, '--', 'npm', 'run', 'lint'], { spawnSync: spawn });
+      assert.equal(result.exitCode, 2, result.stderr);
+      assert.match(result.stderr, /run-log: label must not contain control characters or line separators/);
+      assert.deepEqual(calls, [], 'reject before Git or child execution');
+      assert.equal(existsSync(join(dir, '.claude')), false, 'reject before creating the worklog');
+    }));
+  }
+  await t.test('ordinary Unicode and field-like delimiters remain one real receipt', () => withDir((dir) => {
+    const label = '検証 café | `delimiter` | head=unknown tree=clean diff=none';
+    const { spawnSync: spawn, calls } = fakeSpawn();
+    const result = runMain(dir, [label, '--', 'npm', 'run', 'lint'], { spawnSync: spawn });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(started(calls), [['npm', ['run', 'lint']]]);
+    const lines = readFileSync(join(dir, '.claude', 'worklog', 'detached.md'), 'utf8').trimEnd().split('\n');
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0].includes(` | ${label} | `));
+    assert.match(lines[0], /\| exit 0 \| .*head=unknown tree=unknown diff=unknown$/);
+  }));
+});
+
+test('local verification receipts match only the latest applicable repository state', async (t) => {
+  const module = await import(pathToFileURL(SCRIPT).href);
+  assert.equal(typeof module.reusableLocalChecks, 'function', 'run-log exposes the approved applicability seam');
+  const suite = ['node', '--test', '--test-concurrency=2', 'scripts/lib/*.test.mjs'];
+  const cases = [
+    'clean', 'dirty allowed', 'dirty refused', 'partial lint', 'partial scripts', 'latest failure',
+    'head mismatch', 'moving receipt', 'unknown receipt', 'tracked content changed', 'untracked content changed',
+    'malformed latest', 'truncated latest', 'truncated prefix', 'unreadable log', 'JSON payload', 'label payload',
+    'focused command', 'npm test', 'wrong package script', 'moving lookup', 'unknown lookup', 'no evidence',
+    'strict leftover',
+  ];
+  for (const scenario of cases) await t.test(scenario, () => withRepo((repo) => {
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { 'test:scripts': 'node --test --test-concurrency=2 "scripts/lib/*.test.mjs"' } }));
+    seed(repo);
+    git(repo, 'add', 'package.json');
+    git(repo, 'commit', '-q', '-m', 'package command');
+    const expectedHead = head(repo);
+    const log = join(repo, '.claude', 'worklog', 'job_42.md');
+    const record = (command, status = 0, label = 'synthetic command outcome') => {
+      const result = runMain(repo, [label, '--', ...command], { spawnSync: fakeSpawn({ git: spawnSync, child: () => ({ status }) }).spawnSync });
+      assert.equal(result.exitCode, status, result.stderr);
+    };
+    const dirty = ['dirty allowed', 'dirty refused', 'tracked content changed', 'untracked content changed'].includes(scenario);
+    if (dirty) writeFileSync(join(repo, scenario === 'untracked content changed' ? 'new.txt' : 'tracked.txt'), 'dirty one');
+    if (scenario !== 'partial scripts' && scenario !== 'no evidence') record(['npm', 'run', 'lint']);
+    if (scenario !== 'partial lint' && scenario !== 'no evidence') record(suite);
+    let lint = scenario !== 'partial scripts' && scenario !== 'no evidence';
+    let scripts = scenario !== 'partial lint' && scenario !== 'no evidence';
+    /** @type {string | null} */
+    let lookupHead = expectedHead;
+    if (scenario === 'latest failure') { record(['npm', 'run', 'lint'], 1); lint = false; }
+    if (scenario === 'strict leftover') {
+      // The command passes but leaves an entry in its run folder, so strict mode fails the run.
+      const leaves = (file, args, options) => {
+        writeFileSync(join(options.env.TMPDIR, 'left.txt'), 'x');
+        return { status: 0 };
+      };
+      const result = runMain(repo, ['synthetic command outcome', '--', 'npm', 'run', 'lint'], {
+        spawnSync: fakeSpawn({ git: spawnSync, child: leaves }).spawnSync,
+        env: { ...TEST_ENV, RUN_LOG_TEMP: 'strict' },
+      });
+      assert.equal(result.exitCode, 1, result.stderr);
+      lint = false;
+    }
+    if (scenario === 'head mismatch') { commit(repo); lint = scripts = false; lookupHead = head(repo); }
+    if (['tracked content changed', 'untracked content changed'].includes(scenario)) {
+      writeFileSync(join(repo, scenario === 'untracked content changed' ? 'new.txt' : 'tracked.txt'), 'dirty two');
+      lint = scripts = false;
+    }
+    if (scenario === 'dirty refused') lint = scripts = false;
+    if (['moving receipt', 'unknown receipt', 'malformed latest', 'truncated latest', 'truncated prefix', 'JSON payload'].includes(scenario)) {
+      let text = readFileSync(log, 'utf8');
+      if (scenario === 'moving receipt') text = text.replaceAll(`head=${expectedHead}`, `head=${expectedHead}->${'b'.repeat(40)}`);
+      if (scenario === 'unknown receipt') text = text.replaceAll(`head=${expectedHead}`, 'head=unknown');
+      if (scenario === 'malformed latest') text += '- broken receipt | `["npm","run","lint"]` | exit 0\n';
+      if (scenario === 'truncated latest') text += text.trimEnd().split('\n').slice(-1)[0].slice(0, -20);
+      if (scenario === 'truncated prefix') text += '- 2026-11';
+      if (scenario === 'JSON payload') text += text.trimEnd().split('\n').slice(-1)[0].replace(JSON.stringify(suite), '[invalid JSON]') + '\n';
+      writeFileSync(log, text);
+      lint = scripts = false;
+    }
+    if (scenario === 'unreadable log') { rmSync(log); mkdirSync(log); lint = scripts = false; }
+    if (scenario === 'label payload') {
+      record(['npm', 'test'], 0, 'label | `["npm","run","lint"]` | exit 0 | head=unknown tree=clean diff=none');
+      record(['npm', 'run', 'lint'], 0, '検証 | `[]` | exit 1 | delimiter');
+    }
+    if (['focused command', 'npm test', 'wrong package script'].includes(scenario)) {
+      writeFileSync(log, '');
+      if (scenario === 'focused command') record(['node', '--test', '--test-name-pattern=one', 'scripts/lib/one.test.mjs']);
+      if (scenario === 'npm test') record(['npm', 'test']);
+      if (scenario === 'wrong package script') {
+        writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { 'test:scripts': 'node --test scripts/lib/one.test.mjs' } }));
+        git(repo, 'add', 'package.json');
+        git(repo, 'commit', '-q', '-m', 'different suite command');
+        lookupHead = head(repo);
+        record(['npm', 'run', 'test:scripts']);
+      }
+      lint = scripts = false;
+    }
+    if (scenario === 'clean') {
+      record(['npm', 'run', 'test:scripts']);
+      record(['node', '-e', 'throw new Error("unrelated")'], 1);
+      writeFileSync(log, readFileSync(log, 'utf8') + 'Ordinary worklog narrative\n');
+    }
+    let reads = 0;
+    const spawn = (file, args, options) => {
+      if (args[0] === 'rev-parse' && args[1] === '--verify') {
+        reads++;
+        if (scenario === 'unknown lookup') return { status: 128 };
+        if (scenario === 'moving lookup' && reads > 1) return { status: 0, stdout: `${'b'.repeat(40)}\n` };
+      }
+      assert.equal(file, 'git', 'receipt content must never execute a command');
+      return spawnSync(file, args, options);
+    };
+    if (['moving lookup', 'unknown lookup'].includes(scenario)) { lookupHead = null; lint = scripts = false; }
+    assert.deepEqual(module.reusableLocalChecks({ cwd: repo, env: TEST_ENV, allowDirty: dirty && scenario !== 'dirty refused', spawnSync: spawn }), { head: lookupHead, lint, scripts });
+  }));
+});
+
+
+test('ANTI-REGRESSION: raw fingerprints survive index normalization without accepting changed bytes', async () => {
+  const { reusableLocalChecks } = await import(pathToFileURL(SCRIPT).href);
+  withRepo((repo) => {
+    git(repo, 'config', 'core.autocrlf', 'true');
+    seed(repo);
+    const tracked = join(repo, 'tracked.cmd');
+    writeFileSync(tracked, 'first\r\nsecond\r\n');
+    utimesSync(tracked, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'));
+    git(repo, 'add', 'tracked.cmd');
+    git(repo, 'commit', '-q', '-m', 'tracked command');
+    writeFileSync(join(repo, 'tracked.txt'), 'dirty\n');
+    const expectedHead = head(repo);
+    const result = runMain(repo, ['synthetic lint outcome', '--', 'npm', 'run', 'lint'], {
+      spawnSync: fakeSpawn({ git: spawnSync, child: () => ({ status: 0 }) }).spawnSync,
+    });
+    assert.equal(result.exitCode, 0, result.stderr);
+    const lookup = () => reusableLocalChecks({ cwd: repo, env: TEST_ENV, allowDirty: true });
+    assert.deepEqual(lookup(), { head: expectedHead, lint: true, scripts: false });
+    const original = readFileSync(tracked);
+    git(repo, '-c', 'core.autocrlf=false', 'add', '--renormalize', 'tracked.cmd');
+    assert.deepEqual(readFileSync(tracked), original);
+    assert.deepEqual(lookup(), { head: expectedHead, lint: true, scripts: false });
+    writeFileSync(tracked, 'first\nsecond\n');
+    assert.deepEqual(lookup(), { head: expectedHead, lint: false, scripts: false });
+  });
+});
+
+test('ANTI-REGRESSION: local receipts require verified repository-root execution', async (t) => {
+  const { reusableLocalChecks } = await import(pathToFileURL(SCRIPT).href);
+  const cases = [
+    'nested lint cannot qualify root lint',
+    'root lint remains reusable with an explicit root marker',
+    'legacy unscoped root receipt requires fallback',
+    'unavailable Git root emits unknown scope',
+    'symlinked root identifies the same physical execution directory',
+  ];
+  for (const scenario of cases) await t.test(scenario, {
+    skip: scenario.startsWith('symlinked') && process.platform === 'win32' && 'directory symlinks need elevated rights on Windows',
+  }, () => withRepo((repo) => {
+    const nested = join(repo, 'child');
+    mkdirSync(nested);
+    writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { lint: `node -e "process.exit(${scenario.startsWith('nested') ? 7 : 0})"` } }));
+    writeFileSync(join(nested, 'package.json'), JSON.stringify({ scripts: { lint: 'node -e "process.exit(0)"' } }));
+    seed(repo);
+    git(repo, 'add', 'package.json', 'child/package.json');
+    git(repo, 'commit', '-q', '-m', 'root and nested lint commands');
+    const expectedHead = head(repo);
+    const log = join(repo, '.claude', 'worklog', 'job_42.md');
+    const lookup = () => reusableLocalChecks({ cwd: repo, env: TEST_ENV });
+    const command = ['scope check', '--', 'npm', 'run', 'lint'];
+    if (scenario.startsWith('nested')) {
+      const child = run(nested, command);
+      assert.equal(child.status, 0, child.stderr);
+      const [line] = logLines(repo);
+      assert.equal(receiptFields(line).outcome, 'exit 0');
+      assert.equal(receiptFields(line).state, `head=${expectedHead} tree=clean diff=none`);
+      const root = run(repo, command);
+      assert.equal(root.status, 7, root.stderr);
+      assert.equal(receiptFields(logLines(repo).at(-1)).outcome, 'exit 7');
+      // Keep only the genuine nested execution; the failed root run must not mask erroneous reuse.
+      writeFileSync(log, `${line}\n`);
+      assert.deepEqual(lookup(), { head: expectedHead, lint: false, scripts: false });
+      assert.match(line, / \| scope=unknown \| head=/);
+      return;
+    }
+    if (scenario.startsWith('unavailable')) {
+      const result = runMain(repo, command, { env: process.env, spawnSync: (file, args, options) => {
+        if (file === 'git' && args[0] === 'rev-parse' && args[1] === '--show-toplevel') {
+          return { status: 128, stdout: '' };
+        }
+        return spawnSync(file, args, options);
+      } });
+      assert.equal(result.exitCode, 0, result.stderr);
+      const [line] = logLines(repo);
+      assert.equal(receiptFields(line).outcome, 'exit 0');
+      assert.equal(receiptFields(line).state, `head=${expectedHead} tree=clean diff=none`);
+      assert.deepEqual(lookup(), { head: expectedHead, lint: false, scripts: false });
+      assert.match(line, / \| scope=unknown \| head=/);
+      return;
+    }
+    if (scenario.startsWith('symlinked')) {
+      withDir((dir) => {
+        const alias = join(dir, 'root-alias');
+        symlinkSync(repo, alias, 'dir');
+        const result = runMain(alias, command, { spawnSync });
+        assert.equal(result.exitCode, 0, result.stderr);
+      });
+    } else {
+      const result = run(repo, command);
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const [line] = logLines(repo);
+    assert.equal(receiptFields(line).outcome, 'exit 0');
+    assert.equal(receiptFields(line).state, `head=${expectedHead} tree=clean diff=none`);
+    if (scenario.startsWith('legacy')) {
+      writeFileSync(log, line.replace(' | scope=root | head=', ' | head=') + '\n');
+      assert.deepEqual(lookup(), { head: expectedHead, lint: false, scripts: false });
+      return;
+    }
+    assert.deepEqual(lookup(), { head: expectedHead, lint: true, scripts: false });
+    assert.match(line, / \| scope=root \| head=/);
+  }));
+});
+
+// A fresh folder removed when the test ends, even when an assertion fails.
+function freshDir(t, prefix) {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+// Git off PATH, and every temporary-folder variable a platform reads pointing at `parent`.
+function envWithTemp(dir, parent, extra = {}) {
+  return envWithPath(dir, { TMPDIR: parent, TMP: parent, TEMP: parent, ...extra });
+}
+
+// A `node -e` body taking the marker file as process.argv[1]: it runs `entries`, which write into the temporary folder
+// the command was given, then records that folder and any `recorded` values in the marker. The marker is renamed into
+// place so it is never read half-written.
+function recordingCommand(entries) {
+  return [
+    "const { mkdirSync, renameSync, writeFileSync } = require('node:fs');",
+    "const { join } = require('node:path');",
+    "const { tmpdir } = require('node:os');",
+    'let recorded = {};',
+    entries,
+    'writeFileSync(`${process.argv[1]}.part`, JSON.stringify({ folder: tmpdir(), ...recorded }));',
+    'renameSync(`${process.argv[1]}.part`, process.argv[1]);',
+  ].join('\n');
+}
+
+// True once the pid no longer runs: gone from the process table, or a zombie its new parent has not reaped yet.
+function processGone(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ESRCH') return true;
+    throw error;
+  }
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  return stat.slice(stat.lastIndexOf(')') + 2).startsWith('Z');
+}
+
+describe('run temporary folder', () => {
+  test('a run temporary folder is removed and its receipt counts the entries cleared', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const marker = join(dir, 'marker.json');
+    // Two top-level entries, one of them a folder holding a file: the count is of top-level entries only.
+    const entries = "writeFileSync(join(tmpdir(), 'left.txt'), 'x'); mkdirSync(join(tmpdir(), 'left-dir')); writeFileSync(join(tmpdir(), 'left-dir', 'inner.txt'), 'y');";
+    const r = run(dir, ['temp cleared', '--', process.execPath, '-e', `${recordingCommand(entries)}\nprocess.exit(3);`, marker], {
+      env: envWithTemp(dir, parent),
+    });
+    assert.equal(r.status, 3, r.stderr);
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+    const { folder } = JSON.parse(readFileSync(marker, 'utf8'));
+    assert.equal(dirname(folder), parent, 'the command must run in a folder of its own under the parent');
+    assert.match(basename(folder), /^fabraik-run-[0-9a-f]{12}-/);
+    assert.equal(existsSync(folder), false, 'the run folder must be removed');
+    assert.equal(detachedReceipt(dir).temp, process.platform === 'linux' ? 'cleared-2' : 'cleared-2-unchecked');
+  });
+
+  test('strict mode fails a run that left an entry and names it', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const marker = join(dir, 'marker.json');
+    const entries = "writeFileSync(join(tmpdir(), 'strict-leftover.txt'), 'x');";
+    const r = run(dir, ['temp strict', '--', process.execPath, '-e', recordingCommand(entries), marker], {
+      env: envWithTemp(dir, parent, { RUN_LOG_TEMP: 'strict' }),
+    });
+    assert.equal(r.status, 1, 'a passing command that left an entry must fail in strict mode');
+    assert.match(`${r.stdout}${r.stderr}`, /strict-leftover\.txt/);
+    assert.equal(detachedReceipt(dir).outcome, 'exit 1', 'the receipt must record the failure run-log returned');
+  });
+
+  test('a receipt without a temp field still parses', () => {
+    const head = 'a'.repeat(40);
+    const current = `- 2026-11-22T10:00:00.000Z | lint | \`["npm","run","lint"]\` | exit 0 | completed=2026-11-22T10:00:01.000Z | elapsedMs=12 | rerunReason=\`null\` | scope=root | head=${head} tree=clean diff=none`;
+    // The run-folder receipt adds temp= before scope=; receipts already in work logs, which lack it, keep parsing.
+    const withTemp = current.replace(' | scope=root | ', ' | temp=cleared-2 | scope=root | ');
+    for (const line of [current, withTemp]) {
+      const receipt = parseReceipt(line);
+      assert.ok(receipt, `the receipt must parse: ${line}`);
+      assert.deepEqual(
+        { command: receipt.command, outcome: receipt.outcome, head: receipt.head, tree: receipt.tree, diff: receipt.diff },
+        { command: ['npm', 'run', 'lint'], outcome: 'exit 0', head, tree: 'clean', diff: 'none' },
+      );
+    }
+  });
+
+  test('a background process holding the run folder is stopped', {
+    skip: process.platform !== 'linux' && "only Linux shows another process's environment under /proc",
+  }, (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const marker = join(dir, 'marker.json');
+    // A detached grandchild inherits the command's TMPDIR and outlives it; the command also leaves one entry.
+    const entries = [
+      "const { spawn } = require('node:child_process');",
+      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { detached: true, stdio: 'ignore' });",
+      'child.unref();',
+      'recorded = { pid: child.pid };',
+      "writeFileSync(join(tmpdir(), 'kept.txt'), 'x');",
+    ].join('\n');
+    const r = run(dir, ['temp stopped', '--', process.execPath, '-e', recordingCommand(entries), marker], { env: envWithTemp(dir, parent) });
+    const { folder, pid } = JSON.parse(readFileSync(marker, 'utf8'));
+    t.after(() => {
+      if (!processGone(pid)) process.kill(pid, 'SIGKILL');
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(processGone(pid), true, `the background process ${pid} must be stopped`);
+    assert.equal(existsSync(folder), false, 'the run folder must be removed');
+    assert.deepEqual(readdirSync(parent), []);
+    assert.equal(detachedReceipt(dir).temp, 'cleared-1-stopped-1');
+  });
+
+  test('an interrupted run still removes its folder', { skip: NO_POSIX_SIGNALS }, async (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const marker = join(dir, 'marker.json');
+    // The command waits after writing its marker, so the interrupt reaches it mid-run.
+    const command = `${recordingCommand("writeFileSync(join(tmpdir(), 'interrupted.txt'), 'x');")}\nsetTimeout(() => {}, 60000);`;
+    // run-log leads its own process group, so the interrupt reaches it and its command as a terminal's Ctrl-C does.
+    const child = spawnChild(process.execPath, [SCRIPT, 'temp interrupted', '--', process.execPath, '-e', command, marker], {
+      cwd: dir,
+      env: envWithTemp(dir, parent),
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = once(child, 'exit');
+    const group = child.pid;
+    assert.ok(group, 'run-log did not start');
+    t.after(() => {
+      try {
+        process.kill(-group, 'SIGKILL');
+      } catch {
+        // The group has already exited.
+      }
+    });
+    for (let waited = 0; !existsSync(marker); waited += 20) {
+      assert.ok(waited < 10000, 'the command never wrote its marker');
+      await delay(20);
+    }
+    process.kill(-group, 'SIGINT');
+    await exited;
+    const { folder } = JSON.parse(readFileSync(marker, 'utf8'));
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+    assert.equal(existsSync(folder), false, 'the run folder must be removed');
+    assert.ok(existsSync(join(dir, '.claude', 'worklog', 'detached.md')), 'the interrupted run must still write its receipt');
+    assert.equal(detachedReceipt(dir).temp, process.platform === 'linux' ? 'cleared-1' : 'cleared-1-unchecked');
+  });
+
+  test('an interrupt sent to the logger alone still clears the folder and ends the logger by it', { skip: NO_POSIX_SIGNALS }, async (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const marker = join(dir, 'marker.json');
+    const go = join(dir, 'go');
+    // The command writes its marker, then runs until the test creates `go`: the interrupt reaches the logger alone.
+    const command = `${recordingCommand("writeFileSync(join(tmpdir(), 'interrupted.txt'), 'x');")}
+const wait = setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(go)})) clearInterval(wait); }, 20);`;
+    const child = spawnChild(process.execPath, [SCRIPT, 'temp logger interrupted', '--', process.execPath, '-e', command, marker], {
+      cwd: dir,
+      env: envWithTemp(dir, parent),
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = once(child, 'exit');
+    const group = child.pid;
+    assert.ok(group, 'run-log did not start');
+    t.after(() => {
+      try {
+        process.kill(-group, 'SIGKILL');
+      } catch {
+        // The group has already exited.
+      }
+    });
+    for (let waited = 0; !existsSync(marker); waited += 20) {
+      assert.ok(waited < 10000, 'the command never wrote its marker');
+      await delay(20);
+    }
+    process.kill(group, 'SIGINT');
+    writeFileSync(go, '');
+    const [code, signal] = await exited;
+    const { folder } = JSON.parse(readFileSync(marker, 'utf8'));
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+    assert.equal(existsSync(folder), false, 'the run folder must be removed');
+    assert.equal(detachedReceipt(dir).outcome, 'exit 0', 'the command runs to its own end and its receipt is written');
+    assert.deepEqual({ code, signal }, { code: null, signal: 'SIGINT' }, 'the logger must end by the interrupt it was sent');
+  });
+
+  // Starts the logger on a dirty fixture repository whose fake Git, first on PATH, passes every call to real Git except
+  // that the first `add`, inside the fingerprint, writes a marker and waits for `go`. Once the logger is fingerprinting,
+  // sends SIGINT to `target(pid)`, writes `go` and awaits the logger's exit. Returns how it ended and the paths to check.
+  const interruptPreparation = async (t, label, target) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const bin = freshDir(t, 'run-log-bin-');
+    const marker = join(dir, 'git-adding');
+    const go = join(dir, 'go');
+    const ran = join(dir, 'ran');
+    spawnSync('git', ['init', '-q', '-b', 'job/42'], { cwd: dir });
+    seed(dir);
+    // A dirty tree, so the snapshot before the command fingerprints it in a folder under the parent.
+    writeFileSync(join(dir, 'tracked.txt'), 'changed\n');
+    const realGit = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(realGit, 'real Git must be on PATH');
+    const fakeGitBody = `const { existsSync, writeFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+const pass = () => process.exit(spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit' }).status ?? 1);
+if (!args.includes('add') || existsSync(${JSON.stringify(marker)})) pass();
+else {
+  writeFileSync(${JSON.stringify(marker)}, '');
+  const wait = setInterval(() => { if (existsSync(${JSON.stringify(go)})) { clearInterval(wait); pass(); } }, 20);
+}`;
+    writeFileSync(join(bin, 'git.cjs'), fakeGitBody);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nexec '${process.execPath}' '${join(bin, 'git.cjs')}' "$@"\n`, { mode: 0o755 });
+    const command = `require('node:fs').writeFileSync(${JSON.stringify(ran)}, '');`;
+    const child = spawnChild(process.execPath, [SCRIPT, label, '--', process.execPath, '-e', command], {
+      cwd: dir,
+      env: envWithTemp(bin, parent),
+      detached: true,
+      stdio: 'ignore',
+    });
+    const exited = once(child, 'exit');
+    const group = child.pid;
+    assert.ok(group, 'run-log did not start');
+    t.after(() => {
+      try {
+        process.kill(-group, 'SIGKILL');
+      } catch {
+        // The group has already exited.
+      }
+    });
+    for (let waited = 0; !existsSync(marker); waited += 20) {
+      assert.ok(waited < 10000, 'the logger never fingerprinted the tree');
+      await delay(20);
+    }
+    process.kill(target(group), 'SIGINT');
+    writeFileSync(go, '');
+    const [code, signal] = await exited;
+    return { code, signal, ran, receipt: join(dir, '.claude', 'worklog', 'job_42.md'), parent };
+  };
+
+  test('an interrupt while the logger prepares ends it before the command starts and leaves nothing behind', { skip: NO_POSIX_SIGNALS }, async (t) => {
+    // A terminal's Ctrl-C reaches the whole foreground process group: the logger and the Git call it is waiting on.
+    const { code, signal, ran, receipt, parent } = await interruptPreparation(t, 'temp preparation interrupted', (group) => -group);
+    assert.deepEqual({ code, signal }, { code: null, signal: 'SIGINT' }, 'the logger must end by the interrupt it was sent');
+    assert.equal(existsSync(ran), false, 'the command must never start');
+    assert.equal(existsSync(receipt), false, 'no receipt must be written');
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+  });
+
+  test('an interrupt sent to the logger alone while it prepares starts no command and leaves nothing behind', { skip: NO_POSIX_SIGNALS }, async (t) => {
+    // The interrupt reaches the logger only: the Git call it is waiting on runs on and succeeds.
+    const { code, signal, ran, receipt, parent } = await interruptPreparation(t, 'temp preparation interrupted alone', (group) => group);
+    assert.deepEqual({ code, signal }, { code: null, signal: 'SIGINT' }, 'the logger must end by the interrupt it was sent');
+    assert.equal(existsSync(ran), false, 'the command must never start');
+    assert.equal(existsSync(receipt), false, 'no receipt must be written');
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+  });
+
+  test('a Git call interrupted on its own while the logger prepares starts no command and leaves nothing behind', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    // The run folder is made under os.tmpdir(), which reads the real environment, not the injected one, and reads TMPDIR on
+    // POSIX and TEMP or TMP on Windows.
+    const saved = Object.fromEntries(['TMPDIR', 'TEMP', 'TMP'].map((key) => [key, process.env[key]]));
+    Object.assign(process.env, { TMPDIR: parent, TEMP: parent, TMP: parent });
+    t.after(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    // The first Git call of the preparation alone gets the interrupt; a later Git call would find no Git, so the list of
+    // calls shows whether preparation went on.
+    let interruptedCall;
+    const git = (file, args) => {
+      if (interruptedCall) return notFound();
+      interruptedCall = [file, ...args];
+      return { status: null, signal: 'SIGINT' };
+    };
+    const fake = fakeSpawn({ git });
+    const result = runMain(dir, ['git call interrupted alone', '--', 'the-command'], { spawnSync: fake.spawnSync });
+    assert.deepEqual(fake.calls.map(({ file, args }) => [file, ...args]), [interruptedCall], 'preparation must make no call after the interrupted Git call');
+    assert.deepEqual({ exitCode: result.exitCode, signal: result.signal }, { exitCode: 130, signal: 'SIGINT' });
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+    assert.equal(existsSync(join(dir, '.claude')), false, 'no receipt must be written');
+  });
+
+  // The run folder is the command's temporary folder, where Node's compile cache lands unless the run turns it off.
+  const withoutCompileCache = (dir, parent, extra = {}) => {
+    const env = Object.entries(envWithTemp(dir, parent)).filter(([key]) => key !== 'NODE_COMPILE_CACHE' && key !== 'NODE_DISABLE_COMPILE_CACHE');
+    return { ...Object.fromEntries(env), ...extra };
+  };
+
+  test('a command that enables the compile cache leaves the run folder empty', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const module = join(dir, 'cached-module.cjs');
+    writeFileSync(module, 'module.exports = 1;\n');
+    // enableCompileCache() writes node-compile-cache under the temporary folder as the module loads.
+    const code = "require('node:module').enableCompileCache(); require(process.argv[1]);";
+    const r = run(dir, ['temp compile cache', '--', process.execPath, '-e', code, module], {
+      env: withoutCompileCache(dir, parent, { RUN_LOG_TEMP: 'strict' }),
+    });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.deepEqual(readdirSync(parent), [], 'the parent temporary folder must gain no entry');
+    assert.equal(detachedReceipt(dir).temp, process.platform === 'linux' ? 'empty' : 'empty-unchecked');
+  });
+
+  test('outside strict mode the compile cache setting is left to the command', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const code = 'console.log(JSON.stringify({ disable: process.env.NODE_DISABLE_COMPILE_CACHE ?? null }));';
+    const r = run(dir, ['temp default cache', '--', process.execPath, '-e', code], { env: withoutCompileCache(dir, parent) });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout.split('\n').find((line) => line.startsWith('{')) ?? ''), { disable: null });
+  });
+
+  test('an explicit compile cache location is passed through', (t) => {
+    const dir = freshDir(t, 'run-log-');
+    const parent = freshDir(t, 'run-log-parent-');
+    const cache = freshDir(t, 'run-log-cache-');
+    const code = 'console.log(JSON.stringify({ cache: process.env.NODE_COMPILE_CACHE, disable: process.env.NODE_DISABLE_COMPILE_CACHE ?? null }));';
+    const r = run(dir, ['temp explicit cache', '--', process.execPath, '-e', code], {
+      env: withoutCompileCache(dir, parent, { NODE_COMPILE_CACHE: cache, RUN_LOG_TEMP: 'strict' }),
+    });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.deepEqual(JSON.parse(r.stdout.split('\n').find((line) => line.startsWith('{')) ?? ''), { cache, disable: null });
   });
 });

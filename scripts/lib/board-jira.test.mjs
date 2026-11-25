@@ -156,7 +156,12 @@ test('Jira board reads complete project data and refuses incomplete evidence', a
   assert.deepEqual(api.jiraCardDetails(provider().exec, ['ENG-2']).get('ENG-2'), {
     number: 'ENG-2', body: 'Acceptance\ntext\nHeading\none\ntwo\nquoted\ncode\ncell1\tcell2\n@Alice :wave:',
     whatToBuildUnread: 'not extracted from a native Jira body without a What to build heading', parent: 'ENG-1',
-    comments: ['Claim: first, Codex, 2026-01-01T00:00Z', 'second'], commentCount: 2, commentsUnavailable: null,
+    comments: ['Claim: first, Codex, 2026-01-01T00:00Z', 'second'],
+    commentSources: [
+      { login: 'acct-self', url: SITE + '/browse/ENG-2?focusedCommentId=30001' },
+      { login: 'acct-other', url: SITE + '/browse/ENG-2?focusedCommentId=30002' },
+    ],
+    commentCount: 2, commentsUnavailable: null,
   });
   for (const pull of [{ ...clone(PR), draft: true }, { ...clone(PR), state: 'closed', merged_at: '2026-01-01T00:00:00Z' }]) {
     const data = provider({ pulls: [[pull]] });
@@ -425,12 +430,12 @@ test('Jira board batches complete child evidence without hiding foreign children
   assert.equal(batches.length, 2, '51 scanned parent keys require exactly two native POST child batches');
   assert.equal(native.calls.filter(({ method, query }) => method === 'GET' && /^parent = /.test(query?.jql ?? '')).length, 0);
   assert.ok(batches[1].body.jql.includes('ENG-1051'), 'Done issues still receive child evidence');
-  for (const [scenario, cause] of [
+  for (const [scenario, cause] of /** @type {[string, RegExp][]} */ ([
     ['foreign', /outside configured project|different project|foreign/i],
     ['cursor', /cursor|progress|incomplete/i],
     ['parent', /parent|identity|ID/i],
     ['duplicate', /duplicate/i],
-  ]) {
+  ])) {
     const invalid = fixture(scenario);
     assert.throws(() => readJiraBoard(invalid.exec, invalid.gh), cause, scenario);
   }
@@ -536,12 +541,25 @@ test('612 fix D: a Jira card with a native What to build heading prints that sec
   const card = api.normalizeItem(api.readJiraBoard(native.exec, native.gh).items[1]);
   const details = api.jiraCardDetails(native.exec, ['ENG-2']);
   const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
-  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files, readyOrder: null });
   const from = summary.findIndex((line) => line.startsWith('what to build:'));
   assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
     'what to build: 1 line(s)',
     '| Ship it.',
   ]);
+});
+
+test('a native Jira What to build section keeps a blank line between its paragraphs, so its first paragraph is the outcome', async (t) => {
+  const api = await reader(t);
+  const heading = (text) => ({ type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text }] });
+  const paragraph = (text) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+  const issues = clone(ISSUES);
+  issues['ENG-2'].fields.description = { type: 'doc', version: 1, content: [
+    heading('What to build'), paragraph('First.'), paragraph('Second.'), heading('Acceptance criteria'), paragraph('Criteria text.'),
+  ] };
+  const detail = api.jiraCardDetails(provider({ issues }).exec, ['ENG-2']).get('ENG-2');
+  assert.equal(detail.whatToBuild, 'First.\n\nSecond.');
+  assert.deepEqual(api.whatToBuildSection(detail), { lines: ['First.', '', 'Second.'] });
 });
 
 test('612 fix F: a Jira card whose body holds a literal Markdown What to build section, as jira-card.mjs writes it, still prints that section', async (t) => {
@@ -556,7 +574,7 @@ test('612 fix F: a Jira card whose body holds a literal Markdown What to build s
   const card = api.normalizeItem(api.readJiraBoard(literal.exec, literal.gh).items[1]);
   const details = api.jiraCardDetails(literal.exec, ['ENG-2']);
   const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
-  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files, readyOrder: null });
   const from = summary.findIndex((line) => line.startsWith('what to build:'));
   assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
     'what to build: 1 line(s)',
@@ -575,7 +593,7 @@ test('612 fix J: a Jira card with a code block and no native What to build headi
   const card = api.normalizeItem(api.readJiraBoard(native.exec, native.gh).items[1]);
   const details = api.jiraCardDetails(native.exec, ['ENG-2']);
   const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
-  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files, readyOrder: null });
   const from = summary.findIndex((line) => line.startsWith('what to build:'));
   assert.deepEqual(summary.slice(from, summary.findIndex((line) => line.startsWith('card text:'))), [
     'what to build: not extracted from a native Jira body without a What to build heading, read the card text',

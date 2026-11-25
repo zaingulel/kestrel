@@ -12,6 +12,7 @@ import { rewriteTestCommand } from '../../scripts/lib/test-output-filter.mjs';
 let raw = "";
 process.stdin.on("data", (d) => (raw += d));
 process.stdin.on("end", () => {
+  /** @type {unknown} */
   let toolInput = null;
   // Unparseable stdin = the harness payload shape changed. Say so and leave the command alone;
   // an unfiltered run only costs context.
@@ -22,7 +23,7 @@ process.stdin.on("end", () => {
     process.exit(0);
   }
   if (typeof toolInput !== "object" || toolInput === null || Array.isArray(toolInput)) process.exit(0);
-  const rewritten = rewriteTestCommand(toolInput.command ?? "");
+  const rewritten = rewriteTestCommand(/** @type {{ command?: unknown }} */ (toolInput).command ?? "");
   if (!rewritten) process.exit(0);
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {

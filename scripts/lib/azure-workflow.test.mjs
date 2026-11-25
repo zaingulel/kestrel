@@ -88,10 +88,10 @@ test('Azure commands route native card identities without GitHub issue writes', 
   const { main: board } = await toolkit.load('board.mjs');
   const { main: move } = await toolkit.load('board-move.mjs');
   const { main: publish } = await toolkit.load('verify-issue-publish.mjs');
-  const run = (main, args, provider) => {
+  const run = async (main, args, provider) => {
     const stdout = [];
     const stderr = [];
-    const status = main(args, {
+    const status = await main(args, {
       azureExec: provider.exec, ghExec: provider.gh,
       jiraExec: () => { throw new Error('must not call Jira'); },
       linearExec: () => { throw new Error('must not call Linear'); },
@@ -102,7 +102,7 @@ test('Azure commands route native card identities without GitHub issue writes', 
   };
 
   const moving = native();
-  const moved = run(move, ['AB-299', 'In progress'], moving);
+  const moved = await run(move, ['AB-299', 'In progress'], moving);
   assert.equal(moved.status, 0, moved.stderr.join('\n'));
   assert.deepEqual(moved.stdout, ['board-move: AB-299 → In progress']);
   const writes = moving.calls.filter(({ method }) => method === 'PATCH');
@@ -112,7 +112,7 @@ test('Azure commands route native card identities without GitHub issue writes', 
   assert.equal(moving.ghCalls.length, 0);
 
   const listing = native();
-  const listed = run(board, ['--all', '--json'], listing);
+  const listed = await run(board, ['--all', '--json'], listing);
   assert.equal(listed.status, 0, listed.stderr.join('\n'));
   assert.deepEqual(JSON.parse(listed.stdout[0]), [
     { number: 'AB-299', status: 'Ready', title: 'Native task', routing: null, parked: false, labels: ['task'], state: 'OPEN', assignees: [], openBlockers: [], closingPullRequests: [], subIssues: { total: 0, completed: 0 } },
@@ -121,7 +121,7 @@ test('Azure commands route native card identities without GitHub issue writes', 
   assert.ok(listing.calls.some(({ path }) => path === PROJECT_PATH + '/workitemsbatch'));
 
   const publication = native();
-  const published = run(publish, ['AB-299'], publication);
+  const published = await run(publish, ['AB-299'], publication);
   assert.equal(published.status, 0, published.stderr.join('\n'));
   assert.ok(publication.calls.some(({ method, path }) => method === 'GET' && path === ITEM_PATH));
   assert.match(published.stdout.join('\n'), /Statuses verified for AB-299/);
@@ -131,7 +131,7 @@ test('Azure commands route native card identities without GitHub issue writes', 
 
   for (const [main, args] of [[move, ['299', 'In progress']], [move, ['--batch', '299:In progress']], [publish, ['299']]]) {
     const provider = native();
-    const rejected = run(main, args, provider);
+    const rejected = await run(main, args, provider);
     assert.notEqual(rejected.status, 0);
     assert.deepEqual(rejected.stdout, []);
     assert.ok(rejected.stderr.length > 0);
@@ -196,7 +196,7 @@ test('Azure card CLI routes native reads and preserves provider exits', async (t
   assert.match(rejected.stderr.join('\n'), /Azure card identifier must be AB-<positive int32>/);
   assert.deepEqual(rejectedProvider.calls, []);
   const limited = run(['view', 'AB-299', '--board'], () => {
-    const error = new Error('Azure rate limit fixture');
+    const error = /** @type {Error & { rateLimited?: boolean }} */ (new Error('Azure rate limit fixture'));
     error.rateLimited = true;
     throw error;
   });
@@ -207,7 +207,7 @@ test('Azure card CLI routes native reads and preserves provider exits', async (t
     const reading = native();
     const throttled = run([command, 'AB-299'], (request) => {
       if (request.method === 'GET' && request.path === ITEM_PATH + '/comments') {
-        const error = new Error('Azure comments rate limit fixture');
+        const error = /** @type {Error & { rateLimited?: boolean }} */ (new Error('Azure comments rate limit fixture'));
         error.rateLimited = true;
         throw error;
       }

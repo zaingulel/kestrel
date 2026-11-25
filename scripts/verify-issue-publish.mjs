@@ -41,7 +41,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     for (const line of lines) output.log(line);
     return 0;
   } catch (err) {
-    output.error(`issue-publish: ${err.message}`);
+    output.error(`issue-publish: ${/** @type {Error} */ (err).message}`);
     return 1;
   }
 }
