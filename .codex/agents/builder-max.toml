@@ -1,6 +1,6 @@
 name = "builder-max"
 description = "Higher-capability builder with the identical `builder` charter — a first-pass option whenever higher capability is likely to materially reduce decision or defect risk, not gated on a prior builder failure. Quality-first selection from residual judgment, uncertainty, failure consequence, and verification strength; cost and latency break only equal-reliability ties."
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 developer_instructions = """

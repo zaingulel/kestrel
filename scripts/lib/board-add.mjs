@@ -125,10 +125,10 @@ export function addIssueToBoard({ issueNumber, statusName, workstreamName }, exe
   try {
     itemId = parseAddedItemId(query(addItemMutation(status.projectId, contentId)), issueNumber);
   } catch (err) {
-    if (!err.message.includes(ITEM_EXISTS_MESSAGE)) throw err;
+    if (!/** @type {Error} */ (err).message.includes(ITEM_EXISTS_MESSAGE)) throw err;
     const { item } = lookupIssueBoardItem(issueNumber, exec);
     if (!item) {
-      throw new Error(`#${issueNumber} add was rejected (${err.message}) but the re-read found no item on the board`, { cause: err });
+      throw new Error(`#${issueNumber} add was rejected (${/** @type {Error} */ (err).message}) but the re-read found no item on the board`, { cause: err });
     }
     if (item.isArchived) {
       throw new Error(`#${issueNumber} is already on the board as archived item ${item.id} — unarchive it instead of setting fields on a hidden card`, { cause: err });
@@ -148,14 +148,14 @@ export function addIssueToBoard({ issueNumber, statusName, workstreamName }, exe
       } catch (readErr) {
         throw new Error(
           `#${issueNumber} was added to the board (item ${itemId}) but the ${updates[i].fieldName} update outcome is unknown — ` +
-          `safely re-run the whole command: ${retry} — original error: ${err.message}; re-read failed: ${readErr.message}`,
+          `safely re-run the whole command: ${retry} — original error: ${/** @type {Error} */ (err).message}; re-read failed: ${/** @type {Error} */ (readErr).message}`,
           { cause: err },
         );
       }
       throw new Error(
         `#${issueNumber} was added to the board (item ${itemId}) but the ${updates[i].fieldName} update did not return a result — ` +
         `observed ${updates.map((update) => observedFieldOutcome(update.fieldName, fields)).join(', ')} — ` +
-        `safely re-run the whole command: ${retry} — ${err.message}`,
+        `safely re-run the whole command: ${retry} — ${/** @type {Error} */ (err).message}`,
         { cause: err },
       );
     }

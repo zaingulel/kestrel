@@ -30,7 +30,7 @@ import { pathToFileURL } from 'node:url';
 import { presentRuntimes, SEATS } from './runtimes.mjs';
 
 const KNOWN_MODELS = ['opus', 'sonnet', 'haiku', 'fable', 'inherit'];
-const KNOWN_CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna'];
+const KNOWN_CODEX_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6.2-sol', 'gpt-6.2-astra'];
 const KNOWN_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const KNOWN_SANDBOX_MODES = ['read-only', 'workspace-write'];
 const REQUIRED_KEYS = ['name', 'description'];
@@ -196,7 +196,7 @@ export function checkBuilderParity(dir, seats = SHARED_BUILDER_SEATS) {
     .map(({ seat }) => `${dir}/${seat}.md: shared builder charter (from \`Workflow:\` down) differs from ${first.seat}.md — edit the builder seats together`);
 }
 
-const FIRST_PARTY_SEATS = new Set(['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer']);
+const FIRST_PARTY_SEATS = new Set(['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer', 'tester']);
 
 // Both runtimes carry matching first-party charter bodies; runtime metadata is validated separately.
 // Only marked skill invocations differ (`/name` on Claude, `$name` on Codex).
@@ -212,7 +212,7 @@ export function checkCharterParity(claudeDir, codexDir) {
         if (FIRST_PARTY_SEATS.has(seat)) seats.add(seat);
       }
     } catch (error) {
-      problems.push(`${dir}: cannot be read — cross-runtime charter parity cannot be checked: ${error.message}`);
+      problems.push(`${dir}: cannot be read — cross-runtime charter parity cannot be checked: ${/** @type {Error} */ (error).message}`);
     }
   }
   if (problems.length) return problems;
@@ -225,13 +225,13 @@ export function checkCharterParity(claudeDir, codexDir) {
     try {
       claudeSource = readFileSync(claudeFile, 'utf8');
     } catch (error) {
-      problems.push(`${claudeFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${error.message}`);
+      problems.push(`${claudeFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${/** @type {Error} */ (error).message}`);
       continue;
     }
     try {
       codexSource = readFileSync(codexFile, 'utf8');
     } catch (error) {
-      problems.push(`${codexFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${error.message}`);
+      problems.push(`${codexFile}: ${seat} charter is missing or unreadable — cross-runtime parity cannot be checked: ${/** @type {Error} */ (error).message}`);
       continue;
     }
 
@@ -296,7 +296,7 @@ export function checkAgentsDir(dir) {
 // passes. Each line pattern is tested against every line of the file, so no spelling the agent check accepts slips past
 // (trailing space, quotes, a form feed, a no-break or ideographic space).
 const FABLE_LINE = /^model:[^\S\n]*["']?fable["']?[^\S\n]*$/m;
-const ASTRA_LINE = /^model[^\S\n]*=[^\S\n]*["']gpt-6-astra["'][^\S\n]*$/m;
+const ASTRA_LINE = /^model[^\S\n]*=[^\S\n]*["']gpt-\d+(?:\.\d+)*-astra["'][^\S\n]*$/m;
 const FABLE_SEATS = ['oracle'];
 const ASTRA_SEATS = ['architect', 'oracle', 'security-reviewer'];
 const TURN_LIMITS = new Map([['oracle', 90], ['security-reviewer', 150]]);
@@ -348,12 +348,13 @@ export function checkSeatPolicy(filename, source, shared) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const dirs = process.argv.slice(2);
   const problems = [];
+  /** @type {readonly string[]} */
   let runtimes = [];
   if (!dirs.length) {
     try {
       runtimes = presentRuntimes('.');
     } catch (error) {
-      problems.push(error.message);
+      problems.push(/** @type {Error} */ (error).message);
     }
   }
   const targets = dirs.length ? dirs : runtimes.map((runtime) => SEATS[runtime].directory);

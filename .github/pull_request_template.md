@@ -2,13 +2,13 @@
 
 ## Summary
 
-<!-- Open with a few plain sentences saying what changes for the owner, naming anything the job carried along beyond its card; they are the card's first block. Then the problem, the cause and the fix, only where the opening has not already said them. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. When a product manager run picked the card, the Summary ends with one line beginning `Picked:` that gives the run's reason, as the resume skill says under "2. Work-pick". When the owner approved the card in advance, it ends instead with the line `Approved in advance: <record url>`, as the resume skill says under "7. Push authorisation". -->
+<!-- Open with a few plain sentences saying what changes for the owner, naming anything the job carried along beyond its card; they are the card's first block. Then the problem, the cause and the fix, only where the opening has not already said them. Add a picture, a diagram, a tree or a diff sketch chosen as the `pr` skill says, only where it shows something the sentences cannot; the screenshots a visual change needs go under Evidence either way. -->
 
 Closes #
 
 ## Not done
 
-<!-- The material limitations and unresolved risks a yes accepts: anything skipped, deferred, or uncertain. One bullet each, opening on one sentence that stands alone and says what a yes accepts, because the card copies it. A reason follows only where the item is the owner's call or changes what the owner would do. The owner's own calls come first. "Nothing" is a valid answer only when it is true. When a product manager run built the card, this section opens with, only where they apply, a `**Taste calls I made**` list and a `**Needs your ears**` list saying what to listen for, as the resume skill says under "2. Work-pick". -->
+<!-- The material limitations and unresolved risks a yes accepts: anything skipped, deferred, or uncertain. One bullet each, opening on one sentence that stands alone and says what a yes accepts, because the card copies it. A reason follows only where the item is the owner's call or changes what the owner would do. The owner's own calls come first. "Nothing" is a valid answer only when it is true. When a run built the card, this section opens with, only where they apply, a `**Taste calls I made**` list and a `**Needs your ears**` list saying what to listen for, as the resume skill says under "2. Work-pick". -->
 
 ## Merge Danger
 
@@ -18,7 +18,7 @@ Reach:
 
 ## Evidence
 
-<!-- A before and an after. For a visual change they are representative screenshots per [Review and visual verification](../AGENTS.md#review-and-visual-verification), driven in the built artifact over local HTTP, and the accessibility audit's result follows them, as the resume skill specifies under "6. Verify and review"; say "no visual change" when true. For any other change the before is the output or the failing run and the after is the output or the passing run. Then the three plain lines the card copies, written as the outcome-reporting paragraph of AGENTS.md says: group related passes, naming the review and its tier, and leave the log's path to chat, because this body is published; state each failure's cause or say it is unknown; name each check not run, why, and what follows. Where a line has nothing to say, it reads none. -->
+<!-- A before and an after. For a visual change they are representative screenshots per [Review and visual verification](../AGENTS.md#review-and-visual-verification), driven in the built artifact over local HTTP, and the accessibility audit's result follows them, as the resume skill specifies under "6. Verify and review"; say "no visual change" when true. For any other change the before is the output or the failing run and the after is the output or the passing run. Then the three plain lines the card copies, written as the outcome-reporting paragraph of AGENTS.md says: group related passes, naming the review and its tier, and leave the log's path to chat, because this body is published; state each failure's cause or say it is unknown; name each check that will not have run when the pull request merges, why, and what follows, leaving out a check the required `test` check runs. Where a line has nothing to say, it reads none. -->
 
 - **Before:**
   **After:**
@@ -46,7 +46,7 @@ Carried receipts:
 
 ## Review
 
-<!-- The review line comes first, in the format below, for example `Review: tier=sign-off rounds=7 raised=16 fixed=13 dismissed=2 deferred=1`. Where the repository has turned the external review add-on on, the add-on's three fields follow `deferred`, as below. Any declaration the resume skill requires of how a review ran, such as a pass on the writer's own family or an external review recorded as unavailable, follows the line here, outside the collapsed section.
+<!-- The review line comes first, in the format below, for example `Review: tier=sign-off rounds=7 raised=16 fixed=13 dismissed=2 deferred=1`. Where the repository has turned the external review add-on on, the add-on's three fields follow `deferred`, as below. Any declaration the resume skill requires of how a review ran, such as a pass on the writer's own family or an external review recorded as unavailable, follows the line here, outside the collapsed section. A failed or missing pass counts as neither clean nor a completed round.
 
 ```text title="Review line, base form"
 Review: tier=sign-off rounds=7 raised=16 fixed=13 dismissed=2 deferred=1
@@ -57,8 +57,8 @@ deferred.
 
 | Field | Value |
 |---|---|
-| `tier` | `document`, `code` or `sign-off`: the tier the `resume` skill chose from the two questions. `document` is the session's own review, `code` the cross-family review, and `sign-off` the cross-family review followed by the external review where the repository has turned that add-on on. A change whose parts answer the two questions differently carries the tier of its heaviest part, and one review covers the whole change at that tier. A pass keeps its tier when it runs on the writing family's seat because the other family was unavailable, because the repository's settings file names one runtime, or because the owner did not authorize cross-family review; the pull request body declares each such substitution |
-| `rounds` | Reviewer passes over the tree, at least 1. The fresh review, each pass scoped to a repair, each `security-reviewer` pass and each external review of a commit count one each. A pass counts once it records its verdict, zero findings included |
+| `tier` | `document`, `code` or `sign-off`: the tier the `resume` skill chose from the two questions. `document` is the session's own review, `code` the required cross-family reviews, and `sign-off` those reviews followed by the external review where the repository has turned that add-on on. A change whose parts answer the two questions differently carries the tier of its heaviest part, and the required reviews cover the whole change at that tier. A pass keeps its tier when it runs on the writing family's seat because the other family was unavailable, because the repository's settings file names one runtime, or because the owner did not authorize cross-family review; the pull request body declares each such substitution |
+| `rounds` | Reviewer passes over the tree, at least 1. On the normal dual-runtime route the completed primary and supplemental initial passes count one round each; otherwise the fresh review counts one. Each scoped repair review, `security-reviewer` pass and external review of a commit also counts once. A pass counts once it records its verdict, zero findings included |
 | `raised` | Findings reported across every round, the external review's included, a finding reported more than once counted once. In a self-review, the findings the session records in the Review section. A candidate the reviewer discarded itself is not one |
 | `fixed` | Raised findings repaired in this pull request |
 | `dismissed` | Raised findings judged false and dismissed with a reason |
@@ -102,7 +102,7 @@ Review: tier= rounds= raised= fixed= dismissed= deferred=
 
 <summary>Review findings</summary>
 
-<!-- The fresh reviewer's verdict and every finding with its disposition (fixed, dismissed with reason, or deferred as the review line's `deferred` field defines it above), then the usage and plan-review lines the cross-review skill specifies. Where the external review add-on is on, its threads are resolved on the pull request itself. -->
+<!-- The findings block gives each reviewing seat's verdict and every finding with its disposition. Dispositions are fixed, dismissed with reason, or deferred as the review line's `deferred` field defines it above. Then come the usage and plan-review lines the cross-review skill specifies. Where the external review add-on is on, its threads are resolved on the pull request itself. -->
 
 </details>
 

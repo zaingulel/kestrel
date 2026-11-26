@@ -54,7 +54,7 @@ export function posixShell({
   env = process.env,
   gitExecPath,
   exists = existsSync,
-} = {}) {
+} = /** @type {{ platform?: string, env?: NodeJS.ProcessEnv, gitExecPath?: string, exists?: (path: string) => boolean }} */ ({})) {
   if (platform !== 'win32') return 'sh';
   const onPath = findOnPath('sh.exe', env, exists);
   if (onPath) return onPath;

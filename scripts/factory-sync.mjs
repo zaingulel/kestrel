@@ -81,6 +81,6 @@ try {
   if (args[0] === '--render') render();
   else write();
 } catch (error) {
-  console.error(`factory-sync: ${error.message}`);
+  console.error(`factory-sync: ${/** @type {Error} */ (error).message}`);
   process.exit(1);
 }

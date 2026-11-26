@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// closeout-cleanup.mjs — after a job's merge, removes the job's containers, named scratch, worktree, the empty folder
-// Codex made around the worktree and the branch, each only when every check passes; with --check, reads whether
+// closeout-cleanup.mjs — after a job's merge, stops processes still running from the job's run folders and removes the
+// job's containers, run folders, named scratch, worktree, the empty folder Codex made around the worktree and the
+// branch, each only when every check passes; with --check, reads whether
 // anything uses a path and removes nothing. Run the verifier checkout's copy, never the job worktree's:
 //   node scripts/closeout-cleanup.mjs <issue> [--pr <canonical HTTPS GitHub PR URL>] [--scratch <absolute path>]... [--regenerated <worktree-relative path>]...
 //   node scripts/closeout-cleanup.mjs --check <absolute path> [--check <absolute path>]...
@@ -65,6 +66,10 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
       pid,
       scriptPath: dependencies.scriptPath ?? fileURLToPath(import.meta.url),
       git,
+      tmpdir: dependencies.tmpdir,
+      procRoot: dependencies.procRoot,
+      kill: dependencies.kill,
+      sleep: dependencies.sleep,
     });
   }
   for (const line of result.lines) {

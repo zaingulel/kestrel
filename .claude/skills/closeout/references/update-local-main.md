@@ -19,6 +19,12 @@ independent cleanup or work selection.
    references, absence of open files or descendants, and a removal-helper verdict do not establish that the
    checkout is free of task ownership or active use. Defer if a task owns or uses `main`, actual use cannot be
    resolved, or observations conflict.
+   Before step 3 or 4, drain: where the commits this update brings change `.claude/settings.json` hooks,
+   `scripts/lib/workflow-pin.mjs` or the delivery-lane contract test, defer and report while a Herdr job
+   record of the repository, a `ready.json` reservation or a watcher record, live or retained, exists; a change to
+   the delivery-lane contract also defers on a retained receipt and goes to the owner. The pinned jobs this protects
+   are described under
+   [the guard and capability activation procedure](../../shared-files/SKILL.md#guard-and-capability-activation).
 3. When `main` is checked out, corroborate a passive folder reference with native working-directory, open-file
    and process-tree observations. A runtime-spawned noninteractive helper with verified identity and runtime
    ownership may keep `main` as its working directory when step 2 established that no task owns or uses `main`, and
@@ -26,20 +32,25 @@ independent cleanup or work selection.
    checkout. Do not infer helper eligibility from its process name alone. A per-helper runtime idle status is
    unnecessary in that case. Active file access, a running command in the checkout, or an unresolved descendant
    defers. For an app, require a directly observed passive view or trusted runtime activity evidence for its
-   user-facing window or view; this applies to that view, not its noninteractive helpers. For an interactive shell,
-   require a trusted runtime tab observation matched to the exact holder that explicitly reports nothing running,
-   such as the desktop app's `list_terminal_tabs` when it can identify the tab. Native working-directory, terminal
-   and process-tree observations can rule out idleness; establish shell idleness from the matching runtime tab.
-   Defer when the runtime cannot observe an interactive shell, without typing into it. A verified passive reference
-   can accompany an eligible update. Removal holds govern removal.
+   user-facing window or view; this applies to that view, not its noninteractive helpers. An interactive shell is idle
+   when step 2 established that no task owns or uses `main` and fresh readings of that exact holder, `lsof -nP -p <pid>`
+   and `ps -ww -A -o pid=,ppid=,pgid=,tpgid=,tty=,args=`, show it is an idle shell as
+   [the retained targets rules](retained-targets.md) define one: its only file in the checkout is its working
+   directory, it has no child process, it leads its terminal's foreground process group and it was started with
+   nothing to run. These readings cannot tell a shell at its prompt from one running only builtins in the foreground,
+   such as a typed `read` or a loop of builtins, so the update passes that over too. Otherwise require a trusted
+   runtime tab observation matched to the exact holder that explicitly reports nothing running, such as the desktop
+   app's `list_terminal_tabs` when it can identify the tab. Defer when neither shows the shell idle, as where `lsof` or
+   `ps` cannot run, without typing into it. A verified passive reference can accompany an eligible update. Removal
+   holds govern removal.
 
    Inspect tracked, untracked and ignored files for incoming file or directory collisions. Immediately recheck
    exact ownership, activity, branch, tip, operation state and status before
    `git -C <main-worktree> merge --ff-only --no-overwrite-ignore <recorded-origin-main>`. Leave active, dirty,
    unavailable, uncertain or collision-bearing checkouts intact. Never switch, reset, stash or clean one to make
    it eligible. Defer without asking the owner to quit an app, stop a session, or move a terminal. Leave unrelated
-   sessions alone. Follow
-   [the separate guard and capability activation procedure](../../shared-files/SKILL.md#guard-and-capability-activation) where it applies.
+   sessions alone. Where the commits this update brings carry a guard together with the capability it bounds, follow
+   [the separate guard and capability activation procedure](../../shared-files/SKILL.md#guard-and-capability-activation).
 4. When no worktree checks out `main` and no active task owns it, recheck the inventory and use
    `git update-ref refs/heads/main <recorded-origin-main> <recorded-local-main>`. The expected old commit protects
    against concurrent movement. This advances only an unoccupied branch ref; it does not refresh files in a root

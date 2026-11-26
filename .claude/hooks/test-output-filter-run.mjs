@@ -15,7 +15,7 @@ let raw = '';
 try {
   raw = readFileSync(outputFile, 'utf8');
 } catch (err) {
-  console.error(`test-output-filter: could not read captured test output at ${outputFile} (${err.message}) — the run's own exit status still stands.`);
+  console.error(`test-output-filter: could not read captured test output at ${outputFile} (${/** @type {Error} */ (err).message}) — the run's own exit status still stands.`);
   process.exit(0);
 }
 try {

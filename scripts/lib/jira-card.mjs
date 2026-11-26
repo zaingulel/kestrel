@@ -57,7 +57,7 @@ export function parseCardArgs(args) {
     for (const flag of ['--title', '--body-file', '--status', '--kind']) if (!(flag in flags)) throw new Error(`create needs ${flag}`);
     if (!PICKABLE_STATUSES.includes(flags['--status'])) throw new Error(`--status must be ${PICKABLE_STATUSES.join(' or ')}`);
     if (!Object.hasOwn(KIND_LABELS, flags['--kind'])) throw new Error('--kind is not a configured issue kind');
-    const blockedBy = '--blocked-by' in flags ? flags['--blocked-by'].split(',').map((key) => issueKey(key, '--blocked-by')) : [];
+    const blockedBy = '--blocked-by' in flags ? /** @type {string} */ (flags['--blocked-by']).split(',').map((key) => issueKey(key, '--blocked-by')) : [];
     if (new Set(blockedBy).size !== blockedBy.length) throw new Error('--blocked-by repeats an issue');
     return { name, title: title(flags['--title']), bodyFile: flags['--body-file'], status: flags['--status'], kind: flags['--kind'], parent: '--parent' in flags ? issueKey(flags['--parent'], '--parent') : null, blockedBy };
   }
@@ -79,7 +79,7 @@ export function parseCardArgs(args) {
 
 function fileBody(path) {
   try { return readFileSync(path, 'utf8'); }
-  catch (error) { throw new Error(`body file ${path} could not be read: ${error.code}`); }
+  catch (error) { throw new Error(`body file ${path} could not be read: ${/** @type {NodeJS.ErrnoException} */ (error).code}`); }
 }
 const bodyText = (body) => body.file === undefined ? body.text : fileBody(body.file);
 const literalText = (value) => value.replace(/\r\n?/g, '\n');
@@ -232,7 +232,7 @@ function create(command, exec) {
   for (const field of metadata) if (field.required && field.hasDefaultValue !== true && !Object.hasOwn(fields, field.fieldId)) throw new Error(`Jira required field ${field.fieldId} has no supplied value or default; configure project field setup before creating`);
   let created;
   try { created = exec({ method: 'POST', path: '/rest/api/3/issue', body: { fields } }); }
-  catch (error) { throw new Error(`Jira create outcome is unknown: ${error.message}; inspect project ${project.key} for the requested title before any retry. Search is eventually consistent; no automatic retry was sent`); }
+  catch (error) { throw new Error(`Jira create outcome is unknown: ${/** @type {Error} */ (error).message}; inspect project ${project.key} for the requested title before any retry. Search is eventually consistent; no automatic retry was sent`); }
   if (typeof created?.id !== 'string' || !ID.test(created.id) || typeof created.key !== 'string' || !JIRA_IDENTIFIER.test(created.key)) throw new Error(`Jira create outcome has no usable issue identity; inspect project ${project.key} before retrying`);
   try {
     const issue = readJiraIssue(created.key, exec);
@@ -242,7 +242,7 @@ function create(command, exec) {
     for (const by of command.blockedBy) rows.push(...block({ name: 'block', id: created.key, by }, exec));
     return rows;
   } catch (error) {
-    throw new Error(`created ${created.key} (id ${created.id}), then remaining work failed: ${error.message}; inspect its status and remaining blockers ${command.blockedBy.join(', ') || 'none'}; do not rerun create`);
+    throw new Error(`created ${created.key} (id ${created.id}), then remaining work failed: ${/** @type {Error} */ (error).message}; inspect its status and remaining blockers ${command.blockedBy.join(', ') || 'none'}; do not rerun create`);
   }
 }
 

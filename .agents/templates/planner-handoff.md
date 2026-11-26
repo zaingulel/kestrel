@@ -22,7 +22,7 @@ Standing instructions:
   it may instead carry a bounded unresolved lookup and a distinct named findings-file destination: dispatch only
   `explorer` for that lookup and wait for completed findings before planning. On Codex, if completed findings
   are missing, return a bounded discovery request to the coordinating session before redispatch.
-- Missing Deliverable, an unbounded lookup or insufficient completed evidence stops with the specific caveat;
-  never broaden the investigation or report unavailable findings as a conclusion.
+- An unbounded lookup or insufficient completed evidence stops with the specific caveat; never broaden the investigation
+  or report unavailable findings as a conclusion.
 - Plan every slice to `docs/CODING-STANDARDS.md`, what a test or tool may cost included; a builder cannot change
   the plan once it arrives.

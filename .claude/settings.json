@@ -7,6 +7,7 @@
       "Bash(node scripts/merge-watch.mjs *)",
       "Bash(gh pr ready *)",
       "Bash(gh pr merge --auto --squash --delete-branch *)",
+      "Bash(gh pr merge --squash --delete-branch --match-head-commit *)",
       "Bash(git worktree add .claude/worktrees/*)"
     ]
   },
@@ -17,11 +18,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-unsafe-git.mjs\""
+            "command": "node \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/block-unsafe-git.mjs\" || { s=$?; [ -z \"$FABRAIK_WORKFLOW_ROOT\" ] || exit 2; exit $s; }"
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/filter-test-output.mjs\""
+            "command": "node \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/filter-test-output.mjs\" || { s=$?; [ -z \"$FABRAIK_WORKFLOW_ROOT\" ] || exit 2; exit $s; }"
           }
         ]
       },
@@ -30,7 +31,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-builder-handoff.mjs\""
+            "command": "node \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/check-builder-handoff.mjs\" || { s=$?; [ -z \"$FABRAIK_WORKFLOW_ROOT\" ] || exit 2; exit $s; }"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/owner-menu.mjs\" || { s=$?; [ -z \"$FABRAIK_WORKFLOW_ROOT\" ] || exit 2; exit $s; }",
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/owner-menu.mjs\""
           }
         ]
       }
@@ -40,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify-green.sh\""
+            "command": "sh \"${FABRAIK_WORKFLOW_ROOT:-$CLAUDE_PROJECT_DIR}/.claude/hooks/verify-green.sh\""
           }
         ]
       }

@@ -8,7 +8,7 @@ description: This page explains what each board column means and how the board t
 
 The board is where planned work lives. Each card stands for one issue, and its column says where that work stands.
 Use this page to understand what each column means and how the board tools read and move cards. It also says
-what a board read can and cannot prove. The [`to-issues`](../.agents/skills/to-issues/SKILL.md) skill files cards, and the
+what a board read can and cannot prove. The [`to-tickets`](../.agents/skills/to-tickets/SKILL.md) skill files cards, and the
 [`resume`](../.agents/skills/resume/SKILL.md) and [`closeout`](../.agents/skills/closeout/SKILL.md) skills move them.
 This page owns none of their rules.
 
@@ -37,9 +37,9 @@ card there as stalled.
 ```mermaid
 flowchart LR
     accTitle: How a card moves across the board
-    accDescr: A card moves from Backlog or Ready to In progress, then Awaiting push, In review and Done, and a direct push goes from Awaiting push straight to Done.
-    BL[Backlog] -->|nothing holds it any more| RD[Ready]
-    BL -->|work-pick| IP[In progress]
+    accDescr: A card can be queued from Backlog to Ready, or a manual GitHub pick can start directly from Backlog. It moves through In progress, Awaiting push, In review and Done; a direct push skips In review.
+    BL[Backlog] -->|the owner queues it| RD[Ready]
+    BL -->|manual GitHub pick| IP[In progress]
     RD -->|work-pick| IP
     IP -->|local review passed| AP[Awaiting push]
     AP -->|push authorised, draft opened| IR[In review]
@@ -47,18 +47,21 @@ flowchart LR
     AP -.->|direct route, closeout| DN
 ```
 
-The preceding diagram follows one card across the board. The owner picks a card from Backlog or Ready, and it moves to
-In progress when its job starts. It reaches Awaiting push once local review passes, and In review once the draft opens.
-It ends in Done after the merge closes its issue. The dotted arrow is the direct route. A change pushed straight to
-`main` opens no pull request, so closeout moves its card from Awaiting push to Done. [The life of one
+The preceding diagram follows one card across the board. The owner can queue a card in Ready, and the session takes the
+top startable card there. A manual GitHub pick can claim a startable Backlog card directly; other trackers follow their
+own pick procedure. A markdown card, whose column changes only through a merged change, starts from its own column. It moves to In progress when its job starts. It reaches Awaiting push once local review passes, and In review
+once the draft opens. It ends in Done after the merge closes its issue. The dotted arrow is the direct route. A change
+pushed straight to `main` opens no pull request, so closeout moves its card from Awaiting push to Done. [The life of one
 change](AI-WORKFLOW-job.md) explains each stage of the job behind these moves.
 
 ## How it works
 
-Four scripts make up the board toolkit. `scripts/board.mjs` reads the board, `scripts/board-add.mjs` adds a card,
-`scripts/board-move.mjs` moves one, and `scripts/verify-issue-publish.mjs` checks a published issue. The head of each
-script owns its modes, argument forms and exit codes. `node scripts/board.mjs --help` prints the read modes without
-reading the board.
+These scripts make up the board toolkit. `scripts/board.mjs` reads the board, `scripts/board-add.mjs` adds a card and
+`scripts/board-move.mjs` moves one. `scripts/board-claim.mjs` checks that a picked card is still free and claims it on
+the GitHub Projects tracker, and `scripts/verify-issue-publish.mjs` checks a published issue. `scripts/linear-card.mjs`,
+`scripts/jira-card.mjs` and `scripts/azure-card.mjs` are the card commands for Linear, Jira and Azure Boards. The head
+of each script owns its modes, argument forms and exit codes. `node scripts/board.mjs --help` prints the read modes
+without reading the board.
 
 ### Reading the board
 
@@ -87,6 +90,7 @@ the empty value its row names.
 | `state` | The issue's open or closed state, or null; it does not replace the card's column |
 | `assignees` | The assignee logins on GitHub, an empty array when none |
 | `openBlockers` | The numbers of the blockers still open, an empty array when none |
+| `foreignBlockers` | Each open blocker in another repository as an object with `repository` and `number`, its number also in `openBlockers`; present only on a card with one |
 | `closingPullRequests` | One object with a `number` for each closing pull request, an empty array when none |
 | `subIssues` | The sub-issue summary with its `total` and `completed` counts, or null; it is not a verified child set |
 | `jobBranch` | An object `{ local, remote }` of booleans for the job branch locally and on origin; present only on a Markdown card with one |
@@ -116,6 +120,9 @@ The scan reports known drift, a card whose column contradicts a known fact. Exam
 not in Done, and an open issue whose card is in Done. Others are a claimed card with no closing pull request, an open
 blocker on a claimed card, and an epic whose children have all closed. Some rows are advisory, because the fact
 behind them can change within minutes. `scripts/lib/board-rules.mjs` owns each rule.
+Under `--intake`, the row for a claimed card with no closing pull request also says whether the claim is live, idle
+since a given time, stalled with its last recorded step, or unknown because this machine cannot check it; the check
+reclaims and moves nothing.
 
 The scan also keeps an unreadable card apart from drift. Drift means a card contradicts something known, while an
 unreadable card means the scan knows nothing about it. So the scan never claims it covered a board holding an unreadable
@@ -140,7 +147,7 @@ the board.
 
 ### Checking a published issue
 
-Once `to-issues` files an issue or an epic, the publication check confirms it. It confirms the real column, the
+Once `to-tickets` files an issue or an epic, the publication check confirms it. It confirms the real column, the
 routing value and the one kind label, or the native issue type where the repository records kind that way. Given
 child issue numbers, it requires the native children to match that set exactly. Given none, it reports the real
 child count rather than asserting there are no children. A parent and its children are native links, never text in
@@ -200,7 +207,7 @@ handles itself.
 | Board workflow | State | Setting | Why |
 |---|---|---|---|
 | Auto-add to project | On | `is:issue is:open` on the repository | An issue joins the board when it opens, before anyone triages it |
-| Item added to project | On | Status: Backlog | An added card lands in Backlog, the column `to-issues` and `resume` add to |
+| Item added to project | On | Status: Backlog | An added card lands in Backlog, the column `to-tickets` and `resume` add to |
 | Auto-add sub-issues to project | Off | | It would add sub-issues from other repositories, which the scripts cannot read; a repository's own sub-issues already arrive through Auto-add to project |
 | Item closed | On | Status: Done | The move to Done happens at merge time with no agent involved; the move script reads the column back and skips its own write |
 | Auto-archive items | On | `is:issue,pr is:closed updated:<@today-2w` | Keeps the active board small; archiving never deletes a card, so history stays |
@@ -217,7 +224,7 @@ The weekly retro, in a repository that runs it, files proposal cards and changes
 merged pull requests, their Review sections and the failed checks, and files at most five proposals. The board's
 auto-add lands each in Backlog, and the next local session fills in its routing value. A proposal is never agreed
 work: the owner picks it at work-pick or closes it. That is why the issue tracker page lets the retro file without the
-usual `to-issues` approval. No script in the repository makes the retro's judgments or checks them. A change pushed
+usual `to-tickets` approval. No script in the repository makes the retro's judgments or checks them. A change pushed
 straight to `main` has no pull request, so the retro never reads it. [The weekly retro manual](WEEKLY-RETRO.md) owns
 what it reads, how it ranks and files proposals, and its card check.
 
@@ -233,21 +240,21 @@ what it reads, how it ranks and files proposals, and its card check.
 - `scripts/lib/gh-exec.mjs`: the `BOARD_TOOLKIT_GH` contract.
 - [Markdown cards](MARKDOWN-CARDS.md), [Linear cards](LINEAR-CARDS.md), [Jira cards](JIRA-CARDS.md) and
   [Azure Boards cards](AZURE-CARDS.md): each tracker's setup, claim and card steps.
-- [The `resume` skill](../.agents/skills/resume/SKILL.md): when a session moves a card, what Ready means, and the
-  candidate table the owner picks from.
+- [The `resume` skill](../.agents/skills/resume/SKILL.md): when a session moves a card, what Ready means, which `Ready`
+  card a session takes and the candidates the owner picks from.
 - [The `closeout` skill](../.agents/skills/closeout/SKILL.md): the move to Done and the strict board check after a
   merge.
-- [The `to-issues` skill](../.agents/skills/to-issues/SKILL.md): how the agents propose, file and verify cards.
+- [The `to-tickets` skill](../.agents/skills/to-tickets/SKILL.md): how the agents propose, file and verify cards.
 - [The weekly retro manual](WEEKLY-RETRO.md): the retro's reads and proposals.
 
 ## Failure modes
 
 | Situation | What shows it | What happens next |
 |---|---|---|
-| The board read fails, or a GitHub board returns no cards | The read exits non-zero and names the cause | Once access returns, the session reads again; a failed read is never an empty backlog. An empty Linear, Jira or Azure Boards board is a real empty board |
+| The board read fails, or a GitHub board returns no cards | The read exits non-zero and names the cause in plain words; the raw failure follows on a details line, and the panel shows it as a "raw failure" problem line. An expired sign-in says to sign in again with gh auth login. A 502, 503 or 504 is retried up to three times, after 1, 4 and 9 seconds, only while the retry is expected to end within 90 seconds of the read's start, leaving 30 seconds of the panel's two-minute limit for a retry slower than the one before it; then the read fails with "GitHub is temporarily unavailable" | Nothing reads again on its own: once access returns, the session or the panel's Refresh reads again; a failed read is never an empty backlog. An empty Linear, Jira or Azure Boards board is a real empty board |
 | A read is incomplete | An advisory names what could not be read; intake shows `UNAVAILABLE` details | The owning skill uses only what it read and reads again; an incomplete read is never a clean board |
 | A card's column disagrees with its issue | The scan names a closed issue outside Done, or an open issue in Done | The owning skill reconciles it. Someone reopened an open issue whose closing pull request merged, so it never counts as shipped |
-| GitHub's project listing leaves out a card | The board and publication commands name each recovered card on stderr | The read walks the repository's issues and recovers the card, so nothing adds it again; inconsistent recovery evidence fails the read |
+| GitHub's project listing leaves out a card | The board and publication commands name each recovered card on stderr | The read walks the repository's open issues and its closed issues updated in the last 28 days, and recovers the card, so nothing adds it again; inconsistent recovery evidence fails the read. A board whose auto-archive is off or longer than 28 days keeps older Done cards the walk does not reach |
 | Automation adds a card with no routing value | The scan reports the card until someone fills the field | The add script fills the field on the card already there, with the value the tracker page's convention gives |
 | Auto-add is off | A filed issue never reaches the board; a board copied from another starts with it off | Every issue joins through the add script, as the head of `scripts/board-add.mjs` says |
 | A batch move or a field write stops partway | The report names what completed, what it observed and what is unknown | The named recovery runs; nothing assumes the writes happened together |

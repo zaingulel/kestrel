@@ -2,6 +2,7 @@
 // Two real children cover the stdin/stdout wire; all hostile inputs use direct seams.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +32,13 @@ function privateText(value) {
   }
 }
 
+/** @typedef {import('./azure-api.mjs').TransportError} TransportError */
+
+/** @param {string} code */
+const failedSpawn = (code) => ({
+  error: Object.assign(new Error(`spawnSync ${code}`), { code }), status: null, signal: null, stdout: '', stderr: '',
+});
+
 function answering(status, body, headers = {}) {
   const calls = [];
   return {
@@ -42,6 +50,7 @@ function answering(status, body, headers = {}) {
   };
 }
 
+/** @param {unknown} request @param {{ fetch: (url: string | URL, init: RequestInit) => Promise<Pick<Response, 'status' | 'headers' | 'text'>> }} answer @param {unknown} [credentials] */
 const send = (request, answer, credentials = CREDENTIALS) => requestAzure(request, { ...answer, credentials, config: CONFIG });
 
 test('Azure transport rejects token edge whitespace before fetch', async () => {
@@ -50,7 +59,8 @@ test('Azure transport rejects token edge whitespace before fetch', async () => {
       const sentinel = `SYNTHETIC_SECRET_408_${authentication}_${edge}`;
       const token = edge === 'leading' ? ' ' + sentinel : sentinel + ' ';
       const answer = answering(200, '{}');
-      await assert.rejects(send(PAYLOAD, answer, { ...CREDENTIALS, authentication, token }), (error) => {
+      await assert.rejects(send(PAYLOAD, answer, { ...CREDENTIALS, authentication, token }), (caught) => {
+        const error = /** @type {TransportError} */ (caught);
         assert.match(error.message, /token|whitespace/i);
         assert.equal(error.message.includes(token), false, 'raw token reached validation output');
         assert.equal(error.message.includes(sentinel), false, 'trimmed token reached validation output');
@@ -82,7 +92,7 @@ test('Azure transport confines credentials and destinations', async (t) => {
     assert.equal(options.timeout, 60000);
     assert.equal(options.maxBuffer, 64 * 1024 * 1024);
     assert.equal(options.input, JSON.stringify(PAYLOAD));
-    return { status: 0, stdout: '{"id":299}', stderr: '' };
+    return { status: 0, signal: null, stdout: '{"id":299}', stderr: '' };
   } }), { id: 299 });
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'azure-api-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -122,7 +132,7 @@ test('Azure transport confines credentials and destinations', async (t) => {
   for (const value of ['not JSON ' + TOKEN, null, [], { ...CREDENTIALS, extra: TOKEN },
     { ...CREDENTIALS, authentication: 'oauth' }, { ...CREDENTIALS, organization: 'https://dev.azure.com/example-org' }]) {
     put(value);
-    assert.throws(() => read(), (error) => { privateText(error.stack); return /credential/i.test(error.message); });
+    assert.throws(() => read(), (caught) => { const error = /** @type {TransportError} */ (caught); privateText(error.stack); return /credential/i.test(error.message); });
   }
   for (const field of ['organization', 'authentication', 'token']) {
     const missing = { ...CREDENTIALS };
@@ -184,7 +194,7 @@ test('Azure transport confines credentials and destinations', async (t) => {
     assert.equal(answer.calls.length, 0);
     if (!request.path.startsWith('/22222222-') && !request.path.includes('Task%2Fother')) {
       let started = false;
-      assert.throws(() => azureExec(request, { spawn: () => { started = true; } }));
+      assert.throws(() => azureExec(request, { spawn: () => { started = true; throw new Error('spawned'); } }));
       assert.equal(started, false, 'malformed raw request must fail before child credential loading');
     }
   }
@@ -198,7 +208,7 @@ test('Azure transport confines credentials and destinations', async (t) => {
   // Only the child receives HOME, and it obtains the literal sentinel from its private file.
   const lib = join(repositoryRoot, 'scripts', 'lib');
   mkdirSync(lib, { recursive: true });
-  for (const name of ['azure-api.mjs', 'azure-config.mjs']) {
+  for (const name of ['azure-api.mjs', 'azure-config.mjs', 'workflow-pin.mjs', 'factory-sync.mjs', 'runtimes.mjs', 'seat-settings.mjs', 'check-agents.mjs']) {
     copyFileSync(fileURLToPath(new URL('./' + name, import.meta.url)), join(lib, name));
   }
   writeFileSync(join(lib, 'board-config.mjs'), AZURE_TEST_CONFIG);
@@ -227,7 +237,8 @@ test('Azure transport confines credentials and destinations', async (t) => {
       return run;
     };
     if (wrongProject) {
-      assert.throws(() => azureExec(request, { spawn }), (error) => {
+      assert.throws(() => azureExec(request, { spawn }), (caught) => {
+        const error = /** @type {TransportError} */ (caught);
         privateText(error.stack);
         assert.match(error.message, /configured project/);
         assert.doesNotMatch(error.message, /credential/);
@@ -251,9 +262,10 @@ test('Azure transport confines credentials and destinations', async (t) => {
 
 test('Azure transport classifies failures without leaking secrets', async () => {
   const echo = [TOKEN, ESCAPED, BASIC, 'Bearer ' + TOKEN, 'Basic ' + BASIC].join(' | ');
-  for (const [status, message] of [[401, /credential|authentication/i], [403, /permission|access/i], [429, /Retry-After.*37/], [413, /limit|large|413/i], [500, /500/]]) {
+  for (const [status, message] of /** @satisfies {[number, RegExp][]} */ ([[401, /credential|authentication/i], [403, /permission|access/i], [429, /Retry-After.*37/], [413, /limit|large|413/i], [500, /500/]])) {
     const answer = answering(status, JSON.stringify({ message: echo }), { 'Retry-After': '37' });
-    await assert.rejects(send(PAYLOAD, answer), (error) => {
+    await assert.rejects(send(PAYLOAD, answer), (caught) => {
+      const error = /** @type {TransportError} */ (caught);
       privateText(error.stack);
       assert.match(error.message, message);
       assert.equal(Boolean(error.rateLimited), status === 429);
@@ -261,7 +273,8 @@ test('Azure transport classifies failures without leaking secrets', async () => 
     });
     assert.equal(answer.calls.length, 1);
   }
-  await assert.rejects(send(PAYLOAD, answering(429, '{}', { 'Retry-After': echo })), (error) => {
+  await assert.rejects(send(PAYLOAD, answering(429, '{}', { 'Retry-After': echo })), (caught) => {
+    const error = /** @type {TransportError} */ (caught);
     privateText(error.message);
     privateText(error.stack);
     assert.equal(error.rateLimited, true);
@@ -274,20 +287,21 @@ test('Azure transport classifies failures without leaking secrets', async () => 
   privateText(success);
   for (const authentication of ['entra', 'pat']) {
     const failure = { fetch: async () => { throw new Error(echo); } };
-    await assert.rejects(send(PAYLOAD, failure, { ...CREDENTIALS, authentication }), (error) => {
+    await assert.rejects(send(PAYLOAD, failure, { ...CREDENTIALS, authentication }), (caught) => {
+      const error = /** @type {TransportError} */ (caught);
       privateText(error.stack);
       return /could not be reached|request failed/i.test(error.message);
     });
   }
   const patch = [{ op: 'test', path: '/rev', value: 5 }, { op: 'add', path: '/fields/System.Title', value: 'Changed' }];
-  const writes = [
+  const writes = /** @satisfies {[{ method: string, path: string, body: unknown }, string][]} */ ([
     [{ method: 'PATCH', path: '/' + PROJECT + '/_apis/wit/workitems/299', body: patch }, 'application/json-patch+json'],
     [{ method: 'POST', path: '/' + PROJECT + '/_apis/wit/workitems/$User%20Story', body: patch }, 'application/json-patch+json'],
     [{ method: 'POST', path: '/' + PROJECT + '/_apis/wit/workitems/299/comments', body: { text: 'Claim: synthetic' } }, 'application/json'],
     [{ method: 'PATCH', path: '/' + PROJECT + '/_apis/wit/workitems/299/comments/9', body: { text: 'Withdrawn' } }, 'application/json'],
     [{ method: 'POST', path: '/' + PROJECT + '/_apis/wit/wiql', body: { query: 'SELECT [System.Id] FROM WorkItems' } }, 'application/json'],
     [{ method: 'POST', path: '/' + PROJECT + '/_apis/wit/workitemsbatch', body: { ids: [299] } }, 'application/json'],
-  ];
+  ]);
   for (const [request, contentType] of writes) {
     const answer = answering(200, '{"id":299}');
     await send(request, answer);
@@ -302,12 +316,13 @@ test('Azure transport classifies failures without leaking secrets', async () => 
   ]) {
     await assert.rejects(send(mutation, answer), /outcome unknown.*inspect.*before retry/i);
   }
-  assert.throws(() => azureExec(mutation, { spawn: () => ({ error: { code: 'ETIMEDOUT' } }) }), /outcome unknown.*inspect.*before retry/i);
-  assert.throws(() => azureExec(PAYLOAD, { spawn: () => ({ error: { code: 'ETIMEDOUT' } }) }), /60 s/);
-  assert.throws(() => azureExec(PAYLOAD, { spawn: () => ({ error: { code: 'ENOBUFS' } }) }), {
+  assert.throws(() => azureExec(mutation, { spawn: () => failedSpawn('ETIMEDOUT') }), /outcome unknown.*inspect.*before retry/i);
+  assert.throws(() => azureExec(PAYLOAD, { spawn: () => failedSpawn('ETIMEDOUT') }), /60 s/);
+  assert.throws(() => azureExec(PAYLOAD, { spawn: () => failedSpawn('ENOBUFS') }), {
     message: 'Azure transport failed: ENOBUFS',
   });
-  assert.throws(() => azureExec(PAYLOAD, { spawn: () => ({ status: 3, stderr: 'Azure rate limit: Retry-After 37', stdout: '' }) }), (error) => {
+  assert.throws(() => azureExec(PAYLOAD, { spawn: () => ({ status: 3, signal: null, stderr: 'Azure rate limit: Retry-After 37', stdout: '' }) }), (caught) => {
+    const error = /** @type {TransportError} */ (caught);
     assert.equal(error.rateLimited, true);
     assert.match(error.message, /Retry-After.*37/);
     return true;
@@ -321,6 +336,55 @@ test('Azure transport classifies failures without leaking secrets', async () => 
   await assert.rejects(send({ ...mutation, body: cyclic }, answer), /JSON/);
   assert.equal(answer.calls.length, 0);
   for (const value of [null, [], { ...CREDENTIALS, token: 'line\nbreak' }, { ...CREDENTIALS, extra: TOKEN }]) {
-    await assert.rejects(send(PAYLOAD, answer, value), (error) => { privateText(error.stack); return /credential/i.test(error.message); });
+    await assert.rejects(send(PAYLOAD, answer, value), (caught) => { const error = /** @type {TransportError} */ (caught); privateText(error.stack); return /credential/i.test(error.message); });
   }
+});
+
+test('Azure request validation reports any failure to serialize the body as not JSON', () => {
+  for (const thrown of [null, undefined, 'text', { message: 'limit' }, new Error('limit')]) {
+    assert.throws(
+      () => azureExec({ method: 'POST', path: '/' + PROJECT + '/_apis/wit/wiql', body: { toJSON() { throw thrown; } } }, { spawn: () => { throw new Error('spawned'); } }),
+      { message: 'Azure request body must be JSON' },
+    );
+  }
+});
+
+/** @param {unknown} thrown @returns {never} */
+const raise = (thrown) => { throw thrown; };
+
+test('Azure transport reports a thrown non-error value with a fixed message', async () => {
+  for (const thrown of [null, undefined, 'text', 7, {}]) {
+    const answer = { fetch: async () => ({ get status() { return raise(thrown); }, headers: new Headers(), text: async () => '{}' }) };
+    await assert.rejects(send(PAYLOAD, answer), { message: 'Azure request failed: a non-error value was thrown' });
+  }
+});
+
+test('Azure transport reads an error from another realm', async () => {
+  /** @type {unknown} */
+  const foreign = runInNewContext('new TypeError("status unreadable")');
+  const unreadable = { fetch: async () => ({ get status() { return raise(foreign); }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(send(PAYLOAD, unreadable), { message: 'status unreadable' });
+});
+
+test('Azure transport reports a revoked proxy as a non-error value', async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  const revoked = { fetch: async () => ({ get status() { return raise(proxy); }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(send(PAYLOAD, revoked), { message: 'Azure request failed: a non-error value was thrown' });
+});
+
+test('Azure transport reads a live proxy around an error', async () => {
+  const proxied = new Proxy(new TypeError('status unreadable'), {});
+  const answer = { fetch: async () => ({ get status() { return raise(proxied); }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(send(PAYLOAD, answer), { message: 'status unreadable' });
+});
+
+test('Azure transport reports an error it cannot read without its secret', async () => {
+  const unreadable = new Error('unreadable');
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error(TOKEN); } });
+  const answer = { fetch: async () => ({ get status() { return raise(unreadable); }, headers: new Headers(), text: async () => '{}' }) };
+  const caught = await send(PAYLOAD, answer).then(() => assert.fail('the request resolved'), (error) => error);
+  assert.equal(caught.message, 'Azure request failed: its error could not be read');
+  assert.equal(caught.cause, undefined);
+  privateText(caught.stack);
 });

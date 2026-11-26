@@ -14,7 +14,8 @@
 // Keys in `env(extra)` override the helper's defaults, the override variable included. The second
 // argument is a list of key names, `env(extra, ['GH_TOKEN'])`, deleted after that composition, so a
 // credential-absence test can state the key is absent instead of omitting it and inheriting
-// whatever the ambient environment exports.
+// whatever the ambient environment exports. Inherited coordinated-job variables are dropped, so a
+// caller that needs one sets it through `extra`.
 //
 // Recurring cost: negligible — one mkdtemp and one file write per importing test file.
 // Removal condition: retire when the gh-calling CLI tests stop faking `gh`.
@@ -22,6 +23,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+
+// A test run inside a coordinated Herdr job would otherwise hand the job's own markers to the child,
+// which then takes the coordinated-job route.
+const isJobVariable = (name) =>
+  ['FABRAIK_COORDINATED_JOB', 'FABRAIK_WORKFLOW_ROOT', 'PRE_APPROVED_RUN_SESSION', 'PRE_APPROVED_RUN_CARD'].includes(name) ||
+  name.startsWith('HC_') ||
+  name.startsWith('HERDR_');
 
 // The same plumbing for any external command reached through an argv-override variable: `variable`
 // names the override and `file` the shim, a `.cjs` name whose stem also names the calls files.
@@ -58,7 +66,10 @@ export function installFakeTransport(prefix, script, { variable, file }) {
           `removeKeys must be an array of key names, got: ${removeKeys === null ? 'null' : typeof removeKeys}`,
         );
       }
-      const composed = { ...process.env, [variable]: override, ...extra };
+      const inherited = { ...process.env };
+      for (const name of Object.keys(inherited)) if (isJobVariable(name)) delete inherited[name];
+      /** @type {NodeJS.ProcessEnv} */
+      const composed = { ...inherited, [variable]: override, ...extra };
       for (const key of removeKeys) delete composed[key];
       return composed;
     },

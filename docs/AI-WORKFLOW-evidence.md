@@ -27,18 +27,18 @@ one.
 | Construction mode | Must a failing check come before the fix, or does it only need to exist by the end? | The plan proposes; the coordinating session validates |
 | Discrimination proof | Does the check fail on a plausible wrong version of the code? | The coordinating session, at convergence |
 | Receipt | What exit code did the check really return, and on which tree? | `scripts/run-log.mjs` |
-| Review | Does an independent reader agree the claim is met and the evidence fits it? | A fresh reviewer, on the final tree |
+| Review | Do the required reviews agree the claim is met and the evidence fits it? | The reviewers required by the selected tier, on the final tree |
 | Hosted check | Does the merged result still pass where the repository's required check runs? | Continuous integration, before the merge |
 
 ```mermaid
 flowchart LR
     accTitle: The chain of evidence for a claim
-    accDescr: A job settles each link in order, from the claim through the observer and oracle, construction mode, discrimination proof, receipt and fresh review to the hosted check.
+    accDescr: A job settles each link in order, from the claim through the observer and oracle, construction mode, discrimination proof, receipt and the required reviews to the hosted check.
     C[Claim] --> O[Observer and oracle]
     O --> M[Construction mode]
     M --> D[Discrimination proof]
     D --> R[Receipt]
-    R --> V[Fresh review]
+    R --> V[Required reviews]
     V --> H[Hosted check]
 ```
 
@@ -77,6 +77,8 @@ Each claim gets one of three construction modes. Its subject sets a minimum mode
 | `evidence-required` | Ordinary added or changed behaviour | Added or strengthened evidence and a discrimination proof by convergence, in whatever build order |
 | `preservation` | Behaviour already present at the job's base, with adequate evidence and an unchanged contract | The declared evidence stays green; no added test or mutation |
 
+A plan labels each new test `new behaviour` or `existing behaviour`. A `new behaviour` test covers behaviour absent at the job's base. An `existing behaviour` test covers behaviour present there, so its executed mutation proves it. Each repository's testing strategy says which mode each label admits.
+
 A repository's testing strategy can raise the minimum mode for its own subjects, such as security or privacy. A
 failure counts as meaningful only when it shows the claimed defect through the code's public interface. A broken test
 setup or a reference to code that no one has written does not count.
@@ -87,8 +89,8 @@ and the receipt, records its verdict in the job's worklog and fixes the test con
 builder make the check pass. A distinct safeguard found later stops for classification, and a wrong oracle stops for
 revalidation. No builder edits the fixed assertions to reach green. A missing test that a review finds goes through
 the same two handoffs before any fix.
-[The builder template](../.agents/templates/builder-handoff.md) carries the stage. No hook checks this order, because an
-exit code cannot say why a test failed.
+[The builder template](../.agents/templates/builder-handoff.md) carries the stage. The handoff hooks refuse a strict handoff without its `Stage:` line. They also refuse an implementation handoff without its `Frozen test:` lines and a failing `Red receipt:` line for each, held in the job worktree's run log. That proves only that the job worktree's run log
+holds a well-formed failing receipt naming every frozen test. The session writes that log, and one exit code covers the whole selection. So the log cannot show that each test failed, or why. The coordinator's validation of each failure and the chronology audit's stage-commit read therefore stay.
 
 ### When no runnable baseline exists
 
@@ -114,11 +116,15 @@ a mutation: the coordinating session breaks the code on purpose, sees the check 
 pass. A builder never runs a mutation cycle. Every changed protected rule, such as a trust or honesty rule, keeps one
 deliberate mutation even when a qualifying failure exists.
 
-Nobody can recreate a missed sequence afterwards. A later mutation can show the check discriminates on the code as it
-stands, never that a failure came first. The final audit under "6. Verify and review" in the `resume` skill sorts each
-gap. Sometimes the commits and receipts still show the failure came first, and only the record slipped. The coordinating
-session then settles the gap and names it in the pull request. Code built before its failing check stays a gap, and the
-decision stays with the owner. A saved record of the gap is never fresh authorisation.
+Nobody can recreate a missed sequence afterwards. A later mutation cannot show that a failure came first, but it shows
+what test-first order exists to show: the check fails without the code and passes with it. The final audit under "6.
+Verify and review" in the `resume` skill sorts each gap. Sometimes the commits and receipts still show the failure came
+first, and only the record slipped. The coordinating session then settles the gap and names it in the pull request. Code
+built before its failing check is a test-order gap, settled on a recorded mutation of that code that turns the check red
+and passes once restored, and the pull request names it as settled on proof. Only a gap where no break of the code can
+make the check fail by its own assertion, because the code lies outside the job's worktree or every break stops the
+check running, goes to the owner, who decides only whether to accept the claim without its failing check; the proof it
+still needs stays owed. A saved record of the gap is never fresh authorisation.
 
 ### Recording each check
 
@@ -139,7 +145,7 @@ The fingerprint is what makes a mutation receipt checkable. A mutation's failing
 differs from the passing run's, on the same commit. A matching fingerprint shows nobody changed the code, and the
 reviewer refuses that receipt. A session gives a reason for each rerun it starts, and the receipt records it word for
 word. The logger never guesses that a run was a rerun. With no reason it records none, and it refuses a blank reason
-before the command starts. Nothing else reads the worklog. The head of `scripts/run-log.mjs` owns the exact format.
+before the command starts. The handoff hooks also read it at dispatch to confirm a strict implementation handoff's receipts. The head of `scripts/run-log.mjs` owns the exact format.
 
 ### Receipts after a later commit
 
@@ -169,10 +175,10 @@ reports as passing. The head of `scripts/sweep-scope-check.mjs` and `docs/DOC-SW
 
 ### Review as evidence
 
-One fresh review reads the final tree and its evidence before the pull request opens. It challenges both the change
-and the evidence chosen for it. The reviewer derives the claims from the card and the final diff before it reads the
-selected evidence. So a downgraded mode appears as a finding. A builder repairs a true finding, and the session
-verifies it again.
+The selected tier's required reviews read the final tree and its evidence before the pull request opens.
+[The review route](../.agents/skills/cross-review/SKILL.md) owns how those passes run independently and how exceptions are recorded.
+Each reviewer challenges both the change and its evidence. Each derives claims from the card and final diff before reading the selected evidence.
+So a downgraded mode appears as a finding. A builder repairs a true finding, and the session verifies it again.
 [The review line](AI-WORKFLOW.md#the-review-line) records the review that ran. A correctly formatted line shows the
 format is right, never that a review took place.
 

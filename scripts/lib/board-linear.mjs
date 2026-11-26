@@ -13,6 +13,9 @@ import * as boardConfig from './board-config.mjs';
 import { linearExec } from './linear-api.mjs';
 import { LINEAR_IDENTIFIER } from './tracker.mjs';
 
+/** @typedef {typeof boardConfig & { LINEAR_TEAM?: unknown, LINEAR_STATES?: unknown }} LinearConfigInput */
+/** @typedef {typeof boardConfig & { LINEAR_TEAM: string, LINEAR_STATES: Record<string, string> }} LinearConfig */
+
 export const CLOSED_TYPES = new Set(['completed', 'canceled', 'duplicate']);
 const [DONE] = boardConfig.TERMINAL_STATUSES;
 const REVIEW = 'In review';
@@ -21,7 +24,7 @@ const COLUMN_STATE_TYPES = { 'Backlog': 'backlog', 'Ready': 'unstarted', 'In pro
 
 const itemState = (state) => (CLOSED_TYPES.has(state.type) ? 'CLOSED' : 'OPEN');
 
-export const linearTeamKey = () => boardConfig.LINEAR_TEAM;
+export const linearTeamKey = () => /** @type {LinearConfigInput} */ (boardConfig).LINEAR_TEAM;
 
 // Linear refused the unbounded read as too complex (its default page of 50 teams multiplies the states and rules);
 // two teams are enough to see a second one for the not-one refusal.
@@ -74,7 +77,7 @@ export const allNodes = (exec, query, variables, connectionOf) =>
 const refuse = (subject, problems) => new Error(`${subject}: ${problems.join('; ')}. See "Team setup" in docs/LINEAR-CARDS.md.`);
 
 function configProblems() {
-  const { LINEAR_TEAM, LINEAR_STATES, ROUTING_FIELD, PARKED_LANE, STATUS_OPTIONS } = boardConfig;
+  const { LINEAR_TEAM, LINEAR_STATES, ROUTING_FIELD, PARKED_LANE, STATUS_OPTIONS } = /** @type {LinearConfigInput} */ (boardConfig);
   const problems = [];
   if (!(typeof LINEAR_TEAM === 'string' && /^[A-Z][A-Z0-9]*$/.test(LINEAR_TEAM))) problems.push('LINEAR_TEAM must be the team key in capitals, such as ENG');
   const names = LINEAR_STATES && typeof LINEAR_STATES === 'object' ? Object.entries(LINEAR_STATES) : null;
@@ -93,7 +96,7 @@ function configProblems() {
 function stateProblems(team) {
   const problems = [];
   for (const column of boardConfig.STATUS_OPTIONS) {
-    const name = boardConfig.LINEAR_STATES[column];
+    const name = /** @type {LinearConfig} */ (boardConfig).LINEAR_STATES[column];
     const matches = team.states.nodes.filter((state) => state.name === name);
     if (matches.length === 0) problems.push(`team ${team.key} has no state named "${name}" for ${column}`);
     else if (matches.length > 1) problems.push(`team ${team.key} has ${matches.length} states named "${name}" for ${column}`);
@@ -134,10 +137,10 @@ function automationProblems(team, stateIdOf) {
 export function readLinearTeam(exec = linearExec) {
   const configured = configProblems();
   if (configured.length > 0) throw refuse('Linear configuration in board-config.mjs', configured);
-  const { teams } = exec(TEAM_QUERY, { key: boardConfig.LINEAR_TEAM });
-  if (teams.nodes.length !== 1) throw new Error(`Linear returned ${teams.nodes.length} teams for the key ${boardConfig.LINEAR_TEAM}, not one; set LINEAR_TEAM in board-config.mjs to a team key the access reaches.`);
+  const { teams } = exec(TEAM_QUERY, { key: /** @type {LinearConfig} */ (boardConfig).LINEAR_TEAM });
+  if (teams.nodes.length !== 1) throw new Error(`Linear returned ${teams.nodes.length} teams for the key ${/** @type {LinearConfig} */ (boardConfig).LINEAR_TEAM}, not one; set LINEAR_TEAM in board-config.mjs to a team key the access reaches.`);
   const [team] = teams.nodes;
-  const stateIdOf = (column) => team.states.nodes.find((state) => state.name === boardConfig.LINEAR_STATES[column]).id;
+  const stateIdOf = (column) => team.states.nodes.find((state) => state.name === /** @type {LinearConfig} */ (boardConfig).LINEAR_STATES[column]).id;
   const problems = stateProblems(team);
   // The rules name states by id, so they are checked only against a state mapping that resolved.
   if (problems.length === 0) problems.push(...automationProblems(team, stateIdOf));
@@ -229,13 +232,14 @@ function readCard(exec, id) {
 // and the others go on, except at a rate limit, which is terminal: the cards already read keep their details,
 // the current and every later card carry the rate-limit message, and nothing further is sent.
 export function linearCardDetails(exec, ids) {
+  /** @type {Error | null} */
   let rateLimit = null;
   const read = (id) => {
     try {
       return readCard(exec, id);
     } catch (error) {
-      if (error.rateLimited) rateLimit = error;
-      return { number: id, unavailable: error.message };
+      if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited) rateLimit = /** @type {Error} */ (error);
+      return { number: id, unavailable: /** @type {Error} */ (error).message };
     }
   };
   return new Map(ids.map((id) => [id, rateLimit === null ? read(id) : { number: id, unavailable: rateLimit.message }]));
@@ -245,7 +249,7 @@ export function linearCardDetails(exec, ids) {
 // A card moved to another team answers under its new identifier, so either mismatch refuses.
 export function readTeamIssue(id, exec = linearExec) {
   const { issue } = exec(ISSUE_QUERY, { id });
-  if (issue.team.key !== boardConfig.LINEAR_TEAM) throw new Error(`${id} belongs to team ${issue.team.key}, not the configured team ${boardConfig.LINEAR_TEAM}`);
+  if (issue.team.key !== /** @type {LinearConfigInput} */ (boardConfig).LINEAR_TEAM) throw new Error(`${id} belongs to team ${issue.team.key}, not the configured team ${/** @type {LinearConfigInput} */ (boardConfig).LINEAR_TEAM}`);
   if (issue.identifier !== id) throw new Error(`Linear answered the identifier ${issue.identifier} for ${id}`);
   return { id: issue.id, identifier: issue.identifier, state: issue.state };
 }
@@ -289,12 +293,12 @@ export function moveLinearCards(pairs, exec = linearExec, pause = sleepSync) {
       const skipped = issue.state.id === target;
       if (!skipped) {
         const confirmed = exec(MOVE_MUTATION, { id: issue.id, stateId: target }).issueUpdate.issue?.state;
-        if (confirmed?.id !== target) throw new Error(`Linear answered the update with ${confirmed ? `the state "${confirmed.name}"` : 'no state'}, not "${boardConfig.LINEAR_STATES[column]}"`);
+        if (confirmed?.id !== target) throw new Error(`Linear answered the update with ${confirmed ? `the state "${confirmed.name}"` : 'no state'}, not "${/** @type {LinearConfig} */ (boardConfig).LINEAR_STATES[column]}"`);
       }
       completed.push({ issueNumber, statusName: column, skipped });
     } catch (error) {
       const done = completed.map((pair) => `${pair.issueNumber} → ${pair.statusName}`).join(', ') || 'none';
-      throw new Error(`failed to move ${issueNumber} → "${statusName}" (already completed: ${done}) — ${error.message}`, { cause: error });
+      throw new Error(`failed to move ${issueNumber} → "${statusName}" (already completed: ${done}) — ${/** @type {Error} */ (error).message}`, { cause: error });
     }
   }
   return completed;

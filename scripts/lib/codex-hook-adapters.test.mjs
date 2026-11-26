@@ -2,20 +2,22 @@
 // handoff guard.
 //
 // Representative cases run the hook itself, since the hook's exit status, stdout and stderr are what Codex reads;
-// the rest call codexHandoffHook in process against real scratch repositories.
-// Recurring cost: 6 hook runs, each a Node start; 32 in-process guard calls, at most 31 on one platform; at most 23
-// `git worktree list` runs and one Node start standing in for git; at most 9 scratch repositories with one empty
-// commit each, two of them with a second worktree; one copy of the node binary on Windows only; Codex installs only.
+// other handoff guard cases call codexHandoffHook in process against real scratch repositories.
+// Recurring cost: 11 hook runs, each a Node start; 33 in-process guard calls, at most 32 on one platform; at most 29
+// `git worktree list` runs and one Node start standing in for git; at most 13 scratch repositories with one empty
+// commit each, two of them with a second worktree; one directory fixture for the delivery cwd check;
+// one copy of the node binary on Windows only; Codex installs only.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { codexCommandForGuard, codexCwdForGuard, codexHandoffHook } from './codex-hook-adapters.mjs';
+import { checkedDeliveryCwd, codexCommandForGuard, codexCwdForGuard, codexHandoffHook } from './codex-hook-adapters.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
+import { worklogFileName } from '../run-log.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const HOOK = resolve(ROOT, '.codex/hooks/check-builder-handoff.mjs');
@@ -119,6 +121,9 @@ const call = (repo, seat = 'builder', tool = 'Bash', extra = {}) => ({
   ...extra,
 });
 
+// A run-log receipt line exactly as scripts/run-log.mjs writes it for a failing command.
+const receiptLine = (argv) => `- 2026-11-22T10:00:00.000Z | red | \`${JSON.stringify(argv)}\` | exit 1 | completed=2026-11-22T10:00:01.000Z | elapsedMs=12 | rerunReason=\`null\` | scope=root | head=abc1234 tree=clean diff=none`;
+
 // One repository for the five tests that write no record.
 let shared;
 before(() => {
@@ -150,6 +155,42 @@ test('codexCwdForGuard prefers the command workdir, falls back to the session cw
   assert.equal(codexCwdForGuard(null), '');
 });
 
+test('929 recognizes only the checked Bash delivery working directory', (t) => {
+  assert.equal(typeof checkedDeliveryCwd, 'function', 'the installed adapter exposes the native delivery cwd check');
+
+  const fixture = realpathSync.native(mkdtempSync(join(tmpdir(), 'native-delivery-cwd-')));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const root = join(fixture, 'root');
+  const worktree = join(fixture, 'job');
+  const nested = join(worktree, 'nested');
+  const sibling = join(fixture, 'job-other');
+  const foreign = join(fixture, 'foreign');
+  for (const path of [root, nested, sibling, foreign]) mkdirSync(path, { recursive: true });
+
+  const binding = { root, worktree };
+  const bash = { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: {} };
+  for (const cwd of [worktree, nested]) {
+    assert.equal(checkedDeliveryCwd({ ...bash, cwd }, binding), true, 'Bash can report the job directory without workdir');
+    assert.equal(checkedDeliveryCwd({ ...bash, cwd: root, tool_input: { workdir: cwd } }, binding), true,
+      'Bash can report the launch root with an explicit job workdir');
+  }
+
+  assert.equal(checkedDeliveryCwd({ ...bash, cwd: root }, binding), false, 'Bash cannot run delivery from the launch root');
+  assert.equal(checkedDeliveryCwd({ ...bash, tool_input: { workdir: worktree } }, binding), false, 'Bash must report cwd');
+  for (const cwd of [sibling, foreign, join(worktree, 'missing'), `${nested}${sep}..`]) {
+    assert.equal(checkedDeliveryCwd({ ...bash, cwd, tool_input: { workdir: worktree } }, binding), false, cwd);
+  }
+  for (const cwd of [root, worktree]) {
+    assert.equal(checkedDeliveryCwd({ ...bash, cwd, tool_input: { workdir: foreign } }, binding), false,
+      'an explicit foreign Bash workdir overrides an otherwise allowed cwd');
+  }
+  if (process.platform === 'linux') {
+    const alias = join(worktree, 'alias');
+    symlinkSync(nested, alias);
+    assert.equal(checkedDeliveryCwd({ ...bash, cwd: alias }, binding), false, 'a symlink is not a canonical Bash directory');
+  }
+});
+
 test('a Codex builder thread with no bound handoff is refused every tool call', async () => {
   const { repo } = shared;
   assert.deepEqual(runHook(repo, call(repo, 'builder', 'Bash')), R(UNBOUND));
@@ -174,6 +215,24 @@ test('a saved passing handoff is gated at dispatch, bound and injected at start,
   assert.deepEqual(await direct(call(repo)), R(STOP_REASON));
 });
 
+test('a bound Codex builder thread with a strict implementation handoff keeps working after its run log is removed', async (t) => {
+  const { repo } = freshRepo(t);
+  const worktree = top(repo);
+  const title = 'a bound Codex builder thread with a strict implementation handoff keeps working after its run log is removed';
+  const log = join(worktree, '.claude', 'worklog', worklogFileName(git(repo, ['branch', '--show-current']).trim()));
+  const red = receiptLine(['node', '--test', `--test-name-pattern=${title}`, 'scripts/lib/codex-hook-adapters.test.mjs']);
+  const strict = HANDOFF.replace('Construction mode: evidence-required', 'Construction mode: strict-tdd')
+    .replace('Working directory: /tmp/job-558', `Working directory: ${worktree}`)
+    + `Stage: implementation\nFrozen test: scripts/lib/codex-hook-adapters.test.mjs :: ${title}\nRed receipt: ${red}\n`;
+  save(log, `${red}\n`);
+  save(rec(worktree, 'slice_one.md'), strict);
+  assert.deepEqual(runHook(repo, spawnCall(repo, 'slice_one')), OK);
+  assert.deepEqual(runHook(repo, start(repo)), { status: 0, stdout: BOUND + strict, stderr: '' });
+  rmSync(log);
+  assert.deepEqual(runHook(repo, call(repo, 'builder', 'apply_patch')), OK);
+  assert.deepEqual(await direct(call(repo, 'builder', 'Bash')), OK);
+});
+
 test('other seats and the coordinating session pass every call untouched', async () => {
   const { repo } = shared;
   const coordinator = { session_id: SESSION, cwd: repo, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { cmd: 'ls' } };
@@ -190,6 +249,49 @@ test('a builder dispatch whose saved handoff fails the shared check is refused a
   save(rec(worktree, 'slice_one.md'), HANDOFF_NO_STOP);
   assert.deepEqual(await direct(spawnCall(repo, 'slice_one')), R(STOP_REASON));
   assert.equal(readFileSync(rec(worktree, 'slice_one.md'), 'utf8'), HANDOFF_NO_STOP);
+  assert.equal(existsSync(rec(worktree, SESSION, 'pending.md')), false);
+});
+
+test('a Codex strict-tdd implementation dispatch without a recorded red is refused and keeps the handoff', (t) => {
+  const { repo } = freshRepo(t);
+  const worktree = top(repo);
+  const title = 'a Codex strict-tdd implementation dispatch without a recorded red is refused and keeps the handoff';
+  const log = join(worktree, '.claude', 'worklog', worklogFileName(git(repo, ['branch', '--show-current']).trim()));
+  const strict = HANDOFF.replace('Construction mode: evidence-required', 'Construction mode: strict-tdd')
+    .replace('Working directory: /tmp/job-558', `Working directory: ${worktree}`)
+    + `Stage: implementation\nFrozen test: scripts/lib/codex-hook-adapters.test.mjs :: ${title}\nRed receipt: ${receiptLine(['node', '--test', `--test-name-pattern=${title}`, 'scripts/lib/codex-hook-adapters.test.mjs'])}\n`;
+  save(log, `${receiptLine(['npm', 'run', 'lint'])}\n`);
+  save(rec(worktree, 'slice_one.md'), strict);
+  const run = runHook(repo, spawnCall(repo, 'slice_one'));
+  assert.equal(run.status, 2, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^Blocked: /);
+  assert.ok(run.stderr.includes(log), run.stderr);
+  assert.equal(readFileSync(rec(worktree, 'slice_one.md'), 'utf8'), strict);
+  assert.equal(existsSync(rec(worktree, SESSION, 'pending.md')), false);
+});
+
+// existing behaviour: the Working directory is only compared with the worktree holding the handoff; trusting it would read B's log and admit.
+test('a Codex strict-tdd dispatch refuses a Working directory other than the worktree holding the handoff', (t) => {
+  const { repo } = freshRepo(t);
+  const named = freshRepo(t).repo;
+  const worktree = top(repo);
+  const title = 'a Codex strict-tdd dispatch refuses a Working directory other than the worktree holding the handoff';
+  const red = receiptLine(['node', '--test', `--test-name-pattern=${title}`, 'scripts/lib/codex-hook-adapters.test.mjs']);
+  const logIn = (dir) => join(top(dir), '.claude', 'worklog', worklogFileName(git(dir, ['branch', '--show-current']).trim()));
+  const strict = HANDOFF.replace('Construction mode: evidence-required', 'Construction mode: strict-tdd')
+    .replace('Working directory: /tmp/job-558', `Working directory: ${top(named)}`)
+    + `Stage: implementation\nFrozen test: scripts/lib/codex-hook-adapters.test.mjs :: ${title}\nRed receipt: ${red}\n`;
+  save(logIn(repo), `${receiptLine(['npm', 'run', 'lint'])}\n`);
+  save(logIn(named), `${red}\n`);
+  save(rec(worktree, 'slice_one.md'), strict);
+  const run = runHook(repo, spawnCall(repo, 'slice_one'));
+  assert.equal(run.status, 2, run.stderr);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^Blocked: /);
+  assert.ok(run.stderr.includes("'Working directory:' is not the verified job worktree"), run.stderr);
+  assert.ok(run.stderr.includes(worktree), run.stderr);
+  assert.equal(readFileSync(rec(worktree, 'slice_one.md'), 'utf8'), strict);
   assert.equal(existsSync(rec(worktree, SESSION, 'pending.md')), false);
 });
 
@@ -263,7 +365,7 @@ test('unreadable handoff records and a failed worktree listing refuse rather tha
 test('a dispatch whose saved handoff cannot be removed is refused and leaves no pending record', {
   skip: process.platform === 'win32'
     ? 'a directory permission cannot refuse an unlink on Windows'
-    : process.getuid() === 0 && 'root ignores directory permissions',
+    : /** @type {() => number} */ (process.getuid)() === 0 && 'root ignores directory permissions',
 }, async (t) => {
   const { repo } = freshRepo(t);
   const worktree = top(repo);

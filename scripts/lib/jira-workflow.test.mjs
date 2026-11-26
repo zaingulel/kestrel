@@ -107,10 +107,10 @@ test('Jira commands preserve complete publication and confirmed transitions', as
   const { main: publish } = await toolkit.load('verify-issue-publish.mjs');
   const { verifyJiraPublication } = await toolkit.load('lib/issue-publish.mjs');
   const { parseBatchArgs } = await toolkit.load('lib/board-move.mjs');
-  const run = (main, args, provider) => {
+  const run = async (main, args, provider) => {
     const stdout = [];
     const stderr = [];
-    const status = main(args, { jiraExec: provider.exec, ghExec: provider.gh,
+    const status = await main(args, { jiraExec: provider.exec, ghExec: provider.gh,
       linearExec: () => { throw new Error('must not call Linear'); }, fetchBoard: () => { throw new Error('must not read GitHub Projects'); },
       output: { log: (line) => stdout.push(line), error: (line) => stderr.push(line) } });
     return { status, stdout, stderr };
@@ -120,49 +120,49 @@ test('Jira commands preserve complete publication and confirmed transitions', as
     t.after(() => rmSync(folder, { recursive: true, force: true }));
     return folder;
   };
-  const listed = run(board, [], native());
+  const listed = await run(board, [], native());
   assert.equal(listed.status, 0, listed.stderr.join('\n'));
   assert.ok(listed.stdout[0].startsWith('Board jira project ENG at https://example.atlassian.net'));
   assert.match(listed.stdout.join('\n'), /ENG-2/);
-  const json = run(board, ['--all', '--json'], native());
+  const json = await run(board, ['--all', '--json'], native());
   assert.equal(json.status, 0, json.stderr.join('\n'));
   assert.deepEqual(JSON.parse(json.stdout[0]), [
     { number: 'ENG-1', status: 'Ready', title: 'Parent', routing: null, parked: false, labels: ['epic'], state: 'OPEN', assignees: [], openBlockers: [], closingPullRequests: [], subIssues: { total: 2, completed: 1 } },
     { number: 'ENG-2', status: 'Ready', title: 'Active child', routing: null, parked: false, labels: ['task'], state: 'OPEN', assignees: [], openBlockers: [], closingPullRequests: [], subIssues: { total: 0, completed: 0 } },
     { number: 'ENG-3', status: 'Done', title: 'Done child', routing: null, parked: false, labels: ['task'], state: 'CLOSED', assignees: [], openBlockers: [], closingPullRequests: [], subIssues: { total: 0, completed: 0 } },
   ]);
-  const closeout = run(board, ['--closeout'], native());
+  const closeout = await run(board, ['--closeout'], native());
   assert.equal(closeout.status, 0);
   assert.deepEqual(closeout.stdout, ['board: no drift found.']);
-  const empty = run(board, ['--all', '--json'], native({ empty: true }));
+  const empty = await run(board, ['--all', '--json'], native({ empty: true }));
   assert.equal(empty.status, 0);
   assert.deepEqual(JSON.parse(empty.stdout[0]), []);
   const folder = intakeFolder();
-  const intake = run(board, ['--intake', folder], native());
+  const intake = await run(board, ['--intake', folder], native());
   assert.equal(intake.status, 0, intake.stderr.join('\n'));
   // The claim is in the summary; the card's text is in the file the summary names.
   assert.match(intake.stdout.join('\n'), /claim: comment 1 of 2/);
   assert.ok(intake.stdout.join('\n').includes(`card text: ${join(folder, 'ENG-2.txt')}, `), intake.stdout.join('\n'));
   assert.doesNotMatch(intake.stdout.join('\n'), /Acceptance text/);
   assert.match(readFileSync(join(folder, 'ENG-2.txt'), 'utf8'), /^\| Acceptance text$/m);
-  const missing = run(board, ['--intake', intakeFolder()], native({ commentFailure: true }));
+  const missing = await run(board, ['--intake', intakeFolder()], native({ commentFailure: true }));
   assert.equal(missing.status, 4);
   assert.match(missing.stdout.join('\n'), /details: UNAVAILABLE.*later comment page failed/);
   assert.doesNotMatch(missing.stdout.join('\n'), /body: empty/);
   const inFlight = clone(ISSUES);
   inFlight['ENG-2'].fields.status = STATES[2];
-  const advisory = run(board, ['--all'], native({ issues: inFlight }));
+  const advisory = await run(board, ['--all'], native({ issues: inFlight }));
   assert.equal(advisory.status, 1);
   assert.match(advisory.stdout.join('\n'), /node scripts\/jira-card\.mjs assign ENG-2/);
   assert.doesNotMatch(advisory.stdout.join('\n'), /gh issue edit ENG-2/);
   const noReady = [{ id: '10001', statuses: STATES.filter(({ id }) => id !== '11') }, { id: '10002', statuses: STATES.filter(({ id }) => id !== '11') }];
-  const unread = run(board, ['--intake', intakeFolder()], native({ metadata: noReady }));
+  const unread = await run(board, ['--intake', intakeFolder()], native({ metadata: noReady }));
   assert.equal(unread.status, 2);
   assert.deepEqual(unread.stdout, []);
   assert.match(unread.stderr.join('\n'), /failed to read the Jira project/);
   for (const [main, args, remedy] of [[add, ['ENG-2', 'Ready'], /jira-card\.mjs create/], [move, ['--lane', 'ENG-2:none'], /Jira.*no parked lane|jira.*no parked lane/]]) {
     const provider = native();
-    const result = run(main, args, provider);
+    const result = await run(main, args, provider);
     assert.equal(result.status, 1);
     assert.deepEqual(result.stdout, []);
     assert.match(result.stderr.join('\n'), remedy);
@@ -174,22 +174,22 @@ test('Jira commands preserve complete publication and confirmed transitions', as
   after.fields.status = STATES[2];
   const step = { request: { method: 'POST', path: '/rest/api/3/issue/ENG-2/transitions', body: { transition: { id: '22' } } }, issues: { 'ENG-2': after } };
   const moving = native({ steps: [step] });
-  const moved = run(move, ['ENG-2', 'In progress'], moving);
+  const moved = await run(move, ['ENG-2', 'In progress'], moving);
   assert.equal(moved.status, 0, moved.stderr.join('\n'));
   assert.deepEqual(moved.stdout, ['board-move: ENG-2 → In progress']);
   assert.deepEqual(moving.writes, [step.request]);
   assert.equal(moving.remaining(), 0);
   const noopProvider = native();
-  const noop = run(move, ['ENG-2', 'Ready'], noopProvider);
+  const noop = await run(move, ['ENG-2', 'Ready'], noopProvider);
   assert.equal(noop.status, 0);
   assert.match(noop.stdout.join('\n'), /already at Ready.*no-op/);
   assert.equal(noopProvider.writes.length, 0);
-  const unconfirmed = run(move, ['ENG-2', 'In progress'], native({ steps: [{ request: step.request }] }));
+  const unconfirmed = await run(move, ['ENG-2', 'In progress'], native({ steps: [{ request: step.request }] }));
   assert.equal(unconfirmed.status, 1);
   assert.deepEqual(unconfirmed.stdout, []);
   assert.match(unconfirmed.stderr.join('\n'), /read.back/);
   const batchProvider = native({ steps: [step], transitions: { 'ENG-3': { transitions: [] } } });
-  const batch = run(move, ['--batch', 'ENG-2:In progress', 'ENG-3:Ready'], batchProvider);
+  const batch = await run(move, ['--batch', 'ENG-2:In progress', 'ENG-3:Ready'], batchProvider);
   assert.equal(batch.status, 1);
   assert.deepEqual(batch.stdout, []);
   assert.match(batch.stderr.join('\n'), /completed ENG-2 In progress/);
@@ -199,35 +199,35 @@ test('Jira commands preserve complete publication and confirmed transitions', as
   assert.deepEqual(verifyJiraPublication(['ENG-1', 'ENG-2', 'ENG-3'], published.exec), VERIFIED);
   assert.ok(published.calls.some(({ query }) => query?.nextPageToken === 'child2'));
   const commandPublished = native({ noGitHub: true });
-  const publication = run(publish, ['ENG-1', 'ENG-2', 'ENG-3'], commandPublished);
+  const publication = await run(publish, ['ENG-1', 'ENG-2', 'ENG-3'], commandPublished);
   assert.equal(publication.status, 0, publication.stderr.join('\n'));
   assert.deepEqual(publication.stdout, VERIFIED);
   assert.equal(commandPublished.ghCalls.length, 0);
-  const standalone = run(publish, ['ENG-1'], native({ noGitHub: true }));
+  const standalone = await run(publish, ['ENG-1'], native({ noGitHub: true }));
   assert.equal(standalone.status, 0);
   assert.match(standalone.stdout.join('\n'), /2 child issues \(none supplied/);
-  for (const [args, options, cause] of [
+  for (const [args, options, cause] of /** @type {[string[], object, RegExp][]} */ ([
     [['ENG-1', 'ENG-2'], {}, /child mismatch:.*native children but not supplied: ENG-3/],
     [['ENG-1', 'ENG-2', 'ENG-3', 'ENG-4'], { extraIssue: true }, /child mismatch: supplied but not native children: ENG-4/],
     [['ENG-1', 'ENG-2', 'ENG-2'], {}, /duplicate issue ID ENG-2/],
     [['ENG-1', 'ENG-2', 'ENG-3'], { childFailure: true }, /Jira child page failed/],
     [['ENG-1', 'ENG-2', 'ENG-3'], { duplicateChild: true }, /duplicate issue identity ENG-2.*search pages/],
     [['ENG-1', 'ENG-2', 'ENG-3'], { foreignChild: true }, /issue OPS-1 is outside configured project ENG/],
-  ]) {
-    const failed = run(publish, args, native({ ...options, noGitHub: true }));
+  ])) {
+    const failed = await run(publish, args, native({ ...options, noGitHub: true }));
     assert.equal(failed.status, 1);
     assert.deepEqual(failed.stdout, []);
     assert.match(failed.stderr.join('\n'), cause);
   }
-  for (const [fields, cause] of [
+  for (const [fields, cause] of /** @type {[object, RegExp][]} */ ([
     [{ labels: [] }, /ENG-2 needs exactly one kind label/],
     [{ issuetype: { id: '10001' } }, /ENG-2.*issue type.*does not match.*task kind/],
     [{ status: { id: '99', name: 'Unmapped', statusCategory: { key: 'new' } } }, /ENG-2 has no non-empty Status/],
     [{ project: { id: '99999', key: 'ENG' } }, /ENG-2 belongs to a different project/],
-  ]) {
+  ])) {
     const issues = clone(ISSUES);
     Object.assign(issues['ENG-2'].fields, fields);
-    const failed = run(publish, ['ENG-1', 'ENG-2', 'ENG-3'], native({ issues, noGitHub: true }));
+    const failed = await run(publish, ['ENG-1', 'ENG-2', 'ENG-3'], native({ issues, noGitHub: true }));
     assert.equal(failed.status, 1);
     assert.deepEqual(failed.stdout, []);
     assert.match(failed.stderr.join('\n'), cause);

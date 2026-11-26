@@ -106,7 +106,7 @@ test('kindTypesOf refuses another tracker, a personal account and a malformed ma
   );
   assert.throws(() => kindTypesOf({ BOARD_OWNER_TYPE: 'user', KIND_TYPES: null }), { message: /but BOARD_OWNER_TYPE is "user"/ });
 
-  const missingKey = { ...KIND_TYPES };
+  const missingKey = /** @type {Partial<typeof KIND_TYPES>} */ ({ ...KIND_TYPES });
   delete missingKey.docs;
   const malformed = [null, [], ['Epic', 'Feature', 'Task', 'Bug', 'Documentation'], 'Epic', missingKey, { ...KIND_TYPES, story: 'Story' }, {},
     { ...KIND_TYPES, task: '' }, { ...KIND_TYPES, task: ' Task' }, { ...KIND_TYPES, task: 'Task ' }, { ...KIND_TYPES, task: 7 },

@@ -218,22 +218,22 @@ test('Azure mutations preserve ownership revision and confirmed outcomes', async
 
   const rateLimited = Object.assign(new Error('Azure rate limit (HTTP 429): Retry-After 60; no retry was sent'), { rateLimited: true });
   const rateFlags = [];
-  for (const [options, message] of [
+  for (const [options, message] of /** @type {[object, RegExp][]} */ ([
     [{ validation: rateLimited, patch: STATE_PATCH }, /confirmed none.*AB-299.*validation.*process.*setup.*429/i],
     [{ failure: rateLimited, patch: STATE_PATCH }, /confirmed none.*AB-299.*429.*no retry/i],
     [{ after: rateLimited, patch: STATE_PATCH }, /confirmed none.*AB-299.*unconfirmed.*429/i],
-  ]) {
+  ])) {
     const limited = native(options);
     assert.throws(() => moveAzureCards([{ issueNumber: 'AB-299', statusName: 'In progress' }], limited.exec), (error) => {
-      assert.match(error.message, message);
-      rateFlags.push(error.rateLimited);
+      assert.match(/** @type {Error} */ (error).message, message);
+      rateFlags.push(/** @type {{ rateLimited?: boolean }} */ (error).rateLimited);
       return true;
     });
   }
   const commentLimited = native({ failure: rateLimited, patch: { text: SOURCE } });
   assert.throws(() => invoke(commentLimited, 'comment', 'AB-299', '--body-file', body), (error) => {
-    assert.match(error.message, /AB-299.*comment outcome unknown.*inspect.*no retry.*429/i);
-    rateFlags.push(error.rateLimited);
+    assert.match(/** @type {Error} */ (error).message, /AB-299.*comment outcome unknown.*inspect.*no retry.*429/i);
+    rateFlags.push(/** @type {{ rateLimited?: boolean }} */ (error).rateLimited);
     return true;
   });
   assert.deepEqual(rateFlags, [true, true, true, true], 'native rate-limit classification must survive validation, mutation, readback and comment wrappers');

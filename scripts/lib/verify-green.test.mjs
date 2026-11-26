@@ -9,10 +9,10 @@
 // These tests run both REAL hooks (read fresh off disk) in scratch git repositories. They preserve
 // the runtime-specific root adapters, then distinguish inapplicable, unavailable, clean, and
 // completed-with-findings lint outcomes at the shell boundary. The product gate at
-// scripts/gates/stop is synthetic here and pinned on a clean tree, so its result alone decides;
-// the product's own gate is tested with the product.
+// scripts/gates/stop is synthetic here and remains independently observable with or without
+// applicable lint evidence; the product's own gate is tested with the product.
 //
-// Recurring cost: about 5 seconds for isolated Git, npm, fake-ESLint, and fake-gate subprocesses.
+// Recorded recurring cost of the focused added Stop receipt scenarios on Linux/Node 26: 11.2–18.4 seconds.
 // Removal condition: remove with the Stop gates, or replace when the agent runtimes provide an
 // equivalent native three-way outcome contract.
 //
@@ -21,7 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,11 +60,15 @@ function initRootRepo(scratch) {
   writeFileSync(join(repo, 'src', 'a.txt'), 'A');
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { lint: 'eslint .' } }));
   const eslint = join(repo, 'node_modules', '.bin', 'eslint');
-  writeFileSync(eslint, '#!/bin/sh\nprintf "eslint-status-%s-sentinel\\n" "${FAKE_ESLINT_STATUS:-0}" >&2\nexit "${FAKE_ESLINT_STATUS:-0}"\n');
+  writeFileSync(eslint, '#!/bin/sh\n[ -z "$LINT_CALLS" ] || printf x >> "$LINT_CALLS"\nprintf "eslint-status-%s-sentinel\\n" "${FAKE_ESLINT_STATUS:-0}" >&2\nexit "${FAKE_ESLINT_STATUS:-0}"\n');
   chmodSync(eslint, 0o755);
   if (process.platform === 'win32') {
-    writeFileSync(`${eslint}.cmd`, '@echo off\r\necho eslint-status-%FAKE_ESLINT_STATUS%-sentinel 1>&2\r\nexit /b %FAKE_ESLINT_STATUS%\r\n');
+    writeFileSync(`${eslint}.cmd`, '@echo off\r\nif defined LINT_CALLS echo x>>"%LINT_CALLS%"\r\necho eslint-status-%FAKE_ESLINT_STATUS%-sentinel 1>&2\r\nexit /b %FAKE_ESLINT_STATUS%\r\n');
   }
+  mkdirSync(join(repo, 'scripts', 'lib'), { recursive: true });
+  copyFileSync(join(ROOT, 'scripts/run-log.mjs'), join(repo, 'scripts/run-log.mjs'));
+  copyFileSync(join(ROOT, 'scripts/lib/run-folder.mjs'), join(repo, 'scripts/lib/run-folder.mjs'));
+  writeFileSync(join(repo, '.gitignore'), '.claude/worklog/\n');
   git(repo, ['init', '-q', '-b', 'main']);
   git(repo, ['add', '-A']);
   git(repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', 'commit', '-q', '-m', 'base']);
@@ -109,6 +113,30 @@ test('Stop gate: every installed runtime uses ancestor-installed ESLint for a li
     for (const hook of HOOKS) {
       const result = runHook(hook, worktree, root, { env: { FAKE_ESLINT_STATUS: '1' } });
       assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /npm run lint exited 1\. Fix before finishing/);
+      assert.match(result.stderr, /eslint-status-1-sentinel/);
+    }
+
+    // Stop wire: with FABRAIK_WORKFLOW_ROOT set, the Claude Stop definition runs the pinned hook under
+    // sh. The fixture root holds no hook, so only the pinned copy can produce the lint block. The receipt policy is
+    // the pinned copy's too: the worktree's editable run-log.mjs claims reusable lint, and lint still runs.
+    if (PRESENT.includes('claude')) {
+      const stop = JSON.parse(readFileSync(resolve(ROOT, '.claude/settings.json'), 'utf8')).hooks.Stop[0].hooks[0].command;
+      const pin = join(scratch, 'pin');
+      mkdirSync(join(pin, '.claude', 'hooks'), { recursive: true });
+      mkdirSync(join(pin, 'scripts', 'lib'), { recursive: true });
+      copyFileSync(CLAUDE_HOOK.script, join(pin, '.claude', 'hooks', 'verify-green.sh'));
+      copyFileSync(join(ROOT, 'scripts/run-log.mjs'), join(pin, 'scripts/run-log.mjs'));
+      copyFileSync(join(ROOT, 'scripts/lib/run-folder.mjs'), join(pin, 'scripts/lib/run-folder.mjs'));
+      writeFileSync(join(worktree, 'scripts/run-log.mjs'), `export const reusableLocalChecks = () => ({ head: '${'0'.repeat(40)}', lint: true, scripts: true });\n`);
+      assert.ok(SHELL, NO_SHELL);
+      const result = spawnSync(SHELL, ['-c', stop], {
+        cwd: worktree,
+        encoding: 'utf8',
+        input: '{}',
+        env: { ...process.env, CLAUDE_PROJECT_DIR: root, FABRAIK_WORKFLOW_ROOT: pin, FAKE_ESLINT_STATUS: '1' },
+      });
+      assert.equal(result.status, 2, `stop wire: ${stop}\n${result.stderr}`);
       assert.match(result.stderr, /npm run lint exited 1\. Fix before finishing/);
       assert.match(result.stderr, /eslint-status-1-sentinel/);
     }
@@ -184,16 +212,20 @@ test('Stop gate: a missing local or ancestor ESLint executable makes lint explic
   });
 });
 
-test('Stop gate: every completed nonzero lint result blocks with the actual ESLint output', () => {
+test('ANTI-REGRESSION: Stop treats lint exit 75 as could-not-verify and blocks every other failure', () => {
   withScratchRoot((scratch) => {
     const root = initRootRepo(scratch);
     makePending(root);
-    for (const status of ['1', '2']) {
-      for (const hook of HOOKS) {
-        const r = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: status } });
-        assert.equal(r.status, 2, r.stderr);
-        assert.match(r.stderr, new RegExp(`npm run lint exited ${status}\\. Fix before finishing`));
-        assert.match(r.stderr, new RegExp(`eslint-status-${status}-sentinel`));
+    for (const hook of HOOKS) {
+      const r = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: '75' } });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /Stop gate: npm run lint could not run \(exit 75\), so the lint observation is unavailable\.[\s\S]*eslint-status-75-sentinel/);
+      assert.doesNotMatch(r.stderr, /Fix before finishing/);
+      for (const status of ['1', '2']) {
+        const blocked = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: status } });
+        assert.equal(blocked.status, 2, blocked.stderr);
+        assert.match(blocked.stderr, new RegExp(`npm run lint exited ${status}\\. Fix before finishing`));
+        assert.match(blocked.stderr, new RegExp(`eslint-status-${status}-sentinel`));
       }
     }
   });
@@ -229,7 +261,7 @@ function pathWithOnly(scratch, label, commands) {
 // real shell's own directory follows the stubs; that Git for Windows directory holds no node or npm.
 function restrictedPath(bin) {
   if (process.platform !== 'win32') return bin;
-  const shellDir = dirname(SHELL);
+  const shellDir = dirname(/** @type {string} */ (SHELL));
   for (const name of ['node.exe', 'npm', 'npm.cmd']) {
     assert.ok(
       !existsSync(join(shellDir, name)),
@@ -362,4 +394,62 @@ test('Codex Stop launcher: no reachable POSIX shell blocks with the Git for Wind
     assert.equal(r.status, 2, r.stderr);
     assert.match(r.stderr, /no POSIX shell found; install Git for Windows/);
   });
+});
+
+
+test('ANTI-REGRESSION: Stop reuses matching lint evidence and retains every fallback and product gate', async (t) => {
+  for (const [index, hook] of HOOKS.entries()) {
+    for (const scenario of ['matching dirty', 'missing', 'failed', 'stale head', 'tracked changed', 'untracked changed', 'malformed', 'truncated', 'scripts only', 'reader unavailable', 'product refusal']) {
+      await t.test(`${index}: ${scenario}`, () => withScratchRoot((scratch) => {
+        const repo = initRootRepo(scratch);
+        makePending(repo);
+        const worklog = join(repo, '.claude', 'worklog');
+        mkdirSync(worklog, { recursive: true });
+        const calls = join(worklog, 'lint-calls');
+        const gateCalls = join(worklog, 'gate-calls');
+        writeStopGate(repo, '#!/bin/sh\nprintf x >> .claude/worklog/gate-calls\nexit "${PRODUCT_STATUS:-0}"\n');
+        if (scenario === 'untracked changed') writeFileSync(join(repo, 'extra.txt'), 'one');
+        const receipt = join(worklog, 'main.md');
+        if (scenario !== 'missing') {
+          const command = scenario === 'scripts only' ? ['node', '--test', '--test-concurrency=2', 'scripts/lib/*.test.mjs'] : ['npm', 'run', 'lint'];
+          // The unrelated suite record is fixture input; lint receipts run the actual writer and lint command.
+          if (scenario === 'scripts only') {
+            const actualCommand = ['node', '-e', 'process.exit(0)'];
+            const logged = spawnSync(process.execPath, [join(repo, 'scripts/run-log.mjs'), 'synthetic suite input', '--', ...actualCommand], { cwd: repo, encoding: 'utf8' });
+            assert.equal(logged.status, 0, logged.stderr);
+            writeFileSync(receipt, readFileSync(receipt, 'utf8').replace(JSON.stringify(actualCommand), JSON.stringify(command)));
+          } else {
+            const logged = spawnSync(process.execPath, [join(repo, 'scripts/run-log.mjs'), 'lint evidence', '--', ...command], { cwd: repo, encoding: 'utf8', env: { ...process.env, FAKE_ESLINT_STATUS: scenario === 'failed' ? '1' : '0' } });
+            assert.equal(logged.status, scenario === 'failed' ? 1 : 0, logged.stderr);
+          }
+        }
+        if (scenario === 'tracked changed') writeFileSync(join(repo, 'src/a.txt'), 'A3');
+        if (scenario === 'untracked changed') writeFileSync(join(repo, 'extra.txt'), 'two');
+        if (scenario === 'stale head') {
+          git(repo, ['add', '-A']);
+          git(repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', 'commit', '-q', '-m', 'new head']);
+          writeFileSync(join(repo, 'src/a.txt'), 'A3');
+        }
+        if (scenario === 'malformed') writeFileSync(receipt, readFileSync(receipt, 'utf8') + '- broken receipt | `["npm","run","lint"]` | exit 0\n');
+        if (scenario === 'truncated') writeFileSync(receipt, readFileSync(receipt, 'utf8').trimEnd().slice(0, -20));
+        if (scenario === 'reader unavailable') rmSync(join(repo, 'scripts/run-log.mjs'));
+        const result = runHook(hook, repo, repo, { env: { FAKE_ESLINT_STATUS: '1', LINT_CALLS: calls, PRODUCT_STATUS: scenario === 'product refusal' ? '2' : '0' } });
+        assert.equal(readFileSync(gateCalls, 'utf8'), 'x', 'product gate always runs once');
+        if (scenario === 'matching dirty') {
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(result.stderr, '');
+          assert.equal(existsSync(calls), false, 'matching receipt dispatches zero duplicate lint commands');
+        } else {
+          assert.equal(result.status, 2, result.stderr);
+          if (scenario === 'product refusal') {
+            assert.match(result.stderr, /scripts\/gates\/stop exited 2/);
+            assert.equal(existsSync(calls), false);
+          } else {
+            assert.match(result.stderr, /npm run lint exited 1/);
+            assert.equal(readFileSync(calls, 'utf8').trim(), 'x', 'fallback dispatches lint exactly once');
+          }
+        }
+      }));
+    }
+  }
 });

@@ -4,15 +4,15 @@
 # enforced at 100% instead of by memory. Tests stay at pre-push and CI — this hook lints only, to
 # keep the per-turn cost in seconds.
 # First, an executable scripts/gates/stop (the product gate) runs on every Stop, its output on stderr;
-# it owns its own trigger. Lint then runs only when src/ has pending changes, so conversation-only
-# and docs-only turns are untouched by it. A change outside `src/` gets no Stop-time lint; pre-push
-# and CI lint it.
+# it owns its own trigger. Applicable same-state evidence reuses lint; otherwise lint runs when src/
+# has pending changes. Conversation-only and docs-only turns are untouched by it. A change outside
+# `src/` gets no Stop-time lint; pre-push and CI lint it.
 #
 # One convention for a deliberate pass, shared with the Codex twin:
-#   exit 0, silent        — nothing to verify (recursion re-entry, no pending src/ change);
+#   exit 0, silent        — no pending check or applicable lint evidence;
 #                           an absent product gate changes nothing, and a passing one adds only its own output
 #   exit 0, stated reason — could not verify (no project root resolved, an unenterable root, a root
-#                           git cannot inspect, a required tool absent, or lint unable to evaluate):
+#                           git cannot inspect, a required tool absent, or lint unable to evaluate, exit 75):
 #                           the applicable observation did not complete, and stderr says so; a product
 #                           gate that could not verify states its own reason and exits 0
 #   exit 2, stated reason — verified and failed, including a product gate that exited non-zero or is
@@ -25,6 +25,11 @@ input=$(cat)
 
 # Avoid the Stop-hook infinite loop: if we already forced one continuation, let it stop.
 case "$input" in *'"stop_hook_active"'*true*) exit 0 ;; esac
+
+# A pinned job's own copy of this hook lives under its pinned workflow root; resolve it before the
+# `cd` below so a relative hook path still names it.
+hook_root=
+[ -z "$FABRAIK_WORKFLOW_ROOT" ] || hook_root=$(cd "$(dirname "$0")/../.." && pwd)
 
 # Resolve the repository this hook is actually running in first, exactly as the Codex twin does:
 # CLAUDE_PROJECT_DIR stays at the session's original project root, so for a session working inside
@@ -102,8 +107,54 @@ if [ -z "$eslint_bin" ]; then
   exit 0
 fi
 
+reuse_root=$root
+# A pinned job takes its receipt policy from the pinned copy this hook runs from, never from the
+# worktree's editable run-log.mjs.
+[ -z "$hook_root" ] || reuse_root=$hook_root
+reuse_mode=dirty
+reuse_lint=no
+# Self-contained hooks repeat this bridge; reusableLocalChecks owns receipt policy.
+# shellcheck disable=SC2016 # The single-quoted text is a Node script; its $ and backticks are JavaScript, not shell.
+if reuse_probe=$(node --input-type=module -e '
+  import { pathToFileURL } from "node:url";
+  const { reusableLocalChecks } = await import(pathToFileURL(process.argv[2]).href);
+  const value = reusableLocalChecks({ allowDirty: process.argv[3] === "dirty" });
+  if (!(value.head === null || (typeof value.head === "string" && /^[0-9a-f]{40}$/.test(value.head))) ||
+      typeof value.lint !== "boolean" || typeof value.scripts !== "boolean") process.exit(2);
+  console.log(`${value.head ?? "unknown"} ${value.lint ? "yes" : "no"} ${value.scripts ? "yes" : "no"}`);
+' -- . "$reuse_root/scripts/run-log.mjs" "$reuse_mode" </dev/null 2>/dev/null); then
+  case "$reuse_probe" in
+    *'
+'*) ;;
+    *)
+      if IFS=' ' read -r probe_head probe_lint probe_scripts probe_extra <<REUSE
+$reuse_probe
+REUSE
+      then
+        case "$probe_head" in
+          ''|*[!0-9a-f]*) ;;
+          *)
+            if [ "${#probe_head}" -eq 40 ] && [ -z "$probe_extra" ]; then
+              case "$probe_lint:$probe_scripts" in
+                yes:yes|yes:no|no:yes|no:no)
+                  reuse_lint=$probe_lint
+                  ;;
+              esac
+            fi
+            ;;
+        esac
+      fi
+      ;;
+  esac
+fi
+[ "$reuse_lint" = yes ] && exit 0
+
 out=$(npm run lint 2>&1)
 lint_status=$?
 [ "$lint_status" -eq 0 ] && exit 0
+if [ "$lint_status" -eq 75 ]; then
+  printf 'Stop gate: npm run lint could not run (exit 75), so the lint observation is unavailable.\n%s\n' "$out" >&2
+  exit 0
+fi
 printf 'Stop gate: npm run lint exited %s. Fix before finishing.\n%s\n' "$lint_status" "$out" >&2
 exit 2

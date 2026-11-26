@@ -4,16 +4,13 @@
 // local-ESLint capabilities. It observes calls, scrubbed environment and the output it shows at the executable boundary;
 // no push or hook activation occurs.
 //
-// The tests of a push to main and of Git LFS use run the hook over a real git and a real repository,
-// because what they prove is which commit's files the hook hands to the product gate and what the pushed
-// commits and this machine's attributes files say: the first commit is what the remote's main holds, the
-// second is the pushed commit and stays checked out. Every other test keeps the fake git, which fails
-// any call the hook should not make.
+// Main-push, Git LFS and receipt-applicability cases run the hook over real Git repositories.
+// The first commit is what the remote's main holds; the second is pushed and stays checked out.
+// Other cases keep fake Git, which fails any call the hook should not make.
 //
-// Recurring cost: about 2.8 seconds for the file apart from the setting-only test, measured on Linux
-// with Node 26: 13 to 38 milliseconds for each test over the fake git and 68 to 183 for each case over a
-// real repository. Over one run on the same machine: 0.27 seconds for the setting-only test's five hook
-// runs over a real repository.
+// Historical Linux/Node 26 measurements: fake-Git cases 13–38ms each; real-repository cases 68–183ms each;
+// the setting-only path took 0.27s across five runs. Recorded recurring cost of the focused added receipt
+// scenarios on Linux/Node 26: 4.4–10.2 seconds.
 // Removal condition: remove with the pre-push hook, or replace when Git supplies equivalent native
 // lint, nested-test, environment-scrub, optional-full-test, and Git LFS upload enforcement.
 
@@ -34,13 +31,15 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { main as runLog } from '../run-log.mjs';
 import { fixtureShell } from './posix-shell.mjs';
 
 const HOOK = resolve(dirname(fileURLToPath(import.meta.url)), '../../.githooks/pre-push');
+const REUSE_BRIDGE_SOURCE = "\n  import { pathToFileURL } from \"node:url\";\n  const { reusableLocalChecks } = await import(pathToFileURL(process.argv[2]).href);\n  const value = reusableLocalChecks({ allowDirty: process.argv[3] === \"dirty\" });\n  if (!(value.head === null || (typeof value.head === \"string\" && /^[0-9a-f]{40}$/.test(value.head))) ||\n      typeof value.lint !== \"boolean\" || typeof value.scripts !== \"boolean\") process.exit(2);\n  console.log(`${value.head ?? \"unknown\"} ${value.lint ? \"yes\" : \"no\"} ${value.scripts ? \"yes\" : \"no\"}`);\n";
 const NO_SHELL = 'a POSIX shell is required: install Git for Windows';
 
 const SHELL = fixtureShell();
-const HAS_GIT_LFS = Boolean(SHELL) && spawnSync(SHELL, ['-c', 'command -v git-lfs']).status === 0;
+const HAS_GIT_LFS = Boolean(SHELL) && spawnSync(/** @type {string} */ (SHELL), ['-c', 'command -v git-lfs']).status === 0;
 
 function executable(path, source) {
   writeFileSync(path, source);
@@ -58,7 +57,7 @@ function commandPath(name) {
 // instead names it in its own POSIX form.
 function shellForm(dir) {
   return process.platform === 'win32'
-    ? spawnSync(SHELL, ['-c', 'cd "$DIR" && printf %s "$PWD"'], { encoding: 'utf8', env: { DIR: dir } }).stdout
+    ? spawnSync(/** @type {string} */ (SHELL), ['-c', 'cd "$DIR" && printf %s "$PWD"'], { encoding: 'utf8', env: { DIR: dir } }).stdout
     : dir;
 }
 
@@ -128,7 +127,13 @@ function realRepository(repo, isolation, options, scratch) {
   };
 
   git(['init', '-q', '-b', 'main', '.']);
-  const mainSha = commit('main', GATES[options.main], options.mainFiles);
+  const receiptFiles = options.receipts ? [
+    { path: '.gitignore', content: '.claude/worklog/\nnode_modules/\n' },
+    { path: 'scripts/run-log.mjs', content: readFileSync(resolve(dirname(HOOK), '../scripts/run-log.mjs'), 'utf8') },
+    { path: 'scripts/lib/run-folder.mjs', content: readFileSync(resolve(dirname(HOOK), '../scripts/lib/run-folder.mjs'), 'utf8') },
+    { path: 'package.json', content: JSON.stringify({ scripts: { 'test:scripts': 'node --test --test-concurrency=2 "scripts/lib/*.test.mjs"' } }) },
+  ] : [];
+  const mainSha = commit('main', GATES[options.main], [...receiptFiles, ...(options.mainFiles ?? [])]);
   let pushedSha = commit('pushed', GATES[options.pushed], options.pushedFiles);
   if (options.merge === 'side') {
     git(['reset', '-q', mainSha]);
@@ -173,7 +178,7 @@ function realRepository(repo, isolation, options, scratch) {
     attributes(file, options.attributesFile);
     git(['config', 'core.attributesFile', file]);
   }
-  return { mainSha, pushedSha, pushedTree, remote, remoteUrl, toplevel };
+  return { git, mainSha, pushedSha, pushedTree, remote, remoteUrl, toplevel };
 }
 
 /**
@@ -266,6 +271,10 @@ esac
 
     if (options.node !== false) {
       executable(join(bin, 'node'), `#!/bin/sh
+# Native Windows Node cannot spawn the shell Git stub, so this bridge finds native Git first.
+if [ "$#" -eq 7 ] && [ "$1" = --input-type=module ] && [ "$2" = -e ] && [ "$3" = "$REUSE_BRIDGE_SOURCE" ] && [ "$4" = -- ] && [ "$5" = . ] && [ "$6" = "$REPO_ROOT/scripts/run-log.mjs" ] && { [ "$7" = clean ] || [ "$7" = dirty ]; }; then
+  PATH="${dirname(commandPath('git'))}:$PATH" exec "${process.execPath}" "$@"
+fi
 printf 'node\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$*" "$PWD" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_NAMESPACE" "$NODE_TEST_CONTEXT" "$GIT_TRACE_PACKET$GIT_TRACE2_EVENT" >> "$CALLS"
 case "$*" in
   "--test --test-concurrency=2 scripts/lib/*.test.mjs")
@@ -281,7 +290,7 @@ esac
       executable(join(bin, 'npm'), `#!/bin/sh
 printf 'npm\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$*" "$PWD" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_NAMESPACE" "$NODE_TEST_CONTEXT" "$GIT_TRACE_PACKET$GIT_TRACE2_EVENT" >> "$CALLS"
 case "$*" in
-  "run lint --silent") exit "\${LINT_STATUS:-0}" ;;
+  "run lint"|"run lint --silent") exit "\${LINT_STATUS:-0}" ;;
   "test") exit "\${FULL_TEST_STATUS:-0}" ;;
   *) exit 92 ;;
 esac
@@ -296,13 +305,14 @@ esac
 
     // `input` is the ref lines Git writes to the hook's stdin, one per pushed ref, and `args` the remote's
     // name and URL Git passes as the hook's arguments.
-    const run = (extra = {}, input = '', args = []) => spawnSync(SHELL, [HOOK, ...args], {
+    const run = (extra = {}, input = '', args = []) => spawnSync(/** @type {string} */ (SHELL), [HOOK, ...args], {
       cwd,
       encoding: 'utf8',
       input,
       env: {
         PATH: bin,
-        REPO_ROOT: repo,
+        REPO_ROOT: repository.toplevel ?? repo,
+        REUSE_BRIDGE_SOURCE,
         CALLS: calls,
         TMPDIR: shellForm(temporary),
         ...isolation,
@@ -319,7 +329,15 @@ esac
     const recorded = () => readFileSync(calls, 'utf8').split('\n').filter(Boolean);
     // What the hook left behind in its temporary directory.
     const leftovers = () => readdirSync(temporary);
-    fn({ ...repository, leftovers, recorded, nativeRoot: repo, root: shellForm(repo), run });
+    const record = (command, status = 0) => {
+      const result = runLog(['synthetic command outcome', '--', ...command], {
+        cwd: repo, env: { ...process.env, ...isolation }, output: { log() {}, error() {} },
+        spawnSync: (file, args, options) => file === 'git' ? spawnSync(file, args, options) : { status },
+      });
+      assert.equal(result.exitCode, status);
+      writeFileSync(calls, '');
+    };
+    fn({ ...repository, record, leftovers, recorded, nativeRoot: repo, root: shellForm(repo), run });
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -425,12 +443,12 @@ test('pre-push shows the whole output of a passing script suite when it finds no
   });
 });
 
-test('pre-push skips lint without npm but still runs the script suite', () => {
+test('pre-push refuses missing npm without applicable lint evidence', () => {
   withFixture({ npm: false }, ({ recorded, run }) => {
     const result = run();
-    assert.equal(result.status, 0, output(result));
-    assert.match(result.stderr, /npm not found.*skipping lint gate/);
-    assert.deepEqual(recorded().map((line) => line.split('\t')[0]), ['node']);
+    assert.notEqual(result.status, 0, output(result));
+    assert.match(result.stderr, /npm (?:not found|is not on PATH|is unavailable)/);
+    assert.deepEqual(recorded(), [], 'an unavailable required lint check refuses before suite dispatch');
   });
 });
 
@@ -670,13 +688,13 @@ test('ANTI-REGRESSION: pre-push uploads the LFS objects of a push after every ga
 
 test('pre-push finds LFS use wherever attributes are read and in a range whose tip dropped it', async (t) => {
   const uploaded = ['npm', 'node', 'lfs'];
-  const cases = [
+  const cases = /** @type {[string, object][]} */ ([
     ['a: a nested .gitattributes at the pushed tip', { pushedFiles: [{ path: 'assets/.gitattributes', content: TRACKING.content }] }],
     ['c: a side branch that added and dropped tracking, merged with no net change', { merge: 'side' }],
     ['e: the repository\'s own info/attributes', { infoAttributes: TRACKING.content }],
     ['f: a core.attributesFile', { attributesFile: TRACKING.content }],
     ['g: the per-user attributes file', { userAttributes: TRACKING.content }],
-  ];
+  ]);
   for (const [title, options] of cases) {
     await t.test(title, () => {
       withLfs(options, ({ mainSha, pushedSha, recorded, run }) => {
@@ -750,7 +768,7 @@ test('pre-push passes every ref that uses LFS to the upload', () => {
 });
 
 test('pre-push behaves as before for a push that does not use LFS', async (t) => {
-  const cases = [
+  const cases = /** @type {[string, string, { ref?: string, remoteArgs?: boolean, [option: string]: unknown }][]} */ ([
     ['a: git-lfs installed, no tracking', 'installed', {}],
     ['b: git-lfs absent, no tracking', 'absent', {}],
     ['c: git-lfs absent, tracking only in a comment', 'absent', { pushedFiles: [{ path: '.gitattributes', content: `# ${TRACKING.content}` }] }],
@@ -758,7 +776,7 @@ test('pre-push behaves as before for a push that does not use LFS', async (t) =>
     ['e: git-lfs absent, tracking that the remote already dropped', 'absent', { onRemote: 'pushed', mainFiles: [TRACKING], pushedFiles: [{ path: '.gitattributes', content: PLAIN }], remoteArgs: true }],
     ['f: git-lfs absent, attributes files with no tracking', 'absent', { infoAttributes: PLAIN, userAttributes: PLAIN }],
     ['g: git-lfs absent, a core.attributesFile replacing a per-user file that tracks', 'absent', { userAttributes: TRACKING.content, attributesFile: PLAIN }],
-  ];
+  ]);
   for (const [title, lfs, { ref, remoteArgs, ...options }] of cases) {
     await t.test(title, () => {
       withLfs({ ...options, lfs }, ({ mainSha, pushedSha, recorded, run }) => {
@@ -847,13 +865,13 @@ test('pre-push uploads an LFS object a local replacement hides', { skip: HAS_GIT
 });
 
 test('pre-push refuses a push when its LFS use cannot be read', async (t) => {
-  const cases = [
+  const cases = /** @type {[string, Record<string, string>, object][]} */ ([
     ['grep *', { FAILING_GIT: 'grep *' }, {}],
     ['log *', { FAILING_GIT: 'log *' }, {}],
     ['config *', { FAILING_GIT: 'config *' }, {}],
     ['rev-parse --git-path *', { FAILING_GIT: 'rev-parse --git-path *' }, {}],
     ['a failing grep of a local attributes file', { FAILING_GREP: '1' }, { infoAttributes: PLAIN }],
-  ];
+  ]);
   for (const [title, extra, options] of cases) {
     await t.test(title, () => {
       withLfs(options, ({ mainSha, pushedSha, recorded, run }) => {
@@ -864,4 +882,86 @@ test('pre-push refuses a push when its LFS use cannot be read', async (t) => {
       });
     });
   }
+});
+
+
+test('ANTI-REGRESSION: pre-push reuses only applicable clean-head evidence and retains every fallback and distinct gate', async (t) => {
+  const lint = ['npm', 'run', 'lint'];
+  const suite = ['node', '--test', '--test-concurrency=2', 'scripts/lib/*.test.mjs'];
+  for (const scenario of [
+    'both matching', 'lint only', 'scripts only', 'missing', 'latest lint failed', 'latest suite failed',
+    'stale head', 'pushed sha mismatch', 'one pushed sha mismatch', 'deletion only', 'no refs',
+    'dirty matching', 'changed content', 'malformed', 'truncated', 'reader unavailable',
+    'main only', 'mixed main', 'main refusal', 'LFS refusal', 'RUN_TESTS',
+    'ESLint unavailable', 'npm unavailable with lint receipt',
+  ]) await t.test(scenario, () => {
+    withFixture({ main: scenario === 'main refusal' ? 'refuse' : 'admit', pushed: 'admit', receipts: true, lfs: scenario === 'LFS refusal' ? 'installed' : undefined }, ({ git, mainSha, pushedSha, nativeRoot, record, recorded, run }) => {
+      const log = join(nativeRoot, '.claude/worklog/main.md');
+      if (scenario === 'dirty matching') writeFileSync(join(nativeRoot, DEFINITION_PATH), 'dirty\n');
+      if (scenario !== 'scripts only' && scenario !== 'missing') record(lint);
+      if (scenario !== 'lint only' && scenario !== 'missing') record(suite);
+      if (scenario === 'latest lint failed') record(lint, 1);
+      if (scenario === 'latest suite failed') record(suite, 3);
+      let pushed = pushedSha;
+      if (scenario === 'stale head') {
+        git(['commit', '-q', '--allow-empty', '-m', 'new head']);
+        pushed = git(['rev-parse', 'HEAD']);
+      }
+      if (scenario === 'changed content') writeFileSync(join(nativeRoot, DEFINITION_PATH), 'changed\n');
+      if (scenario === 'malformed') writeFileSync(log, readFileSync(log, 'utf8') + '- broken receipt | `["npm","run","lint"]` | exit 0\n');
+      if (scenario === 'truncated') writeFileSync(log, readFileSync(log, 'utf8').trimEnd().slice(0, -20));
+      if (scenario === 'reader unavailable') rmSync(join(nativeRoot, 'scripts/run-log.mjs'));
+      if (scenario === 'ESLint unavailable') rmSync(join(nativeRoot, 'node_modules/.bin/eslint'));
+      let refs = refLine('refs/heads/topic', ZERO, scenario === 'pushed sha mismatch' ? mainSha : pushed);
+      if (scenario === 'one pushed sha mismatch') refs += refLine('refs/heads/other', ZERO, mainSha);
+      if (scenario === 'deletion only') refs = refLine('refs/heads/topic', pushed, ZERO);
+      if (scenario === 'no refs') refs = '';
+      if (['main only', 'main refusal', 'mixed main'].includes(scenario)) {
+        const main = refLine('refs/heads/main', mainSha, pushed);
+        refs = scenario === 'mixed main' ? refs + main : main;
+      }
+      const extra = { LINT_STATUS: '1', SCRIPT_STATUS: '3' };
+      if (scenario === 'RUN_TESTS') Object.assign(extra, { RUN_TESTS: '1', FULL_TEST_STATUS: '7' });
+      if (scenario === 'LFS refusal') {
+        // A machine attributes file adds LFS without changing the clean committed tree.
+        writeFileSync(join(nativeRoot, '.git/info/attributes'), TRACKING.content);
+        extra.LFS_STATUS = '1';
+      }
+      if (scenario === 'npm unavailable with lint receipt') {
+        // The npm wrapper is outside the repository, so removing it cannot invalidate the receipt.
+        rmSync(join(dirname(nativeRoot), 'bin/npm'));
+      }
+      const result = run(extra, refs, ['origin', 'unused']);
+      const calls = recorded().map((line) => line.split('\t')[0]);
+      if (['both matching', 'npm unavailable with lint receipt'].includes(scenario)) {
+        assert.equal(result.status, 0, output(result));
+        assert.deepEqual(calls, [], 'applicable evidence dispatches neither duplicate check');
+        assert.match(output(result), /reus.*lint/i);
+        assert.match(output(result), /reus.*script/i);
+      } else if (scenario === 'RUN_TESTS') {
+        assert.equal(result.status, 7, output(result));
+        assert.deepEqual(calls, ['npm']);
+        assert.match(output(result), /RUN_TESTS=1/);
+      } else if (scenario === 'LFS refusal') {
+        assert.notEqual(result.status, 0, output(result));
+        assert.deepEqual(calls, ['lfs']);
+        assert.match(output(result), /git lfs pre-push failed/);
+      } else if (scenario === 'main refusal') {
+        assert.notEqual(result.status, 0, output(result));
+        assert.deepEqual(calls, ['gate']);
+        assert.match(output(result), /gate as it stands on the remote/);
+      } else if (scenario === 'ESLint unavailable') {
+        assert.notEqual(result.status, 0, output(result));
+        assert.deepEqual(calls, []);
+        assert.match(output(result), /eslint is not installed/);
+      } else if (['lint only', 'latest suite failed'].includes(scenario)) {
+        assert.equal(result.status, 3, output(result));
+        assert.deepEqual(calls, ['node'], 'only the suite lacks applicable evidence');
+      } else {
+        assert.equal(result.status, 1, output(result));
+        assert.deepEqual(calls, ['main only', 'mixed main'].includes(scenario) ? ['gate', 'npm'] : ['npm']);
+        assert.match(output(result), /npm run lint/);
+      }
+    });
+  });
 });

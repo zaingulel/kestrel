@@ -6,8 +6,9 @@
 //
 // boardQuery fetches only the fields the scripts consume, about 2 GraphQL points per
 // 100-item page, and fetchBoard walks every page inside one
-// `gh api graphql --paginate --slurp` process, then walks the repository's issues the same
-// way to recover the cards that listing omits.
+// `gh api graphql --paginate --slurp` process, then walks the repository's open issues and
+// its issues, open or closed, updated in the last RECENTLY_CLOSED_WINDOW_DAYS the same way to recover the
+// cards that listing omits.
 //
 // Do not migrate this read to the REST Projects API: at parity on these
 // fields it sends 24.1x the payload, and the quota a migration would save is
@@ -27,11 +28,14 @@ import {
   STATUS_OPTIONS,
 } from './board-config.mjs';
 import { rejectUnknownArgs } from './cli-flags.mjs';
-import { GhOutputTooLargeError } from './gh-exec.mjs';
+import { GhOutputTooLargeError, retryBudget, retryTransient, sleepSync } from './gh-exec.mjs';
+import { showFirstAmong } from './merge-evidence.mjs';
 import { LINEAR_IDENTIFIER, cardRef, compareCardIds, kindTypesOf } from './tracker.mjs';
 // A namespace import, because board-config.mjs is the adopter's file and an update never touches
 // it: a named import of KIND_TYPES would stop every board tool at link time where it is absent.
 import * as boardConfig from './board-config.mjs';
+
+/** @typedef {{ field: string, option: string }} ParkedLane */
 
 // The map from each kind to its native issue type where the configuration chooses types, else null.
 export const KIND_TYPES = kindTypesOf(boardConfig);
@@ -41,11 +45,11 @@ export const KIND_TYPES = kindTypesOf(boardConfig);
 // operator never asked — and --closeout's exit code is a proof contract, so an
 // unrecognised argument stops the command here rather than certifying a board nobody
 // asked about (the #598 silent-substitution defect class).
-const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake <folder> | --approval check <card>... | --help';
+const BOARD_USAGE = 'usage: node scripts/board.mjs [--all | --status=<Column>] [--json] | --closeout | --intake <folder> | --waits <card> [--herdr] | --help';
 
 // Every flag the parser accepts, `--status=` as the prefix of its value form. The parser builds its
 // accepted-flag map from this list and BOARD_HELP must mention each one, which a test pins.
-export const BOARD_FLAGS = ['--all', '--json', '--closeout', '--intake', '--status=', '--approval', '--help'];
+export const BOARD_FLAGS = ['--all', '--json', '--closeout', '--intake', '--status=', '--waits', '--herdr', '--help'];
 
 // What `--help` prints: the usage line, then each mode or option. The exit codes stay in the head of
 // scripts/board.mjs.
@@ -57,8 +61,9 @@ export const BOARD_HELP = [
   `  --status=<Column>           one column, exactly one of ${STATUS_OPTIONS.join(', ')}`,
   '  --json                      the normalized selection on stdout, the scan on stderr',
   '  --closeout                  the strict proof gate: the scan alone',
-  '  --intake <folder>           the pick summary on stdout, each card\'s full text in <folder>, the outcome on stderr',
-  "  --approval check <card>...  each card's advance approval line, with no board read",
+  '  --intake <folder>           the board line and one summary per card on stdout, each card\'s full text in <folder>, the outcome on stderr',
+  "  --waits <card>              whether the card's saved write-up at HEAD and its marker on the board hold its merge for the owner",
+  '  --herdr                     after --waits <card>, the verdict for a Herdr job, where only check, screenshot and the marker hold',
   '  --help                      this text, with no board read',
 ].join('\n');
 
@@ -68,14 +73,17 @@ export function parseBoardArgs(argv) {
     if (argv.length > 1) throw new Error(`--help takes no other argument — ${BOARD_USAGE}`);
     return { help: true };
   }
-  // --approval reads no board, so it stands first and alone: any other shape would promise a
-  // listing it never prints, and a card that is not a positive integer names no card.
-  if (argv.includes('--approval')) {
-    const cards = argv.slice(2);
-    if (argv[0] !== '--approval' || argv[1] !== 'check' || cards.length === 0 || !cards.every((card) => /^[1-9]\d*$/.test(card))) {
-      throw new Error(`--approval takes only check and one or more card numbers — ${BOARD_USAGE}`);
+  // --waits prints one judgement and no listing, so it stands first and alone, followed only by --herdr: any other
+  // shape would promise a listing it never prints, and a card that is neither a positive integer nor an identifier names
+  // no card.
+  if (argv.includes('--waits')) {
+    const card = argv[1];
+    const isNumber = /^[1-9]\d*$/.test(card);
+    const herdr = argv.length === 3 && argv[2] === '--herdr';
+    if ((argv.length !== 2 && !herdr) || argv[0] !== '--waits' || !(isNumber || LINEAR_IDENTIFIER.test(card))) {
+      throw new Error(`--waits takes one card number or identifier and no other argument but --herdr — ${BOARD_USAGE}`);
     }
-    return { approval: cards.map(Number) };
+    return { waits: isNumber ? Number(card) : card, herdr };
   }
   // --intake writes into one folder and prints one fixed summary, so it stands first with
   // exactly that value: a selection or format flag beside it would promise a listing it never
@@ -95,8 +103,8 @@ export function parseBoardArgs(argv) {
     throw new Error(`only one --status= filter is allowed, got ${statusFlags.join(' ')} — ${BOARD_USAGE}`);
   }
   rejectUnknownArgs(argv, {
-    // --status= is the positional below, and --approval, --intake and --help were handled above.
-    flags: new Map(BOARD_FLAGS.filter((flag) => !['--status=', '--approval', '--intake', '--help'].includes(flag)).map((flag) => [flag, 0])),
+    // --status= is the positional below, --waits, --intake and --help were handled above, and --herdr goes only with --waits.
+    flags: new Map(BOARD_FLAGS.filter((flag) => !['--status=', '--waits', '--herdr', '--intake', '--help'].includes(flag)).map((flag) => [flag, 0])),
     // An empty `--status=` names no column, so it is rejected here rather than degrading
     // into the default selection.
     positionals: [(arg) => /^--status=.+$/.test(arg)],
@@ -140,7 +148,7 @@ const STATUS_FIELD = 'Status';
 // all parse through parseNode.
 // The issue type is asked for only where the configuration chooses native types, so a labels
 // repository's requests are the same bytes as before.
-export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } ${KIND_TYPES ? 'issueType { name } ' : ''}labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
+export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number title state repository { nameWithOwner } subIssuesSummary { total completed } ${KIND_TYPES ? 'issueType { name } ' : ''}labels(first:20) { totalCount nodes { name } } assignees(first:20) { totalCount nodes { login } } blockedBy(first:20) { totalCount nodes { number state stateReason repository { nameWithOwner } } } closedByPullRequestsReferences(first:20) { totalCount nodes { number } } } } fieldValues(first:20) { totalCount nodes { ... on ProjectV2ItemFieldSingleSelectValue { name field { ... on ProjectV2FieldCommon { name } } } ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2FieldCommon { name } } } } }`;
 
 // The one fused board query: the project's identity and field schema, then its items
 // 100 per page, each carrying every fact the board rules judge a card on — Status and
@@ -165,7 +173,7 @@ export const BOARD_CARD_FIELDS = `content { __typename ... on Issue { number tit
 // resolve on this read. Without it both arrive as `number: null` and a just-added card
 // reads as never added (#572).
 export function boardQuery() {
-  return `query($endCursor: String) { ${BOARD_OWNER_TYPE}(login:"${BOARD_OWNER}") { login projectV2(number:${BOARD_PROJECT_NUMBER}) { id number closed fields(first:50) { totalCount nodes { ... on ProjectV2FieldCommon { name dataType } ... on ProjectV2SingleSelectField { options { name } } } } items(first:100, after:$endCursor) { totalCount pageInfo { hasNextPage endCursor } nodes { id ${BOARD_CARD_FIELDS} } } } } }`;
+  return `query($endCursor: String) { ${BOARD_OWNER_TYPE}(login:"${BOARD_OWNER}") { login projectV2(number:${BOARD_PROJECT_NUMBER}) { id number closed fields(first:50) { totalCount nodes { ... on ProjectV2FieldCommon { name dataType } ... on ProjectV2SingleSelectField { options { name } } } } items(first:100, after:$endCursor, orderBy:{field:POSITION, direction:ASC}) { totalCount pageInfo { hasNextPage endCursor } nodes { id ${BOARD_CARD_FIELDS} } } } } }`;
 }
 
 const RERUN = 'rerun the board read, and if it repeats inspect the GitHub Projects API response';
@@ -240,11 +248,18 @@ export function parseNode(node) {
     status: fieldValue(fieldValues, STATUS_FIELD, node.id),
     title: content.title ?? fieldValue(fieldValues, 'Title', node.id) ?? '',
     routing: ROUTING_FIELD ? fieldValue(fieldValues, ROUTING_FIELD, node.id) : null,
-    ...(PARKED_LANE ? { lane: fieldValue(fieldValues, PARKED_LANE.field, node.id) } : {}),
+    ...(PARKED_LANE ? { lane: fieldValue(fieldValues, /** @type {ParkedLane} */ (PARKED_LANE).field, node.id) } : {}),
     labels: connectionNodes(issue?.labels).map((l) => l.name),
     ...(KIND_TYPES ? { issueType: issue?.issueType?.name ?? null } : {}),
     assignees: connectionNodes(issue?.assignees).map((a) => a.login),
-    blockers: connectionNodes(issue?.blockedBy).map((b) => ({ number: b.number, state: b.state })),
+    // A blocker keeps its repository only when that is not the board's own: a blocker with none is
+    // this board's card, as every other tracker's blocker is.
+    blockers: connectionNodes(issue?.blockedBy).map((b) => ({
+      number: b.number,
+      state: b.state,
+      stateReason: b.stateReason ?? null,
+      ...(b.repository.nameWithOwner === BOARD_NAME_WITH_OWNER ? {} : { repository: b.repository.nameWithOwner }),
+    })),
     closingPullRequests: connectionNodes(issue?.closedByPullRequestsReferences)
       .map((pr) => ({ number: pr.number })),
     content: {
@@ -298,6 +313,9 @@ function assertIssueContent(issue, cardId) {
     if (!numbered(blocker) || (blocker.state !== 'OPEN' && blocker.state !== 'CLOSED')) {
       throw new Error(`${card} carried a blocker without a number and an OPEN or CLOSED state; ${RERUN}`);
     }
+    if (typeof blocker.repository?.nameWithOwner !== 'string' || blocker.repository.nameWithOwner.trim() === '') {
+      throw new Error(`${card} carried a blocker without a usable repository; ${RERUN}`);
+    }
   }
   for (const assignee of issue.assignees.nodes) {
     if (typeof assignee?.login !== 'string' || assignee.login.trim() === '') {
@@ -346,7 +364,7 @@ export function assertProject(data, boardOwner = BOARD_OWNER, projectNumber = BO
 // compares the next page against.
 export function assertFieldSchema(fields, { routingField = ROUTING_FIELD, routingOptions = ROUTING_OPTIONS, parkedLane = PARKED_LANE } = {}) {
   assertWholeConnection(fields, 'project fields', 'board page');
-  const configuredOptions = [[STATUS_FIELD, STATUS_OPTIONS], ...(routingField ? [[routingField, routingOptions]] : [])];
+  const configuredOptions = /** @type {[string, string[]][]} */ ([[STATUS_FIELD, STATUS_OPTIONS], ...(routingField ? [[routingField, routingOptions]] : [])]);
   for (const [name, configured] of configuredOptions) {
     const field = fields.nodes.find((f) => f?.name === name);
     if (!field) {
@@ -434,7 +452,7 @@ export function parseBoardPage(json) {
   try {
     data = typeof json === 'string' ? JSON.parse(json) : json;
   } catch (err) {
-    throw new Error(`board page JSON could not be parsed: ${err.message}; ${RERUN}`);
+    throw new Error(`board page JSON could not be parsed: ${/** @type {Error} */ (err).message}; ${RERUN}`);
   }
   if (data === null || typeof data !== 'object') {
     throw new Error(`board page is not a GraphQL data object; ${RERUN}`);
@@ -498,16 +516,47 @@ function parseSlurpedBoardPages(out) {
   return pages;
 }
 
+// One paginated GraphQL walk as the slurped reply `--paginate --slurp` gives. An executor not marked
+// `onePagePerRequest` is handed the whole walk as one `gh` process. A marked one, as the quota wait and the coordinator gate are, is handed one
+// page per call, so a refused page ends or repeats on its own: the next page's cursor is `pageInfoOf(page)`'s, and the pages
+// are returned in the slurped shape. `pageInfoOf` returns a page's `{ hasNextPage, endCursor }`; every other check
+// stays with the caller's walk.
+function readPages(exec, query, pageInfoOf, what) {
+  if (exec.onePagePerRequest !== true) return exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${query}`]);
+  const pages = [];
+  const usedCursors = new Set();
+  let cursorArgs = [];
+  for (;;) {
+    const number = pages.length + 1;
+    const reply = exec(['api', 'graphql', '-f', `query=${query}`, ...cursorArgs]);
+    let page;
+    try {
+      page = JSON.parse(reply);
+    } catch (err) {
+      throw new Error(`the ${what} page ${number} is not JSON (${/** @type {Error} */ (err).message}); ${RERUN}`);
+    }
+    if (!isPlainObject(page)) throw new Error(`the ${what} page ${number} is not a GraphQL data object; ${RERUN}`);
+    pages.push(page);
+    const { hasNextPage, endCursor } = pageInfoOf(page) ?? {};
+    if (hasNextPage !== true) return JSON.stringify(pages);
+    if (typeof endCursor !== 'string' || endCursor.trim() === '' || usedCursors.has(endCursor)) {
+      throw new Error(`the ${what} page ${number} reports a next page without a fresh endCursor; ${RERUN}`);
+    }
+    usedCursors.add(endCursor);
+    cursorArgs = ['-f', `endCursor=${endCursor}`];
+  }
+}
+
 // Read the project's item listing in one `gh` process: `--paginate` walks the pages on the
 // query's `$endCursor`, `--slurp` returns them as one array, and this checks the
 // walk it was handed the way the page-by-page loop it replaced did (#1155): a
 // constant totalCount, a fresh cursor behind every hasNextPage (parseBoardPage has
 // already required a usable one), no hasNextPage left on the final page, and an exact
-// item count at the end. The
-// injected executor keeps the board transport at the CLI edge while making the
-// walk checks testable without `gh`.
-function fetchListedBoard(exec) {
-  const out = exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${boardQuery()}`]);
+// item count at the end. `readListing` returns that process's reply or throws its
+// failure, so the transport stays at the CLI edge and the walk checks are testable
+// without `gh`.
+function fetchListedBoard(readListing) {
+  const out = readListing();
   const pages = parseSlurpedBoardPages(out).map(parseBoardPage);
   const items = [];
   let expected;
@@ -574,11 +623,16 @@ const MEMBERSHIP_PAGE_SIZE = 100;
 // How many omitted items one read by id asks for.
 const OMITTED_ITEM_BATCH_SIZE = 20;
 
-// Every issue of the repository, open and closed, with its project memberships, archived ones
-// included so an archived card is told apart from an absent one. Only the issues connection
-// carries a pageInfo: gh pages on the first one it finds.
-function issueWalkQuery() {
-  return `query($endCursor: String) { repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issues(first:100, after:$endCursor, states:[OPEN,CLOSED]) { totalCount pageInfo { hasNextPage endCursor } nodes { number projectItems(first:${MEMBERSHIP_PAGE_SIZE}, includeArchived:true) { totalCount nodes { ${MEMBERSHIP_FIELDS} } } } } } }`;
+// A closed card stays on the board as Done until the auto-archive rule (docs/AI-WORKFLOW-board.md) removes it
+// two weeks after its last update, and GitHub documents only that archiving may be delayed. The recently updated walk
+// reads the issues updated within twice that, so a Done card the listing drops is still recovered.
+const RECENTLY_CLOSED_WINDOW_DAYS = 28;
+
+// The repository's issues the `filter` selects, each with its project memberships, archived ones included so an
+// archived card is told apart from an absent one. Only the issues connection carries a pageInfo: gh pages on the
+// first one it finds.
+function issueWalkQuery(filter) {
+  return `query($endCursor: String) { repository(owner:"${BOARD_OWNER}", name:"${BOARD_REPOSITORY}") { issues(first:100, after:$endCursor, ${filter}) { totalCount pageInfo { hasNextPage endCursor } nodes { number projectItems(first:${MEMBERSHIP_PAGE_SIZE}, includeArchived:true) { totalCount nodes { ${MEMBERSHIP_FIELDS} } } } } } }`;
 }
 
 function membershipWalkQuery(number) {
@@ -597,7 +651,7 @@ function parseRecoveryReply(out, what) {
   try {
     reply = JSON.parse(out);
   } catch (err) {
-    throw new Error(recoveryError(`the ${what} is not JSON (${err.message})`));
+    throw new Error(recoveryError(`the ${what} is not JSON (${/** @type {Error} */ (err).message})`));
   }
   return reply;
 }
@@ -683,14 +737,16 @@ function issueMemberships(exec, issue) {
   if (firstPage.nodes.length !== MEMBERSHIP_PAGE_SIZE) {
     throw new Error(recoveryError(`${where} has ${firstPage.totalCount} project items but only ${firstPage.nodes.length} fetched`));
   }
-  const out = exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${membershipWalkQuery(issue.number)}`]);
-  const memberships = walkConnection(out, `project item walk of ${where}`, (page) => {
+  const walkOf = `project item walk of ${where}`;
+  const connectionOf = (page) => {
     const walked = page.data?.repository?.issue;
     if (!isPlainObject(walked) || walked.number !== issue.number) {
-      throw new Error(recoveryError(`the project item walk of ${where} answered for another issue or none`));
+      throw new Error(recoveryError(`the ${walkOf} answered for another issue or none`));
     }
     return walked.projectItems;
-  });
+  };
+  const out = readPages(exec, membershipWalkQuery(issue.number), (page) => connectionOf(page)?.pageInfo, walkOf);
+  const memberships = walkConnection(out, walkOf, connectionOf);
   memberships.forEach((membership) => assertMembership(membership, where));
   const walkedKeys = new Set(memberships.map(membershipKey));
   if (memberships.length !== firstPage.totalCount || firstPage.nodes.some((m) => !walkedKeys.has(membershipKey(m)))) {
@@ -699,26 +755,56 @@ function issueMemberships(exec, issue) {
   return memberships;
 }
 
-// Every unarchived item on this board the listing lacked, as `{ id, number }`. A listed item
-// seen on another board, archived or under another issue is evidence that disagrees with the
-// listing, and so is one item id or one issue seen twice; an unresolved listed card has no
-// number to disagree with.
-function omittedMemberships(exec, listed) {
-  const listedNumbers = new Map(listed.map((item) => [item.id, item.content?.number ?? null]));
-  const issues = walkConnection(
-    exec(['api', 'graphql', '--paginate', '--slurp', '-f', `query=${issueWalkQuery()}`]),
-    'repository issue walk',
-    (page) => page.data?.repository?.issues,
-  );
+const issueConnectionOf = (page) => page.data?.repository?.issues;
+
+function walkIssues(out, what) {
+  const issues = walkConnection(out, what, issueConnectionOf);
   const seenNumbers = new Set();
+  for (const issue of issues) {
+    if (!isPlainObject(issue) || !Number.isInteger(issue.number) || issue.number < 1 || seenNumbers.has(issue.number)) {
+      throw new Error(recoveryError(`the ${what} returned an issue without a number, or one issue twice`));
+    }
+    seenNumbers.add(issue.number);
+  }
+  return issues;
+}
+
+// Every unarchived item on this board the listing lacked, as `{ id, number }`. A listed item seen on
+// another board, archived or under another issue disagrees with the listing, as does one item id
+// walked twice; an unresolved listed card has no number to disagree with. One issue twice within a
+// walk is refused by walkIssues. An issue in both walks, as one that closes or reopens between the two reads is, is
+// compared and its open observation stands.
+function omittedMemberships(exec, listed, readOpenIssues, readRecentIssues) {
+  const listedNumbers = new Map(listed.map((item) => [item.id, item.content?.number ?? null]));
+  const openIssues = walkIssues(readOpenIssues(), 'open issue walk');
+  const recentIssues = walkIssues(readRecentIssues(), 'recently updated issue walk');
+  const openMemberships = new Map();
+  const membershipsOfOpen = (issue) => {
+    if (!openMemberships.has(issue.number)) openMemberships.set(issue.number, issueMemberships(exec, issue));
+    return openMemberships.get(issue.number);
+  };
+  const openByNumber = new Map(openIssues.map((issue) => [issue.number, issue]));
+  const issues = [...openIssues];
+  for (const issue of recentIssues) {
+    const opened = openByNumber.get(issue.number);
+    if (opened === undefined) {
+      issues.push(issue);
+      continue;
+    }
+    const openKeys = new Set(membershipsOfOpen(opened).map(membershipKey));
+    const recent = issueMemberships(exec, issue);
+    const recentKeys = new Set(recent.map(membershipKey));
+    if (recentKeys.size !== recent.length) {
+      throw new Error(recoveryError(`issue #${issue.number}'s recently updated walk observation repeats a project item`));
+    }
+    if (openKeys.size !== recentKeys.size || [...openKeys].some((key) => !recentKeys.has(key))) {
+      throw new Error(recoveryError(`issue #${issue.number}'s open and recently updated walk observations disagree`));
+    }
+  }
   const seenIds = new Set();
   const omitted = [];
   for (const issue of issues) {
-    if (!isPlainObject(issue) || !Number.isInteger(issue.number) || issue.number < 1 || seenNumbers.has(issue.number)) {
-      throw new Error(recoveryError('the repository issue walk returned an issue without a number, or one issue twice'));
-    }
-    seenNumbers.add(issue.number);
-    for (const membership of issueMemberships(exec, issue)) {
+    for (const membership of openByNumber.get(issue.number) === issue ? membershipsOfOpen(issue) : issueMemberships(exec, issue)) {
       if (seenIds.has(membership.id)) {
         throw new Error(recoveryError(`project item ${membership.id} was walked twice`));
       }
@@ -762,21 +848,59 @@ function readOmittedItems(exec, omitted) {
   return items;
 }
 
+const OPEN_ISSUES_FILTER = 'states:[OPEN]';
+
+// The open and closed issues updated at or after the window's start, which GitHub's `since` filter selects on last
+// update. A closed-only filter would miss an issue reopened after the open walk answered.
+const recentIssuesFilter = (now) =>
+  `states:[OPEN, CLOSED], filterBy:{since:"${new Date(now - RECENTLY_CLOSED_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString()}"}`;
+
+// The two reads every board read opens with, as `gh` arguments: the project's item listing and the repository's open
+// issue walk. Neither needs the other's reply, so a caller may start both together. The recently updated issue walk is left to
+// fetchBoard, which starts it after the open walk has answered, so an issue that closes or reopens between the two
+// reads is in it.
+export function boardOpeningRequests() {
+  return {
+    listing: ['api', 'graphql', '--paginate', '--slurp', '-f', `query=${boardQuery()}`],
+    openIssues: ['api', 'graphql', '--paginate', '--slurp', '-f', `query=${issueWalkQuery(OPEN_ISSUES_FILTER)}`],
+  };
+}
+
 // GitHub's project item list can leave out a card that is on the board while its own
 // totalCount agrees (#504), so the listing alone cannot show the gap. The issue side still
-// holds each card's membership: this walks the repository's issues and reads by id every
+// holds each card's membership: this walks the repository's open issues and its closed issues
+// updated within RECENTLY_CLOSED_WINDOW_DAYS of `now`, and reads by id every
 // unarchived membership on this board the listing lacked, then returns listed and recovered
 // cards as one list the board rules judge alike. A recovery calls `onOmission` once with an
 // advisory naming each recovered card; any evidence that is incomplete or disagrees throws,
-// so a reconciliation that could not finish never reads as a whole board.
-export function fetchBoard(exec, { onOmission = () => {} } = {}) {
-  const listed = fetchListedBoard(exec);
-  const recovered = readOmittedItems(exec, omittedMemberships(exec, listed));
+// so a reconciliation that could not finish never reads as a whole board. `opening` holds the
+// outcome of any opening read a caller started itself, each a function that returns the reply
+// or throws the read's failure; a read it does not hold is made here, when its turn comes. The
+// recently updated issue walk is never one a caller starts: it is read here once the open walk has answered. The
+// listing is judged first either way, so its failure is the one reported when several reads fail.
+// Every request, an opening read included, is retried through retryTransient, waiting through `pause`, all of them
+// sharing the one `budget` this read starts with; a started opening read is asked again through `exec`.
+export function fetchBoard(exec, { onOmission = () => {}, opening = {}, now = Date.now(), pause = sleepSync, budget = retryBudget() } = {}) {
+  const pageInfoOf = (page) => issueConnectionOf(page)?.pageInfo;
+  const retrying = Object.assign((args) => retryTransient(() => exec(args), pause, undefined, budget), { onePagePerRequest: exec.onePagePerRequest });
+  const reads = {
+    listing: (run) => () => readPages(run, boardQuery(), parseBoardPage, 'project listing'),
+    openIssues: (run) => () => readPages(run, issueWalkQuery(OPEN_ISSUES_FILTER), pageInfoOf, 'open issue walk'),
+    recentIssues: (run) => () => readPages(run, issueWalkQuery(recentIssuesFilter(now)), pageInfoOf, 'recently updated issue walk'),
+  };
+  const held = /** @type {{ listing?: () => unknown, openIssues?: () => unknown }} */ (opening);
+  const opened = (name) => {
+    const started = held[name];
+    return started === undefined ? reads[name](retrying) : () => retryTransient(started, pause, reads[name](exec), budget, budget.startedAt);
+  };
+  // Each listed card keeps its place in the order the listing asks for; a recovered card has none.
+  const listed = fetchListedBoard(opened('listing')).map((item, boardPosition) => ({ ...item, boardPosition }));
+  const recovered = readOmittedItems(retrying, omittedMemberships(retrying, listed, opened('openIssues'), reads.recentIssues(retrying)));
   if (recovered.length === 0) return listed;
   const items = [...listed, ...recovered];
   assertNoDuplicateCards(items);
   const named = recovered.map((item) => `${cardRef(item.content.number)} (${item.id})`).join(', ');
-  onOmission(`GitHub's project listing left out ${recovered.length} card(s) that are on the board, read from their issues instead: ${named}. They are already on the board, so do not add them again.`);
+  /** @type {(advisory: string) => void} */ (onOmission)(`GitHub's project listing left out ${recovered.length} card(s) that are on the board, read from their issues instead: ${named}. They are already on the board, so do not add them again.`);
   return items;
 }
 
@@ -784,9 +908,10 @@ export function fetchBoard(exec, { onOmission = () => {} } = {}) {
 // the batch is the unit of loss, except that a batch too large to read is read again in halves.
 export const DETAIL_BATCH_SIZE = 20;
 
-// The newest 100 comments and the cursor to the ones before them. `totalCount` is the
-// whole connection's count on every page, never the page's own.
-const COMMENT_PAGE_FIELDS = 'totalCount pageInfo { hasPreviousPage startCursor } nodes { body }';
+// The newest 100 comments, each with its address and the account that posted it, and the
+// cursor to the ones before them. `totalCount` is the whole connection's count on every
+// page, never the page's own.
+const COMMENT_PAGE_FIELDS = 'totalCount pageInfo { hasPreviousPage startCursor } nodes { body url author { login } }';
 
 // One aliased issue per card, so one call reads a whole batch. It declares no
 // `$endCursor`: comments page backward, which `gh --paginate` cannot follow.
@@ -809,15 +934,16 @@ const thrownReason = (err) =>
 
 const isObject = (value) => value !== null && typeof value === 'object';
 
-// One detail call → `{ repository }` or `{ reason, tooLarge }`, where `malformed` is the reason for
+// One detail call → `{ repository }` or `{ reason, tooLarge }`, where `read` returns the call's reply
+// or throws its failure and `malformed` is the reason for
 // a response that is not the shape asked for. gh prints partial data beside GraphQL
 // errors, so no part of a response that carries errors is used. No value from the response
 // is put into a reason before its type is checked: one that cannot be turned into text
 // would throw out of the read and lose every card beside it.
-function readDetailCall(exec, args, malformed) {
+function readDetailCall(read, malformed) {
   let out;
   try {
-    out = exec(args);
+    out = read();
   } catch (err) {
     return { reason: thrownReason(err), tooLarge: err instanceof GhOutputTooLargeError };
   }
@@ -837,10 +963,15 @@ function readDetailCall(exec, args, malformed) {
   return isObject(repository) ? { repository } : { reason: malformed };
 }
 
+// A comment carries its text, its address and its author: null where the account is gone, else its login.
+const isCommentNode = (node) => typeof node?.body === 'string'
+  && typeof node.url === 'string' && node.url !== ''
+  && (node.author === null || typeof node.author?.login === 'string');
+
 function isCommentPage(page) {
   return Number.isInteger(page?.totalCount)
     && Array.isArray(page.nodes)
-    && page.nodes.every((node) => typeof node?.body === 'string')
+    && page.nodes.every(isCommentNode)
     && page.nodes.length <= page.totalCount
     && typeof page.pageInfo?.hasPreviousPage === 'boolean'
     && (!page.pageInfo.hasPreviousPage
@@ -851,41 +982,43 @@ function isCommentPage(page) {
 // against the FIRST page's totalCount, and only once no previous page remains: a short
 // final page is valid, so no continuation is judged short on its own. A continuation
 // reporting another totalCount is a list that changed between pages: it is not
-// accumulated, and the comments already read are returned as an incomplete read.
+// accumulated, and the comments already read are returned as an incomplete read. Each
+// comment's text is in `comments` and, at the same index of `commentSources`, the login
+// of the account that posted it (null where the account is gone) and its address.
 function readOlderComments(exec, number, firstPage) {
   const commentCount = firstPage.totalCount;
-  let comments = firstPage.nodes.map((node) => node.body);
+  let nodes = firstPage.nodes;
   let { hasPreviousPage, startCursor } = firstPage.pageInfo;
   const usedCursors = new Set();
+  const read = (commentsUnavailable) => ({
+    comments: nodes.map((node) => node.body),
+    commentSources: nodes.map((node) => ({ login: node.author?.login ?? null, url: node.url })),
+    commentCount,
+    commentsUnavailable,
+  });
   while (hasPreviousPage) {
     usedCursors.add(startCursor);
     // The cursor travels as -f, a raw string: -F would read one starting `@` as a file name.
     const { repository, reason } = readDetailCall(
-      exec,
-      ['api', 'graphql', '-F', `number=${number}`, '-f', `before=${startCursor}`, '-f', `query=${commentPageQuery()}`],
+      () => exec(['api', 'graphql', '-F', `number=${number}`, '-f', `before=${startCursor}`, '-f', `query=${commentPageQuery()}`]),
       'malformed comment page',
     );
-    if (!repository) return { comments, commentCount, commentsUnavailable: reason };
+    if (!repository) return read(reason);
     const page = repository.issue?.comments;
     if (
       repository.issue?.number !== number
       || !isCommentPage(page)
       || page.nodes.length === 0
-      || page.nodes.length > commentCount - comments.length
+      || page.nodes.length > commentCount - nodes.length
       || (page.pageInfo.hasPreviousPage && usedCursors.has(page.pageInfo.startCursor))
     ) {
-      return { comments, commentCount, commentsUnavailable: 'malformed comment page' };
+      return read('malformed comment page');
     }
-    if (page.totalCount !== commentCount) {
-      return { comments, commentCount, commentsUnavailable: 'comment count changed while reading' };
-    }
-    comments = [...page.nodes.map((node) => node.body), ...comments];
+    if (page.totalCount !== commentCount) return read('comment count changed while reading');
+    nodes = [...page.nodes, ...nodes];
     ({ hasPreviousPage, startCursor } = page.pageInfo);
   }
-  const commentsUnavailable = comments.length < commentCount
-    ? `GitHub reported ${commentCount} comment(s) but ${comments.length} were read`
-    : null;
-  return { comments, commentCount, commentsUnavailable };
+  return read(nodes.length < commentCount ? `GitHub reported ${commentCount} comment(s) but ${nodes.length} were read` : null);
 }
 
 function cardDetail(exec, number, issue) {
@@ -908,14 +1041,25 @@ function cardDetail(exec, number, issue) {
   return { number, body: issue.body, parent: parent?.number ?? null, ...readOlderComments(exec, number, firstPage) };
 }
 
-// Writes one entry per card of the batch, in card order. A batch whose reply was too large
-// to read is read again as two halves.
-function readDetailBatch(exec, batch, details) {
-  const { repository, reason, tooLarge } = readDetailCall(
-    exec,
-    ['api', 'graphql', '-f', `query=${cardDetailsQuery(batch)}`],
-    'malformed detail response',
-  );
+// The cards of a detail read in the batches it is made in, in card order.
+function detailBatches(numbers) {
+  const batches = [];
+  for (let start = 0; start < numbers.length; start += DETAIL_BATCH_SIZE) {
+    batches.push(numbers.slice(start, start + DETAIL_BATCH_SIZE));
+  }
+  return batches;
+}
+
+const detailRequest = (batch) => ['api', 'graphql', '-f', `query=${cardDetailsQuery(batch)}`];
+
+// The first call of each batch `fetchCardDetails` reads these cards in, as `gh` arguments and in
+// batch order. No batch needs another's reply, so a caller may start them together.
+export const cardDetailRequests = (numbers) => detailBatches(numbers).map(detailRequest);
+
+// Writes one entry per card of the batch, in card order. `read` returns the reply of the batch's
+// call or throws its failure. A batch whose reply was too large to read is read again as two halves.
+function readDetailBatch(exec, batch, details, read = () => exec(detailRequest(batch))) {
+  const { repository, reason, tooLarge } = readDetailCall(read, 'malformed detail response');
   if (tooLarge && batch.length > 1) {
     const half = Math.ceil(batch.length / 2);
     readDetailBatch(exec, batch.slice(0, half), details);
@@ -933,17 +1077,17 @@ function readDetailBatch(exec, batch, details) {
 // unavailable. A detail that was not read is never an empty body or zero comments, and
 // nothing is retried, except that a batch too large to read is read again in halves, down
 // to one card, so only a card whose own reply is too large is lost. Each call goes through
-// the injected executor, so the transport stays at the CLI edge.
-export function fetchCardDetails(exec, numbers) {
+// the injected executor, so the transport stays at the CLI edge, except a batch's first call
+// that the caller started itself: `started` holds those outcomes in `cardDetailRequests` order,
+// each a function that returns the reply or throws the read's failure.
+export function fetchCardDetails(exec, numbers, started = []) {
   const details = new Map();
-  for (let start = 0; start < numbers.length; start += DETAIL_BATCH_SIZE) {
-    readDetailBatch(exec, numbers.slice(start, start + DETAIL_BATCH_SIZE), details);
-  }
+  detailBatches(numbers).forEach((batch, index) => readDetailBatch(exec, batch, details, started[index]));
   return details;
 }
 
-// The exit status of `--intake` alone; other board-scan modes keep scanOutcome's.
-// Approval checks have their own outcomes. 1 stays the rejected argument, so no outcome of a read reuses it.
+// The exit status of `--intake`, whose read failure `--waits` shares; other board-scan modes keep scanOutcome's.
+// 1 stays the rejected argument, so no outcome of a read reuses it.
 export const INTAKE_EXIT = Object.freeze({ complete: 0, readFailed: 2, drift: 3, incomplete: 4, driftAndIncomplete: 5 });
 
 const LINE_BREAK = /\r\n|\n|\r/;
@@ -979,6 +1123,14 @@ const cardText = (text) => text.split(LINE_BREAK).flatMap(foldCardTextLine);
 
 export const isClaim = (comment) => comment.trimStart().startsWith('Claim:');
 
+// A comment's first line is `Claim: <machine>, <runtime>, <time>`; the newest claim holds the card.
+export function newestClaim(comments) {
+  const claim = comments.map((comment) => comment.trimStart()).findLast((comment) => comment.startsWith('Claim:'));
+  if (claim === undefined) return {};
+  const [machine, runtime, time] = claim.split(/\r?\n/, 1)[0].slice('Claim:'.length).split(',').map((field) => field.trim());
+  return { machine, runtime, time };
+}
+
 // The newest Claim comment among those read, which is the latest claim even when older
 // pages failed. With none found, only a complete read may say there is none.
 export function claimLines({ comments, commentCount, commentsUnavailable }) {
@@ -1011,12 +1163,19 @@ function bodyLines(body) {
   return [`body: ${body.split(LINE_BREAK).length} line(s)`, ...cardText(body)];
 }
 
-// One card's board lines: its heading and routing, then its open blockers and assignees.
+// A card's labels on one line, led by its issue type where the configuration chooses native types.
+function cardLabels(card) {
+  const shown = KIND_TYPES ? [card.issueType ?? 'no issue type', ...card.labels] : card.labels;
+  return oneLine(shown.length ? shown.join(', ') : '—');
+}
+
+// One card's board lines: its heading, routing and labels, then its open blockers and assignees.
 function cardFacts(card) {
   return {
     heading: [
       oneLine(`=== ${cardRef(card.number)} [${card.status}] ${card.title} ===`),
       ...(ROUTING_FIELD ? [oneLine(`${ROUTING_FIELD}: ${card.routing || 'none'}`)] : []),
+      `labels: ${cardLabels(card)}`,
     ],
     blockers: `open blockers: ${card.openBlockers.length > 0 ? card.openBlockers.map(cardRef).join(', ') : 'none'}`,
     assignees: oneLine(`assignees: ${card.assignees.length > 0 ? card.assignees.map((login) => `@${login}`).join(', ') : 'none'}`),
@@ -1062,34 +1221,62 @@ export function intakeCardFiles({ candidates, claims, details }) {
   });
 }
 
-// The newest comments read that open with `Needs owner:`, each whole, under a heading that
-// says whether every comment was read. A tracker whose comments carry a metadata line before
-// the text sets `ownerQuestions` to the advisory it prints instead of a count it cannot make.
-function ownerQuestionLines({ comments, commentCount, commentsUnavailable, ownerQuestions }) {
-  if (ownerQuestions !== undefined) return [`owner questions: ${ownerQuestions}`];
-  const found = comments.flatMap((comment, index) => (comment.trimStart().startsWith('Needs owner:') ? [{ comment, index }] : []));
+// The account that posted a comment and the comment's address, or that the tracker's read gives neither.
+function postedByLine(source) {
+  if (source === undefined) return "posted by: not given by this tracker's read";
+  return oneLine(`posted by: ${source.login === null ? 'no account' : `@${source.login}`} ${source.url}`);
+}
+
+// The newest comments read that open with `opening`, each whole under the account that posted
+// it and its address, under a heading that says whether every comment was read.
+function openingCommentLines(label, opening, { comments, commentSources, commentCount, commentsUnavailable }) {
+  const found = comments.flatMap((comment, index) => (comment.trimStart().startsWith(opening) ? [{ comment, index }] : []));
   const heading = commentsUnavailable === null
-    ? `owner questions: ${found.length}`
-    : `owner questions: ${found.length} in the newest ${comments.length} of ${commentCount} comment(s), UNAVAILABLE before them — ${commentsUnavailable}`;
+    ? `${label}: ${found.length}`
+    : `${label}: ${found.length} in the newest ${comments.length} of ${commentCount} comment(s), UNAVAILABLE before them — ${commentsUnavailable}`;
   return [
     heading,
     ...found.flatMap(({ comment, index }) => [
       `--- comment ${commentCount - comments.length + index + 1} of ${commentCount} ---`,
+      postedByLine(commentSources?.[index]),
       ...cardText(comment),
     ]),
   ];
 }
 
-// CommonMark: an ATX heading has 0 to 3 leading spaces, and a line inside a fenced code block (opened
-// by 3+ backticks or tildes with 0 to 3 leading spaces, closed by a line of the same character at least
-// as long) is never a heading.
-const WHAT_TO_BUILD_HEADING = /^ {0,3}(#{1,6})\s+What to build\s*#*\s*$/i;
+// The comments that hold a card for the owner and those that returned it. A tracker whose comments
+// carry a metadata line before the text sets `ownerQuestions` to the advisory it prints instead of
+// counts it cannot make.
+function heldCommentLines(detail) {
+  if (detail.ownerQuestions !== undefined) return [`owner questions: ${detail.ownerQuestions}`];
+  return [
+    ...openingCommentLines('owner questions', 'Needs owner:', detail),
+    ...openingCommentLines('returned comments', 'Returned:', detail),
+  ];
+}
+
+// CommonMark: an ATX heading has 0 to 3 leading spaces, a space or tab after its hashes (or nothing, when
+// empty) and, optionally, a closing run of hashes that follows a space or tab; a line inside a fenced code
+// block (opened by 3+ backticks or tildes with 0 to 3 leading spaces, closed by a line of the same character
+// at least as long) is never a heading. A setext heading is a paragraph line over a `=` or `-` underline,
+// and an HTML block starts with `<` and a tag, comment, declaration or instruction. The section's own start is
+// found only at the top level. Every other rule reads a line through its container prefix, the list markers,
+// block quote markers and indentation before its content, and applies to what follows the prefix (its rest), so
+// a list item or block quote cannot hide an HTML block or an underlined heading, and a What to build heading
+// inside one is noticed. A list marker counts as part of the prefix only when content follows it on the line,
+// so a lone `-` under a line is read as an underline.
+const WHAT_TO_BUILD_HEADING = /^ {0,3}(#{1,6})[ \t]+What to build(?:[ \t]+#+)?[ \t]*$/i;
+const CONTAINER_PREFIX = /^(?:[ \t]*(?:[-+*]|\d{1,9}[.)])[ \t]+(?=\S)|[ \t]*>[ \t]?|[ \t]+)*/;
+const ATX_HEADING = /^#{1,6}(?:[ \t]|$)/;
+const SETEXT_UNDERLINE = /^(?:=+|-+)[ \t]*$/;
+const HTML_BLOCK_START = /^<[A-Za-z/!?]/;
 const FENCE = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
 
 // Whether each line is part of a fenced code block, its fences included, and whether a fence is still open at
 // the end (CommonMark closes it with its container, which a line scan cannot see). A closer holds only spaces
 // or tabs after its run.
 function fencedLines(lines) {
+  /** @type {string | null} */
   let open = null;
   const fenced = lines.map((line) => {
     const run = FENCE.exec(line)?.[1];
@@ -1104,38 +1291,70 @@ function fencedLines(lines) {
 }
 
 const NO_WHAT_TO_BUILD = ['what to build: none in the card text'];
-const FENCE_LEFT_OPEN = ['what to build: a code fence is left open, read the card text'];
+const FENCE_LEFT_OPEN = 'a code fence is left open';
+const HTML_BLOCK = 'an HTML block comes before the section ends';
+const UNDERLINED_HEADING = 'an underlined heading may start or end the section';
+const CONTAINED_HEADING = 'a heading inside a list or quote may start the section';
+const HTML_BODY = 'not extracted from an HTML body';
 
 // A section's lines without the blank lines around them.
 function sectionLines(section) {
   const first = section.findIndex((line) => line.trim() !== '');
-  if (first < 0) return NO_WHAT_TO_BUILD;
-  const trimmed = section.slice(first, section.findLastIndex((line) => line.trim() !== '') + 1);
-  return [`what to build: ${trimmed.length} line(s)`, ...trimmed.flatMap(foldCardTextLine)];
+  return { lines: first < 0 ? [] : section.slice(first, section.findLastIndex((line) => line.trim() !== '') + 1) };
 }
 
-// The What to build section: the detail's own `whatToBuild` when its tracker extracts it (a native
-// document has no Markdown headings to find), the advisory in its `whatToBuildUnread` when it cannot, else
-// the body's lines after its heading up to the next heading of the same or a higher level, or the advisory
-// that a fence is left open in the body.
-function whatToBuildLines(detail) {
-  if (Object.hasOwn(detail, 'whatToBuildUnread')) return [`what to build: ${detail.whatToBuildUnread}, read the card text`];
-  if (Object.hasOwn(detail, 'whatToBuild')) return detail.whatToBuild === null ? NO_WHAT_TO_BUILD : sectionLines(detail.whatToBuild.split(LINE_BREAK));
-  if (detail.bodyFormat === 'html') return ['what to build: not extracted from an HTML body, read the card text'];
+// The index of the heading that ends the section starting at `start` (a heading of its level or a higher one,
+// empty included), else the body's length; the whole body when no section starts.
+function sectionEnd(lines, fenced, start) {
+  if (start < 0) return lines.length;
+  const nextHeading = new RegExp(`^ {0,3}#{1,${/** @type {RegExpExecArray} */ (WHAT_TO_BUILD_HEADING.exec(lines[start]))[1].length}}(?:[ \\t]|$)`);
+  const next = lines.findIndex((line, index) => index > start && !fenced[index] && nextHeading.test(line));
+  return next < 0 ? lines.length : next;
+}
+
+// The What to build section as `{ lines }`, its lines without the blank lines around them (none where the card
+// text has none), or `{ unread }`, the reason it cannot be read: the detail's own `whatToBuild` when its tracker
+// extracts it (a native document has no Markdown headings to find), the reason in its `whatToBuildUnread` when it
+// cannot, else the body's lines after its heading up to the next heading of the same or a higher level (an empty
+// heading of that level included). The scanner cannot tell whether an HTML block swallows a heading, whether a
+// setext heading is the section's own or ends it, or whether a What to build heading inside a list item or
+// block quote starts the section, so a body with an HTML block at or before the section's last line, an
+// underlined heading in the section, an underlined one named What to build before its start, or such a
+// contained heading before its start (anywhere when none starts) is unread, as is a fence left open in the
+// body. HTML blocks and underlined headings are read through their list and quote prefixes, so one inside a list
+// item or block quote counts too.
+export function whatToBuildSection(detail) {
+  if (Object.hasOwn(detail, 'whatToBuildUnread')) return { unread: detail.whatToBuildUnread };
+  if (Object.hasOwn(detail, 'whatToBuild')) return detail.whatToBuild === null ? { lines: [] } : sectionLines(detail.whatToBuild.split(LINE_BREAK));
+  if (detail.bodyFormat === 'html') return { unread: HTML_BODY };
   const bodyText = detail.body.split(LINE_BREAK);
   const { fenced, left } = fencedLines(bodyText);
-  if (left) return FENCE_LEFT_OPEN;
+  if (left) return { unread: FENCE_LEFT_OPEN };
   const start = bodyText.findIndex((line, index) => !fenced[index] && WHAT_TO_BUILD_HEADING.test(line));
-  if (start < 0) return NO_WHAT_TO_BUILD;
-  const level = WHAT_TO_BUILD_HEADING.exec(bodyText[start])[1].length;
-  const nextHeading = new RegExp(`^ {0,3}#{1,${level}}\\s`);
-  const after = bodyText.slice(start + 1);
-  const end = after.findIndex((line, index) => !fenced[start + 1 + index] && nextHeading.test(line));
-  return sectionLines(end < 0 ? after : after.slice(0, end));
+  const end = sectionEnd(bodyText, fenced, start);
+  const rests = bodyText.map((line) => line.slice(/** @type {RegExpExecArray} */ (CONTAINER_PREFIX.exec(line))[0].length));
+  if (rests.some((rest, index) => index < end && !fenced[index] && HTML_BLOCK_START.test(rest))) return { unread: HTML_BLOCK };
+  const underlines = rests.flatMap((rest, index) => (
+    index > 0 && !fenced[index] && SETEXT_UNDERLINE.test(rest) && !fenced[index - 1] && rests[index - 1].trim() !== '' && !ATX_HEADING.test(rests[index - 1]) ? [index] : []
+  ));
+  const beforeStart = (index) => index < (start < 0 ? bodyText.length : start);
+  const namedBefore = (index) => beforeStart(index) && rests[index - 1].trim().toLowerCase() === 'what to build';
+  if (underlines.some((index) => namedBefore(index) || (start >= 0 && index > start && index < end))) return { unread: UNDERLINED_HEADING };
+  if (rests.some((rest, index) => beforeStart(index) && !fenced[index] && rest.length < bodyText[index].length && WHAT_TO_BUILD_HEADING.test(rest))) return { unread: CONTAINED_HEADING };
+  if (start < 0) return { lines: [] };
+  return sectionLines(bodyText.slice(start + 1, end));
 }
 
-// One card's summary: its facts, claim, owner questions and What to build section, and the file
-// holding the rest. A card whose details were not read keeps the lines its section prints.
+// The What to build section as the summary prints it: its count and folded lines, or the advisory.
+function whatToBuildLines(detail) {
+  const { lines, unread } = whatToBuildSection(detail);
+  if (unread !== undefined) return [`what to build: ${unread}, read the card text`];
+  if (lines.length === 0) return NO_WHAT_TO_BUILD;
+  return [`what to build: ${lines.length} line(s)`, ...lines.flatMap(foldCardTextLine)];
+}
+
+// One card's summary: its facts, claim, owner questions, returned comments and What to build section,
+// and the file holding the rest. A card whose details were not read keeps the lines its section prints.
 function summarySection(card, detail, file, directory) {
   if (detail.unavailable !== undefined) return cardSection(card, detail);
   const { heading, blockers, assignees } = cardFacts(card);
@@ -1146,21 +1365,34 @@ function summarySection(card, detail, file, directory) {
     assignees,
     `proposal: ${typeof card.title === 'string' && card.title.trimStart().startsWith('Proposed: ') ? 'yes' : 'no'}`,
     ...claimSection(detail),
-    ...ownerQuestionLines(detail),
+    ...heldCommentLines(detail),
     ...whatToBuildLines(detail),
     `card text: ${join(directory, file.name)}, ${file.lines.length} line(s)`,
   ];
 }
 
-// Every line of the `--intake` stdout: the pick listing, then one summary per card, then the
-// end line that counts every line including itself. `files` maps each card number to the
-// `{ name, lines }` of its written text file.
-export function intakeSummary({ listing, candidates, claims, numberless, details, directory, files }) {
+// The one line saying which order the document gives the pickable columns: `readyOrder` is null where the tracker's
+// read keeps no column order, else `{ unplaced }`, the numbers of Ready cards the listing gave no place.
+function readyOrderLine(readyOrder) {
+  const [backlog, ready] = PICKABLE_STATUSES;
+  const follows = `${backlog} follows by card number.`;
+  if (readyOrder === null) return `${ready} order: by card number, as this tracker's read keeps no column order; ${follows}`;
+  const left = readyOrder.unplaced.length === 0
+    ? ''
+    : `, then ${readyOrder.unplaced.map(cardRef).join(', ')}, which GitHub's project listing left out, so their place is unknown`;
+  return `${ready} order: the board's, top of the column first${left}; ${follows}`;
+}
+
+// Every line of the `--intake` stdout: the opening `intakeListing` gives, then one summary per card, then the
+// end line that counts every line including itself. `files` maps each card number to the `{ name, lines }` of its
+// written text file.
+export function intakeSummary({ listing, candidates, claims, numberless, details, directory, files, readyOrder }) {
   const noNumber = numberless > 0 ? ` ${numberless} card(s) with no issue number have no details.` : '';
   const lines = [
     ...listing.split('\n'),
     '',
     `Card summaries: ${candidates.length} pickable card(s), then ${claims.length} claimed card(s) with no closing pull request.${noNumber}`,
+    readyOrderLine(readyOrder),
     `${CARD_TEXT_LEGEND} Each card's full body and comments are in the file its "card text:" line names.`,
     ...[...candidates, ...claims].flatMap((card) => ['', ...summarySection(card, details.get(card.number), files.get(card.number), directory)]),
     '',
@@ -1168,7 +1400,7 @@ export function intakeSummary({ listing, candidates, claims, numberless, details
   return [...lines, `board intake: end of document, ${lines.length + 1} line(s).`];
 }
 
-const isParked = (i) => PARKED_LANE != null && i.lane === PARKED_LANE.option;
+const isParked = (i) => PARKED_LANE != null && i.lane === /** @type {ParkedLane} */ (PARKED_LANE).option;
 
 // The PICKABLE_STATUSES columns only — never an in-flight or terminal one, and never a
 // card parked in the configured PARKED_LANE.
@@ -1190,7 +1422,7 @@ export function parkedLine(items, args) {
   const numbers = held.map((i) => i.content?.number ?? null)
     .sort(compareCardIds)
     .map((n) => (n == null ? '#?' : cardRef(n)));
-  return `Parked (${PARKED_LANE.field}: ${PARKED_LANE.option}), not pickable: ${numbers.join(', ')}`;
+  return `Parked (${/** @type {ParkedLane} */ (/** @type {ParkedLane | null} */ (PARKED_LANE)).field}: ${/** @type {ParkedLane} */ (/** @type {ParkedLane | null} */ (PARKED_LANE)).option}), not pickable: ${numbers.join(', ')}`;
 }
 
 // `ProjectV2ItemContent` is a closed union of DraftIssue | Issue | PullRequest, and
@@ -1205,11 +1437,18 @@ export function isContentUnresolved(i) {
   return (i.content?.number ?? null) == null && !NUMBERLESS_CONTENT_TYPES.has(i.content?.__typename);
 }
 
+// An open blocker holds its card; a closed one frees it only when closed as completed. A closed
+// blocker with no stateReason key at all (trackers that record no close reasons) frees it too. The
+// GitHub reader always writes the key, so a GitHub issue closed with no recorded reason still holds.
+const holdsCard = (b) => b.state === 'OPEN' || (b.state === 'CLOSED' && 'stateReason' in b && b.stateReason !== 'COMPLETED');
+
 // Flatten a raw board item to the fields the board rules judge a card on. Only the
-// OPEN blockers survive: a closed blocker blocks nothing, and every caller asks the
-// same question of the list.
+// blockers that still hold the card survive: every caller asks the same question of
+// the list.
 export function normalizeItem(i) {
   const list = (value) => (Array.isArray(value) ? value : []);
+  const holding = list(i.blockers).filter(holdsCard);
+  const foreign = holding.filter((b) => b.repository !== undefined);
   return {
     number: i.content?.number ?? null,
     status: i.status ?? null,
@@ -1220,7 +1459,9 @@ export function normalizeItem(i) {
     ...(KIND_TYPES ? { issueType: i.issueType ?? null } : {}),
     state: i.content?.state ?? null,
     assignees: list(i.assignees),
-    openBlockers: list(i.blockers).filter((b) => b.state === 'OPEN').map((b) => b.number),
+    openBlockers: holding.map((b) => b.number),
+    // A blocker in another repository is never a card on this board, though its number may be one's.
+    ...(foreign.length > 0 ? { foreignBlockers: foreign.map((b) => ({ repository: b.repository, number: b.number })) } : {}),
     closingPullRequests: list(i.closingPullRequests),
     subIssues: i.content?.subIssuesSummary ?? null,
     // A markdown card's claim is a job branch, not an assignee; only that tracker's items carry it.
@@ -1228,15 +1469,26 @@ export function normalizeItem(i) {
   };
 }
 
+// Whether card `card` carries a label isShowFirst matches among the normalized `items`, or a throw where the board does
+// not hold it or a label of it is not text.
+export function markerOf(card, items) {
+  const item = items.find((candidate) => candidate.number === card);
+  if (!item) throw new Error(`card ${card} is not on the board`);
+  return showFirstAmong(card, item.labels);
+}
+
 // The last pickable column first — PICKABLE_STATUSES is in board order, so that is the
-// one nearest being worked — then ascending issue number (nulls last). Every other
-// column keeps the rank it had: this orders a pick view, it does not rank the board.
+// one nearest being worked. Inside it the board's own order leads: a card with a place
+// in the listing sorts by it, ahead of the cards with none, which keep ascending issue
+// number (nulls last). Every other column is ascending issue number: this orders a pick
+// view, it does not rank the board.
 const NEXT_UP_STATUS = PICKABLE_STATUSES[PICKABLE_STATUSES.length - 1];
 
 export function sortForDisplay(items) {
   const rank = (s) => (s === NEXT_UP_STATUS ? 0 : 1);
   const num = (i) => (i.content?.number ?? null);
-  return [...items].sort((a, b) => rank(a.status) - rank(b.status) || compareCardIds(num(a), num(b)));
+  const place = (i) => (i.status === NEXT_UP_STATUS && Number.isInteger(i.boardPosition) ? i.boardPosition : Number.MAX_SAFE_INTEGER);
+  return [...items].sort((a, b) => rank(a.status) - rank(b.status) || place(a) - place(b) || compareCardIds(num(a), num(b)));
 }
 
 // One item → the two-line routing view (`#N [Status] Title` + its labels, led by its issue type
@@ -1244,9 +1496,7 @@ export function sortForDisplay(items) {
 export function formatRow(i) {
   const n = normalizeItem(i);
   const num = n.number == null ? '#?' : cardRef(n.number);
-  const shown = KIND_TYPES ? [n.issueType ?? 'no issue type', ...n.labels] : n.labels;
-  const labels = shown.length ? shown.join(', ') : '—';
-  return `${oneLine(`${num} [${n.status}] ${n.title}`)}\n    ${oneLine(labels)}`;
+  return `${oneLine(`${num} [${n.status}] ${n.title}`)}\n    ${cardLabels(n)}`;
 }
 
 // A pre-selected list → the sorted, formatted block. Selection (pickable/status)
@@ -1267,7 +1517,7 @@ export function formatList(items) {
 // trailing `Unfielded` group for items with no routing value. Empty groups are
 // omitted; no item is ever dropped.
 export function groupByRouting(items) {
-  const known = new Map(ROUTING_OPTIONS.map((w) => [w, []]));
+  const known = new Map(ROUTING_OPTIONS.map((w) => [w, /** @type {unknown[]} */ ([])]));
   const unknown = new Map();
   const unfielded = [];
 
@@ -1281,7 +1531,7 @@ export function groupByRouting(items) {
     if (w == null) {
       unfielded.push(i);
     } else if (known.has(w)) {
-      known.get(w).push(i);
+      /** @type {unknown[]} */ (known.get(w)).push(i);
     } else {
       if (!unknown.has(w)) unknown.set(w, []);
       unknown.get(w).push(i);
@@ -1290,7 +1540,7 @@ export function groupByRouting(items) {
 
   const groups = [];
   for (const w of ROUTING_OPTIONS) {
-    const its = known.get(w);
+    const its = /** @type {unknown[]} */ (known.get(w));
     if (its.length > 0) groups.push({ routing: w, items: its });
   }
   for (const w of [...unknown.keys()].sort()) {
@@ -1306,20 +1556,44 @@ export function groupByRouting(items) {
 // single-sourced — no duplicated row rendering). A board with no routing field has
 // nothing to group by, so it gets the plain formatList block.
 export function formatGrouped(items) {
+  const warning = routingWarning(items);
+  return warning === null ? groupedRows(items) : `${groupedRows(items)}\n\n${warning}`;
+}
+
+function groupedRows(items) {
   if (!ROUTING_FIELD) return formatList(items);
-  const groups = groupByRouting(items);
-  const body = groups
+  return groupByRouting(items)
     .map((g) => `${oneLine(`── ${g.routing} (${g.items.length}) ──`)}\n${formatList(g.items)}`)
     .join('\n\n');
+}
+
+// The warning naming every routing value among the items that ROUTING_OPTIONS does not hold, or null.
+function routingWarning(items) {
+  if (!ROUTING_FIELD) return null;
   const unknown = [...new Set(
     items.map(normalizeItem)
       .map((i) => i.routing)
       .filter((w) => w && !ROUTING_OPTIONS.includes(w)),
   )].sort();
-  if (unknown.length === 0) return body;
+  if (unknown.length === 0) return null;
 
   // Keep the repository-owned priority and low-cost read; newly seen values must fail loud.
   const values = unknown.join(', ');
   const label = unknown.length === 1 ? 'value' : 'values';
-  return `${body}\n\n${oneLine(`WARNING: unrecognised ${ROUTING_FIELD} ${label}: ${values}; add ${values} to ROUTING_OPTIONS in scripts/lib/board-config.mjs.`)}`;
+  return oneLine(`WARNING: unrecognised ${ROUTING_FIELD} ${label}: ${values}; add ${values} to ROUTING_OPTIONS in scripts/lib/board-config.mjs.`);
+}
+
+// The opening of the `--intake` document: the board line, then what no card summary carries. A pickable
+// card with no number has no summary, so its row is printed here, and so is the warning for a routing
+// value the configuration does not name.
+export function intakeListing(header, picks) {
+  const numberless = picks.filter((item) => normalizeItem(item).number == null);
+  const warning = routingWarning(picks);
+  return [
+    header,
+    ...(numberless.length > 0
+      ? ['', `Pickable cards with no issue number, which have no summary: ${numberless.length}`, groupedRows(numberless)]
+      : []),
+    ...(warning === null ? [] : ['', warning]),
+  ].join('\n');
 }

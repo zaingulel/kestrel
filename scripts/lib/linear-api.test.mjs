@@ -11,12 +11,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LINEAR_ENDPOINT, linearExec, linearKeyPath, readLinearKey, requestLinear } from './linear-api.mjs';
+
+/** @typedef {import('./linear-api.mjs').TransportError} TransportError */
+/** @typedef {import('./linear-api.mjs').TransportSpawn} TransportSpawn */
 
 const LINEAR_API = fileURLToPath(new URL('./linear-api.mjs', import.meta.url));
 const KEY = 'lin_api_TESTKEY0123456789';
@@ -102,7 +106,7 @@ async function outcomeText(promise) {
   try {
     return String(JSON.stringify(await promise));
   } catch (error) {
-    return String(error.message);
+    return String(/** @type {Error} */ (error).message);
   }
 }
 
@@ -110,7 +114,7 @@ async function rejection(promise) {
   try {
     await promise;
   } catch (error) {
-    return error;
+    return /** @type {TransportError} */ (error);
   }
   assert.fail('the request resolved instead of failing');
 }
@@ -119,7 +123,7 @@ function exception(run) {
   try {
     run();
   } catch (error) {
-    return error;
+    return /** @type {TransportError} */ (error);
   }
   assert.fail('linearExec returned instead of failing');
 }
@@ -172,6 +176,7 @@ test('the Linear transport refuses before any network call when no key file exis
 });
 
 // Every classified failure, each answer echoing the key it was sent.
+/** @type {[string, () => ReturnType<typeof answering>][]} */
 const ECHOING_FAILURES = [
   ['an authentication answer', () => answering(401, { errors: [{ message: `Invalid API key ${KEY}`, extensions: { type: 'authentication error' } }] })],
   ['a forbidden answer', () => answering(403, { errors: [{ message: `Key ${KEY} may not read this team`, extensions: { type: 'forbidden' } }] })],
@@ -217,7 +222,7 @@ test('ANTI-REGRESSION: the Linear key reaches only the Authorization header of a
   try {
     childText = String(JSON.stringify(linearExec(QUERY, VARIABLES)));
   } catch (error) {
-    childText = String(error.message);
+    childText = String(/** @type {Error} */ (error).message);
   }
   assert.equal(childText.includes(KEY), false, `the child echoed the key: ${childText}`);
   const request = JSON.parse(readFileSync(record, 'utf8'));
@@ -265,7 +270,7 @@ test('readLinearKey refuses an absent file, a link, a directory, a file other ac
     symlinkSync(keyFile('target', `${KEY}\n`), link);
     refusals.push(['a link', link]);
   } catch (error) {
-    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
     t.diagnostic('the link case is left out: this Windows account may not create symbolic links (EPERM)');
   }
   const directory = join(root, 'directory');
@@ -290,7 +295,8 @@ test('readLinearKey refuses an absent file, a link, a directory, a file other ac
   );
 
   for (const [refusal, path, remedy = ''] of refusals) {
-    assert.throws(() => readLinearKey({ path, platform: process.platform }), (error) => {
+    assert.throws(() => readLinearKey({ path, platform: process.platform }), (caught) => {
+      const error = /** @type {Error} */ (caught);
       assert.ok(error.message.includes(`${remedy}${path}`), `${refusal} does not name ${remedy}${path}: ${error.message}`);
       assert.equal(error.message.includes('lin_api_'), false, `${refusal} echoes the content: ${error.message}`);
       return true;
@@ -300,6 +306,7 @@ test('readLinearKey refuses an absent file, a link, a directory, a file other ac
 
 test("requestLinear names Linear's rate limit with Retry-After and the reset times on HTTP 429 and on RATELIMITED inside HTTP 200, and says nothing further was sent", async () => {
   // The reset headers are epoch milliseconds: 1767225600000 is 2026-01-01T00:00:00.000Z.
+  /** @type {[string, ReturnType<typeof answering>, string[]][]} */
   const cases = [
     [
       'HTTP 429',
@@ -348,6 +355,7 @@ test('requestLinear fails whole on an HTTP 200 answer that carries errors beside
 });
 
 test('requestLinear names the key file and the access it needs on an authentication or forbidden answer', async () => {
+  /** @type {[string, ReturnType<typeof answering>][]} */
   const cases = [
     ['HTTP 401', answering(401, { errors: [{ message: 'Not authenticated' }] })],
     ['HTTP 403', answering(403, { errors: [{ message: 'Not allowed' }] })],
@@ -424,10 +432,11 @@ test('linearExec refuses a BOARD_TOOLKIT_LINEAR that is not a JSON array of non-
   process.env.HOME = empty;
   process.env.USERPROFILE = empty;
   const timedOut = [];
+  /** @type {TransportSpawn} */
   const timingOutSpawn = (command, args, options) => {
     timedOut.push(options);
     return {
-      pid: 0, output: null, stdout: '', stderr: '', status: null, signal: 'SIGTERM',
+      stdout: '', stderr: '', status: null, signal: 'SIGTERM',
       error: Object.assign(new Error(`spawnSync ${command} ETIMEDOUT`), { code: 'ETIMEDOUT', syscall: `spawnSync ${command}` }),
     };
   };
@@ -454,4 +463,88 @@ test('linearExec refuses a BOARD_TOOLKIT_LINEAR that is not a JSON array of non-
   assert.equal(limited.rateLimited, true, `the rate limit is not marked rateLimited: ${limited.message}`);
   assert.match(limited.message, /rate limit/i);
   assert.match(limited.message, /Retry-After/);
+});
+
+test('Linear transport reports a thrown non-error value as unreachable', async () => {
+  for (const thrown of [null, undefined, 'text', 7, {}]) {
+    await assert.rejects(
+      requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw thrown; }, key: KEY }),
+      { message: 'Linear could not be reached: a non-error value was thrown' },
+    );
+  }
+});
+
+test('Linear transport reads an error from another realm', async () => {
+  /** @type {unknown} */
+  const foreign = runInNewContext('new TypeError("socket hang up", { cause: { code: "ECONNRESET" } })');
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw foreign; }, key: KEY }),
+    { message: 'Linear could not be reached: ECONNRESET' },
+  );
+});
+
+test('Linear transport reports a revoked proxy as a non-error value', async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw proxy; }, key: KEY }),
+    { message: 'Linear could not be reached: a non-error value was thrown' },
+  );
+});
+
+test('Linear transport reads a live proxy around an error', async () => {
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw new Proxy(new TypeError('socket hang up', { cause: { code: 'ECONNRESET' } }), {}); }, key: KEY }),
+    { message: 'Linear could not be reached: ECONNRESET' },
+  );
+});
+
+test('Linear transport skips a cause field that is neither a string nor a number', async () => {
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw new TypeError('socket hang up', { cause: { code: Symbol('ECONNRESET'), name: 'NetworkError' } }); }, key: KEY }),
+    { message: 'Linear could not be reached: NetworkError' },
+  );
+});
+
+test('Linear transport reads the first valid error field without reading later ones', async () => {
+  const cause = { code: 'ECONNRESET' };
+  Object.defineProperty(cause, 'name', { get: () => { throw new Error('name unreadable'); } });
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw new TypeError('socket hang up', { cause }); }, key: KEY }),
+    { message: 'Linear could not be reached: ECONNRESET' },
+  );
+});
+
+test('Linear transport reports an error it cannot read with a fixed message', async () => {
+  const unreadable = new TypeError('socket hang up');
+  Object.defineProperty(unreadable, 'cause', { get: () => { throw new Error('cause unreadable'); } });
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { fetch: async () => { throw unreadable; }, key: KEY }),
+    { message: 'Linear could not be reached: its error could not be read' },
+  );
+});
+
+test('Linear transport reports a non-error value thrown while reading the answer with a fixed message', async () => {
+  const answer = { fetch: async () => ({ get status() { throw null; }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(requestLinear({ query: QUERY, variables: VARIABLES }, { ...answer, key: KEY }), { message: 'Linear request failed: a non-error value was thrown' });
+});
+
+test('Linear transport reports an error it cannot read while reading the answer without its secret', async () => {
+  const unreadable = new Error('unreadable');
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error(KEY); } });
+  const answer = { fetch: async () => ({ get status() { throw unreadable; }, headers: new Headers(), text: async () => '{}' }) };
+  const caught = await requestLinear({ query: QUERY, variables: VARIABLES }, { ...answer, key: KEY }).then(() => assert.fail('the request resolved'), (error) => error);
+  assert.equal(caught.message, 'Linear request failed: its error could not be read');
+  assert.equal(caught.cause, undefined);
+  assert.equal(String(caught.stack).includes(KEY), false);
+});
+
+test('Linear transport reports an error whose message is not text with a fixed message', async () => {
+  const unreadable = new Error('unreadable');
+  Object.defineProperty(unreadable, 'message', { value: undefined });
+  const answer = { fetch: async () => ({ get status() { throw unreadable; }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(
+    requestLinear({ query: QUERY, variables: VARIABLES }, { ...answer, key: KEY }),
+    { message: 'Linear request failed: its error could not be read' },
+  );
 });

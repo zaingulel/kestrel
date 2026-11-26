@@ -16,6 +16,7 @@ const {
   parseBatchArgs,
   moveCards,
   moveLanes,
+  placeCardAfter,
 } = await toolkit.load('lib/board-move.mjs');
 const { main: boardMoveMain, BOARD_MOVE_HELP } = await toolkit.load('board-move.mjs');
 const { BOARD_OWNER, BOARD_REPOSITORY, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER } = await toolkit.load('lib/board-config.mjs');
@@ -125,7 +126,7 @@ test('lookupIssueBoardItem matches the configured owner and refuses a project wi
 test('moveCards preserves the configured add advice for a complete absent reply', () => {
   assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
     args[3]?.includes('projectV2(number:') ? STATUS_FIELD_JSON : issueItemReply()), (error) => {
-    assert.equal(error.cause.message, 'issue #999 is not on the board — add it with Status and Workstream: node scripts/board-add.mjs 999 <Status> <Workstream>');
+    assert.equal(/** @type {{ cause: Error }} */ (error).cause.message, 'issue #999 is not on the board — add it with Status and Workstream: node scripts/board-add.mjs 999 <Status> <Workstream>');
     return true;
   });
 });
@@ -177,14 +178,16 @@ test('parseBatchArgs names the value label it is given in its errors, not Status
 // Records every exec() call so we can assert the exact call count + order — the
 // #461 acceptance criterion (status-field query resolved ONCE regardless of pair
 // count, not once per card). `currentStatusByIssue` is optional per-issue Status,
-// absent by default (no value, never mistaken for "already there").
-function recordingExec(itemIdByIssue, currentStatusByIssue = {}) {
+// absent by default (no value, never mistaken for "already there"). `positionReply` is what the
+// updateProjectV2ItemPosition write returns; it defaults to GitHub's success reply.
+function recordingExec(itemIdByIssue, currentStatusByIssue = {}, positionReply = JSON.stringify({ data: { updateProjectV2ItemPosition: { clientMutationId: null } } })) {
   const calls = [];
   const exec = (args) => {
     calls.push(args);
     if (args[0] === 'api') {
       const query = args[3];
       if (query.includes('projectV2(number:')) return JSON.stringify(STATUS_FIELD_JSON);
+      if (query.includes('updateProjectV2ItemPosition')) return positionReply;
       const match = query.match(/issue\(number:(\d+)\)/);
       const issueNumber = Number(match[1]);
       const status = currentStatusByIssue[issueNumber];
@@ -280,8 +283,8 @@ test('moveCards preserves the underlying error as cause on a per-pair failure', 
     moveCards([{ issueNumber: 453, statusName: 'Nonexistent Status' }], exec);
     assert.fail('expected moveCards to throw');
   } catch (err) {
-    assert.ok(err.cause instanceof Error, 'cause missing');
-    assert.match(err.cause.message, /unknown Status "Nonexistent Status"/);
+    assert.ok(/** @type {Error} */ (err).cause instanceof Error, 'cause missing');
+    assert.match(/** @type {{ cause: Error }} */ (err).cause.message, /unknown Status "Nonexistent Status"/);
   }
 });
 
@@ -342,6 +345,64 @@ function outputSink() {
   return sink;
 }
 
+// A recording wake: each call is counted, and it answers `cause` (undefined means woken).
+function recordingWake(cause) {
+  const wake = () => { wake.count += 1; return cause; };
+  wake.count = 0;
+  return wake;
+}
+
+test('a move to ready wakes the coordinator once after the move', () => {
+  const { exec, calls } = recordingExec({ 453: 'item-453' });
+  const wakeCallCounts = [];
+  const wake = () => { wakeCallCounts.push(calls.length); return undefined; };
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['453', 'ready'], { ghExec: exec, output: sink, wake }), 0);
+  assert.equal(wakeCallCounts.length, 1);
+  const edit = calls.findIndex((args) => args[0] === 'project' && args[1] === 'item-edit');
+  assert.notEqual(edit, -1, 'the move was written');
+  assert.ok(edit < wakeCallCounts[0], 'the wake ran after the move was written');
+  assert.equal(sink.stderr, '');
+});
+
+test('a move to another column or of a card already in Ready wakes nothing', () => {
+  const wake = recordingWake();
+  const { exec } = recordingExec({ 453: 'item-453', 454: 'item-454' }, { 454: 'Ready' });
+
+  assert.equal(boardMoveMain(['453', 'Done'], { ghExec: exec, output: outputSink(), wake }), 0);
+  assert.equal(boardMoveMain(['454', 'Ready'], { ghExec: exec, output: outputSink(), wake }), 0);
+  assert.equal(wake.count, 0);
+});
+
+test('a move to Ready exits 0 when no coordinator is woken', () => {
+  const { exec } = recordingExec({ 453: 'item-453' });
+  const wake = recordingWake('no Coordinator tab is open');
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['453', 'Ready'], { ghExec: exec, output: sink, wake }), 0);
+  assert.equal(wake.count, 1);
+  assert.equal(sink.stderr, 'board-move: the coordinator was not woken: no Coordinator tab is open\n');
+});
+
+test('a batch with two Ready cards wakes once', () => {
+  const { exec } = recordingExec({ 453: 'item-453', 454: 'item-454' });
+  const wake = recordingWake();
+
+  assert.equal(boardMoveMain(['--batch', '453:Ready', '454:Ready'], { ghExec: exec, output: outputSink(), wake }), 0);
+  assert.equal(wake.count, 1);
+});
+
+test('a batch that fails after a Ready move still wakes and exits 1', () => {
+  const { exec } = recordingExec({ 453: 'item-453' });
+  const wake = recordingWake();
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['--batch', '453:Ready', '454:Nonexistent'], { ghExec: exec, output: sink, wake }), 1);
+  assert.equal(wake.count, 1);
+  assert.match(sink.stderr, /unknown Status "Nonexistent"/);
+});
+
 test('board-move single-card form moves the card, prints its line on stdout and returns 0', () => {
   const { exec, calls } = recordingExec({ 453: 'item-453' });
   const sink = outputSink();
@@ -353,6 +414,66 @@ test('board-move single-card form moves the card, prints its line on stdout and 
   assert.ok(edit, 'no item-edit call recorded');
   assert.equal(edit[edit.indexOf('--id') + 1], 'item-453');
   assert.equal(edit[edit.indexOf('--single-select-option-id') + 1], 'opt-inprogress');
+});
+
+test("board-move --top moves the card, then puts it first in the board's order with one position write that sends its ids as variables", () => {
+  const { exec, calls } = recordingExec({ 754: 'item-754' });
+  const sink = outputSink();
+
+  assert.equal(boardMoveMain(['--top', '754', 'Ready'], { ghExec: exec, output: sink }), 0, sink.stderr);
+  assert.equal(sink.stdout, "board-move: #754 → Ready\nboard-move: #754 first in the board's order\n");
+  assert.equal(sink.stderr, '');
+  assert.deepEqual(calls.at(-1), [
+    'api', 'graphql',
+    '-f', 'query=mutation($project: ID!, $item: ID!) { updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item}) { clientMutationId } }',
+    '-f', 'project=PVT_kwHOA50uGs4BcfoO',
+    '-f', 'item=item-754',
+  ]);
+  assert.ok(calls.slice(0, -1).some((args) => args[0] === 'project' && args[1] === 'item-edit'), 'the position write did not follow an item-edit');
+});
+
+test("board-move --top refuses an unreadable position reply with exit 1 after reporting the status move", () => {
+  const cases = [
+    ['not json', "board-move: #754 is at Ready, but its place first in the board's order is not confirmed: position write GraphQL response is not valid JSON\n"],
+    ['{"data":{"updateProjectV2ItemPosition":null}}', "board-move: #754 is at Ready, but its place first in the board's order is not confirmed: position write GraphQL response has no updateProjectV2ItemPosition object\n"],
+    ['{"data":{"updateProjectV2ItemPosition":[]}}', "board-move: #754 is at Ready, but its place first in the board's order is not confirmed: position write GraphQL response has no updateProjectV2ItemPosition object\n"],
+  ];
+  for (const [reply, message] of cases) {
+    const { exec } = recordingExec({ 754: 'item-754' }, {}, reply);
+    const sink = outputSink();
+    assert.equal(boardMoveMain(['--top', '754', 'Ready'], { ghExec: exec, output: sink }), 1, reply);
+    assert.equal(sink.stdout, 'board-move: #754 → Ready\n', reply);
+    assert.equal(sink.stderr, message, reply);
+  }
+});
+
+const POSITION_WRITE = (args) => args[0] === 'api' && args[3].includes('updateProjectV2ItemPosition');
+
+test("placeCardAfter sends the after card's item id as afterId in one position write", () => {
+  const { exec, calls } = recordingExec({ 754: 'item-754', 755: 'item-755' });
+
+  placeCardAfter(754, 755, exec);
+
+  const writes = calls.filter(POSITION_WRITE);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][3], 'query=mutation($project: ID!, $item: ID!, $after: ID!) { updateProjectV2ItemPosition(input: {projectId: $project, itemId: $item, afterId: $after}) { clientMutationId } }');
+  assert.deepEqual(writes[0].slice(4), ['-f', 'project=PVT_kwHOA50uGs4BcfoO', '-f', 'item=item-754', '-f', 'after=item-755']);
+});
+
+test('placeCardAfter refuses an after card that is not on the board before any write', () => {
+  const { exec, calls } = recordingExec({ 754: 'item-754' });
+  const afterCardOffBoard = (args) => (args[0] === 'api' && args[3].includes('issue(number:755)') ? issueItemReply() : exec(args));
+
+  assert.throws(() => placeCardAfter(754, 755, afterCardOffBoard), /issue #755 is not on the board/);
+  assert.equal(calls.some(POSITION_WRITE), false);
+});
+
+test('placeCardAfter refuses a card number that is not a positive integer before any board read', () => {
+  const { exec, calls } = recordingExec({ 754: 'item-754' });
+
+  assert.throws(() => placeCardAfter(754, '755) {', exec), { message: 'invalid issue number: 755) {' });
+  assert.throws(() => placeCardAfter('754) {', null, exec), { message: 'invalid issue number: 754) {' });
+  assert.ok(calls.every((c) => !c.join(' ').includes('projectItems')), 'issue resolve ran on invalid input');
 });
 
 test('board-move --batch moves every pair, prints one line each on stdout and returns 0', () => {
@@ -367,6 +488,7 @@ test('board-move --batch moves every pair, prints one line each on stdout and re
 // Literal, not imported from scripts/board-move.mjs: the printed text is the oracle, so a
 // change to any usage line must fail this test.
 const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. board-move.mjs 272 Done\n' +
+  '       node scripts/board-move.mjs --top <issue#> <Status>   e.g. board-move.mjs --top 754 Ready\n' +
   '       node scripts/board-move.mjs --batch <issue#>:<Status> [...]   e.g. board-move.mjs --batch 453:Done 454:"In review"\n' +
   '       node scripts/board-move.mjs --lane <issue#>:<option|none> [...]   e.g. board-move.mjs --lane 12:none\n' +
   '       node scripts/board-move.mjs --help   prints the modes, with no board read\n' +
@@ -377,12 +499,13 @@ const USAGE_TEXT = 'usage: node scripts/board-move.mjs <issue#> <Status>   e.g. 
 const HELP_TEXT = `${USAGE_TEXT}
 
   <issue#> <Status>                 move one card; a several-word Status may be unquoted
+  --top <issue#> <Status>           move one card, then put it first in the board's order; GitHub Projects only
   --batch <issue#>:<Status>...      move each card to its Status
   --lane <issue#>:<option|none>...  put each card in a parked-lane option; none clears it
   --help                            this text, with no board read`;
 
 test('board-move rejects bad arguments before any gh call: usage problems return 2 and a malformed batch pair returns 1', () => {
-  for (const args of [[], ['abc', 'Done'], ['453'], ['--batch']]) {
+  for (const args of [[], ['abc', 'Done'], ['453'], ['--batch'], ['--top'], ['--top', '453'], ['--top', '--batch', '453:Done'], ['--top', '--lane', '453:none']]) {
     const { exec, calls } = recordingExec({});
     const sink = outputSink();
     assert.equal(boardMoveMain(args, { ghExec: exec, output: sink }), 2, JSON.stringify(args));
@@ -510,8 +633,8 @@ test('board-move refuses incomplete issue-item replies with their cause and no w
       return args[3]?.includes('projectV2(number:') ? JSON.stringify(STATUS_FIELD_JSON) : typeof reply === 'string' ? reply : JSON.stringify(reply);
     };
     assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], exec), (error) => {
-      assert.match(error.cause.message, expected);
-      assert.doesNotMatch(error.message, /is not on the board/);
+      assert.match(/** @type {{ cause: Error }} */ (error).cause.message, expected);
+      assert.doesNotMatch(/** @type {Error} */ (error).message, /is not on the board/);
       return true;
     });
     const sink = outputSink();

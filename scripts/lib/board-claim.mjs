@@ -12,13 +12,17 @@
 // `main(args, deps)` takes its `gh` executor, tracker, hostname, clock and output from `deps`, so a
 // test needs no process and no `gh`.
 
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { hostname as machineHostname } from 'node:os';
+import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { foldCardTextLine, isClaim } from './board.mjs';
+import { foldCardTextLine, isClaim, newestClaim } from './board.mjs';
 import * as boardConfig from './board-config.mjs';
 import { moveCards } from './board-move.mjs';
+import { parseWorktreeList } from './closeout-cleanup.mjs';
 import { ghExec } from './gh-exec.mjs';
+import { LOCAL_HERDR_TERMINAL } from './runtimes.mjs';
 import { trackerOf } from './tracker.mjs';
 
 export const RUNTIMES = ['Claude Code', 'Codex', 'Claude Code cloud'];
@@ -238,6 +242,7 @@ function claim(call, exec, { hostname, now }, before, output) {
     output.log(`outcome: Could not confirm: ${reason}`);
     return 5;
   };
+  /** @type {[string, () => unknown][]} */
   const writes = [
     ['the move to In progress', () => {
       const [{ skipped }] = moveCards([{ issueNumber: call.issue, statusName: CLAIM_COLUMN }], exec);
@@ -262,7 +267,7 @@ function claim(call, exec, { hostname, now }, before, output) {
   // the session cannot know its own claim, though the comment may well have been posted.
   let created;
   try {
-    created = JSON.parse(reply);
+    created = JSON.parse(/** @type {string} */ (reply));
   } catch {
     created = null;
   }
@@ -315,7 +320,7 @@ export function main(args = process.argv.slice(2), deps = {}) {
   try {
     call = parseArgs(args);
   } catch (err) {
-    return refuse(err.message);
+    return refuse(/** @type {Error} */ (err).message);
   }
   if (call.runtime !== undefined && !RUNTIMES.includes(call.runtime)) {
     return refuse(`--runtime must be exactly one of ${RUNTIMES.map((name) => `"${name}"`).join(', ')}`);
@@ -329,7 +334,7 @@ export function main(args = process.argv.slice(2), deps = {}) {
   try {
     tracker = deps.tracker ?? trackerOf(boardConfig);
   } catch (err) {
-    return refuse(err.message);
+    return refuse(/** @type {Error} */ (err).message);
   }
   if (tracker !== 'github') {
     return refuse(`this command serves only the GitHub Projects tracker, not "${tracker}"; claim by hand as references/claim-reads.md of the resume skill says`);
@@ -353,4 +358,201 @@ export function main(args = process.argv.slice(2), deps = {}) {
     return 0;
   }
   return claim(call, exec, { hostname, now: deps.now ?? (() => new Date()) }, before, output);
+}
+
+// A Herdr command line, `hc` or `herdr-app`, run with its arguments: its exit code and output.
+/** @typedef {(args: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} HerdrCommand */
+
+// A Herdr command line, `hc` or `herdr-app`: resolves its exit code and output, and rejects only when it cannot run.
+export const herdrCommand = (executable, timeout = 0) => (commandArgs) => new Promise((resolve, reject) => {
+  execFile(executable, commandArgs, { encoding: 'utf8', timeout }, (error, stdout, stderr) => {
+    if (error && typeof error.code !== 'number') reject(error);
+    else resolve({ code: error ? error.code : 0, stdout, stderr });
+  });
+});
+
+// The terminals `hc ls` lists with the labels `labels` (`key=value` words), finished ones too where `all`, or throws, naming the
+// cause, when it cannot list them.
+export async function jobTerminals(hc, labels, all = false) {
+  const listing = await hc(['ls', ...labels.flatMap((label) => ['--label', label]), ...(all ? ['--all'] : []), '--json']);
+  try {
+    if (listing.code !== 0) throw new Error();
+    const { terminals } = JSON.parse(listing.stdout);
+    if (!Array.isArray(terminals)) throw new Error();
+    return terminals;
+  } catch {
+    throw new Error(`hc ls could not list the job terminals: ${listing.stderr.trim() || `exit ${listing.code}`}`);
+  }
+}
+
+// The `hc get --json` record of terminal `address` as `interpret` reads it, or throws, naming what it could not do (`reading`).
+export async function readRecord(hc, address, reading, interpret) {
+  const read = await hc(['get', address, '--json']);
+  try {
+    if (read.code !== 0) throw new Error();
+    return interpret(JSON.parse(read.stdout));
+  } catch {
+    throw new Error(`hc get ${address} could not ${reading}: ${read.stderr.trim() || (read.code === 0 ? 'unreadable reply' : `exit ${read.code}`)}`);
+  }
+}
+
+// The program `startJob` launches a job through; Herdr's record keeps it as `argv[0]` until the program is lost.
+export const LAUNCH_PROGRAM = '/usr/bin/env';
+
+// Whether the `hc ls` entry of terminal `address` is live, or throws, naming the address, where its state is no string.
+export function isLive(address, state) {
+  if (typeof state !== 'string') throw new Error(`hc ls listed terminal ${address} with no readable state`);
+  return state === 'live';
+}
+
+// What `hc get` reads of terminal `address`: whether it is `running` a program, its status and its labels. A live terminal
+// is running when its foreground is a known runtime, is a different process from the terminal or uses the job launch form.
+// A finished record is stopped. Throws when a field a live record needs cannot be read.
+export function interpretTerminal(record, live) {
+  if (!live) return { running: false, status: undefined, labels: record.labels };
+  const { pid, argv, foreground, status } = record;
+  if (!Number.isInteger(pid) || !Number.isInteger(foreground.pid)) throw new Error();
+  if (!Array.isArray(argv) || typeof argv[0] !== 'string') throw new Error();
+  if (status !== null && typeof status.state !== 'string') throw new Error();
+  const runtime = foreground.name === 'claude' || foreground.name === 'codex';
+  return { running: runtime || foreground.pid !== pid || argv[0] === LAUNCH_PROGRAM, status: status?.state, labels: record.labels };
+}
+
+// `interpretTerminal` over the `hc get --json` record of terminal `address`, or throws, naming the cause, when `hc get` cannot be read.
+export const readTerminal = (hc, address, live) => readRecord(hc, address, 'tell whether it is running and its status', (record) => interpretTerminal(record, live));
+
+/** @typedef {import('./board-rules.mjs').Observation} Observation */
+/** @typedef {(args: string[]) => { status: number | null, stdout: string, stderr: string }} GitRunner */
+/** @typedef {{ readDir: (path: string) => string[], stat: (path: string) => { isFile(): boolean, mtime: Date }, readFile: (path: string, encoding: 'utf8') => string }} WorklogReads */
+
+// Why the newest claim in `detail` cannot be checked on `hostname`, or its time where it can.
+/** @returns {{ cause: string, claimedAt?: undefined } | { cause?: undefined, claimedAt: Date }} */
+function claimCheck(detail, hostname) {
+  if (detail.unavailable !== undefined) return { cause: `comments not read: ${detail.unavailable}` };
+  // A markdown install claims a card by its job branch, which names no machine.
+  if (detail.claim !== undefined) return { cause: 'no claim names a machine' };
+  const { machine, runtime, time } = newestClaim(detail.comments);
+  if (machine === undefined) {
+    return { cause: detail.commentsUnavailable === null ? 'no claim names a machine' : `comments not read: ${detail.commentsUnavailable}` };
+  }
+  // newestClaim ends the first line at a line feed only, so a lone carriage return still ends it here.
+  const written = time?.split('\r')[0];
+  // The time must read back exactly as written, which refuses another form and a date such as 30 February.
+  const claimedAt = new Date(written ?? NaN);
+  if (Number.isNaN(claimedAt.getTime()) || claimTime(claimedAt) !== written) return { cause: 'claim time unreadable' };
+  if (machine !== hostname || runtime === 'Claude Code cloud') return { cause: `claimed on ${machine}, ${runtime}; this machine cannot check it` };
+  return { claimedAt };
+}
+
+// Whether a live Herdr job terminal of `card`, launched from the integration checkout `checkout`, is running its job. Its
+// foreground counts only where its `hc get` record names the same terminal and is live by its own state; a live local job
+// terminal with no launch folder, or a record of another terminal, leaves it unavailable.
+/** @param {HerdrCommand} hc */
+async function jobLiveness(hc, card, checkout) {
+  try {
+    for (const { address, state, cwd } of await jobTerminals(hc, ['fabraik.role=job', `fabraik.card=${card}`])) {
+      if (!LOCAL_HERDR_TERMINAL.test(address) || (typeof cwd === 'string' && cwd !== checkout) || !isLive(address, state)) continue;
+      if (typeof cwd !== 'string') throw new Error(`hc ls gave job terminal ${address} no launch folder`);
+      const read = await readRecord(hc, address, 'tell whether it is running and its status',
+        (record) => (record.address === address ? interpretTerminal(record, record.state === 'live') : null));
+      if (read === null) throw new Error(`hc get ${address} returned another terminal`);
+      if (read.running) return { running: address };
+    }
+    return { running: null };
+  } catch (error) {
+    const { code, message } = /** @type {NodeJS.ErrnoException} */ (error);
+    return { unavailable: code === 'ENOENT' ? 'hc is not available' : message };
+  }
+}
+
+const errorCode = (error) => /** @type {NodeJS.ErrnoException} */ (error).code ?? /** @type {Error} */ (error).message;
+
+// The newest of `claimedAt` and the modified times of the regular files directly in the worklog folder of `worktree`, judged
+// without following links, and the last step its worklog records; or why the folder cannot be read. An entry that vanishes
+// between the listing and its stat is skipped.
+/**
+ * @param {Date} claimedAt
+ * @param {WorklogReads} reads
+ * @param {{ parseReceipt: (line: string) => any, worklogFileName: (branch: string) => string }} runLog
+ */
+function worklogActivity(card, worktree, claimedAt, reads, runLog) {
+  const { readDir, stat, readFile } = reads;
+  const { parseReceipt, worklogFileName } = runLog;
+  if (worktree === undefined) return { activeAt: claimedAt, lastStep: 'no job worktree here' };
+  const folder = join(worktree, '.claude', 'worklog');
+  const receiptName = worklogFileName(`job/${card}`);
+  let activeAt = claimedAt;
+  let receipt;
+  try {
+    for (const name of readDir(folder)) {
+      let file;
+      try {
+        file = stat(join(folder, name));
+      } catch (error) {
+        if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue;
+        throw error;
+      }
+      if (name === receiptName) receipt = file;
+      if (file.isFile() && file.mtime > activeAt) activeAt = file.mtime;
+    }
+  } catch (error) {
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') return { cause: `worklog unreadable: ${errorCode(error)}` };
+  }
+  if (receipt === undefined) return { activeAt, lastStep: 'no step recorded' };
+  if (!receipt.isFile()) return { activeAt, lastStep: 'worklog unreadable: not a regular file' };
+  let text;
+  try {
+    text = readFile(join(folder, receiptName), 'utf8');
+  } catch (error) {
+    const absent = /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT';
+    return { activeAt, lastStep: absent ? 'no step recorded' : `worklog unreadable: ${errorCode(error)}` };
+  }
+  const step = text.split('\n').map(parseReceipt).findLast((parsed) => parsed !== null);
+  return { activeAt, lastStep: step ? `${step.label}, ${step.outcome}, completed ${step.completed}` : 'no step recorded' };
+}
+
+// One observation per card of `claims`, from its newest claim in `details`: not checkable where the claim cannot be read or
+// names another machine or a cloud build, which reads neither Herdr nor any file; else the liveness of its Herdr job
+// terminal, its last activity and its last recorded step. `git worktree list` is read once, and only for a checkable claim.
+/**
+ * @param {{ claims: { number: number }[], details: Map<number, any>, hostname: string, now: Date, rungit: GitRunner, hc: HerdrCommand } & WorklogReads} options
+ * @returns {Promise<Map<number, Observation>>}
+ */
+export async function observeClaims({ claims, details, hostname, now, rungit, hc, readDir, stat, readFile }) {
+  // run-log.mjs has a top-level await, and the guard loads coordinator.mjs, which imports this module, with a synchronous require.
+  const runLog = await import('../run-log.mjs');
+  /** @type {Map<number, Observation>} */
+  const observations = new Map();
+  /** @type {import('./closeout-cleanup.mjs').WorktreeRecord[] | null | undefined} */
+  let worktrees;
+  for (const { number } of claims) {
+    const { cause, claimedAt } = claimCheck(details.get(number), hostname);
+    if (claimedAt === undefined) {
+      observations.set(number, { checkable: false, cause });
+      continue;
+    }
+    if (worktrees === undefined) {
+      const listing = rungit(['worktree', 'list', '--porcelain', '-z']);
+      worktrees = listing.status === 0 ? parseWorktreeList(listing.stdout) : null;
+    }
+    if (worktrees === null) {
+      observations.set(number, { checkable: false, cause: 'git worktree list could not be read' });
+      continue;
+    }
+    const branch = `job/${number}`;
+    const onBranch = worktrees.filter((record) => record.branch === `refs/heads/${branch}`);
+    if (onBranch.length > 1) {
+      observations.set(number, { checkable: false, cause: `${branch} is checked out in more than one worktree` });
+      continue;
+    }
+    const liveness = await jobLiveness(hc, number, worktrees[0].path);
+    const activity = worklogActivity(number, onBranch[0]?.path, claimedAt, { readDir, stat, readFile }, runLog);
+    if (activity.cause !== undefined) {
+      observations.set(number, { checkable: false, cause: activity.cause });
+      continue;
+    }
+    const { activeAt, lastStep } = activity;
+    observations.set(number, { checkable: true, liveness, activeAt, quietMs: now.getTime() - activeAt.getTime(), lastStep });
+  }
+  return observations;
 }

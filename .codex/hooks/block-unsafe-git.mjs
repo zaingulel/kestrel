@@ -5,29 +5,33 @@
 // scripts/lib/unsafe-git.mjs says what does and does not limit a push. blockReason() judges the
 // command using its checkout and the session's run restrictions. The run can be marked by the
 // launcher or bound to a native app session. A failed native lookup cannot drop those restrictions.
+// PRE_APPROVED_RUN_CARD, which a lead sets on a continue session, binds that session to the one card it names.
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { blockReason } from "../../scripts/lib/unsafe-git.mjs";
 import { checkoutContext } from "../../scripts/lib/checkout-context.mjs";
-import { CODEX_APP_RUN_UNAVAILABLE, codexCommandForGuard, codexCwdForGuard, readCodexAppRun } from "../../scripts/lib/codex-hook-adapters.mjs";
+import { CODEX_HERDR_BIND, bindCodexHerdrJob, codexCommandForGuard, codexCwdForGuard, readCodexAppRun, readCodexHerdrDeliveryBinding, readCodexHerdrTerminal } from "../../scripts/lib/codex-hook-adapters.mjs";
 
-const operatingRoot = fileURLToPath(new URL("../..", import.meta.url));
+const operatingRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
+/** @returns {never} */
 function refuse(reason, terminalHint = false) {
   const hint = terminalHint ? " Guards Codex's tool calls only; run it in your own terminal if you truly need it." : "";
   console.error(`Blocked: ${reason}.${hint}`);
   process.exit(2);
 }
 
+/** @returns {never} */
 function refusePreApproved(why) {
   refuse(`a pre-approved run session ${why}`);
 }
 
 // Only a pre-approved session needs the tracker, so only it loads the board configuration.
-async function preApprovedOptions(start, appJob) {
+async function preApprovedOptions(start, appJob, boundCard, codexHerdr) {
   if (start === undefined) return null;
   try {
-    const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
-    return { start, tracker: TRACKER ?? "github", appJob };
+    const { TRACKER } = /** @type {{ TRACKER?: string }} */ (await import("../../scripts/lib/board-config.mjs"));
+    return { start, tracker: TRACKER ?? "github", appJob, boundCard, codexHerdr };
   } catch {
     return refusePreApproved("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
   }
@@ -48,10 +52,12 @@ process.stdin.on("end", async () => {
   } catch {
     // A removed session directory leaves an unavailable anchor.
   }
-  const connection = readCodexAppRun({ sessionCwd, payload, operatingRoot });
-  const runUnavailable = connection?.runUnavailable;
+  const herdr = readCodexHerdrTerminal({ operatingRoot });
+  const connection = herdr ?? readCodexAppRun({ sessionCwd, payload, operatingRoot });
+  let runUnavailable = connection?.runUnavailable;
   const appJob = connection?.kind === "pre-approved" ? { card: connection.card, worktree: connection.worktree } : undefined;
   const preApprovedStart = connection === null ? process.env.PRE_APPROVED_RUN_SESSION : appJob && connection.runStart;
+  const boundCard = connection === null ? process.env.PRE_APPROVED_RUN_CARD : undefined;
 
   if (payload === undefined) {
     if (runUnavailable) refuse(runUnavailable);
@@ -63,22 +69,35 @@ process.stdin.on("end", async () => {
 
   const cmd = codexCommandForGuard(payload?.tool_input);
   if (cmd === "" && connection !== null) {
-    refuse(connection.kind
-      ? "a native app run session is refused a call whose hook payload holds no string command"
-      : CODEX_APP_RUN_UNAVAILABLE);
+    refuse(runUnavailable ?? "a native app run session is refused a call whose hook payload holds no string command");
   }
-  const { checkout, unresolved } = checkoutContext(codexCwdForGuard(payload) || sessionCwd);
+  const binding = herdr && (cmd === CODEX_HERDR_BIND || payload?.tool_input?.command === CODEX_HERDR_BIND);
+  // Binding checks the actual integration root and never opens a cwd supplied by the submitted command.
+  const { checkout, unresolved } = binding ? {} : checkoutContext(codexCwdForGuard(payload) || sessionCwd);
   if (unresolved) {
     const message = connection === null ? unresolved : "git cannot resolve the command working directory";
     console.error(`block-unsafe-git: ${message} — the integration-checkout rule is NOT applied to this call.`);
   }
   if (cmd === "" && preApprovedStart !== undefined) refusePreApproved("is refused a call whose hook payload holds no string command");
+  let codexHerdr;
+  if (herdr?.terminal && !binding) {
+    try {
+      codexHerdr = await readCodexHerdrDeliveryBinding({ herdr, payload, operatingRoot });
+      runUnavailable = undefined;
+    } catch (error) {
+      runUnavailable = /** @type {Error} */ (error).message;
+    }
+  }
   const reason = blockReason(cmd, checkout, {
-    runSession: connection === null ? process.env.PRODUCT_MANAGER_RUN_SESSION === "1" : connection.kind === "product-manager",
-    preApproved: await preApprovedOptions(preApprovedStart, appJob),
-    appRun: Boolean(connection?.kind),
+    preApproved: await preApprovedOptions(codexHerdr?.runStart ?? preApprovedStart, appJob, boundCard, codexHerdr),
+    appRun: Boolean(connection?.kind || codexHerdr),
     runUnavailable,
+    herdrTerminal: Boolean(herdr?.terminal),
   });
   if (reason) refuse(reason, connection === null);
+  if (binding) {
+    const bindReason = await bindCodexHerdrJob({ herdr, payload, operatingRoot, sessionCwd });
+    if (bindReason) refuse(bindReason);
+  }
   process.exit(0);
 });

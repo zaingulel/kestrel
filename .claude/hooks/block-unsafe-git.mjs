@@ -1,36 +1,64 @@
 #!/usr/bin/env node
 // PreToolUse(Bash) guard: apply Git refusals, then grant cleanup-specific permission only
 // from this installed root. The classifier documents the accident-catcher's wider limits.
-// The launcher's marks reach the publishing rule here: PRODUCT_MANAGER_RUN_SESSION=1 refuses every
-// publish, PRE_APPROVED_RUN_SESSION=<run start> admits only a delivery push the owner's advance
-// approval covers, and CARRIED_PUSH_YES=<card> admits only the delivery forms of the card whose yes
-// the coordinator carried. Under either of the last two an unreadable call is refused, not passed.
+// The run's mark reaches the publishing rule here: PRE_APPROVED_RUN_SESSION=<run start> admits only the delivery forms of its own card,
+// claimed by its GitHub account since the run start, while fetched-main waitForOwner is on-screen or when-needed,
+// for a push while no own pull request from its branch is ready or queued and, for a ready or merge,
+// while no wait reason holds for HEAD or the published body and its card does not carry show-me-first,
+// unless the card's recorded owner answer admits that head. Under PRE_APPROVED_RUN_SESSION an unreadable
+// call is refused, not passed. PRE_APPROVED_RUN_CARD, which a lead sets on a continue session, binds that session to
+// the one card it names. FABRAIK_COORDINATED_JOB=1, which a Herdr coordinator sets on the job it starts, makes the
+// guard take the Herdr exact path, where no comment or note ever admits a held head, and makes every publish and
+// merge watch first verify the job's workflow version, FABRAIK_WORKFLOW_ROOT, whole.
+// A session the desktop app started in its sidebar has no such environment, so with no mark in the
+// environment the first is read as a whole line of the first message of the transcript the payload
+// names. In the desktop app a first message that cannot be read refuses every publish.
 import { realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { blockReason, cleanupPermission } from "../../scripts/lib/unsafe-git.mjs";
 import { checkoutContext } from "../../scripts/lib/checkout-context.mjs";
+import { fileRunMarks } from "../../scripts/lib/run-marks.mjs";
+import { verifyJobPin, workflowRoots } from "../../scripts/lib/workflow-pin.mjs";
 
-const installedRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const installedRoot = workflowRoots(import.meta.url).operating;
 
-const preApprovedStart = process.env.PRE_APPROVED_RUN_SESSION;
-const carriedPushYes = process.env.CARRIED_PUSH_YES;
-// The session that may publish, named in its refusals; blockReason refuses a session holding both marks.
-const publishingSession = preApprovedStart !== undefined ? "a pre-approved run" : carriedPushYes !== undefined ? "a carried push yes" : null;
+const environmentMarks = {
+  preApprovedStart: process.env.PRE_APPROVED_RUN_SESSION,
+  boundCard: process.env.PRE_APPROVED_RUN_CARD,
+  coordinated: process.env.FABRAIK_COORDINATED_JOB === "1",
+};
+const environmentMarked = environmentMarks.preApprovedStart !== undefined;
+const inDesktopApp = process.env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop";
 
-function refusePublishing(why) {
-  console.error(`Blocked: ${publishingSession} session ${why}.`);
+/** @returns {never} */
+function refusePublishing(session, why) {
+  console.error(`Blocked: ${session} ${why}.`);
   process.exit(2);
 }
 
+// This session's marks: the environment's where it holds one, else its first message's. Outside the desktop
+// app no session is started with a mark in its first message, so one that cannot be read there is unmarked.
+function sessionMarks(payload) {
+  if (environmentMarked) return environmentMarks;
+  const path = payload?.transcript_path;
+  const marks = typeof path === "string" && path.length > 0 ? fileRunMarks(path) : { unreadable: "the hook payload names no transcript" };
+  return marks.unreadable && !inDesktopApp ? {} : marks;
+}
+
+// The session that may publish, or whose mark cannot be read, as its refusals name it.
+function publishingSession(marks) {
+  if (marks.preApprovedStart !== undefined) return "a pre-approved run session";
+  return marks.unreadable ? "a desktop app session whose run mark cannot be read" : null;
+}
+
 // Only a pre-approved session needs the tracker, so only it loads the board configuration.
-async function preApprovedOptions() {
-  if (preApprovedStart === undefined) return null;
+async function preApprovedOptions(start, boundCard, coordinated, verifyPin) {
+  if (start === undefined) return null;
   try {
-    const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
-    return { start: preApprovedStart, tracker: TRACKER ?? "github" };
+    const { TRACKER } = /** @type {{ TRACKER?: string }} */ (await import("../../scripts/lib/board-config.mjs"));
+    return { start, tracker: TRACKER ?? "github", boundCard, coordinated, verifyJobPin: verifyPin };
   } catch {
-    return refusePublishing("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
+    return refusePublishing("a pre-approved run session", "publishes nothing: the board configuration could not be loaded to name this repository's tracker");
   }
 }
 
@@ -44,13 +72,16 @@ process.stdin.on("end", async () => {
   try {
     payload = JSON.parse(raw);
   } catch {
-    if (publishingSession) refusePublishing("is refused a call whose hook payload is unparseable");
+    const session = publishingSession(sessionMarks(null));
+    if (session) refusePublishing(session, "is refused a call whose hook payload is unparseable");
     console.error("block-unsafe-git: unparseable hook payload; rules NOT applied to this call.");
     process.exit(0);
   }
+  const marks = sessionMarks(payload);
   if (!payload || typeof payload !== "object" || Array.isArray(payload)
       || typeof payload.tool_input?.command !== "string") {
-    if (publishingSession) refusePublishing("is refused a call whose hook payload holds no string command");
+    const session = publishingSession(marks);
+    if (session) refusePublishing(session, "is refused a call whose hook payload holds no string command");
     console.error("block-unsafe-git: no string command in hook payload; rules NOT applied to this call.");
     process.exit(0);
   }
@@ -58,14 +89,15 @@ process.stdin.on("end", async () => {
   const hasCwd = typeof payload.cwd === "string" && payload.cwd.length > 0;
   if (!hasCwd) console.error("block-unsafe-git: no string cwd; cleanup permission unavailable.");
   // The process directory preserves the existing Git-check fallback, never cleanup approval.
-  const { checkout, unresolved } = checkoutContext(hasCwd ? payload.cwd : process.cwd());
+  const sessionCwd = hasCwd ? payload.cwd : process.cwd();
+  const { checkout, unresolved } = checkoutContext(sessionCwd);
   if (unresolved) {
     console.error(`block-unsafe-git: ${unresolved.slice(0, 400)}; the integration-checkout rule is NOT applied to this call.`);
   }
   const reason = blockReason(cmd, checkout, {
-    runSession: process.env.PRODUCT_MANAGER_RUN_SESSION === "1",
-    preApproved: await preApprovedOptions(),
-    carriedYes: carriedPushYes === undefined ? null : { carried: carriedPushYes },
+    preApproved: await preApprovedOptions(marks.preApprovedStart, marks.boundCard, marks.coordinated === true,
+      environmentMarks.coordinated ? ({ drift }) => verifyJobPin({ env: process.env, cwd: sessionCwd, drift }) : undefined),
+    runMarkUnreadable: marks.unreadable ?? "",
   });
   if (reason) {
     console.error(`Blocked: ${reason}. Guards Claude's tool calls only; run it in your own terminal if you truly need it.`);

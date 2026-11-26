@@ -70,7 +70,7 @@ const splitIdentifier = (id) => {
 // digit string's length, then the digit string itself, so a number is never converted and ENG-9
 // sorts before ENG-10. A number sorts before an identifier.
 export function compareCardIds(a, b) {
-  if (a == null || b == null) return (a == null) - (b == null);
+  if (a == null || b == null) return Number(a == null) - Number(b == null);
   if (typeof a === 'number' && typeof b === 'number') return a - b;
   if (typeof a === 'number') return -1;
   if (typeof b === 'number') return 1;

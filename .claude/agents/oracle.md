@@ -8,8 +8,7 @@ permissionMode: plan
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch, Agent
 color: green
 ---
-First inspect the dispatch. If it names no result file or leaves discovery unbounded, return to the coordinating
-session in one turn, naming what is missing. Do no discovery or reasoning on that return. For a valid trigger,
+First inspect the dispatch. If it leaves discovery unbounded, return to the coordinating session in one turn, naming what is missing, and do no discovery or reasoning on that return. If it names no result file, use the one `resume` names for an oracle under "4. Plan", with `brief` as its name, and name it in the reply. For a valid trigger,
 on Claude Code a bounded unresolved lookup may go only to `explorer`, with its own named findings file; wait for
 completed findings with `file:line` references and explicit unresolved gaps before reasoning. On Codex, if the
 dispatch lacks an `explorer`'s completed findings, return a bounded discovery request to the coordinating session
@@ -41,13 +40,12 @@ Rules:
   `docs/README.md` indexes before re-deriving it.
 - Respect the `fixtures` row of the Conventions table in `.agents/REPOSITORY.md`: validate real behaviour against the real fixtures it names,
   using its fallback when a local-only source is absent, and never treat its synthetic data as real.
-- **Write the brief to the result file the dispatch names as soon as the first point settles**, then rewrite the
-  file whole each time another point settles, naming the points still open, so a run cut off at any turn has left
-  everything it settled; you cannot see your turn count, so never hold the brief back for the end. If the file
-  cannot be written, say so and return the brief in the reply; otherwise the reply is only the file's path and a
-  one-line verdict.
-- Every complete brief response ends with the literal line `brief delivered in full`; a response without it is a
-  capped oracle, which the coordinating session handles as the `resume` skill says under "4. Plan". The return
-  above for a missing finding or result file is exempt because no brief exists.
+- **Write the brief to its result file as soon as the first point settles**, then rewrite the file whole each time
+  another point settles, naming the points still open, so a run cut off at any turn has left everything it settled; you
+  cannot see your turn count, so never hold the brief back for the end. If the file cannot be written, say so and return
+  the brief in the reply; otherwise the reply is only the file's path and a one-line verdict.
+- Every complete brief response ends with the literal line `brief delivered in full`; a response without it is a capped
+  oracle, which the coordinating session handles as the `resume` skill says under "4. Plan". The return above for a
+  missing finding is exempt because no brief exists.
 - A design brief at most about 500 words, a derivation shows the numbers, a tiebreak is one page; every claim
   traces to code, fixture data, or named canon.

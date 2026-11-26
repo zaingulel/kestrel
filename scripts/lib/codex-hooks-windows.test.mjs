@@ -10,8 +10,8 @@
 //
 // A failing `git rev-parse` falls back to the working directory, as the POSIX form does.
 //
-// Recurring cost: seven hook runs per PowerShell found, each a PowerShell and Node start, and one
-// `npm run lint` per PowerShell, plus two scratch Git repositories and one scratch directory; nothing
+// Recurring cost: native hook runs start PowerShell and Node; Stop fixtures also run npm lint and
+// real Git, including a receipt-backed pass and changed-evidence refusal. No subprocesses start
 // where no PowerShell is on PATH.
 // Removal condition: remove when Codex fires hooks on native Windows in a live-session test that
 // replaces this registration proof.
@@ -115,7 +115,7 @@ function withStopRepo(fn) {
   // the resolved form.
   const repo = mkdtempSync(join(realpathSync(tmpdir()), 'codex hooks windows-'));
   try {
-    for (const file of ['.codex/hooks/verify-green.mjs', '.codex/hooks/verify-green.sh', 'scripts/lib/posix-shell.mjs']) {
+    for (const file of ['.codex/hooks/verify-green.mjs', '.codex/hooks/verify-green.sh', 'scripts/lib/posix-shell.mjs', 'scripts/lib/run-folder.mjs', 'scripts/run-log.mjs']) {
       mkdirSync(dirname(join(repo, file)), { recursive: true });
       copyFileSync(resolve(ROOT, file), join(repo, file));
     }
@@ -124,11 +124,12 @@ function withStopRepo(fn) {
     writeFileSync(join(repo, 'package.json'), JSON.stringify({ scripts: { lint: 'eslint .' } }));
     const eslint = join(repo, 'node_modules', '.bin', 'eslint');
     mkdirSync(dirname(eslint), { recursive: true });
-    writeFileSync(eslint, '#!/bin/sh\nexit "${FAKE_ESLINT_STATUS:-0}"\n');
+    writeFileSync(eslint, '#!/bin/sh\n[ -z "$LINT_CALLS" ] || printf x >> "$LINT_CALLS"\nexit "${FAKE_ESLINT_STATUS:-0}"\n');
     chmodSync(eslint, 0o755);
     if (process.platform === 'win32') {
-      writeFileSync(`${eslint}.cmd`, '@echo off\r\nexit /b %FAKE_ESLINT_STATUS%\r\n');
+      writeFileSync(`${eslint}.cmd`, '@echo off\r\nif defined LINT_CALLS echo x>>"%LINT_CALLS%"\r\nexit /b %FAKE_ESLINT_STATUS%\r\n');
     }
+    writeFileSync(join(repo, '.gitignore'), '.claude/worklog/\n');
     git(repo, ['init', '-q', '-b', 'main']);
     git(repo, ['add', '-A']);
     git(repo, ['-c', 'user.email=test@test.dev', '-c', 'user.name=Test', 'commit', '-q', '-m', 'base']);
@@ -155,5 +156,27 @@ test('Stop commandWindows exits 0 silently on a recursive Stop', NEEDS_POWERSHEL
       assert.equal(r.status, 0, `${r.ps}: ${r.stderr}`);
       assert.equal(r.stderr, '', r.ps);
     }
+  });
+});
+
+
+test('Stop commandWindows reuses matching lint evidence and refuses changed evidence', NEEDS_POWERSHELL, () => {
+  withStopRepo((repo) => {
+    const receipt = spawnSync(process.execPath, [join(repo, 'scripts/run-log.mjs'), 'native lint evidence', '--', 'npm', 'run', 'lint'], {
+      cwd: repo, encoding: 'utf8', env: { ...process.env, FAKE_ESLINT_STATUS: '0' },
+    });
+    assert.equal(receipt.status, 0, receipt.stderr);
+    const calls = join(repo, '.claude/worklog/lint-calls');
+    for (const r of runEach(STOP, { cwd: repo, input: '{}', env: { FAKE_ESLINT_STATUS: '1', LINT_CALLS: calls } })) {
+      assert.equal(r.status, 0, `${r.ps}: ${r.stderr}`);
+      assert.equal(r.stderr, '', r.ps);
+      assert.equal(existsSync(calls), false, 'matching evidence dispatches zero duplicate lint commands');
+    }
+    writeFileSync(join(repo, 'src/a.txt'), 'changed after evidence');
+    for (const r of runEach(STOP, { cwd: repo, input: '{}', env: { FAKE_ESLINT_STATUS: '1', LINT_CALLS: calls } })) {
+      assert.equal(r.status, 2, `${r.ps}: ${r.stderr}`);
+      assert.match(r.stderr, /npm run lint exited 1/, r.ps);
+    }
+    assert.equal((readFileSync(calls, 'utf8').match(/x/g) ?? []).length, POWERSHELLS.length, 'one fallback dispatch per native launcher');
   });
 });

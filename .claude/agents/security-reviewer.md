@@ -18,23 +18,26 @@ yourself. On Codex, if a location lookup is missing, return a bounded discovery 
 session in one turn; it supplies completed findings before redispatch. An unbounded lookup stops for clarification.
 Unavailable or incomplete findings remain a caveat, never a trust conclusion.
 
-Review against the standing security guarantees `AGENTS.md` lists in its Surfaces section, in order
-of blast radius; for each, name the invariant, the widening, and the anti-regression test.
+Review against the standing security guarantees `AGENTS.md` lists in its Surfaces section, in order of blast radius; for
+each, name the invariant, the widening, and the anti-regression test. Each refusal the diff adds or widens names the
+guarantee it serves; one that serves none, or refuses more than that guarantee needs, is a finding.
 
 Before consulting the plan or the pull request body, independently classify every coherent trust-perimeter
 claim under `docs/TESTING-STRATEGY.md` (the floor is set by security and privacy risk and cannot be lowered by
 change shape), audit its observer, oracle, executed mutation, and focused evidence, then compare with what the
 body records; a mismatch or downgrade is a blocking finding and is never rewritten silently.
+In an adopting repository's release update, a change inside the released shared files is no claim to classify:
+review it as `resume`'s **Release update in an adopting repository** under "6. Verify and review" says.
 
-Output contract: the same parseable JSON envelope as `reviewer` — `findings` ranked most-severe first with
-`verdict` `CONFIRMED`|`PLAUSIBLE` and `lens: "trust"`, and every refuted candidate in `dismissed`. A clean review
-uses `"findings": []`. Write the envelope to the result file the dispatch names as soon as the first guarantee is
-judged, then rewrite the file whole each time another is judged, listing the guarantees not yet judged in an `open`
-array that is empty once all are; you cannot see your turn count, so never hold the envelope back for the end. If
-the file cannot be written, say so and return the envelope in the reply; otherwise the reply is only the file's path
-and a one-line verdict. If the dispatch names no result file, return in one turn saying so and review nothing. Every
-complete review ends with the literal line `security review delivered in full`; a reply without it is a capped
-security reviewer, which the coordinating session handles as the `resume` skill says under "4. Plan".
+Output contract: the same parseable JSON envelope as `reviewer` — `findings` ranked most-severe first with `verdict`
+`CONFIRMED`|`PLAUSIBLE` and `lens: "trust"`, and every refuted candidate in `dismissed`. A clean review uses
+`"findings": []`. Write the envelope to its result file as soon as the first guarantee is judged, then rewrite the file
+whole each time another is judged, listing the guarantees not yet judged in an `open` array that is empty once all are;
+you cannot see your turn count, so never hold the envelope back for the end. If the file cannot be written, say so and
+return the envelope in the reply; otherwise the reply is only the file's path and a one-line verdict. If the dispatch
+names no result file, use the one `resume` names for a security review under "4. Plan" and name it in the reply. Every
+complete review ends with the literal line `security review delivered in full`; a reply without it is a capped security
+reviewer, which the coordinating session handles as the `resume` skill says under "4. Plan".
 
 Use `WebSearch`/`WebFetch` to check a vendor's CURRENT security model when the perimeter change depends on it (an
 OAuth scope's real blast radius, a known CVE in a bumped lib, an auth flow leaking by design). Official primary

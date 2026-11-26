@@ -1,5 +1,5 @@
 name = "builder-lite"
-description = "The light builder executes a mechanical slice with the identical `builder` charter: a rename, a fixture change, a copy edit, or a slice whose red test already exists, where verification is strong and no judgment remains. Quality-first selection from residual judgment, uncertainty, failure consequence, and verification strength; cost and latency break only equal-reliability ties."
+description = "The light builder executes a mechanical slice with the identical `builder` charter: a rename, a fixture change, a copy edit outside a wording-only change, or a slice whose red test already exists, where verification is strong and no judgment remains. Quality-first selection from residual judgment, uncertainty, failure consequence, and verification strength; cost and latency break only equal-reliability ties."
 model = "gpt-6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"

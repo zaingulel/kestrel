@@ -20,7 +20,7 @@ function checkedStatus(status) {
 }
 
 export function readJiraProject(exec = jiraExec) {
-  const config = validateJiraConfig(boardConfig.JIRA_CONFIG, 'Jira board-config.mjs JIRA_CONFIG');
+  const config = validateJiraConfig(/** @type {typeof boardConfig & { JIRA_CONFIG?: unknown }} */ (boardConfig).JIRA_CONFIG, 'Jira board-config.mjs JIRA_CONFIG');
   if (boardConfig.BOARD_PROJECT_NUMBER !== null || boardConfig.ROUTING_FIELD !== null ||
       !Array.isArray(boardConfig.ROUTING_OPTIONS) || boardConfig.ROUTING_OPTIONS.length !== 0 || boardConfig.PARKED_LANE !== null) {
     throw problem('board-config.mjs must have no GitHub project number, routing field/options or parked lane');
@@ -199,7 +199,7 @@ function closingPulls(keys, ghExec) {
   const name = `${boardConfig.BOARD_OWNER}/${boardConfig.BOARD_REPOSITORY}`;
   let pages;
   try { pages = JSON.parse(ghExec(['api', `repos/${name}/pulls?state=all&per_page=100`, '--paginate', '--slurp'])); }
-  catch (error) { throw new Error(`GitHub pull-request pages are unavailable: ${error.message}`); }
+  catch (error) { throw new Error(`GitHub pull-request pages are unavailable: ${/** @type {Error} */ (error).message}`); }
   if (!Array.isArray(pages) || pages.length === 0 || !pages.every(Array.isArray)) throw new Error('GitHub pull-request pages are malformed or incomplete');
   const matches = new Map(keys.map((key) => [key, []]));
   const seen = new Set();
@@ -285,7 +285,8 @@ export function adfText(document) {
 }
 
 // The detail fields for the description's What to build section: `whatToBuild`, the text under the top-level
-// What to build heading up to the next heading of its level or higher (null when blank). Without such a heading,
+// What to build heading up to the next heading of its level or higher (null when blank), its top-level nodes
+// separated by a blank line as Markdown paragraphs are. Without such a heading,
 // no field when every top-level node is a paragraph or the description is null (the intake then reads a literal
 // Markdown section from the body text, as jira-card.mjs writes it), else `whatToBuildUnread`, because other
 // native nodes hold Markdown-looking text that is no section. adfText drops heading markers, so the section is
@@ -303,7 +304,7 @@ function whatToBuildOf(description) {
   const level = levelOf(nodes[start]);
   const after = nodes.slice(start + 1);
   const end = after.findIndex((node) => node.type === 'heading' && levelOf(node) <= level);
-  const text = textOf(end < 0 ? after : after.slice(0, end));
+  const text = (end < 0 ? after : after.slice(0, end)).map((node) => textOf([node])).join('\n\n');
   return { whatToBuild: text.trim() === '' ? null : text };
 }
 
@@ -342,7 +343,7 @@ export function readJiraComments(key, exec = jiraExec) {
 export function jiraCardDetails(exec, ids) {
   let project;
   try { project = readJiraProject(exec); }
-  catch (error) { return new Map(ids.map((number) => [number, { number, unavailable: error.message }])); }
+  catch (error) { return new Map(ids.map((number) => [number, { number, unavailable: /** @type {Error} */ (error).message }])); }
   let rateLimit;
   return new Map(ids.map((number) => {
     if (rateLimit) return [number, { number, unavailable: rateLimit.message }];
@@ -351,10 +352,10 @@ export function jiraCardDetails(exec, ids) {
       const parent = parentOf(issue, project, exec);
       const body = adfText(issue.fields.description);
       const comments = commentsOf(issue, project, exec);
-      return [number, { number, body, ...whatToBuildOf(issue.fields.description), parent, comments: comments.map((comment) => comment.body), commentCount: comments.length, commentsUnavailable: null }];
+      return [number, { number, body, ...whatToBuildOf(issue.fields.description), parent, comments: comments.map((comment) => comment.body), commentSources: comments.map((comment) => ({ login: comment.accountId, url: comment.url })), commentCount: comments.length, commentsUnavailable: null }];
     } catch (error) {
-      if (error.rateLimited) rateLimit = error;
-      return [number, { number, unavailable: error.message }];
+      if (/** @type {{ rateLimited?: boolean }} */ (error).rateLimited) rateLimit = /** @type {Error} */ (error);
+      return [number, { number, unavailable: /** @type {Error} */ (error).message }];
     }
   }));
 }
@@ -401,7 +402,7 @@ export function moveJiraCards(pairs, exec = jiraExec) {
       if (issueAt(issueNumber, project, exec).fields.status.id !== target) throw problem(`status read-back did not confirm ${issueNumber} in ${column}`);
       completed.push({ issueNumber, statusName: column, skipped: false });
     } catch (error) {
-      throw new Error(`Jira failed to move ${issueNumber} to ${statusName}; completed ${completed.map((pair) => `${pair.issueNumber} ${pair.statusName}`).join(', ') || 'none'}; ${error.message}; inspect current status before retrying`);
+      throw new Error(`Jira failed to move ${issueNumber} to ${statusName}; completed ${completed.map((pair) => `${pair.issueNumber} ${pair.statusName}`).join(', ') || 'none'}; ${/** @type {Error} */ (error).message}; inspect current status before retrying`);
     }
   }
   return completed;

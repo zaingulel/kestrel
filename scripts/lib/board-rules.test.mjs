@@ -18,6 +18,7 @@ after(() => toolkit.cleanup());
 
 const {
   BOARD_OWNER,
+  BOARD_REPOSITORY,
   KIND_LABELS,
   PICKABLE_STATUSES,
   ROUTING_FIELD,
@@ -34,6 +35,7 @@ const {
   intakeOutcome,
   isEpic,
   isInFlight,
+  QUIET_LIMIT_MS,
   scanBoard,
   scanOutcome,
   stalledClaimDrift,
@@ -56,12 +58,12 @@ function issueNode({
   status,
   title = `card ${number}`,
   routing = 'Product',
-  labels = [],
+  labels = /** @type {string[]} */ ([]),
   state = 'OPEN',
   subIssues = { total: 0, completed: 0 },
   assignees = [BOARD_OWNER],
-  blockers = [],
-  closingPullRequests = [],
+  blockers = /** @type {{ number: number, state: string }[]} */ ([]),
+  closingPullRequests = /** @type {{ number: number }[]} */ ([]),
 }) {
   return leanNode({
     id: `PVTI_${number}`,
@@ -122,7 +124,7 @@ test('rule 2 — an open issue whose card sits in Done is fatal drift; a closed 
   assert.equal(closeoutExit(drifted), 1);
 });
 
-test('rule 3 — an open native blocker on non-Backlog work is an advisory; a closed blocker and a blocked card already in Backlog are not', () => {
+test('rule 3 — an open native blocker on work past Ready is an advisory; a closed blocker and a blocked card in Backlog or Ready are not', () => {
   const { drifted } = scan([
     {
       number: 1,
@@ -130,15 +132,17 @@ test('rule 3 — an open native blocker on non-Backlog work is an advisory; a cl
       blockers: [{ number: 5, state: 'OPEN' }, { number: 6, state: 'OPEN' }],
       closingPullRequests: [{ number: 9 }],
     },
-    // twin: the blocker has closed, so it blocks nothing.
+    // twin: the blocker closed as completed, so it blocks nothing.
     {
       number: 2,
       status: 'In progress',
-      blockers: [{ number: 7, state: 'CLOSED' }],
+      blockers: [{ number: 7, state: 'CLOSED', stateReason: 'COMPLETED' }],
       closingPullRequests: [{ number: 10 }],
     },
     // twin: already where a blocked card belongs.
     { number: 3, status: 'Backlog', blockers: [{ number: 8, state: 'OPEN' }] },
+    // twin: Ready is where a blocked card waits for its turn; its blocker #1 is in progress.
+    { number: 4, status: 'Ready', blockers: [{ number: 1, state: 'OPEN' }] },
   ]);
   assert.deepEqual(rowsFor(drifted, 1), [{
     number: 1,
@@ -149,7 +153,76 @@ test('rule 3 — an open native blocker on non-Backlog work is an advisory; a cl
   }]);
   assert.deepEqual(rowsFor(drifted, 2), []);
   assert.deepEqual(rowsFor(drifted, 3), []);
+  assert.deepEqual(rowsFor(drifted, 4), []);
   assert.equal(closeoutExit(drifted), 0);
+});
+
+test('rule 3b — a Ready card whose open blocker is in neither Ready nor an in-progress column is an advisory naming that blocker; one whose blockers are in Ready or in progress is not', () => {
+  const { drifted } = scan([
+    {
+      number: 10,
+      status: 'Ready',
+      blockers: [11, 12, 13, 14, 16].map((number) => ({ number, state: 'OPEN' })),
+    },
+    { number: 11, status: 'Backlog' },
+    { number: 12, status: 'In progress', closingPullRequests: [{ number: 90 }] },
+    { number: 13, status: 'Ready' },
+    // #14 is deliberately absent from the board: an off-board blocker is stranded too.
+    { number: 16, status: 'Awaiting push' },
+    // twin: every blocker is in Ready or in progress, so nothing strands this card.
+    {
+      number: 20,
+      status: 'Ready',
+      blockers: [{ number: 12, state: 'OPEN' }, { number: 13, state: 'OPEN' }],
+    },
+  ]);
+  assert.deepEqual(rowsFor(drifted, 10), [{
+    number: 10,
+    status: 'Ready',
+    title: 'card 10',
+    reason: 'in "Ready" waiting on open #11, #14, in neither Ready nor an in-progress column, so it would wait forever — move #11, #14 to Ready or this card to Backlog',
+    advisory: true,
+  }]);
+  assert.deepEqual(rowsFor(drifted, 20), []);
+});
+
+test('rule 3b — an open blocker from another repository is named with its repository and never matched to the board card of the same number', () => {
+  const other = `${BOARD_OWNER}/other-repo`;
+  const foreign = (number) => ({ number, state: 'OPEN', repository: { nameWithOwner: other } });
+  const { drifted } = scan([
+    { number: 30, status: 'Ready', blockers: [foreign(11)] },
+    // the board's own #11 is in Ready, yet card 30 does not wait on it.
+    { number: 11, status: 'Ready' },
+    { number: 31, status: 'Ready', blockers: [foreign(12), { number: 14, state: 'OPEN' }] },
+    // the board's own #12 sits in Backlog but blocks nothing; #14 is deliberately absent from the board.
+    { number: 12, status: 'Backlog' },
+    // twin: a blocker named with the board repository is the board's own #11, which is in Ready.
+    { number: 32, status: 'Ready', blockers: [{ number: 11, state: 'OPEN', repository: { nameWithOwner: `${BOARD_OWNER}/${BOARD_REPOSITORY}` } }] },
+  ]);
+  assert.deepEqual(rowsFor(drifted, 30), [{
+    number: 30,
+    status: 'Ready',
+    title: 'card 30',
+    reason: `in "Ready" waiting on open ${other}#11, in neither Ready nor an in-progress column, so it would wait forever — move this card to Backlog`,
+    advisory: true,
+  }]);
+  assert.deepEqual(rowsFor(drifted, 31), [{
+    number: 31,
+    status: 'Ready',
+    title: 'card 31',
+    reason: `in "Ready" waiting on open #14, ${other}#12, in neither Ready nor an in-progress column, so it would wait forever — move #14 to Ready or this card to Backlog`,
+    advisory: true,
+  }]);
+  assert.deepEqual(rowsFor(drifted, 32), []);
+});
+
+test('rule 3b — the advisory is withheld while any board item is unreadable, since its blocker may be that item', () => {
+  const result = scanBoard(parsedLeanItems([
+    issueNode({ number: 40, status: 'Ready', blockers: [{ number: 41, state: 'OPEN' }] }),
+    leanNode({ id: 'PVTI_unresolved_blocker', content: null, status: 'Ready', routing: 'Product' }),
+  ]));
+  assert.deepEqual(result.unreadable.map((card) => card.id), ['PVTI_unresolved_blocker']);
+  assert.deepEqual(rowsFor(result.drifted, 40), []);
 });
 
 test('rule 4 — active work with no assignee is an advisory; an assigned card and a card still in Ready are not', () => {
@@ -240,6 +313,65 @@ test('rule 5 — a claim with no closing pull request at all is an advisory; an 
   assert.deepEqual(rowsFor(drifted, 3), []);
   assert.deepEqual(rowsFor(drifted, 4), []);
   assert.equal(closeoutExit(drifted), 0);
+});
+
+// Rule 5 classifies a claim from the observation the edge gathered, keyed by card number. The fixture is an
+// In progress card with no closing pull request; its twin (card 2) has no observation and keeps the plain reason.
+const ACTIVE_AT = new Date('2026-05-01T10:30:00Z');
+const SINCE = '2026-05-01T10:30Z';
+const stalledReason = (suffix) =>
+  `claimed in "In progress" with no closing pull request — ${suffix} — if no session is building it, resume it or return it to Ready`;
+const observedReasons = (observation) => {
+  const { drifted } = scanBoard(
+    parsedLeanItems([issueNode({ number: 1, status: 'In progress' }), issueNode({ number: 2, status: 'In progress' })]),
+    new Map([[1, observation]]),
+  );
+  return { observed: rowsFor(drifted, 1).map((d) => d.reason), twin: rowsFor(drifted, 2).map((d) => d.reason) };
+};
+const checkable = (liveness, quietMs) => ({ checkable: true, liveness, activeAt: ACTIVE_AT, quietMs, lastStep: 'S1, pass, completed 2026-05-01T10:30Z' });
+
+test('new behaviour: rule 5 — a claim with no running terminal and nothing recorded past the limit is stalled, and its twin is untouched', () => {
+  const { observed, twin } = observedReasons(checkable({ running: null }, 2 * 60 * 60 * 1000 + 1));
+  assert.deepEqual(observed, [stalledReason(`stalled: no running Herdr job terminal here and nothing recorded since ${SINCE}; last step: S1, pass, completed 2026-05-01T10:30Z`)]);
+  assert.deepEqual(twin, ['claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready']);
+});
+
+test('new behaviour: rule 5 — a claim whose Herdr job terminal is running is live, never stalled', () => {
+  const { observed } = observedReasons(checkable({ running: 'term-7' }, QUIET_LIMIT_MS * 10));
+  assert.deepEqual(observed, [stalledReason('live: Herdr terminal term-7 is running its job')]);
+  assert.ok(!observed[0].includes('stalled'));
+});
+
+test('new behaviour: rule 5 — a running Herdr job terminal with recent activity is live, never idle', () => {
+  const { observed } = observedReasons(checkable({ running: 'term-7' }, QUIET_LIMIT_MS - 1));
+  assert.deepEqual(observed, [stalledReason('live: Herdr terminal term-7 is running its job')]);
+});
+
+test('new behaviour: rule 5 — quiet exactly at the limit with no running terminal is idle, not stalled', () => {
+  const { observed } = observedReasons(checkable({ running: null }, 2 * 60 * 60 * 1000));
+  assert.deepEqual(observed, [stalledReason(`idle since ${SINCE}; no running Herdr job terminal here`)]);
+});
+
+test('new behaviour: rule 5 — quiet under the limit with no live-process check is idle and names why it could not check', () => {
+  const { observed } = observedReasons(checkable({ unavailable: 'hc is not available' }, QUIET_LIMIT_MS - 1));
+  assert.deepEqual(observed, [stalledReason(`idle since ${SINCE}; no live-process check here: hc is not available`)]);
+});
+
+test('new behaviour: rule 5 — a claim this machine cannot check is unknown, never live or stalled', () => {
+  const foreign = observedReasons({ checkable: false, cause: 'claimed on other-box, Claude Code; this machine cannot check it' }).observed;
+  const cloud = observedReasons({ checkable: false, cause: 'claimed on cloud-box, Claude Code cloud; this machine cannot check it' }).observed;
+  assert.deepEqual(foreign, [stalledReason('unknown: claimed on other-box, Claude Code; this machine cannot check it')]);
+  assert.deepEqual(cloud, [stalledReason('unknown: claimed on cloud-box, Claude Code cloud; this machine cannot check it')]);
+});
+
+test('new behaviour: rule 5 — old activity with no live-process check is unknown, with the last step', () => {
+  const { observed } = observedReasons(checkable({ unavailable: 'hc is not available' }, 2 * 60 * 60 * 1000 + 1));
+  assert.deepEqual(observed, [stalledReason(`unknown: nothing recorded since ${SINCE} and no live-process check here: hc is not available; last step: S1, pass, completed 2026-05-01T10:30Z`)]);
+});
+
+test('new behaviour: rule 5 — a claim with no observation keeps the plain reason byte for byte', () => {
+  const { drifted } = scanBoard(parsedLeanItems([issueNode({ number: 1, status: 'In progress' })]), new Map());
+  assert.deepEqual(rowsFor(drifted, 1).map((d) => d.reason), ['claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready']);
 });
 
 // This repository's own config parks no lane, so no card this file's board read produces is
@@ -697,6 +829,29 @@ test('ANTI-REGRESSION: intakeCards keeps every numbered pickable card and every 
   assert.equal(numberless, 1);
 });
 
+// The board's own order is the order the listing came in: fetchBoard stamps each listed card with its place,
+// and the intake puts the Ready column in that order, a Ready card with no place after those placed, by number.
+// Backlog has no board order the pick uses, so it stays by number whatever place its cards hold.
+test('intakeCards orders Ready by board place, then the unplaced Ready cards by number, and Backlog by number', () => {
+  const [backlog, ready] = PICKABLE_STATUSES;
+  const placed = new Map([[30, 0], [10, 1], [20, 2], [5, 3]]);
+  const items = parsedLeanItems(
+    [
+      { number: 30, status: ready },
+      { number: 10, status: ready },
+      { number: 20, status: backlog },
+      { number: 5, status: backlog },
+      { number: 12, status: ready },
+      { number: 11, status: ready },
+    ].map(issueNode),
+  ).map((item) => (placed.has(item.content.number) ? { ...item, boardPosition: placed.get(item.content.number) } : item));
+
+  const { candidates, unplaced } = intakeCards(items);
+
+  assert.deepEqual(candidates.map((c) => c.number), [30, 10, 11, 12, 5, 20]);
+  assert.deepEqual(unplaced, [11, 12]);
+});
+
 // A Linear card's number is its identifier string. The board read of the GitHub fixtures cannot carry one,
 // so these are raw items as the Linear reader will hand them over. Every expected line is written by hand
 // from the identifier forms and the team-then-number order.
@@ -731,10 +886,11 @@ test('a Linear card prints by its identifier in rows, drift lines, blockers and 
   assert.equal(numberless, 0);
 
   const read = { body: 'b', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  /** @type {Map<string, Record<string, unknown>>} */
   const details = new Map([...candidates, ...claims].map(({ number }) => [number, { ...read, number, ...(number === 'ENG-9' ? { parent: 'ENG-1' } : {}) }]));
   const files = new Map(intakeCardFiles({ candidates, claims, details }).map((file) => [file.number, file]));
   assert.deepEqual([...files.values()].map(({ name }) => name), ['ENG-9.txt', 'ENG-10.txt', 'FAB-1.txt', 'ENG-2.txt', 'ENG-4.txt', 'ENG-30.txt']);
-  const document = intakeSummary({ listing: 'listing', candidates, claims, numberless, details, directory: 'out', files });
+  const document = intakeSummary({ listing: 'listing', candidates, claims, numberless, details, directory: 'out', files, readyOrder: null });
   assert.deepEqual(document.filter((line) => line.startsWith('===')), [
     '=== ENG-9 [Ready] t ENG-9 ===', '=== ENG-10 [Ready] t ENG-10 ===', '=== FAB-1 [Ready] t FAB-1 ===',
     '=== ENG-2 [Backlog] t ENG-2 ===', '=== ENG-4 [In progress] t ENG-4 ===', '=== ENG-30 [In progress] t ENG-30 ===',

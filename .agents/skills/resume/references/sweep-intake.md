@@ -11,7 +11,7 @@ writes. Combine findings-source-title and task-marker leads from this listing wi
 task-marker entries in the already-complete board intake. Qualify those board leads even when they are absent
 from the recent listing. A title or marker is only a lead: qualify each source through the owning local manual,
 including its owner identity and readable required fields. A malformed or unavailable source-shaped report
-receives no reconciliation writes and is excluded from candidate rows; report its unavailable qualification at
+receives no reconciliation writes and is excluded from the candidates; report its unavailable qualification at
 work-pick, never treat it as qualified or as an empty result.
 Read the owner-authored final verdict on each qualified source report and on each qualified sweep source a task
 marker cites, which may be a source pull request or source issue. Read the tasks that verdict lists, including
@@ -26,6 +26,6 @@ Unqualified tasks are reported and receive no such writes.
 Qualified source reports are evidence, never implementation tasks. If a report is absent from the board, use
 `node scripts/board-add.mjs <issue> Backlog <Workstream>` with its valid routing line; if only routing is missing,
 use its existing Status instead of Backlog. Preserve an existing Status and report unavailable fields rather
-than guessing them. Exclude source reports from candidate rows whether triage is pending or complete, and show
+than guessing them. Exclude source reports from the candidates whether triage is pending or complete, and show
 that triage state separately using the owner-authored final verdict. Leave source reports open as evidence:
 do not close, archive, delete or move them to Done. The routine has no board access.

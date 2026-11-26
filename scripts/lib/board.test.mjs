@@ -13,11 +13,15 @@ import { installFakeGh } from './fake-gh.mjs';
 import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './board-toolkit-copy.mjs';
 
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
+
+// The fixtures load untyped; only the builders the recovery fixture is made of carry their module's types.
+/** @typedef {'hydratedItem' | 'issuesPage' | 'membership' | 'membershipsPage' | 'walkedIssue'} RecoveryBuilder */
+/** @typedef {Pick<typeof import('./board-fixtures.mjs'), RecoveryBuilder> & { [Name in Exclude<keyof typeof import('./board-fixtures.mjs'), RecoveryBuilder>]: any }} RecoveryFixtures */
 
 const {
   boardReadExec,
@@ -28,12 +32,13 @@ const {
   leanNode,
   membership,
   membershipsPage,
+  onePageAtATime,
   READD_WARNING,
   walkedIssue,
-} = await toolkit.load('lib/board-fixtures.mjs');
+} = /** @type {RecoveryFixtures} */ (await toolkit.load('lib/board-fixtures.mjs'));
 const { closedNotDoneDrift } = await toolkit.load('lib/board-rules.mjs');
 // The copy's own gh-exec: the board reader tells an oversized read apart by the error class its own copy exports.
-const { ghExec } = await toolkit.load('lib/gh-exec.mjs');
+const { GhUnavailableError, ghExec } = await toolkit.load('lib/gh-exec.mjs');
 const {
   BOARD_OWNER,
   BOARD_OWNER_TYPE,
@@ -45,8 +50,6 @@ const {
   STATUS_OPTIONS,
 } = await toolkit.load('lib/board-config.mjs');
 const board = await toolkit.load('lib/board.mjs');
-// The command itself, for the approval-mode test at the end of the file.
-const { main: boardMain } = await toolkit.load('board.mjs');
 const {
   BOARD_HELP,
   DETAIL_BATCH_SIZE,
@@ -68,6 +71,7 @@ const {
   formatList,
   groupByRouting,
   formatGrouped,
+  markerOf,
 } = board;
 
 // A representative board spanning pickable + non-pickable columns.
@@ -113,7 +117,10 @@ test('parseBoardArgs: fails loud on an unrecognised argument or a valueless --st
   for (const bad of ['--closout', '-closeout', '--closeout=true', '--status=', '--all=yes', 'Ready']) {
     assert.throws(
       () => parseBoardArgs([bad]),
-      (err) => err.message.includes(bad) && err.message.includes('usage: node scripts/board.mjs'),
+      (err) => {
+        const { message } = /** @type {Error} */ (err);
+        return message.includes(bad) && message.includes('usage: node scripts/board.mjs');
+      },
       bad,
     );
   }
@@ -159,7 +166,6 @@ test('parseBoardArgs: --help takes no other argument', () => {
     assert.throws(() => parseBoardArgs(['--help', other]), /--help takes no other argument/, other);
     assert.throws(() => parseBoardArgs([other, '--help']), /--help takes no other argument/, other);
   }
-  assert.throws(() => parseBoardArgs(['--approval', 'check', '1', '--help']), /--help takes no other argument/);
 });
 
 // The help is the one place an agent learns the modes, so it must name exactly the flags the
@@ -176,7 +182,8 @@ test('BOARD_HELP names exactly the flags the parser accepts, and each one parses
   assert.deepEqual([...helped].sort(), accepted);
   const validForm = {
     '--status=': ['--status=Ready'],
-    '--approval': ['--approval', 'check', '1'],
+    '--waits': ['--waits', '1'],
+    '--herdr': ['--waits', '1', '--herdr'],
     '--intake': ['--intake', 'folder'],
   };
   for (const flag of accepted) {
@@ -208,9 +215,12 @@ test('flagLiterals: reads a flag from `--name=` or `--name$` in a regular expres
 test('parseBoardArgs: rejects a --status= value that is not a board column, and accepts every one that is', () => {
   assert.throws(
     () => parseBoardArgs(['--status=Rady']),
-    (err) => err.message.includes('--status=Rady is not a board column')
-      && STATUS_OPTIONS.every((column) => err.message.includes(column))
-      && err.message.includes('usage: node scripts/board.mjs'),
+    (err) => {
+      const { message } = /** @type {Error} */ (err);
+      return message.includes('--status=Rady is not a board column')
+        && STATUS_OPTIONS.every((column) => message.includes(column))
+        && message.includes('usage: node scripts/board.mjs');
+    },
   );
   // Case is part of the name: the board has no lower-case column.
   assert.throws(() => parseBoardArgs([`--status=${STATUS_OPTIONS[1].toLowerCase()}`]), /is not a board column/);
@@ -295,7 +305,7 @@ const BOARD_PAGE = leanBoardPage(
 test('boardQuery declares the $endCursor variable gh --paginate walks on, and carries exactly one pageInfo', () => {
   const q = boardQuery();
   assert.match(q, /^query\(\$endCursor: String\) \{/);
-  assert.match(q, /items\(first:100, after:\$endCursor\)/);
+  assert.match(q, /items\(first:100, after:\$endCursor, orderBy:\{field:POSITION, direction:ASC\}\)/);
   assert.equal(q.split('pageInfo').length - 1, 1);
   assert.match(q, /pageInfo \{ hasNextPage endCursor \}/);
 });
@@ -307,9 +317,9 @@ test('boardQuery asks for every field the fused read carries, each capped sub-li
   assert.match(q, /\.\.\. on Issue \{ number title state repository \{ nameWithOwner \} subIssuesSummary \{ total completed \}/);
   assert.match(q, /labels\(first:20\) \{ totalCount nodes \{ name \} \}/);
   assert.match(q, /assignees\(first:20\) \{ totalCount nodes \{ login \} \}/);
-  assert.match(q, /blockedBy\(first:20\) \{ totalCount nodes \{ number state \} \}/);
+  assert.match(q, /blockedBy\(first:20\) \{ totalCount nodes \{ number state stateReason repository \{ nameWithOwner \} \} \}/);
   assert.match(q, /closedByPullRequestsReferences\(first:20\) \{ totalCount nodes \{ number \} \}/);
-  assert.match(q, /items\(first:100, after:\$endCursor\) \{ totalCount/);
+  assert.match(q, /items\(first:100, after:\$endCursor, orderBy:\{field:POSITION, direction:ASC\}\) \{ totalCount/);
   assert.match(q, /fieldValues\(first:20\) \{ totalCount/);
 });
 
@@ -342,12 +352,14 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
       title: 'Move refresh() and upsertChart into their own source pieces',
       routing: 'Product', labels: [], assignees: [], blockers: [], closingPullRequests: [],
       content: { __typename: 'Issue', number: 319, state: 'OPEN', subIssuesSummary: { total: 0, completed: 0 } },
+      boardPosition: 0,
     },
     {
       id: 'PVTI_lAHOA50uGs4BcfoOzgx0mxg', status: 'Backlog',
       title: 'Trial Blacksmith CI runners (free 3k min/mo) — maybe for a future project',
       routing: 'Platform', labels: [], assignees: [], blockers: [], closingPullRequests: [],
       content: { __typename: 'DraftIssue' },
+      boardPosition: 1,
     },
   ]);
   assert.equal(calls.filter((args) => boardRequestKind(args) === 'board').length, 1);
@@ -384,7 +396,29 @@ test('fetchBoard walks the slurped pages of one gh call in order and fails loud 
   );
 });
 
+// The intake puts the Ready column in the board's own order, so the read asks GitHub for the project's
+// position order and keeps each listed card's place in it, counted across pages. A listing in any other
+// order than the cards' numbers shows the place is the listing's, not the number's.
+test("fetchBoard asks for the board's own order and keeps each listed card's place in it", () => {
+  const card = (id, number, status) => leanNode({
+    id, content: { __typename: 'Issue', number, title: `card ${number}` }, status, routing: 'Product',
+  });
+  const { exec, calls } = boardReadExec({
+    board: [leanBoardPage([
+      card('PVTI_thirty', 30, 'Ready'),
+      card('PVTI_ten', 10, 'Ready'),
+      card('PVTI_twenty', 20, 'Backlog'),
+    ])],
+  });
+
+  const items = fetchBoard(exec);
+
+  assert.match(calls[0].find((arg) => arg.startsWith('query=')), /items\(first:100, after:\$endCursor, orderBy:\{field:POSITION, direction:ASC\}\)/);
+  assert.deepEqual(items.map((i) => [i.content.number, i.boardPosition]), [[30, 0], [10, 1], [20, 2]]);
+});
+
 test('fetchBoard rejects a short read and accepts an exact one', () => {
+  /** @param {{ totalCount: number, nodes?: object[], hasNextPage?: boolean, endCursor?: string | null }} fields */
   const page = ({ totalCount, nodes = [REAL_ISSUE_NODE], hasNextPage = false, endCursor = null }) =>
     leanBoardPage(nodes, { totalCount, pageInfo: { hasNextPage, endCursor } });
   const fetchPages = (...pages) => fetchBoard(boardReadExec({ board: pages }).exec);
@@ -434,13 +468,21 @@ test('fetchBoard throws when the project identity or the field schema changes ac
 // by hand from the fixtures: an unarchived membership on this board is a card exactly once, and
 // nothing else is.
 
+// The issue numbers of the recovery fixture: one listed, one omitted, one omitted past the first page of 100
+// memberships, and one number the fixture does not use (past all three).
+const LISTED_ISSUE = 10;
+const OMITTED_ISSUE = 11;
+const OVERFLOW_ISSUE = 12;
+const UNUSED_ISSUE = Math.max(LISTED_ISSUE, OMITTED_ISSUE, OVERFLOW_ISSUE) + 1;
+
 const RECOVERY_LISTED = leanNode({
   id: 'PVTI_listed',
-  content: { __typename: 'Issue', number: 10, title: 'Listed card' },
+  content: { __typename: 'Issue', number: LISTED_ISSUE, title: 'Listed card' },
   status: 'Ready',
   routing: 'Product',
 });
 
+/** @type {(id: string, number: number, state: string, status: string) => import('./board-fixtures.mjs').IssueCard} */
 const omittedCard = (id, number, state, status) => ({
   id,
   content: { __typename: 'Issue', number, title: `Omitted card ${number}`, state },
@@ -458,7 +500,9 @@ const escapeForPattern = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const namesId = (text, id) => new RegExp(`${escapeForPattern(id)}(?![\\w-])`).test(text);
 const namesNumber = (text, number) => new RegExp(`#${number}(?!\\d)`).test(text);
 
-test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', () => {
+// The recovery fixture: one listing page, two issue-walk pages behind `issues-1` and two membership pages of
+// issue 15 behind `members-1`.
+function recoveryReads() {
   const draft = leanNode({ id: 'PVTI_listed_draft', content: { __typename: 'DraftIssue' }, title: 'draft note', status: 'Backlog', routing: 'Product' });
   const unresolved = leanNode({ id: 'PVTI_listed_unresolved', content: null, status: 'Backlog', routing: 'Product' });
   const recovered = [
@@ -467,12 +511,11 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
     omittedCard('PVTI_closed_backlog', 13, 'CLOSED', 'Backlog'),
     omittedCard('PVTI_overflow', 15, 'OPEN', 'Ready'),
   ];
-  const advisories = [];
-  const { exec, calls } = boardReadExec({
+  const reads = {
     board: [leanBoardPage([RECOVERY_LISTED, draft, unresolved])],
     issues: [
       issuesPage([
-        walkedIssue(10, [membership('PVTI_listed')]),
+        walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')]),
         walkedIssue(11, [membership('PVTI_open_backlog')]),
         walkedIssue(12, [
           membership('PVTI_closed_done'),
@@ -500,7 +543,14 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
       hydratedItem(omittedCard('PVTI_other_project', 12, 'CLOSED', 'Done'), { project: BOARD_PROJECT_NUMBER + 1 }),
       hydratedItem(omittedCard('PVTI_other_owner', 12, 'CLOSED', 'Done'), { owner: 'someone-else' }),
     ],
-  });
+  };
+  return { draft, unresolved, recovered, reads };
+}
+
+test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', () => {
+  const { draft, recovered, reads } = recoveryReads();
+  const advisories = [];
+  const { exec, calls } = boardReadExec(reads);
 
   const items = fetchBoard(exec, { onOmission: (advisory) => advisories.push(advisory) });
 
@@ -509,7 +559,7 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   assert.deepEqual(sortedById(items).map((i) => [i.id, i.content.number ?? null, i.status, i.content.state ?? null]), [
     ['PVTI_closed_backlog', 13, 'Backlog', 'CLOSED'],
     ['PVTI_closed_done', 12, 'Done', 'CLOSED'],
-    ['PVTI_listed', 10, 'Ready', 'OPEN'],
+    ['PVTI_listed', LISTED_ISSUE, 'Ready', 'OPEN'],
     ['PVTI_listed_draft', null, 'Backlog', null],
     ['PVTI_listed_unresolved', null, 'Backlog', null],
     ['PVTI_open_backlog', 11, 'Backlog', 'OPEN'],
@@ -524,6 +574,10 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   });
   assert.equal(closedNotDoneDrift(normalizeItem(closedInBacklog)).reason, 'issue closed but card still in "Backlog" (not Done)');
   assert.equal(closedNotDoneDrift(normalizeItem(items.find((i) => i.id === 'PVTI_closed_done'))), null);
+  // Only a listed card has a place in the board's order; a card recovered from its issue has none.
+  for (const card of recovered) {
+    assert.equal('boardPosition' in items.find((i) => i.id === card.id), false, card.id);
+  }
 
   assert.equal(advisories.length, 1, advisories.join('\n'));
   const [advisory] = advisories;
@@ -535,15 +589,15 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   for (const id of ['PVTI_listed', 'PVTI_listed_draft', 'PVTI_listed_unresolved', 'PVTI_archived', 'PVTI_other_project', 'PVTI_other_owner']) {
     assert.equal(namesId(advisory, id), false, `${id}: ${advisory}`);
   }
-  for (const number of [10, 14]) assert.equal(namesNumber(advisory, number), false, advisory);
+  for (const number of [LISTED_ISSUE, 14]) assert.equal(namesNumber(advisory, number), false, advisory);
   assert.match(advisory, READD_WARNING);
 
-  // The walk asks for open AND closed issues and their archived memberships, in one paginated process.
+  // The open walk asks for open issues and their archived memberships, in one paginated process.
   const issueWalks = calls.filter((args) => boardRequestKind(args) === 'issues');
   assert.equal(issueWalks.length, 1);
   assert.ok(issueWalks[0].includes('--paginate') && issueWalks[0].includes('--slurp'), issueWalks[0].join(' '));
   const issueQuery = issueWalks[0].find((arg) => arg.startsWith('query='));
-  assert.match(issueQuery, /states:\s*\[\s*OPEN\s*,\s*CLOSED\s*\]/);
+  assert.match(issueQuery, /states:\s*\[\s*OPEN\s*\]/);
   assert.match(issueQuery, /includeArchived:\s*true/);
   assert.equal(boardRequestKind(calls[0]), 'board');
 
@@ -551,7 +605,7 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   const quiet = [];
   const listedOnly = boardReadExec({
     board: [leanBoardPage([RECOVERY_LISTED, draft])],
-    issues: [issuesPage([walkedIssue(10, [membership('PVTI_listed')])])],
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
   });
   assert.deepEqual(
     sortedById(fetchBoard(listedOnly.exec, { onOmission: (advisory) => quiet.push(advisory) })).map((i) => i.id),
@@ -560,49 +614,65 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   assert.deepEqual(quiet, []);
 });
 
-// One card listed (#10), one omitted (#11) and one omitted past the first page of 100
-// memberships (#12, its board membership the first one the walk saw): the read the refusal
-// cases below each break one fact of.
+/**
+ * The mutable read the refusal cases below break. A case reads each field as the valid shape
+ * the fixtures build, so a misspelt field fails the type check, and overwrites it with a
+ * deliberately wrong value, so each field's setter takes `unknown`.
+ * @typedef {{
+ *   board: unknown,
+ *   get issues(): import('./board-fixtures.mjs').IssuesPage[], set issues(value: unknown),
+ *   memberships: { get [OVERFLOW_ISSUE](): import('./board-fixtures.mjs').MembershipsPage[], set [OVERFLOW_ISSUE](value: unknown) } & { [issue: number]: unknown },
+ *   get items(): import('./board-fixtures.mjs').HydratedItem[], set items(value: unknown),
+ * }} RecoveryBase
+ */
+
+/** @returns {RecoveryBase} */
 function recoveryBase() {
   const firstObservation = [membership('PVTI_overflow'), ...elsewhere(99)];
   return {
     board: [leanBoardPage([RECOVERY_LISTED])],
     issues: [
       issuesPage([
-        walkedIssue(10, [membership('PVTI_listed')]),
-        walkedIssue(11, [membership('PVTI_omitted')]),
+        walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')]),
+        walkedIssue(OMITTED_ISSUE, [membership('PVTI_omitted')]),
       ], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }),
-      issuesPage([walkedIssue(12, firstObservation, { totalCount: 101 })], { totalCount: 3 }),
+      issuesPage([walkedIssue(OVERFLOW_ISSUE, firstObservation, { totalCount: 101 })], { totalCount: 3 }),
     ],
     memberships: {
-      12: [
-        membershipsPage(12, structuredClone(firstObservation), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
-        membershipsPage(12, elsewhere(1, 99), { totalCount: 101 }),
+      [OVERFLOW_ISSUE]: [
+        membershipsPage(OVERFLOW_ISSUE, structuredClone(firstObservation), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+        membershipsPage(OVERFLOW_ISSUE, elsewhere(1, 99), { totalCount: 101 }),
       ],
     },
     items: [
-      hydratedItem(omittedCard('PVTI_omitted', 11, 'OPEN', 'Backlog')),
-      hydratedItem(omittedCard('PVTI_overflow', 12, 'OPEN', 'Ready')),
+      hydratedItem(omittedCard('PVTI_omitted', OMITTED_ISSUE, 'OPEN', 'Backlog')),
+      hydratedItem(omittedCard('PVTI_overflow', OVERFLOW_ISSUE, 'OPEN', 'Ready')),
     ],
   };
 }
 
-const walked = (base, page, index) => base.issues[page].data.repository.issues.nodes[index];
-const issuesOf = (base, page) => base.issues[page].data.repository.issues;
-const overflowPage = (base, page) => base.memberships[12][page].data.repository.issue;
+const walked = (/** @type {RecoveryBase} */ base, /** @type {number} */ page, /** @type {number} */ index) => base.issues[page].data.repository.issues.nodes[index];
+const issuesOf = (/** @type {RecoveryBase} */ base, /** @type {number} */ page) => base.issues[page].data.repository.issues;
+const overflowPage = (/** @type {RecoveryBase} */ base, /** @type {number} */ page) => base.memberships[OVERFLOW_ISSUE][page].data.repository.issue;
+const issueWalk = (/** @type {RecoveryBase} */ base) => base.issues;
+const overflowWalk = (/** @type {RecoveryBase} */ base) => base.memberships[OVERFLOW_ISSUE];
+const itemRead = (/** @type {RecoveryBase} */ base) => base.items;
+// A list as its slots, where a case puts a deliberately wrong element in place of a valid one.
+const slots = (/** @type {unknown[]} */ list) => list;
 const failing = () => { throw new Error('gh: HTTP 502'); };
 
+/** @type {[string, (base: RecoveryBase) => void][]} */
 const REFUSED_RECOVERY = [
   // Malformed, failed and null replies.
   ['the issue walk is not JSON', (b) => { b.issues = 'not json'; }],
-  ['the issue walk is not slurped', (b) => { b.issues = b.issues[0]; }],
+  ['the issue walk is not slurped', (b) => { b.issues = issueWalk(b)[0]; }],
   ['the issue walk is empty', (b) => { b.issues = []; }],
   ['the issue walk fails', (b) => { b.issues = failing; }],
-  ['an issue walk page carries GraphQL errors', (b) => { b.issues[1] = { errors: [{ message: 'Something went wrong' }] }; }],
-  ['an issue walk page is null', (b) => { b.issues[1] = null; }],
-  ['an issue walk page has a null repository', (b) => { b.issues[1].data.repository = null; }],
-  ['an issue walk page has no issues connection', (b) => { b.issues[1].data.repository.issues = null; }],
-  ['a walked issue is null', (b) => { issuesOf(b, 0).nodes[1] = null; }],
+  ['an issue walk page carries GraphQL errors', (b) => { slots(issueWalk(b))[1] = { errors: [{ message: 'Something went wrong' }] }; }],
+  ['an issue walk page is null', (b) => { slots(issueWalk(b))[1] = null; }],
+  ['an issue walk page has a null repository', (b) => { issueWalk(b)[1].data.repository = null; }],
+  ['an issue walk page has no issues connection', (b) => { issueWalk(b)[1].data.repository.issues = null; }],
+  ['a walked issue is null', (b) => { slots(issuesOf(b, 0).nodes)[1] = null; }],
   ['a walked issue has no number', (b) => { walked(b, 0, 1).number = null; }],
   ['a walked issue has no membership connection', (b) => { walked(b, 0, 1).projectItems = null; }],
   ['a membership is null', (b) => { walked(b, 0, 1).projectItems.nodes = [null]; }],
@@ -616,25 +686,25 @@ const REFUSED_RECOVERY = [
   ['the item read fails', (b) => { b.items = failing; }],
   ['the item read carries GraphQL errors', (b) => { b.items = { errors: [{ message: 'Something went wrong' }] }; }],
   ['the item read answers no node list', (b) => { b.items = { data: { nodes: null } }; }],
-  ['the item read answers null for an item', (b) => { b.items = [b.items[1]]; }],
-  ['the overflow walk fails', (b) => { b.memberships[12] = failing; }],
-  ['the overflow walk answers no issue', (b) => { b.memberships[12] = [{ data: { repository: { issue: null } } }]; }],
+  ['the item read answers null for an item', (b) => { b.items = [itemRead(b)[1]]; }],
+  ['the overflow walk fails', (b) => { b.memberships[OVERFLOW_ISSUE] = failing; }],
+  ['the overflow walk answers no issue', (b) => { b.memberships[OVERFLOW_ISSUE] = [{ data: { repository: { issue: null } } }]; }],
   // Truncated walks.
-  ['the issue walk stops while a page remains', (b) => { b.issues = [b.issues[0]]; }],
+  ['the issue walk stops while a page remains', (b) => { b.issues = [issueWalk(b)[0]]; }],
   ['the issue walk continues past a page with no next page', (b) => { issuesOf(b, 0).pageInfo = { hasNextPage: false, endCursor: null }; }],
   ['an issue walk page reports a next page with no cursor', (b) => { issuesOf(b, 0).pageInfo.endCursor = null; }],
   ['the issue walk fetches fewer issues than its count', (b) => { issuesOf(b, 0).totalCount = 4; issuesOf(b, 1).totalCount = 4; }],
   ['a walked issue holds fewer memberships than its count under the cap', (b) => { walked(b, 0, 1).projectItems.totalCount = 2; }],
   ['a walked issue holds more memberships than its count', (b) => { walked(b, 0, 1).projectItems.totalCount = 0; }],
-  ['the overflow walk stops while a page remains', (b) => { b.memberships[12] = [b.memberships[12][0]]; }],
+  ['the overflow walk stops while a page remains', (b) => { b.memberships[OVERFLOW_ISSUE] = [overflowWalk(b)[0]]; }],
   ['the overflow walk fetches fewer memberships than its count', (b) => { overflowPage(b, 1).projectItems.nodes = []; }],
   ['the project walk is short of its count however many cards recovery finds', (b) => { b.board = [leanBoardPage([RECOVERY_LISTED], { totalCount: 3 })]; }],
   // Repeated cursors.
   ['the issue walk repeats a cursor', (b) => {
-    b.issues.splice(1, 0, issuesPage([], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }));
+    issueWalk(b).splice(1, 0, issuesPage([], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }));
   }],
   ['the overflow walk repeats a cursor', (b) => {
-    b.memberships[12].splice(1, 0, membershipsPage(12, [], { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }));
+    overflowWalk(b).splice(1, 0, membershipsPage(OVERFLOW_ISSUE, [], { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }));
   }],
   // Counts that change.
   ['the issue count changes across pages', (b) => { issuesOf(b, 1).totalCount = 4; }],
@@ -646,14 +716,14 @@ const REFUSED_RECOVERY = [
   ['the overflow walk loses the board membership the first observation saw', (b) => {
     overflowPage(b, 0).projectItems.nodes[0] = membership('PVTI_elsewhere_swapped', { project: 3000 });
   }],
-  ['the overflow walk answers for another issue', (b) => { for (const page of [0, 1]) overflowPage(b, page).number = 13; }],
+  ['the overflow walk answers for another issue', (b) => { for (const page of [0, 1]) overflowPage(b, page).number = UNUSED_ISSUE; }],
   // Duplicate and conflicting identities.
   ['an issue is walked twice', (b) => {
-    issuesOf(b, 1).nodes.push(walkedIssue(11, [membership('PVTI_omitted')]));
+    issuesOf(b, 1).nodes.push(walkedIssue(OMITTED_ISSUE, [membership('PVTI_omitted')]));
     for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
   }],
   ['one item id is walked under two issues', (b) => {
-    issuesOf(b, 1).nodes.push(walkedIssue(13, [membership('PVTI_omitted')]));
+    issuesOf(b, 1).nodes.push(walkedIssue(UNUSED_ISSUE, [membership('PVTI_omitted')]));
     for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
   }],
   ['one item id is listed twice under one issue', (b) => {
@@ -661,7 +731,7 @@ const REFUSED_RECOVERY = [
   }],
   ['one issue holds two items on this board', (b) => {
     walked(b, 0, 1).projectItems = { totalCount: 2, nodes: [membership('PVTI_omitted'), membership('PVTI_omitted_twin')] };
-    b.items.push(hydratedItem(omittedCard('PVTI_omitted_twin', 11, 'OPEN', 'Backlog')));
+    itemRead(b).push(hydratedItem(omittedCard('PVTI_omitted_twin', OMITTED_ISSUE, 'OPEN', 'Backlog')));
   }],
   ['the listed item is walked under another issue', (b) => {
     walked(b, 0, 0).projectItems = { totalCount: 0, nodes: [] };
@@ -672,22 +742,137 @@ const REFUSED_RECOVERY = [
     const firstPage = walked(b, 1, 0).projectItems.nodes;
     firstPage[99] = structuredClone(firstPage[98]);
   }],
-  ['the item read answers one item twice', (b) => { b.items = { data: { nodes: [b.items[0], b.items[0]] } }; }],
-  ['the item read answers another item id', (b) => { b.items = { data: { nodes: [{ ...b.items[0], id: 'PVTI_someone_else' }, b.items[1]] } }; }],
+  ['the item read answers one item twice', (b) => { b.items = { data: { nodes: [itemRead(b)[0], itemRead(b)[0]] } }; }],
+  ['the item read answers another item id', (b) => { b.items = { data: { nodes: [{ ...itemRead(b)[0], id: 'PVTI_someone_else' }, itemRead(b)[1]] } }; }],
   // Wrong repository, project or content.
-  ['a read item belongs to another repository', (b) => { b.items[0].content.repository = { nameWithOwner: 'someone-else/other-repo' }; }],
-  ['a read item is on another project', (b) => { b.items[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
-  ["a read item is on another owner's project", (b) => { b.items[0].project.owner.login = 'someone-else'; }],
+  ['a read item belongs to another repository', (b) => { itemRead(b)[0].content.repository = { nameWithOwner: 'someone-else/other-repo' }; }],
+  ['a read item is on another project', (b) => { itemRead(b)[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
+  ["a read item is on another owner's project", (b) => { itemRead(b)[0].project.owner.login = 'someone-else'; }],
   ['the listed item is walked on another project', (b) => { walked(b, 0, 0).projectItems.nodes[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
   ["the listed item is walked on another owner's project", (b) => { walked(b, 0, 0).projectItems.nodes[0].project.owner.login = 'someone-else'; }],
-  ['a read item has no project', (b) => { b.items[0].project = null; }],
-  ['a read item resolves to another issue', (b) => { b.items[0].content.number = 99; }],
-  ['a read item has no issue content', (b) => { b.items[0].content = null; }],
+  ['a read item has no project', (b) => { itemRead(b)[0].project = null; }],
+  ['a read item resolves to another issue', (b) => { itemRead(b)[0].content.number = 99; }],
+  ['a read item has no issue content', (b) => { itemRead(b)[0].content = null; }],
   // Archive observations that disagree.
-  ['a read item is archived though its membership is not', (b) => { b.items[0].isArchived = true; }],
+  ['a read item is archived though its membership is not', (b) => { itemRead(b)[0].isArchived = true; }],
   ['the overflow walk sees the board membership archived', (b) => { overflowPage(b, 0).projectItems.nodes[0].isArchived = true; }],
   ['a listed card is archived on its issue', (b) => { walked(b, 0, 0).projectItems.nodes[0].isArchived = true; }],
 ];
+
+
+test('a board read through a one-page-per-request executor sends each page as its own call and finds the same cards', () => {
+  const { reads } = recoveryReads();
+  const asRead = fetchBoard(boardReadExec(reads).exec, { onOmission: () => {} });
+
+  const received = [];
+  const slurped = boardReadExec(reads).exec;
+  const paged = onePageAtATime((args) => {
+    received.push(args);
+    return slurped(args);
+  });
+  const sent = [];
+  const exec = Object.assign((args) => {
+    sent.push(args);
+    return paged(args);
+  }, { onePagePerRequest: true });
+  const items = fetchBoard(exec, { onOmission: () => {} });
+  assert.deepEqual(items, asRead);
+
+  // Each page is its own call: no walk is sent to gh as one paginated process.
+  const walks = sent.filter((args) => ['board', 'issues', 'closedIssues', 'memberships'].includes(boardRequestKind(args)));
+  for (const args of walks) assert.equal(args.some((arg) => arg === '--paginate' || arg === '--slurp'), false, args.join(' '));
+  const cursorOf = (args) => args.find((arg) => arg.startsWith('endCursor='));
+  const issueWalks = walks.filter((args) => boardRequestKind(args) === 'issues');
+  assert.deepEqual(issueWalks.map(cursorOf), [undefined, 'endCursor=issues-1']);
+  const memberWalks = walks.filter((args) => boardRequestKind(args) === 'memberships');
+  assert.deepEqual(memberWalks.map(cursorOf), [undefined, 'endCursor=members-1']);
+
+  // A listing that answers every call with its first page repeats its cursor, so the read stops at page 2.
+  const firstPage = leanBoardPage([RECOVERY_LISTED], { totalCount: 2, pageInfo: { hasNextPage: true, endCursor: 'board-1' } });
+  const listingCalls = [];
+  const stuck = Object.assign((args) => {
+    listingCalls.push(args);
+    return JSON.stringify(firstPage);
+  }, { onePagePerRequest: true });
+  assert.throws(() => fetchBoard(stuck), /listing.*page 2|page 2.*listing/);
+  assert.equal(listingCalls.length, 2);
+});
+
+test('fetchBoard reads the closed issue walk only after the open issue walk has answered, so an issue closed between them is recovered', () => {
+  const card = omittedCard('PVTI_closed_between', 41, 'CLOSED', 'Done');
+  let openWalkAnswered = false;
+  const { exec: answer } = boardReadExec({
+    board: [leanBoardPage([RECOVERY_LISTED])],
+    // The open walk answers without #41, which closed by then; the closed walk has it only once the open walk has answered.
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
+    closedIssues: () => [issuesPage(openWalkAnswered ? [walkedIssue(41, [membership(card.id)])] : [])],
+    items: [hydratedItem(card)],
+  });
+  const exec = (args) => {
+    const reply = answer(args);
+    if (boardRequestKind(args) === 'issues') openWalkAnswered = true;
+    return reply;
+  };
+
+  const items = fetchBoard(exec, { onOmission: () => {} });
+
+  assert.ok(items.some((item) => item.content.number === 41), JSON.stringify(items));
+});
+
+test('an issue reopened between the two walks is recovered from the recently updated walk', () => {
+  const card = omittedCard('PVTI_reopened', 27, 'OPEN', 'Backlog');
+  const { exec } = boardReadExec({
+    board: [leanBoardPage([RECOVERY_LISTED])],
+    // The open walk answered while #27 was closed; the second walk finds it open again, as GitHub does for a request
+    // that asks for open and closed issues updated within the window, and never for one that asks for closed issues only.
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
+    closedIssues: (args) => {
+      const query = args.find((arg) => arg.startsWith('query=')) ?? '';
+      return [issuesPage(/states:\[OPEN, CLOSED\]/.test(query) ? [walkedIssue(27, [membership(card.id)])] : [])];
+    },
+    items: [hydratedItem(card)],
+  });
+
+  const items = fetchBoard(exec, { onOmission: () => {} });
+
+  assert.ok(items.some((item) => item.content.number === 27), JSON.stringify(items));
+});
+
+test('ANTI-REGRESSION: board reads recover a dropped open card and a dropped card closed within the window, and never walk closed issues outside it', () => {
+  const now = Date.parse('2026-11-24T12:00:00Z');
+  const since = 'filterBy:{since:"2026-10-27T12:00:00.000Z"}';
+  const { exec: answer, calls } = boardReadExec({
+    board: [leanBoardPage([RECOVERY_LISTED])],
+    issues: [issuesPage([walkedIssue(41, [membership('PVTI_open_41')])])],
+    closedIssues: [issuesPage([
+      walkedIssue(42, [membership('PVTI_closed_42')]),
+      walkedIssue(41, [membership('PVTI_open_41')]),
+    ])],
+    items: [
+      hydratedItem(omittedCard('PVTI_open_41', 41, 'OPEN', 'Backlog')),
+      hydratedItem(omittedCard('PVTI_closed_42', 42, 'CLOSED', 'Done')),
+    ],
+  });
+  const exec = (args) => {
+    const query = args.find((arg) => arg.startsWith('query=')) ?? '';
+    if (/\bissues\(/.test(query) && !/states:\[OPEN\]/.test(query) && !query.includes(since)) throw new Error(`walked issues outside the window: ${query}`);
+    return answer(args);
+  };
+  const advisories = [];
+
+  const items = fetchBoard(exec, { now, onOmission: (advisory) => advisories.push(advisory) });
+
+  assert.deepEqual(sortedById(items).map((i) => [i.id, i.content.number]), [
+    ['PVTI_closed_42', 42],
+    ['PVTI_listed', LISTED_ISSUE],
+    ['PVTI_open_41', 41],
+  ]);
+  assert.equal(advisories.length, 1);
+  assert.ok(namesNumber(advisories[0], 41) && namesNumber(advisories[0], 42), advisories[0]);
+  const kinds = calls.map(boardRequestKind);
+  assert.equal(kinds.filter((kind) => kind === 'issues').length, 1);
+  assert.equal(kinds.filter((kind) => kind === 'closedIssues').length, 1);
+});
 
 test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () => {
   assert.doesNotThrow(() => fetchBoard(boardReadExec(recoveryBase()).exec));
@@ -698,7 +883,7 @@ test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () =>
       () => fetchBoard(boardReadExec(base).exec),
       (error) => {
         // A request the fixture never expected is a broken test, not a refusal by the reader.
-        assert.doesNotMatch(error.message, /unexpected gh invocation/, label);
+        assert.doesNotMatch(/** @type {Error} */ (error).message, /unexpected gh invocation/, label);
         return true;
       },
       label,
@@ -706,10 +891,129 @@ test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () =>
   }
   // The unbroken read is what each case departs from, so it has to be accepted whole.
   assert.deepEqual(sortedById(fetchBoard(boardReadExec(recoveryBase()).exec)).map((i) => [i.id, i.content.number]), [
-    ['PVTI_listed', 10],
-    ['PVTI_omitted', 11],
-    ['PVTI_overflow', 12],
+    ['PVTI_listed', LISTED_ISSUE],
+    ['PVTI_omitted', OMITTED_ISSUE],
+    ['PVTI_overflow', OVERFLOW_ISSUE],
   ]);
+});
+
+test('an issue in both walks whose two observations disagree, or whose closed observation is malformed, fails the read naming the issue', () => {
+  const open41 = walkedIssue(41, [membership('PVTI_open_41')]);
+  const hydrated = [hydratedItem(omittedCard('PVTI_open_41', 41, 'OPEN', 'Backlog'))];
+  const cases = /** @satisfies {[string, import('./board-fixtures.mjs').WalkedIssue, import('./board-fixtures.mjs').WalkedIssue | { number: number, projectItems: null }][]} */ ([
+    ['the open walk saw no membership and the closed walk saw one', walkedIssue(41, []), walkedIssue(41, [membership('PVTI_open_41')])],
+    ['the closed walk record is malformed', open41, { number: 41, projectItems: null }],
+  ]);
+  for (const [label, openRecord, closedRecord] of cases) {
+    assert.throws(
+      () => fetchBoard(boardReadExec({
+        board: [leanBoardPage([RECOVERY_LISTED])],
+        issues: [issuesPage([openRecord])],
+        closedIssues: [issuesPage([closedRecord])],
+        items: hydrated,
+      }).exec),
+      (error) => {
+        const { message } = /** @type {Error} */ (error);
+        return namesNumber(message, 41) && !/unexpected gh invocation/.test(message);
+      },
+      label,
+    );
+  }
+});
+
+test('an issue in both walks whose observation repeats a membership fails the read naming the issue', () => {
+  const base = recoveryBase();
+  const first = [membership('PVTI_overflow'), ...elsewhere(99)];
+  const overflowReply = (repeated) => [
+    membershipsPage(OVERFLOW_ISSUE, structuredClone(first), { totalCount: repeated ? 102 : 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+    membershipsPage(OVERFLOW_ISSUE, repeated ? [...elsewhere(1, 99), ...elsewhere(1, 99)] : elsewhere(1, 99), { totalCount: repeated ? 102 : 101 }),
+  ];
+  let reads = 0;
+  const { exec } = boardReadExec({
+    board: base.board,
+    issues: [issuesPage([walkedIssue(OVERFLOW_ISSUE, structuredClone(first), { totalCount: 101 })])],
+    closedIssues: [issuesPage([walkedIssue(OVERFLOW_ISSUE, structuredClone(first), { totalCount: 102 })])],
+    // Only the second overflow walk read, the closed observation's, repeats the last id; every other read holds each once.
+    memberships: { [OVERFLOW_ISSUE]: () => overflowReply((reads += 1) === 2) },
+    items: base.items,
+  });
+
+  assert.throws(
+    () => fetchBoard(exec, { onOmission: () => {} }),
+    (error) => {
+      const { message } = /** @type {Error} */ (error);
+      return namesNumber(message, OVERFLOW_ISSUE) && !/unexpected gh invocation/.test(message);
+    },
+  );
+});
+
+// A failed `gh` call as Node's execFileSync throws it: gh prints `gh: HTTP <status>` when GitHub's error body is not
+// JSON, or `gh: <message> (HTTP <status>)` when it is.
+const ghFailure = (stderr) => Object.assign(new Error(`Command failed: gh api graphql --paginate --slurp -f query=...\n${stderr}`), { status: 1, stderr });
+
+// A listing that fails with `failures` in turn, then answers with the one listed card.
+function listingFailing(...failures) {
+  let attempt = 0;
+  return boardReadExec({
+    board: () => {
+      const failure = failures[attempt++];
+      if (failure) throw failure;
+      return [leanBoardPage([RECOVERY_LISTED])];
+    },
+  }).exec;
+}
+
+test('a board read request that answers HTTP 503 is retried after a pause and the read returns the board, and an HTTP 404 is not retried', () => {
+  const whole = fetchBoard(boardReadExec({ board: [leanBoardPage([RECOVERY_LISTED])] }).exec);
+  const pauses = [];
+
+  const items = fetchBoard(listingFailing(ghFailure('gh: HTTP 503\n')), { pause: (ms) => pauses.push(ms) });
+
+  assert.deepEqual(items, whole);
+  assert.deepEqual(pauses, [1000]);
+
+  const notFound = ghFailure('gh: Not Found (HTTP 404)\n');
+  const notFoundPauses = [];
+  assert.throws(
+    () => fetchBoard(listingFailing(notFound), { pause: (ms) => notFoundPauses.push(ms) }),
+    (error) => error === notFound,
+  );
+  assert.deepEqual(notFoundPauses, []);
+});
+
+test('a 503 whose gh message spans two lines is still retried', () => {
+  const whole = fetchBoard(boardReadExec({ board: [leanBoardPage([RECOVERY_LISTED])] }).exec);
+  const pauses = [];
+
+  const items = fetchBoard(listingFailing(ghFailure('gh: Service unavailable\nPlease try again (HTTP 503)\n')), { pause: (ms) => pauses.push(ms) });
+
+  assert.deepEqual(items, whole);
+  assert.deepEqual(pauses, [1000]);
+});
+
+test('a started opening read that answers HTTP 502 is read again synchronously until it answers', () => {
+  const whole = fetchBoard(boardReadExec({ board: [leanBoardPage([RECOVERY_LISTED])] }).exec);
+  const pauses = [];
+  const opening = { listing: () => { throw ghFailure('gh: Server Error (HTTP 502)\n'); } };
+
+  const items = fetchBoard(listingFailing(ghFailure('gh: Server Error (HTTP 502)\n')), { opening, pause: (ms) => pauses.push(ms) });
+
+  assert.deepEqual(items, whole);
+  assert.deepEqual(pauses, [1000, 4000]);
+});
+
+test("a started opening read's time counts against the read's retry budget", () => {
+  let clock = 50_000;
+  const budget = { now: () => clock, startedAt: 0, endsAt: 90_000 };
+  const pauses = [];
+  const opening = { listing: () => { throw ghFailure('gh: Server Error (HTTP 503)\n'); } };
+
+  assert.throws(
+    () => fetchBoard(listingFailing(), { opening, budget, pause: (ms) => pauses.push(ms) }),
+    (error) => error instanceof GhUnavailableError
+      && /** @type {Error} */ (error).message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.',
+  );
+  assert.deepEqual(pauses, []);
 });
 
 test('parseBoardPage maps a fully-fielded issue card to the exact raw shape', () => {
@@ -736,12 +1040,26 @@ test('parseBoardPage carries labels, assignees, blockers and closing pull reques
     routing: 'Product',
     labels: ['type:feature', 'area:ui', 'area:desktop', 'autonomy:supervised'],
     assignees: [BOARD_OWNER],
-    blockers: [{ number: 261, state: 'OPEN' }, { number: 262, state: 'CLOSED' }],
+    blockers: [{ number: 261, state: 'OPEN', stateReason: null }, { number: 262, state: 'CLOSED', stateReason: null }],
     closingPullRequests: [{ number: 1133 }],
     content: { __typename: 'Issue', number: 263, state: 'OPEN', subIssuesSummary: { total: 2, completed: 1 } },
   });
-  // The normalized card keeps only the OPEN blockers: a closed blocker blocks nothing.
-  assert.deepEqual(normalizeItem(items[1]).openBlockers, [261]);
+  // The normalized card keeps the blockers that still hold it: 261 is open and 262 was closed with no recorded reason.
+  assert.deepEqual(normalizeItem(items[1]).openBlockers, [261, 262]);
+});
+
+test('a closed blocker holds its card unless it was closed as completed', () => {
+  const blockers = [
+    { number: 1, state: 'OPEN' },
+    { number: 2, state: 'CLOSED', stateReason: 'COMPLETED' },
+    { number: 3, state: 'CLOSED', stateReason: 'NOT_PLANNED' },
+    { number: 4, state: 'CLOSED', stateReason: 'DUPLICATE' },
+    // GitHub with no recorded close reason (stateReason null): held, since closure as completed is not shown.
+    { number: 5, state: 'CLOSED', stateReason: null },
+    // A tracker that records no close reasons at all (no key): cleared.
+    { number: 6, state: 'CLOSED' },
+  ];
+  assert.deepEqual(normalizeItem({ content: { number: 9 }, blockers }).openBlockers, [1, 3, 4, 5]);
 });
 
 test('parseBoardPage carries a draft\'s __typename through with the Title fieldValue text fallback (no content.number)', () => {
@@ -1085,6 +1403,15 @@ test('ANTI-REGRESSION: parseBoardPage throws on an assignee without a usable log
   }
 });
 
+test('ANTI-REGRESSION: parseBoardPage throws on a blocker without a usable repository', () => {
+  for (const repository of [null, {}, { nameWithOwner: '' }, { nameWithOwner: '  ' }, { nameWithOwner: 7 }]) {
+    assert.throws(
+      () => parseNodes(guardNode({ blockers: [{ number: 5, state: 'OPEN', repository }] })),
+      /board card #9 carried a blocker without a usable repository.*rerun the board read/s,
+    );
+  }
+});
+
 // Guard 11. One issue, one card. Two cards for the same number make every count and
 // every per-card verdict ambiguous, and one of them is stale by definition.
 test('parseBoardPage and fetchBoard throw when the same issue number appears on two cards', () => {
@@ -1133,7 +1460,7 @@ test('normalizeItem flattens exactly the fields the board rules judge a card on'
     labels: ['type:feature', 'area:ui', 'area:desktop', 'autonomy:supervised'],
     state: 'OPEN',
     assignees: [BOARD_OWNER],
-    openBlockers: [261],
+    openBlockers: [261, 262],
     closingPullRequests: [{ number: 1133 }],
     subIssues: { total: 2, completed: 1 },
   });
@@ -1145,6 +1472,18 @@ test('normalizeItem flattens exactly the fields the board rules judge a card on'
   assert.equal(bare.subIssues, null);
   assert.deepEqual(bare.labels, []);
   assert.deepEqual(bare.openBlockers, []);
+});
+
+test('normalizeItem keeps a blocker from another repository in openBlockers and lists it in foreignBlockers; a blocker from the board repository is not foreign', () => {
+  const other = `${BOARD_OWNER}/other-repo`;
+  const { items } = parseNodes(guardNode({ blockers: [
+    { number: 11, state: 'OPEN', repository: { nameWithOwner: other } },
+    { number: 14, state: 'OPEN' },
+    { number: 12, state: 'CLOSED', stateReason: 'COMPLETED', repository: { nameWithOwner: other } },
+  ] }));
+  const card = normalizeItem(items[0]);
+  assert.deepEqual(card.openBlockers, [11, 14]);
+  assert.deepEqual(card.foreignBlockers, [{ repository: other, number: 11 }]);
 });
 
 test('normalizeItem publishes the routing view only — no Model, no Effort, no internal unresolved-content flag', () => {
@@ -1283,7 +1622,7 @@ test('formatGrouped warns when an unrecognised routing value is rendered without
   assert.match(out, /add Research to ROUTING_OPTIONS in scripts\/lib\/board-config\.mjs\./);
   // The skill is one repository's file and this toolkit is copied verbatim into another; the
   // warning must name the config that travels with it, never a path that may not exist there.
-  assert.doesNotMatch(out, /\.agents\/skills\/to-issues\/SKILL\.md/);
+  assert.doesNotMatch(out, /\.agents\/skills\/to-tickets\/SKILL\.md/);
   assert.doesNotMatch(out, /unrecognised Workstream value: Unfielded/);
 
   const multipleUnknown = formatGrouped([
@@ -1311,11 +1650,19 @@ test('formatGrouped warns when an unrecognised routing value is rendered without
   assert.match(literalUnfielded, /WARNING: unrecognised Workstream value: Unfielded/);
 });
 
+// The address a test comment carries, made from its text so that an expectation can name it.
+const commentUrl = (body) => `https://github.com/example-owner/example/issues/7#issuecomment-${encodeURIComponent(body).slice(0, 40)}`;
+/**
+ * @param {string[]} bodies
+ * @param {{ totalCount?: number | string, hasPreviousPage?: boolean, startCursor?: string | null }} [fields]
+ */
 const commentPage = (bodies, { totalCount = bodies.length, hasPreviousPage = false, startCursor = null } = {}) => ({
   totalCount,
   pageInfo: { hasPreviousPage, startCursor },
-  nodes: bodies.map((body) => ({ body })),
+  nodes: bodies.map((body) => ({ body, url: commentUrl(body), author: /** @type {{ login: string } | null} */ ({ login: 'example-owner' }) })),
 });
+// What a detail read reports of a comment `commentPage` made: who posted it and where it is.
+const commentSource = (body) => ({ login: 'example-owner', url: commentUrl(body) });
 const detailIssue = (number, overrides = {}) => ({
   number, body: `body of ${number}`, parent: null, comments: commentPage([]), ...overrides,
 });
@@ -1339,7 +1686,7 @@ test('ANTI-REGRESSION: a card detail that failed or came back malformed is unava
   }, numbers);
   assert.deepEqual([...split], [
     ...numbers.slice(0, DETAIL_BATCH_SIZE).map((number) => [number, unavailable(number, 'gh: timed out')]),
-    [last, { number: last, body: `body of ${last}`, parent: null, comments: [], commentCount: 0, commentsUnavailable: null }],
+    [last, { number: last, body: `body of ${last}`, parent: null, comments: [], commentSources: [], commentCount: 0, commentsUnavailable: null }],
   ]);
 
   const one = (response) => fetchCardDetails(() => response, [7]).get(7);
@@ -1373,7 +1720,7 @@ test('ANTI-REGRESSION: a card detail that failed or came back malformed is unava
     [7],
   ).get(7);
   const partial = (comments, reason) => ({
-    number: 7, body: 'body of 7', parent: null, comments, commentCount: 5, commentsUnavailable: reason,
+    number: 7, body: 'body of 7', parent: null, comments, commentSources: comments.map(commentSource), commentCount: 5, commentsUnavailable: reason,
   });
   assert.deepEqual(paged(() => { throw new Error('offline'); }), partial(['fourth', 'fifth'], 'offline'));
   assert.deepEqual(
@@ -1398,13 +1745,58 @@ test('ANTI-REGRESSION: a card detail that failed or came back malformed is unava
     [...fetchCardDetails(() => detailBatch({ i7: detailIssue(7, { number: untextable }), i8: detailIssue(8) }), [7, 8])],
     [
       [7, unavailable(7, 'GitHub returned a different issue for this card')],
-      [8, { number: 8, body: 'body of 8', parent: null, comments: [], commentCount: 0, commentsUnavailable: null }],
+      [8, { number: 8, body: 'body of 8', parent: null, comments: [], commentSources: [], commentCount: 0, commentsUnavailable: null }],
     ],
   );
   assert.deepEqual(
     one(detailBatch({ i7: detailIssue(7) }, [{ message: untextable }])),
     unavailable(7, 'malformed detail response'),
   );
+});
+
+test('ANTI-REGRESSION: a comment with no address or a malformed author makes the card\'s details unavailable, never a comment with no one named', () => {
+  // One comment of the page is replaced by a comment that lacks what names its poster.
+  const withNode = (page, node) => ({ ...page, nodes: [...page.nodes.slice(0, -1), node] });
+  const malformedNodes = [
+    { body: 'only', author: { login: 'example-owner' } },
+    { body: 'only', url: '', author: { login: 'example-owner' } },
+    { body: 'only', url: 7, author: { login: 'example-owner' } },
+    { body: 'only', url: commentUrl('only') },
+    { body: 'only', url: commentUrl('only'), author: {} },
+    { body: 'only', url: commentUrl('only'), author: { login: 7 } },
+    { body: 'only', url: commentUrl('only'), author: 'example-owner' },
+  ];
+
+  // In the first page the card is unavailable whole, with no body or comment riding along.
+  for (const node of malformedNodes) {
+    assert.deepEqual(
+      fetchCardDetails(() => detailBatch({ i7: detailIssue(7, { comments: withNode(commentPage(['only']), node) }) }), [7]).get(7),
+      { number: 7, unavailable: 'malformed detail: comments' },
+    );
+  }
+
+  // In an older page the comments already read stay, and the reason says the rest were not.
+  const newest = commentPage(['fourth', 'fifth'], { totalCount: 5, hasPreviousPage: true, startCursor: 'cursor-a' });
+  const older = commentPage(['first', 'second', 'third'], { totalCount: 5 });
+  for (const node of malformedNodes) {
+    assert.deepEqual(
+      fetchCardDetails(
+        (args) => (args.includes('before=cursor-a')
+          ? olderCommentPage(7, withNode(older, node))
+          : detailBatch({ i7: detailIssue(7, { comments: newest }) })),
+        [7],
+      ).get(7),
+      {
+        number: 7,
+        body: 'body of 7',
+        parent: null,
+        comments: ['fourth', 'fifth'],
+        commentSources: ['fourth', 'fifth'].map(commentSource),
+        commentCount: 5,
+        commentsUnavailable: 'malformed comment page',
+      },
+    );
+  }
 });
 
 // Points the real wrapper at a fake gh that answers `api rate_limit` with `{}` and every other
@@ -1449,18 +1841,21 @@ test('ANTI-REGRESSION: a card detail batch beyond the gh output limit is read ag
 
   assert.deepEqual([...fetchCardDetails(ghExec, [7, 8])], [
     [7, { number: 7, unavailable: 'gh output exceeded the 64 MiB read limit' }],
-    [8, { number: 8, body: 'body of 8', parent: null, comments: [], commentCount: 0, commentsUnavailable: null }],
+    [8, { number: 8, body: 'body of 8', parent: null, comments: [], commentSources: [], commentCount: 0, commentsUnavailable: null }],
   ]);
 });
 
-test('fetchCardDetails: reads body, parent and every comment page, oldest comment first', () => {
+test('fetchCardDetails: reads body, parent and every comment page, oldest comment first, each comment with its author and address', () => {
   // The shape a live backward read returns: every page reports the whole count, and the
   // final page is short, has no previous page and still carries a cursor.
   const whole = { totalCount: 5 };
   const newest = commentPage(['fourth', 'fifth'], { ...whole, hasPreviousPage: true, startCursor: 'cursor-a' });
+  const oldest = commentPage(['first'], { ...whole, startCursor: 'cursor-c' });
+  // GitHub gives a null author for a comment whose account is gone.
+  oldest.nodes[0].author = null;
   const olderPages = {
     'before=cursor-a': commentPage(['second', 'third'], { ...whole, hasPreviousPage: true, startCursor: 'cursor-b' }),
-    'before=cursor-b': commentPage(['first'], { ...whole, startCursor: 'cursor-c' }),
+    'before=cursor-b': oldest,
   };
   const calls = [];
   const details = fetchCardDetails((args) => {
@@ -1478,6 +1873,10 @@ test('fetchCardDetails: reads body, parent and every comment page, oldest commen
     body: 'body of 7',
     parent: 3,
     comments: ['first', 'second', 'third', 'fourth', 'fifth'],
+    commentSources: [
+      { login: null, url: commentUrl('first') },
+      ...['second', 'third', 'fourth', 'fifth'].map(commentSource),
+    ],
     commentCount: 5,
     commentsUnavailable: null,
   }]]);
@@ -1485,7 +1884,7 @@ test('fetchCardDetails: reads body, parent and every comment page, oldest commen
   assert.deepEqual(calls, [undefined, 'before=cursor-a', 'before=cursor-b']);
 });
 
-test('cardDetailsQuery asks for body, parent and the newest comment page with its backward cursor, one alias per card', () => {
+test('cardDetailsQuery asks for body, parent and the newest comment page with its backward cursor and each comment\'s address and author, one alias per card', () => {
   const query = cardDetailsQuery([7, 12]);
   assert.deepEqual(
     [...query.matchAll(/(\w+): issue\(number:(\d+)\) \{ \.\.\.CardDetails \}/g)].map(([, alias, number]) => [alias, number]),
@@ -1495,7 +1894,7 @@ test('cardDetailsQuery asks for body, parent and the newest comment page with it
   assert.ok(query.includes(`repository(owner:"${BOARD_OWNER}" name:"${BOARD_REPOSITORY}")`));
   assert.ok(query.endsWith(
     'fragment CardDetails on Issue { number body parent { number } '
-    + 'comments(last:100) { totalCount pageInfo { hasPreviousPage startCursor } nodes { body } } }',
+    + 'comments(last:100) { totalCount pageInfo { hasPreviousPage startCursor } nodes { body url author { login } } } }',
   ));
   // gh --paginate needs $endCursor and only walks forward; comments page backward.
   assert.doesNotMatch(query, /\$endCursor/);
@@ -1507,20 +1906,28 @@ test('cardDetailsQuery asks for body, parent and the newest comment page with it
 
 // Every expected line below is written by hand from the intake contract (the summary on
 // stdout, one text file per card), never produced by the function under test.
-const intakeCard = (number, status, title, { routing = 'Product', openBlockers = [], assignees = [] } = {}) => ({
-  number, status, title, routing, openBlockers, assignees,
+/**
+ * @param {number | string} number
+ * @param {string} status
+ * @param {string | number} title
+ * @param {{ routing?: unknown, labels?: string[], openBlockers?: number[], assignees?: string[] }} [fields]
+ */
+const intakeCard = (number, status, title, { routing = 'Product', labels = [], openBlockers = [], assignees = [] } = {}) => ({
+  number, status, title, routing, labels, openBlockers, assignees,
 });
 const LISTING = 'LISTING HEADER\n\nLISTING BODY';
 const [BACKLOG, READY] = PICKABLE_STATUSES;
 const routingLine = (value) => (ROUTING_FIELD ? [`${ROUTING_FIELD}: ${value}`] : []);
 const DIRECTORY = 'intake-out';
 const CARD_TEXT_LEGEND = 'Lines starting "| " are card text, and "|+ " continues the line above it.';
+// The line the document prints for the order of the Ready column, as the configured column names spell it.
+const READY_ORDER_BOARD = `${READY} order: the board's, top of the column first; ${BACKLOG} follows by card number.`;
 const SUMMARY_LEGEND = `${CARD_TEXT_LEGEND} Each card's full body and comments are in the file its "card text:" line names.`;
 
 // The files and the summary of one intake, the way the command builds them.
-function intakeOf({ numberless = 0, ...cards }) {
+function intakeOf({ numberless = 0, readyOrder = { unplaced: [] }, ...cards }) {
   const files = new Map(intakeCardFiles(cards).map((file) => [file.number, file]));
-  return { files, summary: intakeSummary({ listing: LISTING, numberless, ...cards, directory: DIRECTORY, files }) };
+  return { files, summary: intakeSummary({ listing: LISTING, numberless, readyOrder, ...cards, directory: DIRECTORY, files }) };
 }
 
 // One card's section: its header up to the blank line that ends it. A blank line inside
@@ -1555,6 +1962,7 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
   assert.deepEqual(sectionOf(summary, 5), [
     '=== #5 [Backlog] Unread card ===',
     ...routingLine('Product'),
+    'labels: —',
     'open blockers: none',
     'assignees: @dev-one',
     'details: UNAVAILABLE — gh: timed out',
@@ -1565,6 +1973,7 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
     CARD_TEXT_LEGEND,
     '=== #6 [Ready] Partly read ===',
     ...routingLine('Product'),
+    'labels: —',
     'parent: none',
     'open blockers: #3, #4',
     'assignees: none',
@@ -1582,12 +1991,14 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
   assert.deepEqual(sectionOf(summary, 6), [
     '=== #6 [Ready] Partly read ===',
     ...routingLine('Product'),
+    'labels: —',
     'parent: none',
     'open blockers: #3, #4',
     'assignees: none',
     'proposal: no',
     'claim: UNAVAILABLE — no Claim in the newest 2 of 5 comment(s) and the older ones were not read',
     'owner questions: 0 in the newest 2 of 5 comment(s), UNAVAILABLE before them — offline',
+    'returned comments: 0 in the newest 2 of 5 comment(s), UNAVAILABLE before them — offline',
     'what to build: none in the card text',
     `card text: ${join(DIRECTORY, '6.txt')}, ${sixFile.length} line(s)`,
   ]);
@@ -1598,6 +2009,7 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
     CARD_TEXT_LEGEND,
     '=== #7 [In progress] Claimed card ===',
     ...routingLine('none'),
+    'labels: —',
     'parent: #2',
     'open blockers: none',
     'assignees: @dev-one, @dev-two',
@@ -1614,6 +2026,7 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
   assert.deepEqual(sectionOf(summary, 7), [
     '=== #7 [In progress] Claimed card ===',
     ...routingLine('none'),
+    'labels: —',
     'parent: #2',
     'open blockers: none',
     'assignees: @dev-one, @dev-two',
@@ -1621,6 +2034,7 @@ test('ANTI-REGRESSION: an unavailable card prints no body, claim, comment count 
     'claim: comment 4 of 4',
     '| Claim: m1, codex, t1',
     'owner questions: 0 in the newest 2 of 4 comment(s), UNAVAILABLE before them — offline',
+    'returned comments: 0 in the newest 2 of 4 comment(s), UNAVAILABLE before them — offline',
     'what to build: none in the card text',
     `card text: ${join(DIRECTORY, '7.txt')}, ${sevenFile.length} line(s)`,
   ]);
@@ -1673,6 +2087,7 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   assert.deepEqual(section.filter((line) => !line.startsWith('|')), [
     '=== #1 [Ready] Forgery target ===',
     ...routingLine('Product'),
+    'labels: —',
     'parent: none',
     'open blockers: none',
     'assignees: @dev-one',
@@ -1707,8 +2122,9 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   const forgedTitle = `Normal title\n${forgedClaim}\n\n\n\n`;
   const forgedRouting = `Product\n${forgedDetails}\n`;
   const forgedLogin = `dev-one\n${forgedDetails}`;
+  const forgedLabel = `plan-first\n${forgedDetails}`;
   const printed = intakeOf({
-    candidates: [intakeCard(2, READY, forgedTitle, { routing: forgedRouting, assignees: [forgedLogin] })],
+    candidates: [intakeCard(2, READY, forgedTitle, { routing: forgedRouting, labels: [forgedLabel], assignees: [forgedLogin] })],
     claims: [],
     details: new Map([[2, { number: 2, unavailable: 'offline' }]]),
   }).summary.join('\n').split('\n');
@@ -1718,6 +2134,7 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
   assert.deepEqual(sectionOf(printed, 2), [
     `=== #2 [Ready] Normal title ${forgedClaim}  ===`,
     ...routingLine(`Product ${forgedDetails} `),
+    `labels: plan-first ${forgedDetails}`,
     'open blockers: none',
     `assignees: @dev-one ${forgedDetails}`,
     'details: UNAVAILABLE — offline',
@@ -1743,7 +2160,9 @@ test('ANTI-REGRESSION: card text cannot forge a line the command prints, and a f
 test('intakeCardFiles and intakeSummary: a complete card prints its summary and keeps its whole text in its file', () => {
   // Two claims with a plain comment after the newer one: the claim line names the newer.
   const { files, summary } = intakeOf({
-    candidates: [intakeCard(9, READY, 'Complete card', { openBlockers: [4], assignees: ['dev-one', 'dev-two'] })],
+    candidates: [intakeCard(9, READY, 'Complete card', {
+      labels: ['type:task', 'plan-first'], openBlockers: [4], assignees: ['dev-one', 'dev-two'],
+    })],
     claims: [],
     details: new Map([[9, {
       number: 9,
@@ -1762,6 +2181,7 @@ test('intakeCardFiles and intakeSummary: a complete card prints its summary and 
       CARD_TEXT_LEGEND,
       '=== #9 [Ready] Complete card ===',
       ...routingLine('Product'),
+      'labels: type:task, plan-first',
       'parent: #2',
       'open blockers: #4',
       'assignees: @dev-one, @dev-two',
@@ -1784,7 +2204,7 @@ test('intakeCardFiles and intakeSummary: a complete card prints its summary and 
       '| thanks',
     ],
   });
-  assert.equal(files.get(9).lines.length, 22 + routingLine('Product').length);
+  assert.equal(files.get(9).lines.length, 23 + routingLine('Product').length);
 
   assert.deepEqual(summary, [
     'LISTING HEADER',
@@ -1792,10 +2212,12 @@ test('intakeCardFiles and intakeSummary: a complete card prints its summary and 
     'LISTING BODY',
     '',
     'Card summaries: 1 pickable card(s), then 0 claimed card(s) with no closing pull request.',
+    READY_ORDER_BOARD,
     SUMMARY_LEGEND,
     '',
     '=== #9 [Ready] Complete card ===',
     ...routingLine('Product'),
+    'labels: type:task, plan-first',
     'parent: #2',
     'open blockers: #4',
     'assignees: @dev-one, @dev-two',
@@ -1803,11 +2225,35 @@ test('intakeCardFiles and intakeSummary: a complete card prints its summary and 
     'claim: comment 3 of 4',
     '| Claim: m1, codex, t1',
     'owner questions: 0',
+    'returned comments: 0',
     'what to build: none in the card text',
-    `card text: ${join(DIRECTORY, '9.txt')}, ${22 + routingLine('Product').length} line(s)`,
+    `card text: ${join(DIRECTORY, '9.txt')}, ${23 + routingLine('Product').length} line(s)`,
     '',
-    `board intake: end of document, ${19 + routingLine('Product').length} line(s).`,
+    `board intake: end of document, ${22 + routingLine('Product').length} line(s).`,
   ]);
+});
+
+test('intakeSummary states the order the document gives Ready cards', () => {
+  const read = { body: '', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
+  const summaryFor = (readyOrder) => intakeOf({
+    candidates: [intakeCard(1, READY, 'A card')],
+    claims: [],
+    details: new Map([[1, { ...read, number: 1 }]]),
+    readyOrder,
+  }).summary;
+  const summaryLine = 'Card summaries: 1 pickable card(s), then 0 claimed card(s) with no closing pull request.';
+  // The line stands directly after the one it qualifies, each form written by hand from the contract.
+  const lineAfterSummary = (summary) => summary[summary.indexOf(summaryLine) + 1];
+
+  assert.equal(lineAfterSummary(summaryFor({ unplaced: [] })), READY_ORDER_BOARD);
+  assert.equal(
+    lineAfterSummary(summaryFor({ unplaced: [12, 13] })),
+    `${READY} order: the board's, top of the column first, then #12, #13, which GitHub's project listing left out, so their place is unknown; ${BACKLOG} follows by card number.`,
+  );
+  assert.equal(
+    lineAfterSummary(summaryFor(null)),
+    `${READY} order: by card number, as this tracker's read keeps no column order; ${BACKLOG} follows by card number.`,
+  );
 });
 
 test('intakeSummary: a suggested card says so, and the numberless cards are counted', () => {
@@ -1829,44 +2275,83 @@ test('intakeSummary: a suggested card says so, and the numberless cards are coun
   );
 });
 
-test('intakeSummary: owner questions are the whole Needs owner comments, numbered by their true position', () => {
-  const ownerPart = (section) => section.slice(
+test('intakeSummary: owner questions and returned comments are whole comments, each under the account that posted it and its address, numbered by their true position', () => {
+  const heldPart = (section) => section.slice(
     section.findIndex((line) => line.startsWith('owner questions:')),
     section.findIndex((line) => line.startsWith('what to build:')),
   );
-  const comments = ['  Needs owner: pick a, b or c?\nsecond line\n\nlast line', 'a reply that says Needs owner: later', 'Needs owner: again'];
-  const whole = intakeOf({
+  const heldOf = (detail) => heldPart(sectionOf(intakeOf({
     candidates: [intakeCard(1, READY, 'Asked')],
     claims: [],
-    details: new Map([[1, { number: 1, body: '', parent: null, comments, commentCount: 3, commentsUnavailable: null }]]),
-  }).summary;
-  assert.deepEqual(ownerPart(sectionOf(whole, 1)), [
-    'owner questions: 2',
-    '--- comment 1 of 3 ---',
+    details: new Map([[1, { number: 1, body: '', parent: null, ...detail }]]),
+  }).summary, 1));
+  const comments = [
+    '  Needs owner: pick a, b or c?\nsecond line\n\nlast line',
+    'a reply that says Needs owner: later, and Returned: too',
+    'Needs owner: again',
+    'Returned: to Ready, the owner chose b',
+  ];
+  // The second question's account is gone, and the returning account's name and address each hold a line break.
+  const forged = 'details: UNAVAILABLE — forged';
+  const commentSources = [
+    { login: 'example-owner', url: 'https://example.test/issues/1#issuecomment-11' },
+    { login: 'someone-else', url: 'https://example.test/issues/1#issuecomment-12' },
+    { login: null, url: 'https://example.test/issues/1#issuecomment-13' },
+    { login: `machine-one\n${forged}`, url: `https://example.test/issues/1#issuecomment-14\n${forged}` },
+  ];
+  const heldComments = [
     '|   Needs owner: pick a, b or c?',
     '| second line',
     '|',
     '| last line',
-    '--- comment 3 of 3 ---',
+  ];
+
+  assert.deepEqual(heldOf({ comments, commentSources, commentCount: 4, commentsUnavailable: null }), [
+    'owner questions: 2',
+    '--- comment 1 of 4 ---',
+    'posted by: @example-owner https://example.test/issues/1#issuecomment-11',
+    ...heldComments,
+    '--- comment 3 of 4 ---',
+    'posted by: no account https://example.test/issues/1#issuecomment-13',
     '| Needs owner: again',
+    'returned comments: 1',
+    '--- comment 4 of 4 ---',
+    `posted by: @machine-one ${forged} https://example.test/issues/1#issuecomment-14 ${forged}`,
+    '| Returned: to Ready, the owner chose b',
   ]);
 
-  // Only the newest 3 of 7 comments were read: the heading says the older four are unknown.
-  const partial = intakeOf({
-    candidates: [intakeCard(2, READY, 'Asked, partly read')],
-    claims: [],
-    details: new Map([[2, { number: 2, body: '', parent: null, comments, commentCount: 7, commentsUnavailable: 'offline' }]]),
-  }).summary;
-  assert.deepEqual(ownerPart(sectionOf(partial, 2)), [
-    'owner questions: 2 in the newest 3 of 7 comment(s), UNAVAILABLE before them — offline',
-    '--- comment 5 of 7 ---',
-    '|   Needs owner: pick a, b or c?',
-    '| second line',
-    '|',
-    '| last line',
-    '--- comment 7 of 7 ---',
+  // Only the newest 4 of 8 comments were read: each heading says the older four are unknown.
+  assert.deepEqual(heldOf({ comments, commentSources, commentCount: 8, commentsUnavailable: 'offline' }), [
+    'owner questions: 2 in the newest 4 of 8 comment(s), UNAVAILABLE before them — offline',
+    '--- comment 5 of 8 ---',
+    'posted by: @example-owner https://example.test/issues/1#issuecomment-11',
+    ...heldComments,
+    '--- comment 7 of 8 ---',
+    'posted by: no account https://example.test/issues/1#issuecomment-13',
     '| Needs owner: again',
+    'returned comments: 1 in the newest 4 of 8 comment(s), UNAVAILABLE before them — offline',
+    '--- comment 8 of 8 ---',
+    `posted by: @machine-one ${forged} https://example.test/issues/1#issuecomment-14 ${forged}`,
+    '| Returned: to Ready, the owner chose b',
   ]);
+
+  // A tracker whose read gives no account or address says so, never a blank or a guessed name.
+  assert.deepEqual(heldOf({ comments: comments.slice(2), commentCount: 2, commentsUnavailable: null }), [
+    'owner questions: 1',
+    '--- comment 1 of 2 ---',
+    "posted by: not given by this tracker's read",
+    '| Needs owner: again',
+    'returned comments: 1',
+    '--- comment 2 of 2 ---',
+    "posted by: not given by this tracker's read",
+    '| Returned: to Ready, the owner chose b',
+  ]);
+
+  // A tracker that cannot count them prints its one advisory line and no count of either kind.
+  assert.deepEqual(
+    heldOf({ comments, commentCount: 4, commentsUnavailable: null, ownerQuestions: 'read each comment in the card text' }),
+    ['owner questions: read each comment in the card text'],
+  );
 });
 
 // The What to build lines of a card holding this body.
@@ -1970,6 +2455,62 @@ test('612 fix H: a fence closer followed by a no-break space does not close the 
   );
 });
 
+// CommonMark 0.31: setext headings (4.3), the ATX closing sequence needs a space or tab before it and an empty heading is a heading (4.2), and HTML blocks (4.6).
+test('655 fix 1: a What to build setext heading gives the read-card-text advisory, never none', () => {
+  assert.deepEqual(
+    whatToBuild('Intro\n\nWhat to build\n-------------\nBuild it.\n\n## Acceptance\nx'),
+    ['what to build: an underlined heading may start or end the section, read the card text'],
+  );
+});
+
+test('655 fix 1: a setext heading inside the What to build section gives the read-card-text advisory', () => {
+  assert.deepEqual(
+    whatToBuild('## What to build\nreal\n\nNext\n----\nafter'),
+    ['what to build: an underlined heading may start or end the section, read the card text'],
+  );
+});
+
+test('655 fix 2: closing hashes with no space before them are heading text, so the heading is not What to build', () => {
+  assert.deepEqual(whatToBuild('## What to build####\nx'), ['what to build: none in the card text']);
+});
+
+test('655 fix 4: an HTML comment before the section ends gives the read-card-text advisory', () => {
+  assert.deepEqual(
+    whatToBuild('<!--\n## What to build\nExample task\n-->\n\n## What to build\nActual task'),
+    ['what to build: an HTML block comes before the section ends, read the card text'],
+  );
+});
+
+test("655 fix 5: an empty heading of the section's level ends the What to build section", () => {
+  assert.deepEqual(whatToBuild('## What to build\nreal\n##\nunrelated'), ['what to build: 1 line(s)', '| real']);
+});
+
+test('655 fix 4: an HTML comment inside a list item before the section ends gives the read-card-text advisory', () => {
+  assert.deepEqual(whatToBuild('- <!--\n  ## What to build\n  Example task\n  -->\n\n## What to build\nActual task'), [
+    'what to build: an HTML block comes before the section ends, read the card text',
+  ]);
+});
+
+test('655 fix 1: a What to build setext heading inside a list item gives the read-card-text advisory', () => {
+  assert.deepEqual(whatToBuild('- What to build\n  -------------\n  Actual task'), [
+    'what to build: an underlined heading may start or end the section, read the card text',
+  ]);
+});
+
+test('655 fix 1: a What to build heading inside a list item or block quote gives the read-card-text advisory', () => {
+  const advisory = ['what to build: a heading inside a list or quote may start the section, read the card text'];
+  assert.deepEqual(whatToBuild('- ## What to build\n  Actual task'), advisory);
+  assert.deepEqual(whatToBuild('> ## What to build\n> Actual task'), advisory);
+});
+
+test('655 fix 1: a What to build heading underlined with one hyphen gives the read-card-text advisory', () => {
+  const advisory = ['what to build: an underlined heading may start or end the section, read the card text'];
+  assert.deepEqual(whatToBuild('What to build\n-\nActual task'), advisory);
+  assert.deepEqual(whatToBuild('- What to build\n  -\n  Actual task'), advisory);
+  assert.deepEqual(whatToBuild('> What to build\n> -\n> Actual task'), advisory);
+  assert.deepEqual(whatToBuild('## What to build\nreal\n\nNext\n-\nafter'), advisory);
+});
+
 test('612 fix C: a card whose title is not a string prints its section with proposal: no and does not stop the intake', () => {
   const read = { body: '', parent: null, comments: [], commentCount: 0, commentsUnavailable: null };
   const { summary } = intakeOf({
@@ -2006,206 +2547,54 @@ test('intakeCardFileName: a card number or an identifier names a file, a hostile
   assert.deepEqual(files.map(({ number, name }) => [number, name]), [['../x', null]]);
 });
 
-// ── approval mode ────────────────────────────────────────────────────────────
-// `--approval check <card>...` reads advance approvals through two injected runners and no board:
-// the board ghExec throws, so a case that reads the board fails loud. The runners answer GitHub's
-// own GraphQL field names for acme/widgets, and the expected lines are written by hand from the
-// fixed approval diagnostics and exit codes. Each run is given its environment, so a run mark
-// in the environment running the suite cannot change a line.
-
-const APPROVAL_REPOSITORY = { id: 'R_kgDOwidgets', nameWithOwner: 'acme/widgets' };
-const APPROVAL_RECORD_URL = 'https://github.com/acme/widgets/issues/7#issuecomment-1';
-const APPROVAL_USAGE = '--approval check <card>...';
-// The approval command runs advance-approval.mjs from the toolkit copy, so the checkout holding the running code is
-// read through the copy's scripts/lib, never the process directory.
-const APPROVAL_CODE_DIRECTORY = join(toolkit.root, 'scripts', 'lib');
-const APPROVAL_SETTING_CALLS = [
-  'git rev-parse --verify --quiet refs/remotes/origin/main^{commit}',
-  `git ls-tree --full-tree --format=%(objectmode) ${'a'.repeat(40)} -- .agents/factory-settings.json`,
-  `git show ${'a'.repeat(40)}:.agents/factory-settings.json`,
-];
-const APPROVAL_ANCESTRY_READ = `git -C ${APPROVAL_CODE_DIRECTORY} rev-list --left-right --count HEAD...${'a'.repeat(40)}`;
-const APPROVAL_SETTING_UNAVAILABLE = 'pre-approved run setting unavailable on fetched main; fetch origin and verify .agents/factory-settings.json on main';
-// A key the validator in this copy refuses and names, so a leaked refusal would show the marker.
-const APPROVAL_REFUSED_SETTINGS = '{"version":1,"preApprovedRun":true,"synthetic-setting-secret":true}';
-
-// The two approval runners and the calls they record: viewer `zain`, card 7 holding a valid record, card 8 none,
-// card 9 an unavailable read.
-function approvalRunners(settings = {}) {
-  const {
-    settingOid = 'a'.repeat(40),
-    settingMode = '100644\n',
-    settingText = '{"version":1,"preApprovedRun":true}',
-    settingError,
-    jobText,
-    ancestry,
-  } = settings;
-  const calls = [];
-  const exec = (callArgs) => {
-    calls.push(`gh ${callArgs.join(' ')}`);
-    const card = Number(callArgs[callArgs.indexOf('-F') + 1].replace('number=', ''));
-    if (card === 9) throw new Error('gh: HTTP 502');
-    const comments = card === 7
-      ? [{ author: { login: 'zain' }, createdAt: '2026-11-03T09:00:00Z', lastEditedAt: null, url: APPROVAL_RECORD_URL, body: 'Approved: card=7 edited=none' }]
-      : [];
-    return JSON.stringify({
-      data: {
-        viewer: { login: 'zain' },
-        repository: {
-          id: APPROVAL_REPOSITORY.id,
-          issue: {
-            state: 'OPEN',
-            title: 'Show the logo',
-            lastEditedAt: null,
-            timelineItems: { nodes: [] },
-            comments: { pageInfo: { hasNextPage: false }, nodes: comments },
-          },
-        },
-      },
-    });
-  };
-  const git = (callArgs) => {
-    calls.push(`git ${callArgs.join(' ')}`);
-    const command = JSON.stringify(callArgs);
-    if (command === JSON.stringify(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main^{commit}'])) {
-      if (settingError) throw settingError;
-      return `${settingOid}\n`;
+test('markerOf: a card carrying show-me-first in any letter case is marked, one without is not, a card off the board or with a label that is not text throws, and a Linear identifier is matched', () => {
+  const items = [
+    { content: { number: 7 }, labels: ['type:task', 'show-me-first'] },
+    { content: { number: 8 }, labels: ['type:task'] },
+    { content: { number: 'ENG-12' }, labels: ['show-me-first'] },
+    { content: { number: 'ENG-13' }, labels: [] },
+    { content: { number: 10 }, labels: ['type:task', undefined] },
+    { content: { number: 11 }, labels: [{}] },
+    { content: { number: 12 }, labels: ['Show-Me-First'] },
+  ].map(normalizeItem);
+  assert.equal(markerOf(7, items), true);
+  assert.equal(markerOf(8, items), false);
+  assert.equal(markerOf('ENG-12', items), true);
+  assert.equal(markerOf('ENG-13', items), false);
+  assert.throws(() => markerOf(9, items), { message: 'card 9 is not on the board' });
+  assert.throws(() => markerOf('ENG-99', items), { message: 'card ENG-99 is not on the board' });
+  // A label that is not text is unreadable marker data, never an absent marker, and a near-miss spelling still marks.
+  const unreadable = 'throws naming the card and its unreadable labels';
+  const outcome = (card) => {
+    try {
+      return markerOf(card, items);
+    } catch (error) {
+      const { message } = /** @type {Error} */ (error);
+      return new RegExp(`\\bcard ${card}\\b`).test(message) && /labels cannot be read|unreadable labels/.test(message)
+        ? unreadable : `throws ${message}`;
     }
-    if (command === JSON.stringify(['ls-tree', '--full-tree', '--format=%(objectmode)', settingOid, '--', '.agents/factory-settings.json'])) return settingMode;
-    if (command === JSON.stringify(['show', `${settingOid}:.agents/factory-settings.json`])) return settingText;
-    if (command === JSON.stringify(['show', 'HEAD:.agents/factory-settings.json'])) return jobText;
-    if (ancestry !== undefined && command === JSON.stringify(['-C', APPROVAL_CODE_DIRECTORY, 'rev-list', '--left-right', '--count', `HEAD...${settingOid}`])) {
-      if (ancestry instanceof Error) throw ancestry;
-      return ancestry;
-    }
-    throw new Error(`unexpected approval-mode git read: ${callArgs.join(' ')}`);
   };
-  return { exec, git, calls };
-}
+  assert.deepEqual([10, 11, 12].map(outcome), [unreadable, unreadable, true]);
+});
 
-function approvalRun(args, env = {}, settings = {}) {
-  const { exec, git, calls } = approvalRunners(settings);
-  let stdout = '';
-  let stderr = '';
-  const boardRead = (callArgs) => {
-    throw new Error(`the approval mode must not read the board: ${callArgs.join(' ')}`);
-  };
-  const output = {
-    log: (line) => { stdout += `${line}\n`; },
-    error: (line) => { stderr += `${line}\n`; },
-  };
-  const status = boardMain(args, { ghExec: boardRead, output, env, approval: { exec, git, repository: APPROVAL_REPOSITORY } });
-  return { status, stdout, stderr, calls };
-}
+test('every request of one board read shares one retry budget', () => {
+  let t = 0;
+  const pauses = [];
+  const { exec } = boardReadExec({
+    board: () => {
+      t += 89_500;
+      return [leanBoardPage([RECOVERY_LISTED])];
+    },
+    issues: () => { throw ghFailure('gh: HTTP 503\n'); },
+  });
 
-function assertSettingRefusal(read, stdout, status, calls = APPROVAL_SETTING_CALLS) {
-  assert.equal(read.stdout, stdout);
-  assert.equal(read.status, status, read.stderr);
-  assert.equal(read.stderr, '');
-  assert.doesNotMatch(read.stdout, /post:|synthetic-setting-secret|synthetic\.invalid/);
-  assert.deepEqual(read.calls, calls);
-}
-
-test("ANTI-REGRESSION: board --approval check prints each card's advance approval line and uses exit 0 for completed judgements, 2 for unavailable reads, and 1 with usage for rejected arguments", () => {
-  const read = approvalRun(['--approval', 'check', '7', '8']);
-  assert.equal(read.status, 0, read.stderr);
-  assert.equal(
-    read.stdout,
-    `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record; post: Approved: card=8 edited=none\n`,
+  assert.throws(
+    () => fetchBoard(exec, { budget: { now: () => t, endsAt: 90_000 }, pause: (ms) => pauses.push(ms) }),
+    (error) => {
+      const failure = /** @type {NodeJS.ErrnoException} */ (error);
+      return failure.code === 'GH_UNAVAILABLE'
+        && failure.message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.';
+    },
   );
-  assert.equal(read.stderr, '');
-
-  const unread = approvalRun(['--approval', 'check', '8', '9']);
-  assert.equal(unread.status, 2, unread.stderr);
-  assert.equal(unread.stdout, 'not approved 8: no record; post: Approved: card=8 edited=none\nunavailable 9: gh: HTTP 502\n');
-
-  for (const args of [
-    ['--approval'],
-    ['--approval', 'check'],
-    ['--approval', 'check', '0'],
-    ['--approval', 'check', 'x'],
-    ['--approval', 'line', '7'],
-    ['--approval', 'check', '7', '--json'],
-  ]) {
-    const refused = approvalRun(args);
-    const label = args.join(' ');
-    assert.equal(refused.status, 1, label);
-    assert.match(refused.stderr, /^board: /, label);
-    assert.ok(refused.stderr.includes(APPROVAL_USAGE), `${label}: ${refused.stderr}`);
-    assert.equal(refused.stdout, '', label);
-    assert.deepEqual(refused.calls, [], label);
-  }
-});
-
-test('ANTI-REGRESSION: board --approval check leaves out the post text under either run mark', () => {
-  for (const mark of [{ PRE_APPROVED_RUN_SESSION: '2026-11-04T12:00:00Z' }, { PRODUCT_MANAGER_RUN_SESSION: '1' }]) {
-    const read = approvalRun(['--approval', 'check', '7', '8'], mark);
-    const label = JSON.stringify(mark);
-    assert.equal(read.status, 0, `${label}: ${read.stderr}`);
-    assert.equal(read.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record\n`, label);
-  }
-});
-
-test('ANTI-REGRESSION: fetched-main pre-approved setting gates ordinary approval checks', () => {
-  const disabled = 'pre-approved run disabled on fetched main; preApprovedRun must be true in .agents/factory-settings.json on main';
-  const mainOff = { settingText: '{"version":1,"preApprovedRun":false}', jobText: '{"version":1,"preApprovedRun":true}' };
-  const mainOn = { jobText: '{"version":1,"preApprovedRun":false}' };
-
-  const off = approvalRun(['--approval', 'check', '7'], {}, mainOff);
-  assertSettingRefusal(off, `not approved 7: ${disabled}\n`, 0);
-
-  const enabled = approvalRun(['--approval', 'check', '7', '8'], {}, mainOn);
-  assert.equal(enabled.stdout, `approved 7 2026-11-03T09:00:00Z ${APPROVAL_RECORD_URL}\nnot approved 8: no record; post: Approved: card=8 edited=none\n`);
-  assert.equal(enabled.status, 0, enabled.stderr);
-  assert.equal(enabled.stderr, '');
-  assert.deepEqual(enabled.calls.filter((call) => call.startsWith('git ')), APPROVAL_SETTING_CALLS);
-  assert.equal(enabled.calls.filter((call) => call.startsWith('gh ')).length, 2);
-  assert.equal(enabled.calls.some((call) => call.includes('HEAD:.agents/factory-settings.json')), false);
-
-  for (const settings of [
-    { settingMode: '' },
-    { settingText: '{"version":1}' },
-    mainOff,
-  ]) {
-    for (const cards of [['7'], ['7', '8']]) {
-      // The first invocation already covers the single-card false setting.
-      if (settings === mainOff && cards.length === 1) continue;
-      const read = approvalRun(['--approval', 'check', ...cards], {}, settings);
-      const stdout = cards.map((card) => `not approved ${card}: ${disabled}\n`).join('');
-      assertSettingRefusal(read, stdout, 0, settings.settingMode === '' ? APPROVAL_SETTING_CALLS.slice(0, 2) : APPROVAL_SETTING_CALLS);
-    }
-  }
-
-  const reserved = approvalRun(['--approval', 'check', '7', '8'], { PRODUCT_MANAGER_RUN_SESSION: '1' }, mainOff);
-  assertSettingRefusal(reserved, `not approved 7: ${disabled}\nnot approved 8: ${disabled}\n`, 0);
-
-  for (const settings of [
-    { settingText: '{"version":1,"preApprovedRun":synthetic-setting-secret}' },
-    { settingError: Object.assign(new Error('synthetic-setting-secret https://synthetic.invalid/private'), { code: 'PRE_APPROVED_RUN_DISABLED' }) },
-  ]) {
-    const read = approvalRun(['--approval', 'check', '7', '8'], {}, settings);
-    assertSettingRefusal(read, `unavailable 7: ${APPROVAL_SETTING_UNAVAILABLE}\nunavailable 8: ${APPROVAL_SETTING_UNAVAILABLE}\n`, 2, settings.settingError ? APPROVAL_SETTING_CALLS.slice(0, 1) : [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ]);
-  }
-});
-
-test('ANTI-REGRESSION: an approval check from a checkout behind fetched main names the out-of-date checkout where its code refuses the fetched-main settings', () => {
-  const behind = `pre-approved run setting unreadable by the checkout at ${dirname(dirname(APPROVAL_CODE_DIRECTORY))}, which is older than fetched main; bring that checkout up to date with fetched main, then retry`;
-  const read = approvalRun(['--approval', 'check', '7', '8'], {}, { settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '0\t3\n' });
-  assertSettingRefusal(read, `unavailable 7: ${behind}\nunavailable 8: ${behind}\n`, 2, [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ]);
-});
-
-test('ANTI-REGRESSION: an approval check keeps the unavailable message where the checkout is not behind fetched main or the fetched-main settings were never read', () => {
-  const secret = new Error('synthetic-setting-secret https://synthetic.invalid/private');
-  const refused = [...APPROVAL_SETTING_CALLS, APPROVAL_ANCESTRY_READ];
-  for (const [settings, calls] of [
-    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '0\t0\n' }, refused],
-    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '2\t0\n' }, refused],
-    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: '2\t3\n' }, refused],
-    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: secret }, refused],
-    [{ settingText: APPROVAL_REFUSED_SETTINGS, ancestry: 'synthetic-setting-secret\n' }, refused],
-    [{ settingError: secret, ancestry: '0\t3\n' }, APPROVAL_SETTING_CALLS.slice(0, 1)],
-    [{ settingMode: '120000\n', ancestry: '0\t3\n' }, APPROVAL_SETTING_CALLS.slice(0, 2)],
-  ]) {
-    assertSettingRefusal(approvalRun(['--approval', 'check', '7'], {}, settings), `unavailable 7: ${APPROVAL_SETTING_UNAVAILABLE}\n`, 2, calls);
-  }
+  assert.deepEqual(pauses, []);
 });

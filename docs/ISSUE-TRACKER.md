@@ -4,11 +4,11 @@
 
 Issues are GitHub Issues on `zaingulel/kestrel`, reached through `gh`. Planned work lives on the owner's Project 7 board, read with `node scripts/board.mjs`. `scripts/lib/board-config.mjs` owns the board schema and labels.
 
-Add a card with `node scripts/board-add.mjs <issue> <Status> <Workstream>`. The Workstream field uses the canonical options Go-to-market, Product and Platform: launch or commercial work, product work, and repository tooling respectively. Factory setup issue #2 belongs to Platform; the product specification [issue #11](https://github.com/zaingulel/kestrel/issues/11) belongs to Product. This routing convention decides no product features. Labels come from the repository's existing set; never create labels during issue filing. Every issue carries exactly one kind label from `KIND_LABELS`, plus existing area labels that fit. Native blocker and parent links follow the to-issues skill.
+Add a card with `node scripts/board-add.mjs <issue> <Status> <Workstream>`. The Workstream field uses the canonical options Go-to-market, Product and Platform: launch or commercial work, product work, and repository tooling respectively. Factory setup issue #2 belongs to Platform; the product specification [issue #11](https://github.com/zaingulel/kestrel/issues/11) belongs to Product. This routing convention decides no product features. Labels come from the repository's existing set; never create labels during issue filing. Every issue carries exactly one kind label from `KIND_LABELS`, plus existing area labels that fit. Native blocker and parent links follow the to-tickets skill.
 
 ## Issue body sections
 
-Kestrel adds no sections to the to-issues template. The to-issues skill owns filing and owner approval. Inactive documentation routines provide no exception to that approval.
+Kestrel adds no sections to the to-tickets template. The to-tickets skill owns filing and owner approval. Inactive documentation routines provide no exception to that approval.
 
 ## Triage labels
 
@@ -16,7 +16,7 @@ Board Status is the triage state; there are no local triage labels. An upstream 
 
 ## Publishing specifications
 
-The to-spec skill publishes one epic issue through to-issues, including owner approval, and cards it in Backlog. The owner decomposes it into linked build cards. No product implementation precedes owner discovery and drilling.
+The to-spec skill publishes one epic issue through to-tickets, including owner approval, and cards it in Backlog. The owner decomposes it into linked build cards. No product implementation precedes owner discovery and drilling.
 
 ## Wayfinding operations
 

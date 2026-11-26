@@ -79,6 +79,14 @@ test('Codex Terra high is accepted and unknown models remain rejected', () => {
   assert.deepEqual(checkCodexAgentSource('reviewer.toml', terra), []);
 });
 
+test('Codex Sol 6.2 and Astra 6.2 are accepted and unknown models remain rejected', () => {
+  const sol = GOOD_TOML.replace('model = "gpt-6.1-sol"', 'model = "gpt-6.2-sol"');
+  const astra = GOOD_TOML.replace('name = "reviewer"', 'name = "oracle"').replace('model = "gpt-6.1-sol"', 'model = "gpt-6.2-astra"');
+  assert.deepEqual(checkCodexAgentSource('reviewer.toml', sol), []);
+  assert.deepEqual(checkCodexAgentSource('oracle.toml', astra), []);
+  assert.match(checkCodexAgentSource('reviewer.toml', sol.replace('gpt-6.2-sol', 'gpt-6.3-sol')).join('\n'), /unknown model `gpt-6.3-sol`/);
+});
+
 test('Codex format failures are named: unclosed block, missing field, bad name, sandbox, unrecognized line', () => {
   assert.match(checkCodexAgentSource('reviewer.toml', GOOD_TOML.replace(/\n"""\n$/, '\n')).join('\n'), /never closes/);
   assert.match(checkCodexAgentSource('reviewer.toml', GOOD_TOML.replace('model = "gpt-6.1-sol"\n', '')).join('\n'), /missing required TOML field `model`/);
@@ -114,7 +122,7 @@ test('the live registries in this repository are clean', () => {
 });
 
 test('live runtime seats pin read-only non-writers, writable builders, and Claude plan mode only for planners', () => {
-  const readOnly = ['architect', 'explorer', 'plan-reviewer', 'oracle', 'reviewer', 'security-reviewer'];
+  const readOnly = ['architect', 'explorer', 'plan-reviewer', 'oracle', 'reviewer', 'reviewer-supplemental', 'security-reviewer'];
   const builders = ['builder-lite', 'builder', 'builder-max'];
   if (PRESENT.includes('codex')) {
     for (const seat of readOnly) {
@@ -156,6 +164,18 @@ test('ANTI-REGRESSION: the costliest model on a seat outside its named seats is 
   assert.deepEqual(checkSeatPolicy('builder.toml', 'model = "gpt-6-astra-mini"\n'), []);
 });
 
+// The seat names are written out here from AGENTS.md, never imported, so a change to the module's lists cannot move it.
+// Mutation: match only gpt-6-astra and the builder cases pass unreported, so this goes red.
+test('ANTI-REGRESSION: every Astra version sits only on the architect, oracle and security-reviewer seats', () => {
+  for (const model of ['gpt-6.2-astra', 'gpt-7-astra']) {
+    const problems = checkSeatPolicy('builder.toml', `model = "${model}"\n`);
+    assert.equal(problems.length, 1, model);
+    assert.match(problems[0], /^builder\.toml: the costliest Codex model may sit only on the architect, oracle and security-reviewer seats; found /, model);
+  }
+  assert.deepEqual(checkSeatPolicy('oracle.toml', 'model = "gpt-6.2-astra"\n'), []);
+  assert.deepEqual(checkSeatPolicy('builder.toml', 'model = "gpt-6.2-astra-mini"\n'), []);
+});
+
 // The seat name is written out here from AGENTS.md, never imported, so a change to the module's list cannot move it.
 // Mutation: put security-reviewer back among the seats that may hold the costliest Claude model, and this goes red.
 test('ANTI-REGRESSION: the costliest Claude model is refused on the security-reviewer seat', () => {
@@ -185,7 +205,7 @@ test('a seat the costliest model may sit on may hold it or a cheaper known model
 // comparison, check only `oracle`, or take the first of two lines, and this goes red.
 test('ANTI-REGRESSION: the oracle is refused a turn limit above 90, the security-reviewer one above 150, and either one that is missing or malformed', () => {
   const seatWith = (seat, limitLines) => `---\nname: ${seat}\nmodel: opus\n${limitLines}---\nBody.\n`;
-  for (const [seat, cap, above] of [['oracle', 90, ['maxTurns: 91\n', 'maxTurns: 150\n']], ['security-reviewer', 150, ['maxTurns: 151\n', 'maxTurns: 200\n']]]) {
+  for (const [seat, cap, above] of /** @type {[string, number, string[]][]} */ ([['oracle', 90, ['maxTurns: 91\n', 'maxTurns: 150\n']], ['security-reviewer', 150, ['maxTurns: 151\n', 'maxTurns: 200\n']]])) {
     const refused = [...above,
       `maxTurns: ${'9'.repeat(400)}\n`, 'maxTurns: 0\n', `maxTurns: 0${cap}\n`, '',
       `maxTurns: "${cap}"\n`, `maxTurns:  ${cap}\n`, `maxTurns: ${cap} # cap\n`, 'maxTurns: 60\nmaxTurns: 120\n'];
@@ -224,8 +244,9 @@ test('ANTI-REGRESSION: no seat in this repository breaks the seat policy', () =>
 
 // The three builder seats share one body from `Workflow:` down. Mutation: drop the parity call from
 // checkAgentsDir (or the function's comparison) and a diverged seat passes the gate silently.
-test('the builder seats must share one charter from Workflow: down', () => {
+test('the builder seats must share one charter from Workflow: down', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'agents-parity-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const seat = (name, tail) => `---\nname: ${name}\ndescription: x\n---\nintro for ${name}\n\nWorkflow:\n1. shared\n${tail}`;
   writeFileSync(join(dir, 'builder.md'), seat('builder', ''));
   writeFileSync(join(dir, 'builder-max.md'), seat('builder-max', ''));
@@ -244,7 +265,7 @@ test('the real builder seats share one charter', { skip: without('claude') }, ()
 });
 
 // Keep the expected seat names independent of the production selector.
-const CHARTER_SEATS = ['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer'];
+const CHARTER_SEATS = ['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer', 'tester'];
 
 test('ANTI-REGRESSION: every first-party seat rejects a one-sided charter edit', () => {
   const root = mkdtempSync(join(tmpdir(), 'charter-parity-'));
@@ -336,9 +357,20 @@ test('the real seat charters match across runtimes', { skip: without('claude') |
       .filter(({ path }) => path.startsWith(`${dir}/`) && path.endsWith(extension))
       .map(({ path }) => path.slice(dir.length + 1, -extension.length))
       .sort();
-    assert.deepEqual(manifestNames, [...CHARTER_SEATS].sort(), `${dir} manifest entries must match the first-party seat oracle`);
+    assert.deepEqual(manifestNames, [...CHARTER_SEATS, 'reviewer-supplemental'].sort(), `${dir} manifest entries must match the first-party seat oracle`);
   }
   assert.deepEqual(checkCharterParity('.claude/agents', '.codex/agents'), []);
+  const root = mkdtempSync(join(tmpdir(), 'supplemental-charter-parity-'));
+  try {
+    const claude = join(root, 'claude');
+    const codex = join(root, 'codex');
+    mkdirSync(claude); mkdirSync(codex);
+    writeFileSync(join(claude, 'reviewer.md'), readFileSync('.claude/agents/reviewer-supplemental.md'));
+    writeFileSync(join(codex, 'reviewer.toml'), readFileSync('.codex/agents/reviewer-supplemental.toml'));
+    assert.deepEqual(checkCharterParity(claude, codex), [], 'supplemental reviewer charters must match');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // Price tag: recurring cost is two spawned CLI runs over a tiny fixture; retire it if the CLI stops being

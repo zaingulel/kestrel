@@ -51,7 +51,7 @@ function adoptToolkit(t, configSource) {
   return toolkit.root;
 }
 
-// A board with no routing field, as AlpGuard's is.
+// A board with no routing field.
 const NO_ROUTING_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
 export const BOARD_PROJECT_NUMBER = 7;
@@ -86,7 +86,7 @@ function recordingGh(rootKey, boardPage, currentValues = { Status: 'Ready' }, is
     if (args[0] === 'project' && args[1] === 'item-edit') return '';
     const query = args.find((arg) => arg.startsWith('query=')).slice('query='.length);
     // The repository issue walk finds no card the listing lacks.
-    if (boardRequestKind(args) === 'issues') return JSON.stringify([issuesPage([])]);
+    if (['issues', 'closedIssues'].includes(boardRequestKind(args))) return JSON.stringify([issuesPage([])]);
     if (args.includes('--paginate')) return JSON.stringify([boardPage]);
     const field = query.match(/field\(name:"([^"]+)"\)/);
     if (field) {
@@ -186,6 +186,7 @@ test('a user-owned config still roots every board query at user(login:"example-o
 });
 
 function recordingOutput() {
+  /** @type {{ log: string[], error: string[] }} */
   const lines = { log: [], error: [] };
   return { lines, log: (line) => lines.log.push(line), error: (line) => lines.error.push(line) };
 }
@@ -270,7 +271,7 @@ test('with no routing field, board-move names a board-add command that takes a S
   const { exec } = recordingGh('organization', await boardPageFor(root));
   assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
     args[3]?.includes('projectItems') ? offBoard : exec(args)), (error) => {
-    assert.equal(error.cause.message, 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>');
+    assert.equal(/** @type {Error & { cause: Error }} */ (error).cause.message, 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>');
     return true;
   });
 });
@@ -347,7 +348,7 @@ test('with a Workstream configured, a card missing it is still reported and boar
   assert.deepEqual(sent, []);
 });
 
-// A board with no routing field and a parked lane, as AlpGuard's is.
+// A board with no routing field and a parked lane.
 const PARKED_CONFIG = `export const BOARD_OWNER = 'acme-org';
 export const BOARD_OWNER_TYPE = 'organization';
 export const BOARD_PROJECT_NUMBER = 7;
@@ -375,7 +376,7 @@ const query = args.find((arg) => arg.startsWith('query=')) ?? '';
 const lane = process.env.FAKE_LANE ? JSON.parse(process.env.FAKE_LANE) : null;
 const itemReply = lane?.items[query.match(/issue\\(number:(\\d+)\\)/)?.[1]];
 import(${JSON.stringify(new URL('./board-fixtures.mjs', import.meta.url).href)}).then(({ boardRequestKind }) => {
-  if (boardRequestKind(args) === 'issues') {
+  if (['issues', 'closedIssues'].includes(boardRequestKind(args))) {
     process.stdout.write(process.env.FAKE_ISSUES);
   } else if (args[0] === 'api' && args[1] === 'graphql' && args.includes('--paginate') && args.includes('--slurp')) {
     process.stdout.write(process.env.FAKE_BOARD);
@@ -764,14 +765,16 @@ test('markdown board: intake shows the columns derived from real local, origin a
     'claim: branch job/7 (origin)',
   ]);
   assert.ok(document.includes('open blockers: #1'), run.stdout);
+  // Each card is named in its summary alone: no listing row repeats it.
+  assert.deepEqual(document.filter((line) => /^#\d+ \[/.test(line)), [], run.stdout);
   // The summary names each card's file; the body is in the file alone.
   assert.equal(document.includes('| Body of the card.'), false, run.stdout);
   assert.deepEqual(readdirSync(folder).sort(), ['1.txt', '2.txt', '3.txt', '5.txt', '7.txt']);
-  assert.ok(document.includes(`card text: ${join(folder, '3.txt')}, 10 line(s)`), run.stdout);
+  assert.ok(document.includes(`card text: ${join(folder, '3.txt')}, 11 line(s)`), run.stdout);
   assert.ok(readFileSync(join(folder, '3.txt'), 'utf8').split('\n').includes('| Body of the card.'));
   // The two pushed branches with no counted draft are the stalled claims; the Awaiting push card is not.
   const stalled = (number, word) =>
-    `#${number} [In progress] Card ${word} — claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready`;
+    `#${number} [In progress] Card ${word} — claimed in "In progress" with no closing pull request — unknown: no claim names a machine — if no session is building it, resume it or return it to Ready`;
   const stderr = run.stderr.split('\n');
   assert.deepEqual(stderr.filter((line) => line.startsWith('#')), [stalled(3, 'three'), stalled(7, 'seven')]);
   assert.ok(stderr.includes('⚠ BOARD DRIFT — cards out of sync with reality:'), run.stderr);
@@ -854,6 +857,12 @@ test('markdown board-move: a status the tracker cannot write or check, and a lan
     unknown.stderr,
     'board-move: failed to move #1 → "Parked" (already completed: none) — unknown Status "Parked" — valid options: Backlog, Ready, Done, In progress, Awaiting push, In review\n',
   );
+  const top = runScript(toolkit.root, 'board-move.mjs', ['--top', '1', 'Ready']);
+
+  assert.equal(top.status, 1, top.stderr);
+  assert.equal(top.stdout, '');
+  assert.equal(top.stderr, "board-move: --top needs the GitHub Projects tracker; this repository's tracker is markdown\n");
+  assert.deepEqual(readFileSync(join(toolkit.root, CARDS_DIR, '1.md')), cardBefore);
   const batch = runScript(toolkit.root, 'board-move.mjs', ['--batch', '1:Ready', '1:Parked']);
   assert.equal(batch.status, 1, batch.stderr);
   assert.equal(batch.stdout, '');
@@ -896,8 +905,9 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
   try {
     symlinkSync(outsideCard, join(worktree, CARDS_DIR, '1.md'), 'file');
   } catch (error) {
-    if (error.code !== 'EPERM') throw error;
-    t.skip(`this account cannot create a file symlink (${error.code})`);
+    const { code } = /** @type {NodeJS.ErrnoException} */ (error);
+    if (code !== 'EPERM') throw error;
+    t.skip(`this account cannot create a file symlink (${code})`);
     return;
   }
   const before = readFileSync(outsideCard);
@@ -1050,7 +1060,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   assert.deepEqual(other.sections, ['=== #3 [In progress] Card three ===']);
   assert.equal(other.claimed, claimCount(1));
   assert.deepEqual(other.claims, ['claim: branch job/3 (origin)']);
-  assert.ok(other.run.stderr.includes('#3 [In progress] Card three — claimed in "In progress" but no closing pull request exists'), other.run.stderr);
+  assert.ok(other.run.stderr.includes('#3 [In progress] Card three — claimed in "In progress" with no closing pull request — unknown: no claim names a machine — if no session is building it, resume it or return it to Ready'), other.run.stderr);
 
   // 4. The race: B's own job/3 does not hold origin's tip, so B's claim command refuses.
   git(cloneB, 'switch', '-c', `job/${N}`, 'main');
@@ -1127,6 +1137,12 @@ if (process.env.FAKE_LINEAR_FAIL) {
 after(() => linearTransport.cleanup());
 
 const linearState = (id, name, type) => ({ id, name, type });
+/**
+ * @param {string} identifier
+ * @param {string} title
+ * @param {{ id: string, name: string, type: string }} state
+ * @param {{ parent?: string | null, relations?: string[], description?: string | null }} [fields]
+ */
 const linearNode = (identifier, title, state, { parent = null, relations = [], description = null } = {}) => ({
   id: `id-${identifier}`,
   identifier,
@@ -1221,10 +1237,18 @@ test('linear board: the copied CLI prints the pick view and the intake document 
   ]);
   assert.ok(document.includes('parent: ENG-2'), intake.stdout);
   assert.ok(document.includes('open blockers: ENG-2'), intake.stdout);
+  // Linear's read keeps no column order, so the document says Ready is by card number.
+  assert.equal(
+    document[document.findIndex((line) => line.startsWith('Card summaries: ')) + 1],
+    "Ready order: by card number, as this tracker's read keeps no column order; Backlog follows by card number.",
+    intake.stdout,
+  );
+  // Each card is named in its summary alone: no listing row repeats it.
+  assert.deepEqual(document.filter((line) => line.startsWith('ENG-')), [], intake.stdout);
   // The summary names each card's file; the body and the comments are in the file alone.
   assert.equal(document.includes('| Do the twelve thing.'), false, intake.stdout);
   assert.deepEqual(readdirSync(folder).sort(), ['ENG-11.txt', 'ENG-12.txt', 'ENG-2.txt']);
-  assert.ok(document.includes(`card text: ${join(folder, 'ENG-12.txt')}, 11 line(s)`), intake.stdout);
+  assert.ok(document.includes(`card text: ${join(folder, 'ENG-12.txt')}, 12 line(s)`), intake.stdout);
   const cardFileLines = readFileSync(join(folder, 'ENG-12.txt'), 'utf8').split('\n');
   assert.ok(cardFileLines.includes('| Do the twelve thing.'), cardFileLines.join('\n'));
   assert.ok(cardFileLines.includes('| Comment on ENG-12'), cardFileLines.join('\n'));
@@ -1293,16 +1317,27 @@ function completeBoardRead(result) {
 // tracker and team are the ones the summary's `Board linear team <KEY>` header names, and its column the one
 // in the card's heading.
 function freeAgainst(document, id, cardRead, boardRead) {
-  const [, team] = /^Board linear team (\S+) — /.exec(document[0]);
+  const teamMatch = /^Board linear team (\S+) — /.exec(document[0]);
+  assert.ok(teamMatch);
+  const [, team] = teamMatch;
   const start = document.findIndex((line) => line.startsWith(`=== ${id} [`));
   const section = document.slice(start, document.indexOf('', start));
-  const [, column] = /^=== \S+ \[([^\]]+)\] /.exec(section[0]);
-  const listed = section.find((line) => line.startsWith('assignees: ')).slice('assignees: '.length);
+  const columnMatch = /^=== \S+ \[([^\]]+)\] /.exec(section[0]);
+  assert.ok(columnMatch);
+  const [, column] = columnMatch;
+  const listedLine = section.find((line) => line.startsWith('assignees: '));
+  assert.ok(listedLine);
+  const listed = listedLine.slice('assignees: '.length);
   const documentAssignees = listed === 'none' ? [] : listed.split(', ').map((name) => name.slice(1));
   const claimAt = section.findIndex((line) => line.startsWith('claim: '));
-  const documentClaim = section[claimAt].startsWith('claim: none')
-    ? null
-    : [Number(/^claim: comment (\d+) of /.exec(section[claimAt])[1]), section[claimAt + 1].slice('| '.length)];
+  const claimLine = section[claimAt];
+  /** @type {[number, string] | null} */
+  let documentClaim = null;
+  if (!claimLine.startsWith('claim: none')) {
+    const claimMatch = /^claim: comment (\d+) of /.exec(claimLine);
+    assert.ok(claimMatch);
+    documentClaim = [Number(claimMatch[1]), section[claimAt + 1].slice('| '.length)];
+  }
   const field = (name) => cardRead.find(([key]) => key === name)[1];
   const claims = cardRead.filter(([key]) => key === 'claim');
   const lastClaim = claims.length === 0 ? null : [claims.at(-1)[1], claims.at(-1)[5]];
@@ -1374,7 +1409,7 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   const ready = { state: states.Todo };
   const claimed = { state: states['In Progress'], assignee: 'me', comments: [claimComment] };
 
-  // File: to-issues creates the card, checks its publication and reads its blockers back.
+  // File: to-tickets creates the card, checks its publication and reads its blockers back.
   const bodyFile = join(root, 'body.md');
   writeFileSync(bodyFile, BODY);
   assert.deepEqual(card(['create', '--title', 'Card thirteen', '--body-file', bodyFile, '--status', 'Backlog', '--kind', 'task', '--parent', 'ENG-2', '--blocked-by', 'ENG-12'], filed), [
@@ -1432,7 +1467,11 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   // Every write, in order: none for a read, a no-op or a move Linear made.
   const writes = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     .filter(({ query }) => query.startsWith('mutation'))
-    .map(({ query, variables }) => [/^mutation\([^)]*\) \{ (\w+)\(/.exec(query)[1], variables]);
+    .map(({ query, variables }) => {
+      const mutation = /^mutation\([^)]*\) \{ (\w+)\(/.exec(query);
+      assert.ok(mutation);
+      return [mutation[1], variables];
+    });
   assert.deepEqual(writes, [
     ['issueCreate', { input: { teamId: 'team-eng', title: 'Card thirteen', description: BODY, stateId: 's-backlog', labelIds: ['label-task'], parentId: 'id-ENG-2' } }],
     ['issueRelationCreate', { issueId: 'id-ENG-12', relatedIssueId: 'id-ENG-13' }],
@@ -1449,7 +1488,9 @@ test('native types: a malformed issue type stops the board read', async (t) => {
   const root = adoptToolkit(t, GITHUB_KIND_TYPES_TEST_CONFIG);
   const { parseBoardPage } = await load(root, 'lib/board.mjs');
   const { leanBoardPage, leanNode } = await load(root, 'lib/board-fixtures.mjs');
+  /** @param {unknown} issueType */
   const pageWith = (issueType) => {
+    /** @type {ReturnType<typeof issue> & { labels: string[], issueType?: unknown }} */
     const content = { ...issue(11), labels: ['task'] };
     if (issueType !== undefined) content.issueType = issueType;
     return leanBoardPage([leanNode({ id: 'PVTI_11', content, status: 'Ready' })]);
@@ -1463,6 +1504,11 @@ test('native types: a malformed issue type stops the board read', async (t) => {
 });
 
 // A board card of the types configuration, spelling its issue type as the query returns it.
+/**
+ * @param {number} number
+ * @param {string | null} issueType
+ * @param {{ labels?: string[], status?: string, content?: object }} [fields]
+ */
 const typedCard = (number, issueType, { labels = [], status = 'Ready', content = {} } = {}) => ({
   id: `PVTI_${number}`,
   content: { ...issue(number), issueType: issueType === null ? null : { name: issueType }, labels, ...content },

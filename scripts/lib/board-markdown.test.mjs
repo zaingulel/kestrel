@@ -41,6 +41,7 @@ const {
   readCards,
 } = await toolkit.load('lib/board-markdown.mjs');
 const { verifyMarkdownPublication } = await toolkit.load('lib/issue-publish.mjs');
+const { normalizeItem } = await toolkit.load('lib/board.mjs');
 
 const VOCABULARY = {
   kinds: ['epic', 'feature', 'task', 'bug', 'docs'],
@@ -165,6 +166,18 @@ test('parseCard refuses each malformed title, field, reference and section, nami
   }
 });
 
+test('parseCard refuses a Show me first line other than yes', () => {
+  const head = ['Status: Ready', 'Kind: bug', 'Workstream: Product'];
+  for (const value of ['no', 'Yes', 'true', 'yes please']) {
+    assert.throws(
+      () => parseCard(FILE, lines('# T', '', ...head, `Show me first: ${value}`), VOCABULARY),
+      { message: `${FILE}:6: Show me first must be yes; found "${value}"` },
+      value,
+    );
+  }
+  assert.doesNotThrow(() => parseCard(FILE, lines('# T', '', ...head, 'Show me first: yes'), VOCABULARY));
+});
+
 const NONE = { local: false, localTipDone: false, remote: false, openPullRequests: [] };
 
 test('deriveColumn applies rules 1 to 4 in order', () => {
@@ -268,6 +281,7 @@ test('markdownBoardItems counts a pull request only for a card published Backlog
 // What `git cat-file --batch` answers (its documented `<oid> blob <size>` header, the bytes, a
 // newline, or `<name> missing`), what `for-each-ref` and `ls-remote --heads` print, and a
 // failing ref lookup, as one injected runner that also records every call.
+/** @type {(options?: { ref?: boolean, blobs?: Record<string, string>, locals?: string, remotes?: string | Error }) => { run: (args: string[], input?: string) => string, calls: { args: string[], input?: string }[] }} */
 function fakeGit({ ref = true, blobs = {}, locals = '', remotes = '' } = {}) {
   const calls = [];
   const run = (args, input) => {
@@ -322,7 +336,7 @@ test('publishedStatuses refuses a missing origin/main, naming the fetch', () => 
     }, new Map([[1, card(1)]])),
     (error) => {
       assert.deepEqual(calls, [['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main']]);
-      assert.equal(error.message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
+      assert.equal(/** @type {Error} */ (error).message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
       return true;
     },
   );
@@ -350,6 +364,27 @@ test('publishedStatuses reads a card absent from origin/main as its checkout cop
     [3, { status: 'Ready', onMain: false }],
     [4, { status: 'Backlog', onMain: false }],
   ]);
+});
+
+// The labels of card 7 as the board read gives them: its checkout text, its origin/main text (none when null), parsed,
+// published by publishedStatuses over the fake, turned into items and normalized.
+function labelsOf(checkoutText, mainText) {
+  const git = fakeGit({ blobs: mainText === null ? {} : { [ON_MAIN(7)]: mainText } });
+  const cards = new Map([[7, parseCard(FILE, checkoutText, VOCABULARY)]]);
+  const published = publishedStatuses(git.run, cards);
+  const [item] = markdownBoardItems(cards, published, { local: new Map(), remote: new Map() }, new Map());
+  return normalizeItem(item).labels;
+}
+
+test('a markdown card with a Show me first line has the show-me-first label, from its checkout text or its origin/main text, and one without has none', () => {
+  const head = ['Status: Ready', 'Kind: task', 'Workstream: Product'];
+  const plain = lines('# T', '', ...head);
+  const marked = lines('# T', '', ...head, 'Show me first: yes');
+
+  assert.ok(labelsOf(marked, null).includes('show-me-first'), 'the checkout text alone, not yet on origin/main');
+  assert.ok(labelsOf(plain, marked).includes('show-me-first'), 'the origin/main text alone');
+  assert.equal(labelsOf(plain, plain).includes('show-me-first'), false);
+  assert.equal(labelsOf(plain, null).includes('show-me-first'), false);
 });
 
 test('publishedStatuses refuses a batch answer whose size does not frame the content', () => {
@@ -401,9 +436,9 @@ test('ANTI-REGRESSION: markdown Git runner errors keep remote credentials out of
       assert.throws(() => run(args), (error) => {
         assert.deepEqual(calls, [args], 'one Git failure must not dispatch another child');
         for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl]) {
-          assert.ok(!error.message.includes(secret), `remote credentials leaked in ${JSON.stringify(error.message)}`);
+          assert.ok(!/** @type {Error} */ (error).message.includes(secret), `remote credentials leaked in ${JSON.stringify(/** @type {Error} */ (error).message)}`);
         }
-        assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+        assert.equal(/** @type {Error} */ (error).message, 'Git operation failed; check repository access and configuration');
         return true;
       });
     }
@@ -426,9 +461,9 @@ test('ANTI-REGRESSION: markdown Git runner errors keep remote credentials out of
         assert.throws(() => run(localArgs), (error) => {
           assert.deepEqual(calls, [localArgs]);
           for (const secret of ['user:', 'secret-token', 'query-secret', unsafeUrl, encodedUrl, diagnostic]) {
-            assert.ok(!error.message.includes(secret), `sensitive Git diagnostic leaked in ${JSON.stringify(error.message)}`);
+            assert.ok(!/** @type {Error} */ (error).message.includes(secret), `sensitive Git diagnostic leaked in ${JSON.stringify(/** @type {Error} */ (error).message)}`);
           }
-          assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+          assert.equal(/** @type {Error} */ (error).message, 'Git operation failed; check repository access and configuration');
           return true;
         });
       }
@@ -441,23 +476,23 @@ test('ANTI-REGRESSION: markdown Git runner errors keep remote credentials out of
     calls.length = 0;
     assert.throws(() => publishedStatuses(run, new Map([[1, card(1)]])), (error) => {
       assert.deepEqual(calls, [mainArgs], 'an unverifiable main ref must stop after one attempt');
-      assert.equal(error.message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
+      assert.equal(/** @type {Error} */ (error).message, 'cannot verify refs/remotes/origin/main; if origin/main has not been fetched, run: git fetch origin main; Git diagnostic withheld to protect remote credentials');
       return true;
     });
 
-    for (const [localArgs, cause] of [
+    for (const [localArgs, cause] of /** @type {[string[], string][]} */ ([
       [['for-each-ref', '--format=%(refname)', 'refs/heads/job/'], 'fatal: not a git repository (or any of the parent directories): .git'],
       [mainArgs, 'fatal: bad object refs/remotes/origin/main'],
       [['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], "fatal: Unable to create '.git/index.lock': File exists"],
       [['rev-parse', 'HEAD'], 'fatal: bad object HEAD'],
-    ]) {
+    ])) {
       for (const fromStderr of [true, false]) {
         stderr = fromStderr ? `${cause}\n` : '';
         message = fromStderr ? `Git failed for ${unsafeUrl}` : cause;
         calls.length = 0;
         assert.throws(() => run(localArgs), (error) => {
           assert.deepEqual(calls, [localArgs]);
-          assert.equal(error.message, cause, 'a safe local cause must survive stderr selection and message fallback');
+          assert.equal(/** @type {Error} */ (error).message, cause, 'a safe local cause must survive stderr selection and message fallback');
           return true;
         });
       }
@@ -476,7 +511,7 @@ test('ANTI-REGRESSION: markdown Git runner errors keep remote credentials out of
       calls.length = 0;
       assert.throws(() => run(remoteArgs), (error) => {
         assert.deepEqual(calls, [remoteArgs]);
-        assert.equal(error.message, 'Git operation failed; check repository access and configuration');
+        assert.equal(/** @type {Error} */ (error).message, 'Git operation failed; check repository access and configuration');
         return true;
       });
     }
@@ -497,7 +532,7 @@ test('jobRefs fails the read when ls-remote fails', () => {
       ['for-each-ref', '--format=%(refname)', 'refs/heads/job/'],
       ['ls-remote', '--heads', 'origin'],
     ]);
-    assert.equal(error.message, "cannot read origin's branches (git ls-remote --heads origin); Git diagnostic withheld to protect remote credentials");
+    assert.equal(/** @type {Error} */ (error).message, "cannot read origin's branches (git ls-remote --heads origin); Git diagnostic withheld to protect remote credentials");
     return true;
   });
 });
@@ -530,7 +565,7 @@ test('claim failures keep useful detail without repeating the default Git advice
           ['ls-remote', '--heads', 'origin'],
           ['cat-file', '-e', `${REMOTE_A}^{commit}`],
         ]);
-        assert.equal(error.cause?.message, expected);
+        assert.equal(/** @type {{ cause?: Error }} */ (error).cause?.message, expected);
         return true;
       });
     }

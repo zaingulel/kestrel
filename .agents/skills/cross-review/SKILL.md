@@ -1,14 +1,14 @@
 ---
 name: cross-review
-description: The fresh reviewer pass for a code diff, run by the model family that did not write it, the Codex reviewer seat from a Claude session and the Claude reviewer seat from a Codex session, dispatched as configured, or by that family's own seat where the repository runs one runtime; and the plan review of a plan-first card, run by the other family before any build, with declared exceptions.
+description: "The required fresh code reviews: independent primary and supplemental opposite-family passes on the normal authorized dual-runtime route, with declared single-primary exceptions; and the other-family plan review of a plan-first card before any build."
 ---
 
 # cross-review
 
 The `resume` skill's review step for the code and sign-off tiers. A writer's own family shares its blind spots,
-so the `reviewer` charter runs on the other family. Both seats carry the same charter; this skill chooses which
-one and how to call it. Use the runtime-specific job-directory invocation in `resume` section 3; keep review
-commands read-only and follow Claude Code's isolated-worktree command restrictions.
+so the primary `reviewer` and `reviewer-supplemental` run independently on the other family on the normal authorized
+dual-runtime route. The supplemental seat reuses the primary charter body with its own configured settings. Use the
+runtime-specific job-directory invocation in `resume` section 3; keep review commands read-only and follow Claude Code's isolated-worktree command restrictions.
 
 Section 4 carries the other review this skill reaches: the plan review the `resume` skill's Plan step names, run
 on the other family's `plan-reviewer` seat before any build, with declared exceptions.
@@ -23,101 +23,144 @@ throughout this skill, including complete native-comment review before claiming.
 For Jira or Azure card captures in every route below, use the selected guide's "Review snapshots" substitution, retaining the
 route's existing output file and redirection.
 
-## 1. Dispatch the other family's seat as configured
+## 1. Dispatch the required seats as configured
 
 Dispatch the other family only where the `resume` skill, under "6. Verify and review", finds cross-family review
-authorized or the owner has said yes for this job.
+authorized or the owner has said yes for this job. On the normal authorized dual-runtime code/sign-off route, dispatch
+the other family's `reviewer` and `reviewer-supplemental`, each in a fresh context. Read each seat file and pass its
+settings unchanged; `AGENTS.md`'s model routing rule forbids raising or lowering them. The supplemental seat reads
+only the primary charter body; its own metadata remains authoritative.
 
-Read the seat file and pass its settings unchanged; `AGENTS.md`'s model routing rule forbids raising or lowering them.
-The read-only sandbox has no network, so the prompt carries the card, body and comments, that the charter's spec lens
-needs, and the charter's own `gh` and web calls fail harmlessly. `<out>` is `.claude/worklog/<branch>-cross-review/` in
-the job worktree, the job's own ignored folder.
+For a single-runtime repository, a cloud build, declined authorization or primary-provider unavailability, follow
+`resume`'s [review routes](../resume/references/review-routes.md) or
+[cloud route](../resume/references/cloud-build.md). Those routes run one primary and no supplemental pass. Keep the
+document tier, plan review in section 4, `security-reviewer` and external review on their existing routes.
 
-`<pending>` names every check and review still running or already scheduled for this branch, the full suite, a
-convergence check, `security-reviewer` or the external review among them, or reads `none`. Every reviewer dispatch carries it,
-a native dispatch of this family's own seat included, so the reviewer treats those as in hand and reports findings
-only on what is already settled.
+### Freeze the inputs
 
-**Claude wrote the diff**: the Codex `reviewer` seat, `.codex/agents/reviewer.toml`. Codex's native
-`exec review --base` accepts no custom instructions, so the charter goes through plain `codex exec`, read from
-a prompt file so quoting cannot bite. The charter returns its findings as its final message; give it no OUTPUT
-FILE, and say so, since the sandbox cannot write one. Each step below is one command; the session types each
-value it reads as a literal into the later steps.
+Before dispatch, freeze the clean committed tree and requirements once for both seats. Use the runtime-specific
+job-directory invocation in `resume` section 3. `<out>` is a distinct attempt folder under the job's ignored
+`.claude/worklog/<branch>-cross-review/`. Give each seat its own private `<out>/primary/` or `<out>/supplemental/`
+output folder; create both before preparing prompts. Never reuse a previous attempt's output files.
 
-1. Read the branch, `<branch>`:
+Read `<branch>` with `git branch --show-current`, `<base>` with `git merge-base origin/main HEAD`, and `<head>` with
+`git rev-parse HEAD`. Use those full commit values in both dispatches, never moving branch names. Both seats inspect
+`git diff <base>...<head>` and files at `<head>`. Capture the card and comments once as `<out>/card.md`:
 
-   ```sh
-   git branch --show-current
-   ```
+```sh
+gh issue view <issue> --json title,body,comments \
+  --jq '"# \(.title)\n\n\(.body)\n\n## Comments\n\n" + (.comments | map(.body) | join("\n\n---\n\n"))' > <out>/card.md
+```
 
-2. Read the seat's `model` and `model_reasoning_effort` from `.codex/agents/reviewer.toml`, `<model>` and
-   `<effort>`, at run time; never copy them from anywhere else:
+That file is the frozen requirements snapshot. Include the same approved plan material in both prompts where the
+review needs it. `<pending>` names every check and review still running or already scheduled for this branch, the
+full suite, a convergence check, `security-reviewer` or the external review among them, or reads `none`. Freeze that
+list once too. Every dispatch carries the frozen refs, requirements and pending list, a native own-family primary
+dispatch included, so each reviewer reports only on what is already settled.
 
-   ```sh
-   grep -E '^(model|model_reasoning_effort) = ' .codex/agents/reviewer.toml
-   ```
+### Claude wrote the diff: Codex seats
 
-3. Start the prompt file with the charter:
+For each `<seat>` (`reviewer`, then `reviewer-supplemental`), use its private `<seat-out>` folder. Codex's native
+`exec review --base` accepts no custom instructions, so use plain `codex exec` with a prompt file. The read-only
+sandbox has no network; supply the frozen snapshot instead of live issue reads. The charter returns its review as
+the final message; assign no OUTPUT FILE since the sandbox cannot write one. Each step is one command; type each
+value read as a literal in later steps.
 
-   ```sh
-   sed -n '/^developer_instructions = """/,/^"""/p' .codex/agents/reviewer.toml | sed '1d;$d' > <out>/prompt.md
-   ```
-
-4. Append the review request:
-
-   ```sh
-   printf '\nReview branch %s against main for issue #<issue>, whose card follows. Still running or already
-   scheduled, so in hand and outside your findings: <pending>. The sandbox has no network, so use this copy
-   instead of gh, and return the JSON object as your final message.\n\n' '<branch>' >> <out>/prompt.md
-   ```
-
-5. Append the card:
+1. Read this seat's `model` and `model_reasoning_effort`, `<model>` and `<effort>`, at run time:
 
    ```sh
-   gh issue view <issue> --json title,body,comments \
-     --jq '"# \(.title)\n\n\(.body)\n\n## Comments\n\n" + (.comments | map(.body) | join("\n\n---\n\n"))' >> <out>/prompt.md
+   grep -E '^(model|model_reasoning_effort) = ' .codex/agents/<seat>.toml
    ```
 
-6. Run the reviewer:
+2. Start its prompt with its own charter, including the supplemental pointer when that is the seat:
+
+   ```sh
+   sed -n '/^developer_instructions = """/,/^"""/p' .codex/agents/<seat>.toml | sed '1d;$d' > <seat-out>/prompt.md
+   ```
+
+3. Append the frozen request, with `<peer-out>` naming the other seat's private folder:
+
+   ```sh
+   printf '\nReview frozen base <base> and head <head> for issue #<issue>. The frozen card/comments snapshot follows. Still running or already scheduled, so in hand and outside your findings: <pending>. Inspect only this frozen code and requirements. Do not read peer output folders or peer findings, including <peer-out>. The sandbox has no network and cannot write an output file; use this snapshot instead of gh and return the JSON object as your final message followed by the charter completion line.\n\n' >> <seat-out>/prompt.md
+   ```
+
+4. Append the same requirements snapshot:
+
+   ```sh
+   cat <out>/card.md >> <seat-out>/prompt.md
+   ```
+
+5. Prepare this invocation for each seat, with the settings read from that seat's file:
 
    ```sh
    codex exec -m <model> -c model_reasoning_effort=<effort> \
-     -s read-only --skip-git-repo-check --ephemeral --json -o <out>/review.json -C . - \
-     < <out>/prompt.md > <out>/events.jsonl
+     -s read-only --skip-git-repo-check --ephemeral --json -o <seat-out>/review.md -C . - \
+     < <seat-out>/prompt.md > <seat-out>/events.jsonl
    ```
 
-**Codex wrote the diff**: the Claude `reviewer` seat, `.claude/agents/reviewer.md`, which the CLI loads whole,
-model, effort, tools and charter. Read `<branch>` with `git branch --show-current` first, then:
+### Codex wrote the diff: Claude seats
+
+For each `<seat>` (`reviewer`, then `reviewer-supplemental`), read `.claude/agents/<seat>.md`; the CLI loads its
+model, effort, tools, turn limit and charter whole. Use separate private `<seat-out>` folders and the same frozen
+values and snapshot in each request. Prepare both invocations:
 
 ```sh
-claude -p --agent reviewer --permission-mode plan --output-format json \
-  "Review branch <branch> against main for issue #<issue>. Still running or already scheduled, so in hand and outside your findings: <pending>." > <out>/result.json
+claude -p --agent <seat> --permission-mode plan --output-format json \
+  "Review frozen base <base> and head <head> for issue #<issue>. Use the frozen card/comments snapshot at <out>/card.md instead of live issue reads. Still running or already scheduled, so in hand and outside your findings: <pending>. Inspect only this frozen code and requirements. Do not read peer output folders or peer findings, including <peer-out>. Take no output path and return the JSON review object as your final message followed by the charter completion line." > <seat-out>/result.json
 ```
 
-Read-only is not instruction isolation: the reviewer reads the checkout's `AGENTS.md`, rules and skills as its charter
-directs, and nothing else is handed to it.
+Read-only is not instruction isolation: each reviewer reads the checkout's `AGENTS.md`, rules and skills as its
+charter directs. Its prompt explicitly forbids peer outputs and findings, and supplies no earlier pass's conclusions.
 
-**The repository runs one runtime**: there is no other family's seat. Dispatch this family's own `reviewer` seat
-natively, as configured, in a fresh context, with `<pending>` and the card in the dispatch. The `resume` skill owns what
-the pull request body records, under "6. Verify and review".
+### Dispatch barrier and validation
+
+Start both prepared passes before reading either result, using `resume`'s Waiting rule for the native awaited
+operations. Keep their outputs private. Until both attempts return, copy neither pass's findings into the shared
+worklog, show neither to the other reviewer and make no repairs or changes to the frozen inputs. Observe command
+completion and errors while waiting without reading findings. A failed attempt still returns to this barrier;
+its failure never permits reading the other result early.
+
+After both attempts return, validate each separately: successful exit, a valid JSON review object under the primary
+charter's output contract, and the literal `review delivered in full` closing line in its final message. For Codex,
+read `<seat-out>/review.md` and the completion event in `<seat-out>/events.jsonl`; for Claude, read the final message
+inside `<seat-out>/result.json`. A zero-findings verdict is accepted only after this validation. A nonzero exit, malformed
+object or missing completion marker fails validation. Diagnose and rerun malformed or capped
+attempts against the same frozen inputs, with no peer findings supplied. For provider unavailability, follow `resume`'s [review routes](../resume/references/review-routes.md).
+
+**A review too large to finish.** A seat that returns incomplete because the change is too large to read whole, in
+its own words or by stopping at its turn or output limit while still reading, has given no review: discard that
+attempt and count it neither as a clean review nor as a round. Rerun that seat in parts against the same frozen
+inputs, with no peer findings supplied. List the changed paths with
+`git diff --no-renames --ignore-submodules=none --name-only <base>...<head>`, so a moved file lists its old and new
+path and a changed submodule is listed, and group them into parts that together cover every listed path, keeping
+files whose changes depend on each other in one part. Run each part as its own fresh attempt of that seat, with its
+own private output folder and the same prompt plus this sentence: "Your part replaces the whole diff: judge every
+changed line of these paths and hunk ranges, reading any file at <base> or <head>, other changed files included,
+where needed to judge how these changes affect it: <part>." Where a part still returns incomplete, split only that
+part again, down to hunk ranges within one file, each named by its path and the hunk headers of the frozen diff it
+holds. Validate each part as above. The parts of one seat stand together as that seat's one pass only once every
+part has validated and together they cover every listed path and, for a file split into hunk ranges, every hunk of
+that file. Record each part, with the paths and any hunk ranges it covered, under that seat's verdict in the pull
+request body's collapsed Review findings block.
 
 ## 2. Settle the findings
 
-The same loop as any reviewer pass: fix each true finding by its cheapest valid fix, take a true finding whose every
-fix costs more than it is worth to the owner, who may set it aside as deferred, and dismiss a finding with a reason
-only when it is false; then one pass scoped to the repaired hunks by the same route. A finding whose remedy is a
-rewrite of the writer's design is a scope question for the owner, not a fix; a cross-family reviewer is prone to
-proposing one.
+After the barrier and validation, record each completed seat's verdict and findings, deduplicate overlapping findings, and
+prove or refute each candidate. Fix each true finding by its cheapest valid fix, take a true finding whose every fix
+costs more than it is worth to the owner, who may set it aside as deferred, and dismiss a finding with a reason only
+when it is false. A finding whose remedy rewrites the writer's design is a scope question for the owner, not a fix.
+Use `resume`'s repair pass, with no third full review.
+No further pass runs when a repair adds no factual claim. The pull request template owns review counts; `resume`'s [review routes](../resume/references/review-routes.md) own declarations.
 
 ## 3. Quote the price
 
 Write one line in the pull request body's Review section for each pass the Usage view cannot show: a Codex
 command-line pass, whose `--ephemeral` run writes no session log. The line holds the raw fields of the
 `turn.completed` event's `usage` in `events.jsonl`, side by side and never summed, so cached input is not counted
-twice; for example,
+twice. Name the actual reviewing seat in each line; for example,
 `Usage, pass 1, Codex reviewer: input_tokens=N cached_input_tokens=N output_tokens=N reasoning_output_tokens=N`.
-The JSON itself stays in `<out>`. A Claude pass and a natively dispatched seat each leave a session file the Usage
-view reads, so the body carries no usage for them. A run that fails is reported as failed, never as zero cost.
+The raw output stays in that pass's private `<seat-out>` folder (or `<out>` for a plan review). A Claude pass and a
+natively dispatched seat each leave a session file the Usage view reads, so the body carries no usage for them. A run that fails is reported as failed, never as zero cost.
 
 ## 4. Review a plan before the build
 
@@ -154,7 +197,8 @@ file's absolute path and `<out>` is as in section 1. Each step is one command.
    followed by the closing line your charter names.\n\n' >> <out>/prompt.md
    ```
 
-4. Append the card with the command of section 1, step 5, unchanged.
+4. Append the card with the capture command under section 1, **Freeze the inputs**, redirecting it to
+   `<out>/prompt.md` with `>>` instead of to `<out>/card.md` with `>`.
 
 5. Append the plan heading:
 

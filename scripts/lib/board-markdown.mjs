@@ -19,17 +19,18 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import * as boardConfig from './board-config.mjs';
+import { SHOW_FIRST } from './merge-evidence.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { gitExecutable } from './posix-shell.mjs';
 import { checkContained, kindOf } from './runtimes.mjs';
 import { trackerOf } from './tracker.mjs';
+import { workflowRoots } from './workflow-pin.mjs';
 
 export const CARDS_DIR = '.agents/cards';
 
-// The checkout this module sits in: two folders above scripts/lib, never the current directory.
-const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+// The checkout this module acts on, never the current directory: its own, or the one owning a pinned copy's store.
+const ROOT = workflowRoots(import.meta.url).operating;
 
 export const configuredTracker = () => trackerOf(boardConfig);
 
@@ -64,14 +65,14 @@ export function parseCard(fileName, text, { kinds, routingField, routingOptions,
   if (!lines[0].startsWith('# ') || lines[0].slice(2).trim() === '') fail(1, 'expected "# <title>"');
   if (lines[1] !== '') fail(2, 'expected a blank line after the title');
 
-  const allowed = ['Status', 'Kind', ...(routingField ? [routingField] : []), 'Parent', 'Blocked by'];
+  const allowed = ['Status', 'Kind', ...(routingField ? [routingField] : []), 'Parent', 'Blocked by', 'Show me first'];
   const fields = new Map();
   const fieldLines = {};
   let end = 2;
   for (; end < lines.length && lines[end] !== ''; end += 1) {
     const match = /^([^:]+): (.*)$/.exec(lines[end]);
     if (!match) fail(end + 1, 'expected "<Field>: <value>"');
-    const [, key, value] = match;
+    const [, key, value] = /** @type {RegExpExecArray} */ (match);
     if (!allowed.includes(key)) fail(end + 1, `unknown field "${key}"`);
     if (fields.has(key)) fail(end + 1, `duplicate field "${key}"`);
     fields.set(key, value);
@@ -88,6 +89,7 @@ export function parseCard(fileName, text, { kinds, routingField, routingOptions,
   const kind = oneOf('Kind', kinds);
   const routing = routingField ? oneOf(routingField, routingOptions) : null;
 
+  /** @type {number | null} */
   let parent = null;
   if (fields.has('Parent')) {
     if (!CARD_NUMBER.test(fields.get('Parent')) || !isSafeNumber(fields.get('Parent'))) fail(fieldLines.Parent, `Parent must be a card number; found "${fields.get('Parent')}"`);
@@ -103,6 +105,10 @@ export function parseCard(fileName, text, { kinds, routingField, routingOptions,
     const repeated = blockedBy.find((blocker, index) => blockedBy.indexOf(blocker) !== index);
     if (repeated !== undefined) fail(fieldLines['Blocked by'], `Blocked by names card ${repeated} twice`);
     if (blockedBy.includes(number)) fail(fieldLines['Blocked by'], 'Blocked by must not name the card itself');
+  }
+
+  if (fields.has('Show me first') && fields.get('Show me first') !== 'yes') {
+    fail(fieldLines['Show me first'], `Show me first must be yes; found "${fields.get('Show me first')}"`);
   }
 
   const headingAt = lines.indexOf(COMMENTS_HEADING, end);
@@ -129,6 +135,7 @@ export function parseCard(fileName, text, { kinds, routingField, routingOptions,
     routing,
     parent,
     blockedBy,
+    ...(fields.has('Show me first') ? { showFirst: true } : {}),
     body: lines.slice(end, bodyEnd).join('\n').trim(),
     comments: comments.map(({ heading, lines: commentLines }) => ({ heading, text: commentLines.join('\n').trim() })),
     fieldLines: Object.fromEntries(['Parent', 'Blocked by'].filter((key) => fields.has(key)).map((key) => [key, fieldLines[key]])),
@@ -150,7 +157,7 @@ export function readCards(root = ROOT) {
   try {
     names = readdirSync(join(root, CARDS_DIR));
   } catch (error) {
-    if (error.code === 'ENOENT') return new Map();
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return new Map();
     throw error;
   }
   const files = names.map((name) => {
@@ -221,7 +228,7 @@ export function gitRunner(root = ROOT) {
         maxBuffer: 64 * 1024 * 1024,
       });
     } catch (error) {
-      const diagnostic = String(error.stderr ?? '').trim() || error.message;
+      const diagnostic = String(/** @type {{ stderr?: unknown }} */ (error).stderr ?? '').trim() || /** @type {Error} */ (error).message;
       const local = LOCAL_GIT_READS.some((known) => known.length === args.length && known.every((arg, index) => arg === args[index]));
       // eslint-disable-next-line no-control-regex -- Control characters in Git diagnostics must be withheld.
       if (local && typeof diagnostic === 'string' && diagnostic.trim() && !/:(?:\S|$)|[@?%\\\u0000-\u001f\u007f]/u.test(diagnostic)) {
@@ -262,16 +269,17 @@ export function publishedStatuses(run, cards) {
     run(['rev-parse', '--verify', '--quiet', MAIN_REF]);
   } catch (error) {
     const context = `cannot verify ${MAIN_REF}; if origin/main has not been fetched, run: git fetch origin main`;
-    throw new Error(error.message === GIT_FAILURE
+    throw new Error(/** @type {Error} */ (error).message === GIT_FAILURE
       ? `${context}; Git diagnostic withheld to protect remote credentials`
-      : `${context}${error.message ? ` (${error.message})` : ''}`);
+      : `${context}${/** @type {Error} */ (error).message ? ` (${/** @type {Error} */ (error).message})` : ''}`);
   }
   const numbers = [...cards.keys()];
   const copies = readObjects(run, numbers.map((number) => `${MAIN_REF}:${CARDS_DIR}/${number}.md`));
   return new Map(numbers.map((number, index) => {
     const card = cards.get(number);
     if (copies[index] !== null) {
-      return [number, { status: parseCard(`origin/main:${CARDS_DIR}/${number}.md`, copies[index], vocabulary()).status, onMain: true }];
+      const { status, showFirst } = parseCard(`origin/main:${CARDS_DIR}/${number}.md`, copies[index], vocabulary());
+      return [number, { status, onMain: true, ...(showFirst ? { showFirst } : {}) }];
     }
     if (card.status === DONE) {
       throw new Error(
@@ -298,9 +306,9 @@ export function jobRefs(run) {
   try {
     remoteOut = run(['ls-remote', '--heads', 'origin']);
   } catch (error) {
-    throw new Error(error.message === GIT_FAILURE
+    throw new Error(/** @type {Error} */ (error).message === GIT_FAILURE
       ? "cannot read origin's branches (git ls-remote --heads origin); Git diagnostic withheld to protect remote credentials"
-      : `cannot read origin's branches (git ls-remote --heads origin): ${error.message}`);
+      : `cannot read origin's branches (git ls-remote --heads origin): ${/** @type {Error} */ (error).message}`);
   }
   const remote = new Map();
   for (const line of remoteOut.split('\n').filter(Boolean)) {
@@ -330,14 +338,14 @@ export function openPullRequests(numbers, ghExec, nameWithOwner) {
     try {
       reply = ghExec(['pr', 'list', '--repo', nameWithOwner, '--head', branch, '--state', 'open', '--json', 'number,headRefName,isCrossRepository']);
     } catch (error) {
-      throw new Error(`cannot read the pull requests of ${branch}: ${error.message}`);
+      throw new Error(`cannot read the pull requests of ${branch}: ${/** @type {Error} */ (error).message}`);
     }
     const malformed = (reason) => new Error(`the pull-request list for ${branch} is malformed: ${reason}`);
     let entries;
     try {
       entries = JSON.parse(reply);
     } catch (error) {
-      throw malformed(error.message);
+      throw malformed(/** @type {Error} */ (error).message);
     }
     if (!Array.isArray(entries)) throw malformed('not a JSON array');
     for (const entry of entries) {
@@ -366,7 +374,7 @@ export function markdownBoardItems(cards, published, refs, pulls) {
       status: deriveColumn(status, { local, localTipDone: refs.local.get(number) === DONE, remote, openPullRequests: openPulls }),
       title: card.title,
       routing: card.routing,
-      labels: [boardConfig.KIND_LABELS[card.kind]],
+      labels: [boardConfig.KIND_LABELS[card.kind], ...(card.showFirst || published.get(number).showFirst ? [SHOW_FIRST] : [])],
       assignees: [],
       blockers: card.blockedBy.map((blocker) => ({ number: blocker, state: stateOf(blocker) })),
       closingPullRequests: isPickable(status) ? openPulls.map((pull) => ({ number: pull.number })) : [],
@@ -412,7 +420,7 @@ export function readMarkdownBoard(ghExec, root = ROOT, run = gitRunner(root)) {
   const cards = readCards(root);
   const published = publishedStatuses(run, cards);
   const refs = jobRefs(run);
-  const watched = [...cards.keys()].filter((number) => refs.remote.has(number) && isPickable(published.get(number).status));
+  const watched = [...cards.keys()].filter((number) => refs.remote.has(number) && isPickable(/** @type {{ status: string }} */ (published.get(number)).status));
   const pulls = openPullRequests(watched, ghExec, pullRepository());
   return { cards, refs, items: markdownBoardItems(cards, published, refs, pulls) };
 }
@@ -452,9 +460,9 @@ function checkClaim(run, number, published) {
   try {
     run(['cat-file', '-e', `${tip}^{commit}`]);
   } catch (error) {
-    throw new Error(error.message === GIT_FAILURE
+    throw new Error(/** @type {Error} */ (error).message === GIT_FAILURE
       ? `cannot confirm the claim: origin's ${branch} (${tip}) could not be read; if it has not been fetched, run: git fetch origin; Git diagnostic withheld to protect remote credentials`
-      : `cannot confirm the claim: origin's ${branch} (${tip}) is not in this clone; run: git fetch origin (${error.message})`);
+      : `cannot confirm the claim: origin's ${branch} (${tip}) is not in this clone; run: git fetch origin (${/** @type {Error} */ (error).message})`);
   }
   try {
     run(['merge-base', '--is-ancestor', tip, 'HEAD']);
@@ -539,7 +547,7 @@ export function moveMarkdownCards(pairs, run, ghExec) {
       }
     } catch (error) {
       const done = completed.map((pair) => `#${pair.issueNumber} → ${pair.statusName}`).join(', ') || 'none';
-      throw new Error(`failed to move #${issueNumber} → "${statusName}" (already completed: ${done}) — ${error.message}`, { cause: error });
+      throw new Error(`failed to move #${issueNumber} → "${statusName}" (already completed: ${done}) — ${/** @type {Error} */ (error).message}`, { cause: error });
     }
   }
   return completed;

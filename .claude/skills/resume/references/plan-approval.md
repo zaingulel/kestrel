@@ -6,8 +6,8 @@ This file is part of the `resume` skill: a section number or quoted heading in i
 - **Present the plan, then stop.** Save the plan, the architect's or the session's own short plan, beside the
   work log as `.claude/worklog/<branch>-plan.md`. Tell the owner in plain language what will be built slice by
   slice, what each slice proves and what is left out; where a plan review ran, which seat reviewed the plan and
-  how each finding was settled; and where the full plan is. Then ask whether to build it and end the turn. The
-  card stays in `In progress`.
+  how each finding was settled; any owner ask "4. Plan" lists, each action with its limit; and where the full plan is.
+  Then ask whether to build it, any listed action included, and end the turn. The card stays in `In progress`.
 - **A pause before the yes is local.** Nothing tracked has changed and the saved plan is not tracked, so
   `handoff` has nothing to commit or publish, and no commit is made only to park a plan. The job branch, the
   claim on the card and the saved plan stay on this machine as they are.

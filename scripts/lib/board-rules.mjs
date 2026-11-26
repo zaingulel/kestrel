@@ -73,15 +73,37 @@ export function openInTerminalDrift(card) {
   return row(card, `issue open but card in "${card.status}" — close the issue or move the card back to ${PICKABLE_PHRASE}`);
 }
 
-// 3. Work that cannot proceed should not look available or claimed. Reads GitHub's
-// NATIVE blockedBy dependencies only (normalizeItem has already dropped the closed
-// ones) — never the issue body's prose, which is not a contract. Advisory: a blocker
-// can close minutes later, so this informs the next pick rather than failing a merge.
+// 3. Work that cannot proceed should not look claimed. Reads GitHub's NATIVE blockedBy
+// dependencies only (normalizeItem has already dropped the closed ones) — never the issue
+// body's prose, which is not a contract. Ready is exempt: approved work waits there for its
+// turn and start selection never takes a Ready card with an open blocker (readyOnBoard);
+// rule 3b judges that wait. Advisory: a blocker can close minutes later, so this informs
+// the next pick rather than failing a merge.
 export function blockedClaimDrift(card) {
   if (card.state !== 'OPEN' || card.openBlockers.length === 0) return null;
-  if (card.status === BACKLOG || TERMINAL_STATUSES.includes(card.status)) return null;
+  if (PICKABLE_STATUSES.includes(card.status) || TERMINAL_STATUSES.includes(card.status)) return null;
   const blockers = card.openBlockers.map(cardRef).join(', ');
   return advisory(card, `in "${column(card.status)}" but blocked by open ${blockers} — move it to ${BACKLOG} until the blockers close`);
+}
+
+// 3b. A Ready card's wait ends only while each open blocker is itself in Ready or in flight. A blocker anywhere
+// else (Backlog, Done, no column, off this board, another repository) leaves it waiting forever unsaid. Board-level,
+// because the blocker's column is another card's fact. A blocker in another repository is never a card here, so its
+// number leaves the list before the rest match this board's cards by number; it is named with its repository, and
+// only this board's blockers are offered a move to Ready.
+function strandedReadyDrift(cards) {
+  const moving = new Set(cards.filter((card) => card.status === READY || isInFlight(card.status)).map((card) => card.number));
+  return cards.flatMap((card) => {
+    if (card.state !== 'OPEN' || card.status !== READY) return [];
+    const foreign = card.foreignBlockers ?? [];
+    const own = [...card.openBlockers];
+    for (const blocker of foreign) own.splice(own.indexOf(blocker.number), 1);
+    const movable = own.filter((number) => !moving.has(number)).map(cardRef);
+    const stranded = [...movable, ...foreign.map((blocker) => `${blocker.repository}#${blocker.number}`)];
+    if (stranded.length === 0) return [];
+    const repair = movable.length > 0 ? `move ${movable.join(', ')} to ${READY} or this card to ${BACKLOG}` : `move this card to ${BACKLOG}`;
+    return [advisory(card, `in "${READY}" waiting on open ${stranded.join(', ')}, in neither ${READY} nor an in-progress column, so it would wait forever — ${repair}`)];
+  });
 }
 
 // 4. An active card with no assignee names no one accountable: the board shows work in
@@ -102,6 +124,30 @@ export function unassignedClaimDrift(card) {
   return advisory(card, `claimed in "${card.status}" with no assignee — assign the session's owner (${remedy}) or return it to ${PICKABLE_PHRASE}`);
 }
 
+// How long a claim may record nothing before, with no running terminal found, it reads as stalled. A
+// judgement, not a measurement: a working session writes to its worklog folder far more often than this.
+export const QUIET_LIMIT_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * What the edge learned about one claimed card: not checkable here, or checked with the liveness of its Herdr
+ * job terminal, its last activity and the last step its worklog recorded.
+ * @typedef {{ checkable: false, cause: string }
+ *   | { checkable: true, liveness: { running: string | null } | { unavailable: string }, activeAt: Date, quietMs: number, lastStep: string }} Observation
+ */
+
+/** @param {Observation} observation */
+function observationSuffix(observation) {
+  if (!observation.checkable) return `unknown: ${observation.cause}`;
+  const { liveness, activeAt, quietMs, lastStep } = observation;
+  if ('running' in liveness && liveness.running !== null) return `live: Herdr terminal ${liveness.running} is running its job`;
+  const since = activeAt.toISOString().slice(0, 16) + 'Z';
+  if (quietMs <= QUIET_LIMIT_MS) {
+    return `idle since ${since}; ${'unavailable' in liveness ? `no live-process check here: ${liveness.unavailable}` : 'no running Herdr job terminal here'}`;
+  }
+  if ('unavailable' in liveness) return `unknown: nothing recorded since ${since} and no live-process check here: ${liveness.unavailable}; last step: ${lastStep}`;
+  return `stalled: no running Herdr job terminal here and nothing recorded since ${since}; last step: ${lastStep}`;
+}
+
 // 5. The #654 failure mode, the reverse direction of #319: a card CLAIMED into an
 // in-flight column that then produced nothing — #646 and #618 sat stranded for days
 // while both mandatory bookends reported clean. Evidence is closing pull-request
@@ -116,10 +162,13 @@ export function unassignedClaimDrift(card) {
 // covers an epic claim instead); and a parked card waits on an answer from outside the
 // session, not on a session, so no closing pull request is the expected shape there too
 // (rules 3, 4 and 7 still judge it).
-export function stalledClaimDrift(card) {
+export function stalledClaimDrift(card, observation) {
   if (card.state !== 'OPEN' || !isInFlight(card.status) || card.parked) return null;
   if (WAIT_STATUSES.includes(card.status) || isEpic(card) || card.closingPullRequests.length > 0) return null;
-  return advisory(card, `claimed in "${card.status}" but no closing pull request exists — if no session is actively building it, resume it or return it to ${READY}`);
+  if (!observation) {
+    return advisory(card, `claimed in "${card.status}" but no closing pull request exists — if no session is actively building it, resume it or return it to ${READY}`);
+  }
+  return advisory(card, `claimed in "${card.status}" with no closing pull request — ${observationSuffix(observation)} — if no session is building it, resume it or return it to ${READY}`);
 }
 
 // 6. The #337 failure mode: an epic still OPEN and not terminal whose every child is
@@ -252,6 +301,7 @@ function formatIdentities(numbers) {
 // EXPLANATION is, never whether the scan reports what it found (a misfiring hypothesis
 // must not cost facts).
 export function unfieldedDrift(cards) {
+  /** @type {Record<string, unknown[]>} */
   const missing = { Status: [], ...(ROUTING_FIELD ? { [ROUTING_FIELD]: [] } : {}) };
   for (const card of cards) {
     if (!card.status) missing.Status.push(card.number ?? null);
@@ -305,16 +355,19 @@ const CARD_RULES = [
 // typename the draft/pull-request exemption needs) and then excluded from the rules:
 // blank fields on a card whose content did not resolve are not trustworthy repair
 // evidence, and every other rule would skip it anyway for want of an issue state.
-export function scanBoard(items) {
+/** @param {Map<number, Observation>} [observations] */
+export function scanBoard(items, observations = new Map()) {
   const unreadable = unreadableCards(items);
   const cards = items.filter((item) => !isContentUnresolved(item)).map(normalizeItem);
   const drifted = [];
   for (const card of cards) {
     for (const rule of CARD_RULES) {
-      const found = rule(card);
+      const found = rule(card, observations.get(card.number));
       if (found) drifted.push(found);
     }
   }
+  // Rule 3b reads a blocker's absence as fact, so it needs the whole board: an unreadable item may be that blocker.
+  if (unreadable.length === 0) drifted.push(...strandedReadyDrift(cards));
   drifted.push(...unfieldedDrift(cards));
   return { drifted, unreadable };
 }
@@ -325,15 +378,20 @@ export function scanBoard(items) {
 // are right for a drift row and wrong here, where an exempt claim is still one the owner
 // must see. A card with no number cannot be looked up, so it is counted, never dropped.
 export function intakeCards(items) {
-  const picks = sortForDisplay(pickable(items)).map(normalizeItem);
+  const ordered = sortForDisplay(pickable(items));
+  const picks = ordered.map(normalizeItem);
   const claimed = items.map(normalizeItem)
     .filter((card) => isInFlight(card.status) && card.closingPullRequests.length === 0);
   const numbered = (cards) => cards.filter((card) => card.number != null);
   const candidates = numbered(picks);
   const claims = numbered(claimed).sort((a, b) => compareCardIds(a.number, b.number));
+  const unplaced = candidates
+    .filter((card) => card.status === READY && !Number.isInteger(ordered[picks.indexOf(card)].boardPosition))
+    .map((card) => card.number);
   return {
     candidates,
     claims,
+    unplaced,
     numberless: picks.length + claimed.length - candidates.length - claims.length,
   };
 }
@@ -395,6 +453,7 @@ export function intakeOutcome({ drifted, unreadable, details }) {
   const unread = [...details.values()].filter(detailUnread);
   const drift = drifted.length > 0;
   const incomplete = unread.length > 0 || unreadable.length > 0;
+  /** @type {number} */
   let exitCode = INTAKE_EXIT.complete;
   if (drift && incomplete) exitCode = INTAKE_EXIT.driftAndIncomplete;
   else if (drift) exitCode = INTAKE_EXIT.drift;

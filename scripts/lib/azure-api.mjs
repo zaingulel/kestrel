@@ -6,13 +6,18 @@ import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as boardConfig from './board-config.mjs';
 import { validateAzureConfig } from './azure-config.mjs';
+import { workflowRoots } from './workflow-pin.mjs';
 
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024;
+
+/** @typedef {Error & { rateLimited?: boolean }} TransportError */
+/** @typedef {{ error: NodeJS.ErrnoException, status: number | null, signal: NodeJS.Signals | null, stdout?: string | null, stderr?: string | null } | { error?: undefined, status: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string }} TransportRun */
+/** @typedef {(command: string, args: string[], options: import('node:child_process').SpawnSyncOptionsWithStringEncoding) => TransportRun} TransportSpawn */
 const RATE_LIMIT_EXIT = 3;
 const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const ORGANIZATION = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,47}[A-Za-z0-9])?$/;
-const REPOSITORY_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const REPOSITORY_ROOT = workflowRoots(import.meta.url).operating;
 
 export function azureCredentialsPath(home = homedir()) {
   return join(home, '.config', 'fabraik', 'azure.json');
@@ -54,7 +59,8 @@ export function readAzureCredentials({ path, platform, repositoryRoot = REPOSITO
     bytes = readFileSync(descriptor);
     if (bytes.length > MAX_CREDENTIAL_BYTES) throw new Error('exceeds 16384 bytes');
   } catch (error) {
-    throw new Error(`Azure credentials could not be read: ${error.code ?? error.message}`);
+    const failure = /** @type {NodeJS.ErrnoException} */ (error);
+    throw new Error(`Azure credentials could not be read: ${failure.code ?? failure.message}`);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -69,6 +75,7 @@ function positiveId(value) {
 }
 
 function requestParts(request, config) {
+  /** @type {(string | symbol)[]} */
   const names = ['method', 'path', 'query', 'body', 'profile'];
   if (request === null || typeof request !== 'object' || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => !names.includes(key))) throw new Error('Azure request has unsupported fields');
@@ -138,13 +145,15 @@ function requestParts(request, config) {
   }
   if (request.method === 'GET' && request.body !== undefined) throw new Error('Azure GET request must have no body');
   let body;
+  let size;
   try {
     body = request.body === undefined ? undefined : JSON.stringify(request.body);
     if (request.body !== undefined && body === undefined) throw new Error();
-    if (Buffer.byteLength(JSON.stringify(request)) > MAX_REQUEST_BYTES) throw new Error('limit');
-  } catch (error) {
-    throw new Error(error.message === 'limit' ? 'Azure request/body exceeds the 67108864 byte limit' : 'Azure request body must be JSON');
+    size = Buffer.byteLength(JSON.stringify(request));
+  } catch {
+    throw new Error('Azure request body must be JSON');
   }
+  if (size > MAX_REQUEST_BYTES) throw new Error('Azure request/body exceeds the 67108864 byte limit');
   return {
     path: request.path + (query.size ? `?${query}` : ''), body,
     contentType: ['create', 'item'].includes(endpoint) && request.method !== 'GET' ? 'application/json-patch+json' : 'application/json',
@@ -170,6 +179,26 @@ function privateData(value, redact) {
 
 function unknownOutcome(message) {
   return `${message}; outcome unknown: inspect the Azure project/work item before retry`;
+}
+
+/** A thrown value read in one guarded step: a revoked proxy or a throwing getter gives a fixed message, never its text. */
+function safeError(caught, redact) {
+  let isError;
+  try {
+    isError = Error.isError(caught) || caught instanceof Error;
+  } catch {
+    isError = false;
+  }
+  if (!isError) return new Error('Azure request failed: a non-error value was thrown');
+  try {
+    const error = /** @type {TransportError} */ (caught);
+    // Fresh errors retain no unredacted provider stack or cause.
+    const safe = /** @type {TransportError} */ (new Error(redact(error.message)));
+    if (error.rateLimited === true) safe.rateLimited = true;
+    return safe;
+  } catch {
+    return new Error('Azure request failed: its error could not be read');
+  }
 }
 
 export async function requestAzure(request, { fetch, credentials, config }) {
@@ -198,7 +227,7 @@ export async function requestAzure(request, { fetch, credentials, config }) {
     const { status } = response;
     const detail = (message) => parts.mutation && ![400, 401, 403, 404, 409, 412, 413, 422, 429].includes(status) ? unknownOutcome(message) : message;
     if (status === 429) {
-      const error = new Error(`Azure rate limit (HTTP 429): Retry-After ${response.headers.get('retry-after') ?? 'not given'}; no retry was sent`);
+      const error = /** @type {TransportError} */ (new Error(`Azure rate limit (HTTP 429): Retry-After ${response.headers.get('retry-after') ?? 'not given'}; no retry was sent`));
       error.rateLimited = true;
       throw error;
     }
@@ -212,11 +241,8 @@ export async function requestAzure(request, { fetch, credentials, config }) {
       if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new Error();
     } catch { throw new Error(parts.mutation ? unknownOutcome('Azure response is not a JSON object') : 'Azure response is not a JSON object'); }
     return privateData(data, redact);
-  } catch (error) {
-    // Fresh errors retain no unredacted provider stack or cause.
-    const safe = new Error(redact(error.message));
-    if (error.rateLimited) safe.rateLimited = true;
-    throw safe;
+  } catch (caught) {
+    throw safeError(caught, redact);
   }
 }
 
@@ -230,6 +256,10 @@ function transportArgv(raw = process.env.BOARD_TOOLKIT_AZURE) {
   return parsed;
 }
 
+/**
+ * @param {unknown} request
+ * @param {{ spawn?: TransportSpawn }} [seams]
+ */
 export function azureExec(request, { spawn = spawnSync } = {}) {
   const parts = requestParts(request);
   const [command, ...args] = transportArgv();
@@ -247,7 +277,7 @@ export function azureExec(request, { spawn = spawnSync } = {}) {
     catch { throw new Error(parts.mutation ? unknownOutcome('Azure transport returned output that is not JSON') : 'Azure transport returned output that is not JSON'); }
   }
   const message = run.stderr.trim() || `Azure transport ended with ${run.signal ?? `exit ${run.status}`} and no message`;
-  const error = new Error(parts.mutation && run.signal ? unknownOutcome(message) : message);
+  const error = /** @type {TransportError} */ (new Error(parts.mutation && run.signal ? unknownOutcome(message) : message));
   if (run.status === RATE_LIMIT_EXIT) error.rateLimited = true;
   throw error;
 }
@@ -260,12 +290,13 @@ async function main() {
       if (Buffer.byteLength(input) > MAX_REQUEST_BYTES) throw new Error();
       request = JSON.parse(input);
     } catch { throw new Error('Azure request on stdin must be JSON within the 67108864 byte limit'); }
-    const config = validateAzureConfig(boardConfig.AZURE_CONFIG, 'board-config.mjs AZURE_CONFIG');
+    const config = validateAzureConfig('AZURE_CONFIG' in boardConfig ? boardConfig.AZURE_CONFIG : undefined, 'board-config.mjs AZURE_CONFIG');
     requestParts(request, config);
     const credentials = readAzureCredentials({ path: azureCredentialsPath(), platform: process.platform });
     const data = await requestAzure(request, { fetch, credentials, config });
     process.stdout.write(JSON.stringify(data));
-  } catch (error) {
+  } catch (caught) {
+    const error = /** @type {TransportError} */ (caught);
     process.stderr.write(`${error.message}\n`);
     process.exitCode = error.rateLimited ? RATE_LIMIT_EXIT : 1;
   }

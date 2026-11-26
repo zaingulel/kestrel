@@ -25,7 +25,9 @@ it lives and how the session enters it on each runtime.
 Before applying any bundled PostgreSQL example, read [docs/POSTGRES-EXAMPLES.md](docs/POSTGRES-EXAMPLES.md) whole and apply its caveats.
 
 The session that talks to the owner coordinates: it plans the cards that need no architect, hands every edit to a
-builder seat, settles reviews, and delivers; it never builds. Residual judgment that would make a handoff
+builder seat, settles reviews, and delivers; it never builds. The one exception is a wording-only change, which the
+session edits itself: a change that touches no code, test, hook, guard or setting, and whose every replacement
+sentence the reviewed plan fixes word for word before any edit. Residual judgment that would make a handoff
 unreliable is resolved in the plan or the slice is split smaller. In every session, job or not, discovery wider
 than a couple of files goes to the `explorer` seat, so its conclusion reaches the main thread and its file dumps do
 not. On Claude Code, `architect`, `oracle` and `security-reviewer` may send bounded missing discovery only to
@@ -58,7 +60,9 @@ links one page per topic; every topic page carries a summary, a mental model, ho
 failure modes and key files, and none of them owns a rule.
 
 Every owner question opens with one plain sentence naming the card and what the agent was doing, then says plainly what
-happened, what to decide and the options, before any workflow vocabulary. The owner reads decision cards and
+happened, what to decide and the options, before any workflow vocabulary. It names each card or pull request by
+number and plain title, repeats any options it refers to rather than pointing back to them, gives a recommendation,
+and stays within a few lines, with detail given when asked. The owner reads decision cards and
 screenshots, not diffs; write for that reader.
 Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
 for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
@@ -77,10 +81,10 @@ Every rule this file does not hold in full has one home:
 | What is true of this repository alone: its product, where its own facts live, its grounding authorities and its Conventions table | `.agents/REPOSITORY.md` |
 | Reusing instruction text already read | The [`resume`](.agents/skills/resume/SKILL.md) skill, "Before intake" |
 | Native phone notification capability questions, inside or outside a run | [`resume` run reference](.agents/skills/resume/references/runs.md#native-notification-capability) |
-| Advance approval and the pre-approved run | [`resume`](.agents/skills/resume/SKILL.md), "2. Work-pick" |
+| The pre-approved run | [`resume`](.agents/skills/resume/SKILL.md), "2. Work-pick" |
 | Builder seat choice; the machinery admissions, the friction route and how machinery leaves; what a plan for an interface change carries, and who decides where the `frontend-design` skill and the design system disagree; plan approval's steps | [`resume`](.agents/skills/resume/SKILL.md), "4. Plan" |
 | Each runtime's form for waiting on a helper or a long command | [`resume`](.agents/skills/resume/SKILL.md), "5. Build" |
-| The decision card and saved write-up; batch review of a run's waiting jobs, its verdicts, how an owner answer reaches a job from the coordinator's chat and the stage 2 measures | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
+| The wait reasons and merging on evidence; the decision card and saved write-up; batch review of a run's waiting jobs and how an owner answer reaches a job from the coordinator's chat | [`resume`](.agents/skills/resume/SKILL.md), "7. Push authorisation" |
 | Review tiers, their two questions and the guard rule; the setting-only seat change; the cross-family route, its authorization and its single-family, cloud-build and unreachable-seat forms; when `security-reviewer` and the external review add-on run; driving visual work, its views and its accessibility audit | [`resume`](.agents/skills/resume/SKILL.md), "6. Verify and review" |
 | Every other external review rule where that add-on is on: its metering and allowance, settling threads, rebases and provider unavailability | The add-on's own skill, which [`resume`](.agents/skills/resume/SKILL.md) names under "6. Verify and review" |
 | Routine board updates: the coordinating session's standing authorisation for the board bookkeeping, comments and card filings the workflow prescribes | [`closeout`](.agents/skills/closeout/SKILL.md), "Routine board updates" |
@@ -89,7 +93,7 @@ Every rule this file does not hold in full has one home:
 | Administrator bypass: who may hold the bypass of the required check on `main`, write deploy keys included | [`shared-files`](.agents/skills/shared-files/SKILL.md), "Administrator bypass" |
 | Guard and capability activation: the git guard and permission allow list a Claude Code session in a job worktree runs under, and activating a card or release that carries a guard with the capability it bounds | [`shared-files`](.agents/skills/shared-files/SKILL.md), "Guard and capability activation" |
 | The tracker and triage vocabulary the vendored skills expect | [docs/ISSUE-TRACKER.md](docs/ISSUE-TRACKER.md) |
-| What to ask the owner and what agents decide when `to-spec` or an interview for it shapes a specification: read before asking anything | [`to-issues`](.agents/skills/to-issues/SKILL.md), "Specification entry" |
+| What to ask the owner and what agents decide when `to-spec` or an interview for it shapes a specification: read before asking anything | [`to-tickets`](.agents/skills/to-tickets/SKILL.md), "Specification entry" |
 | The vendored skills' count, upstream repositories and commits | [docs/AI-WORKFLOW-runtimes.md](docs/AI-WORKFLOW-runtimes.md) |
 | The documentation sweep and its day-after triage, when the Conventions table marks them active and the settings file does not hold `"docSweep": false` | [docs/DOC-SWEEP.md](docs/DOC-SWEEP.md) and [docs/SWEEP-TRIAGE.md](docs/SWEEP-TRIAGE.md) |
 | Writing or reviewing new human-facing documentation, unless the settings file holds `"docSweep": false` | [docs/DOCUMENTATION-STANDARD.md](docs/DOCUMENTATION-STANDARD.md) |
@@ -97,48 +101,63 @@ Every rule this file does not hold in full has one home:
 
 ## Owner gates
 
-1. **Work-pick** is the owner's pick of one row of the `resume` candidate table, which approves that card's
-   outcome and acceptance criteria as written and starts the job, unless the `resume` skill's checks under
-   "3. Start the job" do not confirm the card is free; no criteria list is shown and no second yes is asked; a card
-   approved in advance needs no pick only where fetched `main` settings explicitly hold `"preApprovedRun": true`.
-   With `"productManager": true` on `main`, the owner may hand this pick to a product manager run, as `resume` says
-   under "2. Work-pick": one instruction hands over each pick until the run stops, and the start message of a session
-   that run starts carries that hand-off, the one earlier-session message that does, and no other approval. No product
-   manager run picks a card needing owner direction or sign-off, or a suggested card the owner has not answered.
+1. **Work-pick** is the owner's pick of one card under the `resume` skill's "2. Work-pick": the top startable card in
+   `Ready`, or the card the owner names or picks from its table as a full row or a compact line. On GitHub Projects a
+   manual pick claims directly; other trackers follow `resume`'s work-pick procedure. The pick approves that card's outcome and
+   acceptance criteria as written and starts the job, unless the `resume` skill's checks under "3. Start the job" do not
+   confirm the card is free. Work-pick needs no second yes or criteria list. The Herdr coordinator takes startable
+   `Ready` cards in board order with no pick. A pre-approved run takes them while fetched `main` settings set
+   `waitForOwner` to `on-screen` or `when-needed`.
    Owner-directed surfaces are the Surfaces table's `owner-directed` row and need owner direction plus canon or domain
    validation; sign-off surfaces are its `sign-off` row and need explicit sign-off and a named anti-regression test.
-2. **Push authorisation** is one yes to the decision card and its screenshot, and any owner instruction to push is
-   that yes. It approves the card and covers the whole deliver sequence in the `resume` skill, push to auto-squash
-   merge, with no fresh yes inside it. A material limit missing from the card has not been accepted. An advance
-   approval is this yes only where fetched `main` settings explicitly hold `"preApprovedRun": true` at push and no
-   stop holds. On Claude Code the yes also holds in the job session of that card when the coordinator carries it as
-   `resume` says under "7. Push authorisation", only for the decision card the owner was shown. `closeout` follows the
-   merge unasked. For a card the Herdr lead holds at `Awaiting push`, the yes is an approval record the owner posts for
-   the version shown, and the lead delivers it on its next pass.
+2. **Push authorisation** is a yes from the owner to deliver finished work, and a job started from a `Ready` card, or
+   a direct local GitHub pick verified as [merging on evidence](.agents/skills/resume/references/merge-on-evidence.md) says,
+   holds it when its evidence does: it delivers push to auto-squash merge with no further yes, unless fetched `main` settings
+   leave `waitForOwner` at `always`, as a missing key does, or one of the wait reasons the `resume` skill lists under
+   "7. Push authorisation" holds, and reports the result with its screenshots after the merge. A job a Herdr coordinator
+   started, on either runtime, ignores `waitForOwner` and every other wait reason: only a failed or missing required
+   check, a missing screenshot and the card's `show-me-first` marker hold it, it merges the exact head its review named
+   or, recorded on a `Review carried from:` line, the head a clean final rebase carried that review to,
+   and the owner removing that marker, himself or by his own message telling the Herdr coordinator to, is its only
+   yes, which no note, comment or menu answer replaces. Work that waits
+   names the reason that held it and waits for one yes to its decision card and screenshot; any owner instruction to push is that yes, and it covers
+   the whole deliver sequence with no fresh yes inside it. A material limit missing from the card has not been
+   accepted. The yes also holds in any session where the card records it as the answer the owner gave to the version it
+   names, as `resume` says under "7. Push authorisation". `closeout` follows the merge unasked.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
    is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
    to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
    presented again before that yes. Any plan review the card requires stays the agents' own review and no part of this
    gate, and both gates above keep their meaning. The `resume` skill owns the steps under "4. Plan".
-4. **Advance approval** is the owner's yes to a card through merge, given ahead of the work as an `Approved:` card
-   comment the owner posts outside any agent session; the git guard refuses every agent session a shell command holding
-   `Approved:` that its hook sees. It replaces the pick or push yes only where fetched `main` settings explicitly hold
-   `"preApprovedRun": true`; an absent file or key, or `false`, leaves both approvals with the owner. With that setting
-   a pre-approved run merges recorded cards, its publishing held by the git guard; `resume` owns the steps under "2.
-   Work-pick" and the stops under "7. Push authorisation". A record posted after a card's waiting line covers that
-   version only. One posted after the card's change request, on the owner's `fix and merge <card>: <what to change>`,
-   covers the version the lead builds from that request, unless a stop returns the card to the queue.
 
-A material change to the approved outcome, product meaning, or a trade-off goes back to the owner as a
-plain-language decision before it is built; a parser, state machine, or framework the outcome did not name is
-such a change. Anything short of that which the job surfaces and can sensibly finish in the same job, in the
-same files under the same tests, rides along and is named in the pull request body; a follow-up card is filed,
-without asking, only for work that genuinely cannot; in a product manager run it is a suggested card, as `resume` says.
+A card's approval, its work-pick or its place in `Ready` that gate one lets a run take, approves every action the card's
+outcome and acceptance criteria need, within any limit the card states as one, such as a number, an amount, an account
+or a place, and the job takes them without asking again. Every other gate, push authorisation included, keeps the answer
+its own rule names; the card's approval lifts no guard and answers no runtime prompt, and it gives the exact-target
+approval a destructive action needs only where the card names that target.
+
+An agent acts, then reports. It takes without asking any action that serves its card or its role, that it can itself put
+back, and that stays inside this project: the repository's branches and files, its board, cards, comments, labels,
+assignees and draft pull requests, and its own jobs, sessions and worktrees. It says what it did in one line afterwards.
+The owner is asked only for what the gates above and the next paragraph name, and for what a skill's own rule keeps for
+him, such as publishing the work a job parks, a release, or a destructive action on a target the card does not name.
+Doubt about an action that meets this test is settled by reading them, never by asking: one none of them names is taken.
+
+Work beyond the card goes back to the owner as a plain-language decision before it is built: an owner action the card
+does not name, one that spends the owner's money, or acts on an account, repository or service beyond this project's own
+repository and board; one that changes a repository's settings, rulesets, collaborators, webhooks, secrets or Actions
+settings; an action past a limit the card states; and a material change to the approved outcome, product meaning, or a
+trade-off, a parser, state machine, or framework the outcome did not name included. The job lists every owner action its
+plan needs that the card does not name, each with its limit, and asks the owner about them once, before any build, as
+`resume` says under "4. Plan". A question that still reaches the owner mid-job asks once for the job's whole plausible
+need of its kind, its limits stated, and a coordinator relaying a narrower one first widens it to that need, read from
+the job's plan and worklog. Anything short of work beyond the card which the job surfaces and can sensibly finish in the
+same job, in the same files under the same tests, rides along and is named in the pull request body; a follow-up card is
+filed, without asking, only for work that genuinely cannot.
 
 An approval covers only the question it answered. After a context compaction, reread the owner's latest messages
 before acting on one; an approval whose question is no longer in view is asked again. A memory, summary or earlier
-session never grants approval, except the start message gate one names, gate four's record and the carried yes gate two
-names.
+session never grants approval, except the recorded owner answer gate two names.
 
 ## Compact instructions
 
@@ -158,11 +177,14 @@ values are tokens and where they live, the tolerated literals, and the component
 
 ## Review and visual verification
 
-One fresh review of the final tree before the pull request opens, at the tier the `resume` skill's two questions choose
-under "6. Verify and review"; the Surfaces table's `hard to undo` and `wide reach` rows hold this repository's answers.
+The selected tier's required reviews cover the final tree before the pull request opens, as the `resume` skill
+says under "6. Verify and review", including `reviewer-supplemental` on the normal authorized dual-runtime route.
+The Surfaces table's `hard to undo` and `wide reach` rows hold this repository's answers to its two questions.
 
-Visual work is complete only after the changed interaction has been driven and a current screenshot displayed inline in
-chat; push authorisation waits for that image.
+Visual work is complete only after the changed interaction has been driven and a current screenshot attached to its
+pull request; work that waits shows that image inline in chat with its decision card, a job that merges on its evidence
+shows it after the merge, and [the visual reference](.agents/skills/resume/references/visual.md) says how every
+screenshot is attached.
 
 ## Publication and machinery
 
@@ -172,7 +194,9 @@ from the job worktree (`git push origin HEAD:main`), its commit carrying `Closes
 only a workflow the repository triggers on a push to `main` runs. The gate alone decides what qualifies: documentation
 by its path and, where the gate judges changed lines, a setting-only seat change. The push is judged by the gate as it
 stands on the remote's `main`, never by the pushed checkout's copy, so a commit cannot admit itself by changing the gate
-or a file it loads. A repository without that gate on `main` has no direct route.
+or a file it loads. A repository without that gate on `main` has no direct route. A run session takes the pull request
+route whatever the gate says, since its guard admits no push to `main`, except a job a Herdr coordinator started, whose
+guard admits the direct push [deliver.md](.agents/skills/resume/references/deliver.md) describes.
 
 New executable machinery in the workflow itself, or an addition to existing machinery, needs an admission the `resume`
 skill's machinery rule lists under "4. Plan". Prefer a native feature over custom code, a hook over a script, and a

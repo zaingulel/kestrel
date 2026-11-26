@@ -24,14 +24,14 @@ test('checkoutContext tells the main working tree from a linked worktree, and sa
     git(root, 'worktree', 'add', '-q', job, '-b', 'worktree-1170');
     mkdirSync(join(root, 'src'));
 
-    const fromRoot = checkoutContext(root).checkout;
+    const fromRoot = /** @type {NonNullable<ReturnType<typeof checkoutContext>['checkout']>} */ (checkoutContext(root).checkout);
     assert.equal(fromRoot.cwd, root);
     assert.equal(fromRoot.platform, process.platform);
     assert.equal(fromRoot.isRootCheckout(root), true);
     assert.equal(fromRoot.isRootCheckout(join(root, 'src')), true, 'a subdirectory of the root is still the root checkout');
     assert.equal(fromRoot.isRootCheckout(job), false);
 
-    const fromJob = checkoutContext(job).checkout;
+    const fromJob = /** @type {NonNullable<ReturnType<typeof checkoutContext>['checkout']>} */ (checkoutContext(job).checkout);
     assert.equal(fromJob.isRootCheckout(job), false);
     assert.equal(fromJob.isRootCheckout(root), true);
     assert.equal(fromJob.isRootCheckout(join(scratch, 'missing')), false, 'a directory git cannot read is not the root');

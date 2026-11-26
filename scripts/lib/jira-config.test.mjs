@@ -72,10 +72,10 @@ test('Jira configuration accepts exact mappings and rejects hostile values', () 
   duplicate.states.Ready = '10';
   refuse(duplicate, 'states');
   for (const id of ['', '0', '010', '-1', '1.5', '1e2', ' 10', '10\n', 10, null]) {
-    const state = fresh();
+    const state = /** @type {{ states: Record<string, unknown> }} */ (fresh());
     state.states.Ready = id;
     refuse(state, 'states');
-    const type = fresh();
+    const type = /** @type {{ issueTypes: Record<string, unknown> }} */ (fresh());
     type.issueTypes.task = id;
     refuse(type, 'issueTypes');
     refuse({ ...fresh(), blockLinkType: id }, 'blockLinkType');

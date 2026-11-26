@@ -37,7 +37,7 @@ function fileSymlinksAvailable() {
     symlinkSync('target', join(dir, 'link'), 'file');
     return true;
   } catch (error) {
-    if (process.platform === 'win32' && error.code === 'EPERM') return false;
+    if (process.platform === 'win32' && /** @type {NodeJS.ErrnoException} */ (error).code === 'EPERM') return false;
     throw error;
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -54,7 +54,14 @@ const REGION_SHA256 = '09834d488008f5f1ef589a2d7cedc52425bee9dd23b2212e4c1d673c5
 const START = '<!-- factory-shared:start -->';
 const END = '<!-- factory-shared:end -->';
 
+/** @typedef {Record<string, Record<string, Record<string, string | number>>>} SeatValues Values by runtime, seat and setting. */
+
 // seatDefaults left out writes a manifest with no such record.
+/**
+ * @param {string} root
+ * @param {Record<string, unknown>[]} entries
+ * @param {SeatValues} [seatDefaults]
+ */
 function writeManifest(root, entries, seatDefaults) {
   mkdirSync(join(root, '.agents'), { recursive: true });
   writeFileSync(
@@ -347,11 +354,17 @@ const SEAT_ENTRIES = [
   { path: CLAUDE_SEAT, sha256: CLAUDE_SHARED_SHA256 },
   { path: CODEX_SEAT, sha256: CODEX_SHARED_SHA256 },
 ];
+/** @type {SeatValues} */
 const SEAT_SETTINGS = { claude: { builder: { model: 'opus', maxTurns: 120 } }, codex: { reviewer: { model_reasoning_effort: 'high' } } };
+/** @type {SeatValues} */
 const SEAT_DEFAULTS = { claude: { builder: { model: 'sonnet', maxTurns: 60 } }, codex: { reviewer: { model_reasoning_effort: 'medium' } } };
 
 // A tree whose two seats hold the overridden bytes, with a settings file naming seats and a manifest recording
 // seatDefaults; null leaves the settings file, or the record, out.
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {{ seats?: SeatValues | null, seatDefaults?: SeatValues | null }} [options]
+ */
 function seatTree(t, { seats = SEAT_SETTINGS, seatDefaults = SEAT_DEFAULTS } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'factory-sync-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -692,6 +705,57 @@ test('ANTI-REGRESSION: a tree that turns the documentation sweep off verifies wi
   );
 });
 
+// One docs site file and the build workflow, written out by hand; each fixture file holds hello, so no hash is
+// computed by the code under test.
+const SITE_FILE = 'docs-site/build.mjs';
+const SITE_WORKFLOW = '.github/workflows/docs-site-build.yml';
+const SITE_PATHS = [SITE_FILE, SITE_WORKFLOW];
+const SITE_OFF_CAUSE = 'absent (the settings file does not turn the docs site on)';
+const SITE_NOT_ONLINE_CAUSE = 'absent (the settings file does not turn the docs site online)';
+
+test('ANTI-REGRESSION: a tree whose docs site is off or local verifies without the files it leaves out and refuses anything at their paths, and a tree that turns it online still refuses a missing or changed docs site file', (t) => {
+  const tree = (settings) => featureTree(t, SITE_PATHS.map((path) => ({ path, sha256: HELLO_SHA256 })), settings);
+  // Puts the recorded bytes, then other bytes, at a path the tree must leave out, and expects each refused for `cause`.
+  const refusesAt = (root, path, cause, name) => {
+    put(root, path, 'hello\n');
+    assert.deepEqual(verifyManifest(root), [{ path, expected: cause, actual: HELLO_SHA256 }], `${name}: the recorded bytes at ${path}`);
+    put(root, path, OTHER_TEXT);
+    assert.deepEqual(verifyManifest(root), [{ path, expected: cause, actual: OTHER_SHA256 }], `${name}: other bytes at ${path}`);
+    rmSync(join(root, path));
+  };
+  // Takes away, then changes, a file the tree must hold, and expects each refused against its recorded bytes.
+  const refusesMissingOrChanged = (root, path, name) => {
+    rmSync(join(root, path));
+    assert.deepEqual(verifyManifest(root), [{ path, expected: HELLO_SHA256, actual: 'missing' }], `${name}: ${path} missing`);
+    put(root, path, OTHER_TEXT);
+    assert.deepEqual(verifyManifest(root), [{ path, expected: HELLO_SHA256, actual: OTHER_SHA256 }], `${name}: ${path} changed`);
+    put(root, path, 'hello\n');
+  };
+
+  for (const [name, settings] of [
+    ['no settings file', undefined],
+    ['no docsSite key', { version: 1, seats: {} }],
+    ['docsSite off', { version: 1, seats: {}, docsSite: 'off' }],
+  ]) {
+    const off = tree(settings);
+    assert.deepEqual(verifyManifest(off), [], `${name}: none of the docs site's files`);
+    for (const path of SITE_PATHS) refusesAt(off, path, SITE_OFF_CAUSE, name);
+    rmSync(join(off, 'docs/a.txt'));
+    assert.deepEqual(verifyManifest(off), [{ path: 'docs/a.txt', expected: HELLO_SHA256, actual: 'missing' }], `${name}: a missing file of every install`);
+  }
+
+  const local = tree({ version: 1, seats: {}, docsSite: 'local' });
+  put(local, SITE_FILE, 'hello\n');
+  assert.deepEqual(verifyManifest(local), [], 'local: the site file present and no workflow');
+  refusesAt(local, SITE_WORKFLOW, SITE_NOT_ONLINE_CAUSE, 'local');
+  refusesMissingOrChanged(local, SITE_FILE, 'local');
+
+  const online = tree({ version: 1, seats: {}, docsSite: 'online' });
+  for (const path of SITE_PATHS) put(online, path, 'hello\n');
+  assert.deepEqual(verifyManifest(online), [], 'online: every docs site file present');
+  for (const path of SITE_PATHS) refusesMissingOrChanged(online, path, 'online');
+});
+
 test('verifyManifest judges a tree by the settings it is handed, and by its own settings file when handed none', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'factory-sync-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -704,6 +768,7 @@ test('verifyManifest judges a tree by the settings it is handed, and by its own 
   const handed = JSON.stringify({ version: 1, runtimes: ['claude'], seats: {}, docSweep: false });
 
   assert.throws(
+    // @ts-expect-error an object where the settings-file text belongs, passed on purpose to prove it is refused
     () => verifyManifest(root, manifest, { runtimes: ['claude'], greptile: false, docSweep: false, overrides: new Map() }),
     /is not valid JSON/,
     'settings reach the check only as settings-file text: an object a caller built is refused',
@@ -884,6 +949,10 @@ const NAMED_AFTER_UPDATE = /; a value only a newer copy of the shared workflow a
 
 // An adopter repository holding the two seats with the given bytes, a manifest that lists them with seatDefaults,
 // when given, and a settings file naming seats; null leaves the settings file out.
+/**
+ * @param {import('node:test').TestContext} t
+ * @param {{ claude?: string, codex?: string, seats?: SeatValues | null, seatDefaults?: SeatValues, origin?: string }} [options]
+ */
 function renderTree(t, { claude = CLAUDE_SHARED, codex = CODEX_SHARED, seats = SEAT_SETTINGS, seatDefaults, origin = ADOPTER_URL } = {}) {
   const root = staleRepository(t, origin);
   put(root, CLAUDE_SEAT, claude);
@@ -995,7 +1064,7 @@ test('render refuses the canonical repository and invalid settings and writes no
   put(root, SETTINGS, '{');
   assertRenderRefused(root, /^Error: \.agents\/factory-settings\.json: is not valid JSON/);
 
-  for (const [name, named, ...causes] of [
+  for (const [name, named, ...causes] of /** @type {[string, SeatValues, ...RegExp[]][]} */ ([
     [
       'a seat the manifest does not share',
       { claude: { planner: { model: 'opus' } } },
@@ -1025,7 +1094,7 @@ test('render refuses the canonical repository and invalid settings and writes no
       NAMED_AFTER_UPDATE,
     ],
     ['inherit', { claude: { builder: { model: 'inherit' } } }, /seats\.claude\.builder\.model: inherit leaves the seat model to the session/],
-  ]) {
+  ])) {
     put(root, SETTINGS, JSON.stringify({ version: 1, seats: named }));
     for (const cause of causes) {
       assertRenderRefused(root, (error) => {

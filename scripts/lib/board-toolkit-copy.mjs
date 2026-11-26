@@ -27,7 +27,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const LIB = fileURLToPath(new URL('.', import.meta.url));
 const SCRIPTS = fileURLToPath(new URL('..', import.meta.url));
-export const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'board-claim.mjs', 'verify-issue-publish.mjs', 'linear-card.mjs', 'jira-card.mjs', 'azure-card.mjs'];
+export const CLI_ENTRY_POINTS = ['board.mjs', 'board-add.mjs', 'board-move.mjs', 'board-claim.mjs', 'verify-issue-publish.mjs', 'linear-card.mjs', 'jira-card.mjs', 'azure-card.mjs', 'run-log.mjs'];
 
 // The transitive closure of relative imports from the CLI entry points above. Copying
 // exactly this set, no more, is the adoption contract itself: a file the toolkit no longer
@@ -58,11 +58,15 @@ export const TOOLKIT_LIB = [
   'jira-card.mjs',
   // The markdown reader's route to the repository and the cards folder.
   'posix-shell.mjs',
-  'advance-approval.mjs',
+  'merge-evidence.mjs',
+  'run-marks.mjs',
+  'workflow-pin.mjs',
   'factory-sync.mjs',
   'runtimes.mjs',
   'seat-settings.mjs',
   'check-agents.mjs',
+  'closeout-cleanup.mjs',
+  'run-folder.mjs',
 ];
 
 // Not part of the toolkit an adopter ships: a test helper, copied only so it builds fixtures
@@ -196,7 +200,7 @@ function eslintInstalled() {
     createRequire(import.meta.url).resolve('eslint');
     return true;
   } catch (error) {
-    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'MODULE_NOT_FOUND') throw error;
     return false;
   }
 }

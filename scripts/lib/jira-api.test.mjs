@@ -2,6 +2,7 @@
 // Real children use the existing --import fetch-stub pattern and isolated HOME/USERPROFILE.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,8 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { jiraCredentialsPath, jiraExec, readJiraCredentials, requestJira } from './jira-api.mjs';
 
+
+/** @typedef {import('./jira-api.mjs').TransportError} TransportError */
 const SITE = 'https://example.atlassian.net';
 const EMAIL = 'builder@example.test';
 const TOKEN = 'FAKE_jira_"token\\value';
@@ -84,7 +87,11 @@ test('Jira transport confines credentials and classifies every response', async 
   }
   for (const value of ['not JSON ' + TOKEN, null, [], { ...CREDENTIALS, password: TOKEN }]) {
     put(value);
-    assert.throws(() => read(), (error) => { privateText(error.stack); return /credential|Jira/i.test(error.message); });
+    assert.throws(() => read(), (error) => {
+      const { stack, message } = /** @type {Error} */ (error);
+      privateText(stack);
+      return /credential|Jira/i.test(message);
+    });
   }
   for (const field of ['site', 'email', 'token']) {
     const missing = { ...CREDENTIALS };
@@ -131,10 +138,10 @@ test('Jira transport confines credentials and classifies every response', async 
     assert.deepEqual(JSON.parse(answer.calls[0].init.body), body);
     privateText(answer.calls[0].init.body);
   }
-  for (const [credentials, site] of [
+  for (const [credentials, site] of /** @satisfies {[typeof CREDENTIALS, string][]} */ ([
     [{ ...CREDENTIALS, site: 'https://other.atlassian.net' }, SITE],
     [CREDENTIALS, 'https://attacker.test'], [CREDENTIALS, SITE + '/'],
-  ]) {
+  ])) {
     const answer = answering(200, '{}');
     await assert.rejects(send(PAYLOAD, answer, credentials, site), /site|origin|tenant/i);
     assert.equal(answer.calls.length, 0);
@@ -151,12 +158,12 @@ test('Jira transport confines credentials and classifies every response', async 
     await assert.rejects(send(request, answer), /request|method|path|field/i);
     assert.equal(answer.calls.length, 0);
   }
-  for (const [status, body, pattern] of [
+  for (const [status, body, pattern] of /** @satisfies {[number, string, RegExp][]} */ ([
     [200, '<html>bad</html>', /JSON/i], [201, '', /JSON/i], [204, 'unexpected', /204|empty/i],
     [202, '{}', /202/], [302, '{}', /302/], [500, '{"errorMessages":["failed"]}', /500/],
     [401, '{"errorMessages":["not authenticated"]}', /401.*credential|credential.*401/i],
     [403, '{"errorMessages":["not permitted"]}', /403.*permission|permission.*403/i],
-  ]) {
+  ])) {
     const answer = answering(status, body);
     await assert.rejects(send(PAYLOAD, answer), pattern);
     assert.equal(answer.calls.length, 1);
@@ -166,17 +173,19 @@ test('Jira transport confines credentials and classifies every response', async 
   for (const status of [400, 401, 403, 429]) {
     const answer = answering(status, JSON.stringify({ errorMessages: Object.values(reflected) }), { 'Retry-After': '37' });
     await assert.rejects(send(PAYLOAD, answer), (error) => {
-      privateText(error.stack);
-      assert.equal(error.cause, undefined);
-      assert.equal(error.rateLimited === true, status === 429);
-      if (status === 429) assert.match(error.message, /Retry-After.*37/);
+      const failure = /** @type {TransportError} */ (error);
+      privateText(failure.stack);
+      assert.equal(failure.cause, undefined);
+      assert.equal(failure.rateLimited === true, status === 429);
+      if (status === 429) assert.match(failure.message, /Retry-After.*37/);
       return true;
     });
     assert.equal(answer.calls.length, 1);
   }
   await assert.rejects(send(PAYLOAD, { fetch: async () => { throw new Error(TOKEN + BASIC + ESCAPED); } }), (error) => {
-    privateText(error.stack);
-    assert.match(error.message, /reach|network/i);
+    const failure = /** @type {Error} */ (error);
+    privateText(failure.stack);
+    assert.match(failure.message, /reach|network/i);
     return true;
   });
 
@@ -196,13 +205,13 @@ test('Jira transport confines credentials and classifies every response', async 
   let options;
   assert.deepEqual(jiraExec(PAYLOAD, { spawn: (_command, _args, given) => {
     options = given;
-    return { status: 0, stdout: '{"accountId":"acct-self"}', stderr: '' };
+    return { status: 0, signal: null, stdout: '{"accountId":"acct-self"}', stderr: '' };
   } }), { accountId: 'acct-self' });
   assert.deepEqual(JSON.parse(options.input), PAYLOAD);
   privateText(JSON.stringify(options));
   assert.equal(options.timeout, 60_000);
-  assert.throws(() => jiraExec(PAYLOAD, { spawn: () => ({ error: { code: 'ETIMEDOUT' } }) }), /did not answer within 60 s/);
-  assert.throws(() => jiraExec(PAYLOAD, { spawn: () => ({ status: 0, stdout: 'not JSON', stderr: '' }) }), /JSON/i);
+  assert.throws(() => jiraExec(PAYLOAD, { spawn: () => ({ error: Object.assign(new Error('spawnSync ETIMEDOUT'), { code: 'ETIMEDOUT' }), status: null, signal: null, stdout: '', stderr: '' }) }), /did not answer within 60 s/);
+  assert.throws(() => jiraExec(PAYLOAD, { spawn: () => ({ status: 0, signal: null, stdout: 'not JSON', stderr: '' }) }), /JSON/i);
 
   const lib = join(root, 'lib');
   mkdirSync(lib);
@@ -214,6 +223,7 @@ test('Jira transport confines credentials and classifies every response', async 
   writeFileSync(stub, STUB);
   const record = join(root, 'request.json');
   process.env.BOARD_TOOLKIT_JIRA = JSON.stringify([process.execPath, '--import', pathToFileURL(stub).href, join(lib, 'jira-api.mjs')]);
+  /** @type {(limit: boolean) => import('./jira-api.mjs').TransportSpawn} */
   const spawn = (limit) => (command, args, given) => {
     const run = spawnSync(command, args, {
       ...given, env: { ...process.env, HOME: home, USERPROFILE: home, JIRA_STUB_RECORD: record, JIRA_STUB_LIMIT: limit ? '1' : '', JIRA_STUB_APPEND: existsSync(record) ? '1' : '' },
@@ -226,9 +236,10 @@ test('Jira transport confines credentials and classifies every response', async 
   assert.equal(data.accountId, 'acct-self');
   privateText(data);
   assert.throws(() => jiraExec(PAYLOAD, { spawn: spawn(true) }), (error) => {
-    assert.equal(error.rateLimited, true);
-    assert.match(error.message, /Retry-After.*37/);
-    privateText(error.stack);
+    const failure = /** @type {TransportError} */ (error);
+    assert.equal(failure.rateLimited, true);
+    assert.match(failure.message, /Retry-After.*37/);
+    privateText(failure.stack);
     return true;
   });
   const records = JSON.parse(readFileSync(record, 'utf8'));
@@ -288,12 +299,12 @@ test('Jira issue-link transport accepts native empty creation responses', async 
     body: { type: { id: '10003' }, inwardIssue: { key: 'ENG-1' }, outwardIssue: { key: 'ENG-2' } },
   };
   const send = (request, answer) => requestJira(request, { ...answer, credentials: CREDENTIALS, site: SITE });
-  for (const [request, status, body, cause] of [
+  for (const [request, status, body, cause] of /** @satisfies {[object, number, string, RegExp][]} */ ([
     [PAYLOAD, 201, '', /JSON/],
     [{ method: 'POST', path: '/rest/api/3/issue', body: { fields: { summary: 'Jira tracer' } } }, 201, '', /JSON/],
     [link, 201, 'not JSON', /JSON/],
     [link, 202, '', /202/],
-  ]) {
+  ])) {
     const answer = answering(status, body);
     await assert.rejects(send(request, answer), cause);
     assert.equal(answer.calls.length, 1);
@@ -333,6 +344,7 @@ test('Jira helper runs through aliased executable paths', (t) => {
     else process.env.BOARD_TOOLKIT_JIRA = beforeOverride;
   });
   let lastWire;
+  /** @type {import('./jira-api.mjs').TransportSpawn} */
   const spawn = (command, args, given) => {
     const run = spawnSync(command, args, {
       ...given,
@@ -347,7 +359,7 @@ test('Jira helper runs through aliased executable paths', (t) => {
     process.env.BOARD_TOOLKIT_JIRA = JSON.stringify([process.execPath, '--import', pathToFileURL(stub).href, entry]);
     try { return jiraExec(PAYLOAD, { spawn }); }
     catch (error) {
-      error.message += '; native child ' + JSON.stringify(lastWire);
+      /** @type {Error} */ (error).message += '; native child ' + JSON.stringify(lastWire);
       throw error;
     }
   };
@@ -386,4 +398,78 @@ test('Jira helper runs through aliased executable paths', (t) => {
     privateText(JSON.stringify([request.argv, request.execArgv]));
     assert.equal(request.secretInEnvironment, false);
   }
+});
+
+test('Jira transport reports a thrown non-error value as unreachable', async () => {
+  for (const thrown of [null, undefined, 'text', 7, {}]) {
+    await assert.rejects(
+      requestJira(PAYLOAD, { fetch: async () => { throw thrown; }, credentials: CREDENTIALS, site: SITE }),
+      { message: 'Jira could not be reached: a non-error value was thrown' },
+    );
+  }
+});
+
+test('Jira transport reads an error from another realm', async () => {
+  /** @type {unknown} */
+  const foreign = runInNewContext('new TypeError("socket hang up", { cause: { code: "ECONNRESET" } })');
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw foreign; }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: ECONNRESET' },
+  );
+});
+
+test('Jira transport reports a revoked proxy as a non-error value', async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw proxy; }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: a non-error value was thrown' },
+  );
+});
+
+test('Jira transport reads a live proxy around an error', async () => {
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw new Proxy(new TypeError('socket hang up', { cause: { code: 'ECONNRESET' } }), {}); }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: ECONNRESET' },
+  );
+});
+
+test('Jira transport skips a cause field that is neither a string nor a number', async () => {
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw new TypeError('socket hang up', { cause: { code: Symbol('ECONNRESET'), name: 'NetworkError' } }); }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: NetworkError' },
+  );
+});
+
+test('Jira transport reads the first valid error field without reading later ones', async () => {
+  const cause = { code: 'ECONNRESET' };
+  Object.defineProperty(cause, 'name', { get: () => { throw new Error('name unreadable'); } });
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw new TypeError('socket hang up', { cause }); }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: ECONNRESET' },
+  );
+});
+
+test('Jira transport reports an error it cannot read with a fixed message', async () => {
+  const unreadable = new TypeError('socket hang up');
+  Object.defineProperty(unreadable, 'cause', { get: () => { throw new Error('cause unreadable'); } });
+  await assert.rejects(
+    requestJira(PAYLOAD, { fetch: async () => { throw unreadable; }, credentials: CREDENTIALS, site: SITE }),
+    { message: 'Jira could not be reached: its error could not be read' },
+  );
+});
+
+test('Jira transport reports a non-error value thrown while reading the answer with a fixed message', async () => {
+  const answer = { fetch: async () => ({ get status() { throw null; }, headers: new Headers(), text: async () => '{}' }) };
+  await assert.rejects(requestJira(PAYLOAD, { ...answer, credentials: CREDENTIALS, site: SITE }), { message: 'Jira request failed: a non-error value was thrown' });
+});
+
+test('Jira transport reports an error it cannot read while reading the answer without its secret', async () => {
+  const unreadable = new Error('unreadable');
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error(TOKEN); } });
+  const answer = { fetch: async () => ({ get status() { throw unreadable; }, headers: new Headers(), text: async () => '{}' }) };
+  const caught = await requestJira(PAYLOAD, { ...answer, credentials: CREDENTIALS, site: SITE }).then(() => assert.fail('the request resolved'), (error) => error);
+  assert.equal(caught.message, 'Jira request failed: its error could not be read');
+  assert.equal(caught.cause, undefined);
+  privateText(caught.stack);
 });

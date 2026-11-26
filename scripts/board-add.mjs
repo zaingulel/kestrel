@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { ghExec } from './lib/gh-exec.mjs';
 import { addIssueToBoard } from './lib/board-add.mjs';
+import { isReady, wakeCoordinator } from './lib/board-move.mjs';
 import { ROUTING_FIELD } from './lib/board-config.mjs';
 import { CARDS_DIR, configuredTracker } from './lib/board-markdown.mjs';
 
@@ -32,6 +33,7 @@ export const BOARD_ADD_HELP = [
 export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   const executor = dependencies.ghExec ?? ghExec;
+  const wake = dependencies.wake ?? wakeCoordinator;
 
   // --help reads no board and prints a fixed text, so any companion argument would promise more.
   if (args.includes('--help')) {
@@ -43,6 +45,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     return 0;
   }
 
+  let askedReady = false;
   try {
     // A markdown card is a file, so no argument shape files one.
     if (configuredTracker() === 'markdown') {
@@ -59,6 +62,7 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     }
     if (args.length !== (ROUTING_FIELD ? 3 : 2)) throw new Error(BOARD_ADD_USAGE);
     const [numRaw, statusName, workstreamName] = args;
+    askedReady = configuredTracker() === 'github' && isReady(statusName);
     const result = addIssueToBoard(
       { issueNumber: Number(numRaw), statusName, workstreamName },
       executor,
@@ -67,9 +71,18 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
     output.log(ROUTING_FIELD
       ? `board-add: Status = ${result.statusName}, ${ROUTING_FIELD} = ${result.workstreamName}`
       : `board-add: Status = ${result.statusName}`);
+    if (isReady(result.statusName)) {
+      const cause = wake();
+      if (cause) output.error(`board-add: the coordinator was not woken: ${cause}`);
+    }
     return 0;
   } catch (err) {
-    output.error(`board-add: ${err.message}`);
+    output.error(`board-add: ${/** @type {Error} */ (err).message}`);
+    // A failed add may have committed its Ready Status, so a requested Ready wakes.
+    if (askedReady) {
+      const cause = wake();
+      if (cause) output.error(`board-add: the coordinator was not woken: ${cause}`);
+    }
     return 1;
   }
 }

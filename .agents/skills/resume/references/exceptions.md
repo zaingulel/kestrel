@@ -24,19 +24,29 @@ assignees and latest claim the intake showed, and the last `outcome:` line gives
 [claim-reads.md](claim-reads.md) reaches the same two cases, with its own reads in place of those lines. "Those" below
 are the Free criteria there.
 
-  - **Not free**, when complete reads fail any of those. Start nothing and write nothing to the card: no
-    worktree, no branch, no board move, no assignee, no comment. Tell the owner in plain language which card it
-    is and that it is no longer free; the state, the matching project and column, the assignees and the newest
-    claim the reads show, beside the board, column, assignees and claim the intake document showed; and who holds it and
-    since when: the machine and runtime named by a claim the document did not show, the account that posted it
-    and the time GitHub recorded, and any account in `assignees` that the document did not list, assigned since
-    intake at a time the reads do not give. When no such claim and no such account names a holder, say that the
-    card does not show who holds it or since when, and fill neither in. Say that this session started nothing
-    and wrote nothing, and that the owner can pick another row.
+A named GitHub card already shown occupied stops here before the claim command. For that case and exit 3, use the
+incumbent claim's address, account, machine and runtime when supported by the reads. Compare claims in GitHub order
+against trustworthy earlier pickable evidence. If the available read cannot identify the holder, run the standalone
+card read in [claim-reads.md](claim-reads.md) once, passing `--repo` for the exact GitHub repository bound by the
+original intake, including when the status moved after the earlier card read. Never substitute the current default
+repository. An incomplete read, partial move or ambiguous candidate is reported with the visible evidence and
+ownership unconfirmed.
+
+  - **Not free**, when complete reads fail any of those. Start nothing and write nothing to the card: no worktree, no
+    branch, no board move, no assignee, no comment. Tell the owner in plain language which card it is and that it is no
+    longer free; the state, the matching project and column, the assignees and the newest claim the reads show, beside
+    the board, column, assignees and claim the intake document showed; and who holds it and since when: the machine and
+    runtime and address named by a claim trustworthy prior pickable evidence did not show, the account that posted it and the time GitHub recorded, and any
+    account in `assignees` that the document did not list, assigned since intake at a time the reads do not give. When
+    the reads do not identify a holder, say that ownership is unconfirmed and the card does not show who holds it or since when, and
+    fill neither in. Say that this session started nothing and wrote nothing, and that the owner can pick another card;
+    where a pick had already moved the card to the top of `Ready`, say instead that this session moved it there and
+    started and wrote nothing else, and that the owner can pick another card.
   - **Could not confirm**, when either read failed or is incomplete. The card is never treated as free. Start
     nothing and write nothing to the card. Tell the owner that the session could not confirm the card is free;
-    what failed or what the output lacked, with the error printed; that nothing was started or written; and
-    that the session reads again on the owner's say, or the owner can pick another row.
+    what failed or what the output lacked, with the error printed; that nothing was started or written, or, where a
+    pick had already moved the card to the top of `Ready`, that this session moved it there and started and wrote
+    nothing else; and that the session reads again on the owner's say, or the owner can pick another card.
 
 ## 3. Start the job: another claim or an unconfirmed claim
 
@@ -60,7 +70,7 @@ the claim does.
     withdrawal step that fails is reported with its error and what it left behind, never forced. Tell the owner
     in plain language that another session claimed the card first; the holder's machine, runtime and account
     with the time GitHub recorded, beside this session's own; what this session changed on the card and what it
-    put back; what it removed locally; that nothing was built; and that the owner can pick another row.
+    put back; what it removed locally; that nothing was built; and that the owner can pick another card.
   - **Could not confirm**, when the read failed or is incomplete. The card is never treated as held. Build
     nothing and change nothing more: the claim, the assignee and the column stay as they are. Tell the owner
     that the session could not confirm the card is free of an earlier claim; what failed or what the output
@@ -71,21 +81,25 @@ the claim does.
 ## 4. Plan: capped seats
 
 - **Capped architect.** An `architect` reply that does not end with the line `plan delivered in full` is capped. The
-  session never resumes or messages that architect, even where the runtime offers to. It reads the plan file, or the
-  plan in the reply where the reply says the file could not be written; every point the architect settled is held there
-  and any other point is still open. It then either dispatches one fresh `architect` narrowed to the open points, with
-  that plan on its `Discovery:` line, or finishes the plan inline from it; when that fresh dispatch is capped too, the
-  session finishes the plan inline. A split proposal in that plan goes to the owner as the "4. Plan" bullet beginning "A plan names its scope" says, never
-  narrowed or finished inline. A capped architect is never by itself a reason to dispatch `oracle`.
+  session never resumes or messages that architect, even where the runtime offers to. It reads the plan file only where
+  the reply names it as written in this attempt, or the plan in the reply where the reply says the file could not be
+  written; otherwise every point is open, and a fresh dispatch or its own inline plan starts from the original completed
+  discovery, never from a file of that attempt; every point the architect settled is held there and any other point is
+  still open. It then either dispatches one fresh `architect` narrowed to the open points, with that plan on its
+  `Discovery:` line, or finishes the plan inline from it; when that fresh dispatch is capped too, the session finishes
+  the plan inline. A split proposal in that plan goes to the owner as the "4. Plan" bullet beginning "A plan names its
+  scope" says, never narrowed or finished inline. A capped architect is never by itself a reason to dispatch `oracle`.
 
 - **Capped oracle or security reviewer.** A reply from either seat that does not end with its finish line,
-  `brief delivered in full` for the oracle and `security review delivered in full` for the security reviewer, is
-  capped; a charter's return for a missing finding or result file is not. The session never resumes or messages
-  that seat, even where the runtime offers to. It reads the result file, or the result in the reply where the reply
-  says the file could not be written; every point the seat settled is held there and any other point is still open.
-  It then either dispatches one fresh seat of the same name narrowed to the open points, with that result file in
-  the dispatch, or finishes the result inline from it; when that fresh dispatch is capped too, the session finishes
-  inline. A security review the session finished inline is declared in the pull request body's Review section.
+  `brief delivered in full` for the oracle and `security review delivered in full` for the security reviewer, is capped;
+  a charter's return for a missing finding is not. The session never resumes or messages that seat, even where the
+  runtime offers to. It reads the result file only where the reply names it as written in this attempt, or the result in
+  the reply where the reply says the file could not be written; otherwise every point is open, and a fresh dispatch or
+  its own inline result starts from the original completed discovery, never from a file of that attempt; every point the
+  seat settled is held there and any other point is still open. It then either dispatches one fresh seat of the same
+  name narrowed to the open points, with that result file in the dispatch, or finishes the result inline from it; when
+  that fresh dispatch is capped too, the session finishes inline. A security review the session finished inline is
+  declared in the pull request body's Review section.
 
 ## Parking
 

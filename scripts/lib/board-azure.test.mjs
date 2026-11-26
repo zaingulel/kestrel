@@ -334,7 +334,7 @@ test('612 fix A: an Azure comment that begins Needs owner: reaches the intake su
   const card = api.normalizeItem(api.readAzureBoard(native.exec, native.gh).items[1]);
   const details = api.azureCardDetails(native.exec, ['AB-299']);
   const files = new Map(api.intakeCardFiles({ candidates: [card], claims: [], details }).map((file) => [file.number, file]));
-  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files });
+  const summary = api.intakeSummary({ listing: 'LISTING', candidates: [card], claims: [], numberless: 0, details, directory: 'out', files, readyOrder: null });
   assert.deepEqual(summary.filter((line) => line.startsWith('owner questions:')), [
     'owner questions: review complete native comments for Needs owner: questions',
   ]);

@@ -11,14 +11,14 @@ export function main(args = process.argv.slice(2), dependencies = {}) {
   const output = dependencies.output ?? console;
   let command;
   try { command = parseCardArgs(args); }
-  catch (error) { output.error(`jira-card: ${error.message}\n${USAGE}`); return 2; }
+  catch (error) { output.error(`jira-card: ${/** @type {Error} */ (error).message}\n${USAGE}`); return 2; }
   try {
     if (trackerOf(boardConfig) !== 'jira') throw new Error('board-config.mjs must select the Jira tracker for jira-card');
     const rows = runCardCommand(command, dependencies.jiraExec ?? jiraExec);
     for (const row of rows) output.log(JSON.stringify(row));
     return 0;
   } catch (error) {
-    output.error(`jira-card: ${error.message}`);
+    output.error(`jira-card: ${/** @type {Error} */ (error).message}`);
     return 1;
   }
 }
