@@ -26,8 +26,8 @@ function job(name) {
 
 test('current Kestrel test jobs select Node 26.13.1', () => {
   for (const name of ['quality', 'hooks_windows']) {
-    // Each step starts at its six-space `- ` marker; a lane must hold exactly one setup-node step.
-    const setupNode = job(name).split(/^(?=      - )/m).filter((step) => step.startsWith('      - uses: actions/setup-node@'));
+    // Each step starts at its six-space `- ` marker; a setup-node step is found whichever key opens it.
+    const setupNode = job(name).split(/^(?=      - )/m).filter((step) => /^      (?:- |  )uses: actions\/setup-node@/m.test(step));
     assert.equal(setupNode.length, 1, `${name} must have exactly one actions/setup-node step`);
     assert.match(setupNode[0], /^        with:\n/m, `${name} setup-node step must carry a with block`);
     const pins = setupNode[0].match(/^          node-version: '([^']*)'$/gm) ?? [];
