@@ -13,7 +13,7 @@ const env = { ...gitEnvironment(), GIT_NO_REPLACE_OBJECTS: '1' };
 const OFF_LINUX = process.platform === 'linux' ? undefined : `the pin serves coordinated Herdr jobs, which run on Linux only (card #617), not ${process.platform}`;
 
 const run = (cwd, args, options) => {
-  const done = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], { cwd, env, ...options });
+  const done = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.safecrlf=false', ...args], { cwd, env, ...options });
   assert.equal(done.status, 0, `git ${args.join(' ')}: ${done.stderr}`);
   return done.stdout;
 };
@@ -400,7 +400,7 @@ const LANE_TEST = 'scripts/lib/delivery-lane-contract.test.mjs';
 
 const CONTRACT_FILES = {
   [SETTINGS]: `${JSON.stringify({ permissions: { allow: ['Bash(ls)'] }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'stop' }] }] } }, null, 2)}\n`,
-  [PIN_MODULE]: 'export const pin = 1;\n',
+  [PIN_MODULE]: 'export const pin = 1;\nexport const second = 2;\n',
   [LANE_TEST]: 'export const lane = 1;\n',
 };
 // Commits the three shared contracts at the root and returns the commit.
@@ -457,6 +457,90 @@ test('workflow pin: names drift', (t) => {
     assert.ok(error.message.includes(join(root, SETTINGS)), error.message);
     return true;
   });
+});
+
+test("ANTI-REGRESSION: drift ignores CRLF line endings from Git's checkout and still names every content change", (t) => {
+  const root = repository(t);
+  git(root, 'config', 'core.autocrlf', 'true');
+  // The repository's own settings and attributes override a developer's global file, so core.autocrlf alone decides the checkout.
+  const attributes = join(root, git(root, 'rev-parse', '--git-path', 'info/attributes'));
+  mkdirSync(dirname(attributes), { recursive: true });
+  writeFileSync(attributes, '* !text !eol !crlf !working-tree-encoding !filter\n');
+  const commitId = contracts(root);
+  const drift = (commit = commitId) => pin.workflowDrift({ cwd: root, commit, root });
+
+  for (const path of Object.keys(CONTRACT_FILES)) rmSync(join(root, path));
+  git(root, 'checkout', 'HEAD', '--', ...Object.keys(CONTRACT_FILES));
+  assert.equal(readFileSync(join(root, PIN_MODULE), 'latin1').split('\r\n').length - 1, 2, `${PIN_MODULE} is checked out with two CRLF pairs`);
+  assert.ok(readFileSync(join(root, LANE_TEST)).includes('\r\n'), `${LANE_TEST} is checked out with CRLF`);
+  for (const path of [PIN_MODULE, LANE_TEST]) {
+    assert.ok(!blob(root, `${commitId}:${path}`).includes('\r'), `${path} holds no CR in its blob`);
+  }
+  assert.deepEqual(drift(), [], 'a CRLF checkout of the same content is no drift');
+
+  writeFileSync(join(root, LANE_TEST), Buffer.concat([readFileSync(join(root, LANE_TEST)), Buffer.from([0])]));
+  assert.deepEqual(drift(), [LANE_TEST], 'an appended zero byte is drift');
+  git(root, 'checkout', 'HEAD', '--', LANE_TEST);
+
+  const laneTest = readFileSync(join(root, LANE_TEST));
+  writeFileSync(join(root, LANE_TEST), laneTest.subarray(0, -2));
+  assert.deepEqual(drift(), [LANE_TEST], 'a removed final line ending is drift');
+  git(root, 'checkout', 'HEAD', '--', LANE_TEST);
+
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\rexport const second = 2;\r\n');
+  assert.deepEqual(drift(), [PIN_MODULE], 'a lone carriage return is drift');
+
+  writeFileSync(join(root, PIN_MODULE), 'export const \rpin = 1;\r\nexport const second = 2;\r\n');
+  assert.deepEqual(drift(), [PIN_MODULE], 'a carriage return inside a line is drift');
+
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\r\r\nexport const second = 2;\r\n');
+  assert.deepEqual(drift(), [PIN_MODULE], 'an extra carriage return before CRLF is drift');
+
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\r\nexport const second = 2;\r\n\r');
+  assert.deepEqual(drift(), [PIN_MODULE], 'a trailing lone carriage return is drift');
+
+  git(root, 'config', 'core.autocrlf', 'false');
+  // The leading CRLF line is shared by every builder call, so the blob and each copy carry a CR at the same place.
+  const mixedEndingContract = (firstEnding, lastEnding, byte) => Buffer.concat([Buffer.from(`export const zero = 0;\r\nexport const pin = 1;${firstEnding}export const second = 2; // `), Buffer.from([byte]), Buffer.from(lastEnding)]);
+  stage(root, PIN_MODULE, '100644', mixedEndingContract('\r\n', '\n', 0xff));
+  git(root, 'commit', '-m', 'crlf contract');
+  const crlfCommit = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), mixedEndingContract('\n', '\r\n', 0xff));
+  assert.deepEqual(drift(crlfCommit), [], 'a copy with its CRLF on a different line from the blob is no drift');
+  writeFileSync(join(root, PIN_MODULE), mixedEndingContract('\n', '\r\n', 0xfe));
+  assert.deepEqual(drift(crlfCommit), [PIN_MODULE], 'a changed non-UTF-8 byte is drift');
+
+  stage(root, PIN_MODULE, '100644', Buffer.from('export const pin = 1;\r\nexport const second = 2'));
+  git(root, 'commit', '-m', 'no final newline');
+  const noFinalNewline = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\nexport const second = 2');
+  assert.deepEqual(drift(noFinalNewline), [], 'an LF copy with no final newline is no drift');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\nexport const second = 3');
+  assert.deepEqual(drift(noFinalNewline), [PIN_MODULE], 'a changed last byte is drift');
+
+  stage(root, PIN_MODULE, '100644', Buffer.from('export const \rpin = 1;\nexport const second = 2;\n'));
+  git(root, 'commit', '-m', 'lone CR in the pinned blob');
+  const loneCarriageReturn = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\nexport const second = 2;\n');
+  assert.deepEqual(drift(loneCarriageReturn), [PIN_MODULE], 'a lone carriage return in the pinned blob is drift');
+
+  stage(root, PIN_MODULE, '100644', Buffer.from('export const pin = 1;\nexport const second = 2;\r'));
+  git(root, 'commit', '-m', 'final lone CR in the pinned blob');
+  const finalLoneCarriageReturn = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\nexport const second = 2;');
+  assert.deepEqual(drift(finalLoneCarriageReturn), [PIN_MODULE], 'a final lone carriage return in the pinned blob is drift');
+
+  stage(root, PIN_MODULE, '100644', Buffer.from('export const pin = 1;\rexport const second = 2;\n'));
+  git(root, 'commit', '-m', 'lone CR line ending in the pinned blob');
+  const loneCarriageReturnLineEnding = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\nexport const second = 2;\n');
+  assert.deepEqual(drift(loneCarriageReturnLineEnding), [PIN_MODULE], 'a lone carriage return line ending in the pinned blob is drift');
+
+  stage(root, PIN_MODULE, '100644', Buffer.from('export const pin = 1;\r\r\nexport const second = 2;\n'));
+  git(root, 'commit', '-m', 'extra CR before CRLF in the pinned blob');
+  const extraCarriageReturn = git(root, 'rev-parse', 'HEAD');
+  writeFileSync(join(root, PIN_MODULE), 'export const pin = 1;\r\nexport const second = 2;\n');
+  assert.deepEqual(drift(extraCarriageReturn), [PIN_MODULE], 'an extra carriage return before CRLF in the pinned blob is drift');
 });
 
 test('workflow pin: allows drift only for the exact one-argument watcher cleanup', () => {

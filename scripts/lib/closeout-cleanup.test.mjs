@@ -1,4 +1,3 @@
-// @ts-nocheck
 // closeout-cleanup.test.mjs: the closeout cleanup command removes a job's containers, run folders, named scratch, worktree, the
 // empty folder Codex made around the worktree and branch only when every check passes, and retains each target a check or a refusal holds back, with its reason.
 //
@@ -35,6 +34,26 @@ const PR_FIELDS = 'state,mergedAt,mergeCommit,headRefName,headRefOid,isCrossRepo
 const mergedPr = () => ({ state: 'MERGED', mergedAt: '2026-10-18T10:00:00Z', mergeCommit: { oid: MERGE },
   headRefName: 'job/23', headRefOid: HEAD, isCrossRepository: false, baseRefName: 'main', url: PR_URL });
 const reply = (status, stdout = '', stderr = '') => ({ status, stdout, stderr });
+// A fixture a case configures: null stands for the command not installed, which such a case never sets.
+/** @template T @param {T | null} fixture @returns {T} */
+const present = (fixture) => {
+  assert.ok(fixture);
+  return fixture;
+};
+// What the fake `run` answers: a finished command's reply, or a command not installed or failed to finish.
+/** @typedef {{ status: number, stdout: string, stderr: string } | { absent: true } | { failed: string }} Reply */
+// A docker inspect record as the fake prints it: the fields it reads, and any others a case sets, malformed ones included.
+/** @typedef {{ Id: string, State: { Status?: string, Running?: boolean }, [field: string]: unknown }} ContainerFixture */
+/**
+ * @typedef {{ containers: ContainerFixture[], vanished: string[], ls?: Reply, inspect?: Reply,
+ *   volumes?: Record<string, Reply>, refuse?: Record<string, string> }} DockerFixture
+ */
+/**
+ * @typedef {{ listeners: Array<{ pid: number, command: string, cwd?: string }>,
+ *   open: Array<{ pid: number, command: string, name: string }>,
+ *   l1?: Reply, l2Stderr?: string, l3?: Reply, l3Target?: string, l3Stderr?: string }} LsofFixture
+ */
+/** @typedef {{ pid: number, ppid: number, pgid?: number, tpgid?: number, tty?: string, args: string }} ProcessFixture */
 
 const PROOF_HOST = 'unix:///tmp/proof.sock';
 const PROOF_SS = 'u_str LISTEN 0 4096 /tmp/proof.sock 700 * 0 users:(("dockerd",pid=71,fd=3)) <-> ino:90 dev:0/5 peers:\n';
@@ -115,6 +134,7 @@ function withoutDockerSelection(invoke) {
 // the root mount unless set) and `privileged` answers both the
 // direct sudo and the user service manager route. `host` is the endpoint docker selects, PROOF_HOST unless set, and
 // `desktop` holds the replies to the macOS observations: `id`, `stat` and the daemon's `version`.
+/** @typedef {ReturnType<typeof scenario>} Scenario */
 function scenario(t, worktreeParts = ['wt']) {
   const capturedPath = { ...process.env }.PATH;
   const nativeEnv = { ...(capturedPath === undefined ? {} : { PATH: capturedPath }), LC_ALL: 'C' };
@@ -125,15 +145,16 @@ function scenario(t, worktreeParts = ['wt']) {
   mkdirSync(mainDir);
   mkdirSync(worktree, { recursive: true });
   const state = {
-    records: [{ path: mainDir, branch: 'refs/heads/main' }, { path: worktree, branch: 'refs/heads/job/23' }],
+    records: /** @type {Array<{ path: string, branch?: string, prunable?: boolean }>} */ (
+      [{ path: mainDir, branch: 'refs/heads/main' }, { path: worktree, branch: 'refs/heads/job/23' }]),
     branch: true,
     status: '',
-    index: reply(0, 'H kept.txt\0'),
-    docker: { containers: [], vanished: [] },
+    index: /** @type {Reply} */ (reply(0, 'H kept.txt\0')),
+    docker: /** @type {DockerFixture | null} */ ({ containers: [], vanished: [] }),
     native: {},
-    lsof: { listeners: [], open: [] },
+    lsof: /** @type {LsofFixture | null} */ ({ listeners: [], open: [] }),
     tracked: {},
-    processes: [{ pid: 1, ppid: 0, args: '/sbin/init splash' }],
+    processes: /** @type {ProcessFixture[]} */ ([{ pid: 1, ppid: 0, args: '/sbin/init splash' }]),
   };
   const calls = [];
   const executions = [];
@@ -239,8 +260,8 @@ function scenario(t, worktreeParts = ['wt']) {
       if (name === 'sudo') return privilegedAnswer(args);
       let fallback = PROOF_REPLIES[name];
       if (name === 'stat') {
-        const vectors = [[PROOF_VECTORS.stat, PROOF_STAT], [SYSTEMD_VECTOR, SYSTEMD_STAT],
-          [CALLER_VECTOR, CALLER_STAT], [SYSTEMD_CALLER_VECTOR, SYSTEMD_CALLER_STAT]];
+        const vectors = /** @type {Array<[string[], string]>} */ ([[PROOF_VECTORS.stat, PROOF_STAT], [SYSTEMD_VECTOR, SYSTEMD_STAT],
+          [CALLER_VECTOR, CALLER_STAT], [SYSTEMD_CALLER_VECTOR, SYSTEMD_CALLER_STAT]]);
         const vector = vectors.find(([expected]) => JSON.stringify(expected) === JSON.stringify(args));
         assert.ok(vector, `unexpected native stat: ${args.join(' ')}`);
         fallback = reply(0, vector[1]);
@@ -342,6 +363,10 @@ function dockerAnswer(docker, args) {
 }
 
 // A container record with the keys docker inspect prints; HostConfig.Mounts is omitted when unset, as docker does.
+/**
+ * @param {string} id
+ * @param {{ running?: boolean, mounts?: unknown[], binds?: unknown[] | null, hostMounts?: unknown[] }} [options]
+ */
 function containerRecord(id, { running = false, mounts = [], binds = null, hostMounts } = {}) {
   return {
     Id: id, Created: '2026-10-14T10:00:00.000000000Z', Path: 'sh', Args: [],
@@ -469,7 +494,7 @@ const dockerCalls = (s, verb) => s.calls
 
 test('a container bound below the worktree is stopped and removed, then the worktree and the branch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.docker.containers = [
+  present(s.state.docker).containers = [
     containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] }),
     containerRecord(ID_B, { binds: [`${s.worktree}:/work:rw`] }),
     containerRecord(ID_C, { hostMounts: [bindMount(join(s.worktree, 'data'))] }),
@@ -484,39 +509,39 @@ test('a container bound below the worktree is stopped and removed, then the work
   });
   assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
   assert.deepEqual(dockerCalls(s, 'rm'), [['docker', 'rm', ID_A], ['docker', 'rm', ID_B], ['docker', 'rm', ID_C]]);
-  assert.deepEqual(s.state.docker.containers, []);
+  assert.deepEqual(present(s.state.docker).containers, []);
   assert.deepEqual(s.unexpected, []);
 });
 
 test('ANTI-REGRESSION: a running container bound above the worktree retains it and the branch and is not stopped', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, record] of [
+  for (const [name, record] of /** @type {Array<[string, (s: Scenario) => ContainerFixture]>} */ ([
     ['running', (s) => containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })],
     ['State: {}', (s) => ({ ...containerRecord(ID_A, { mounts: [bindMount(s.root)] }), State: {} })],
     ['bound above and at worktree/data', (s) => containerRecord(ID_A, {
       running: true, mounts: [bindMount(s.root), bindMount(join(s.worktree, 'data'))],
     })],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
-      s.state.docker.containers = [record(s)];
+      present(s.state.docker).containers = [record(s)];
       assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
       assertWorktreeNotRemoved(s);
       assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-      assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+      assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     });
   }
 });
 
 test('a stopped container bound above the worktree, or a running one only naming it, leaves the worktree removable', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, record] of [
+  for (const [name, record] of /** @type {Array<[string, (s: Scenario) => ContainerFixture]>} */ ([
     ['stopped, bound at s.root', (s) => containerRecord(ID_A, { mounts: [bindMount(s.root)] })],
     ['running, with label proof.output set to the worktree', (s) => ({
       ...containerRecord(ID_A, { running: true }), Config: { Labels: { 'proof.output': s.worktree }, WorkingDir: '' },
     })],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
-      s.state.docker.containers = [record(s)];
+      present(s.state.docker).containers = [record(s)];
       assert.deepEqual(await s.cleanup(), {
         exitCode: 0,
         out: [`removed worktree ${s.worktree}`, 'removed branch job/23', 'closeout-cleanup: 2 removed, 0 retained'],
@@ -531,7 +556,7 @@ test('a stopped container bound above the worktree, or a running one only naming
 test('a bind source in a symlink loop retains the worktree and reports the container', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   symlinkSync('loop', join(s.root, 'loop'));
-  s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'loop', 'x'))] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'loop', 'x'))] })];
   assert.deepEqual(await s.cleanup(), {
     exitCode: 4,
     out: [
@@ -551,7 +576,7 @@ test('a mount entry with no type retains the worktree and the branch and reports
   const untyped = [{}, { Type: '' }, { Type: 'invalid' }];
   for (const typing of untyped) {
     const s = scenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [{ ...typing, Source: join(s.worktree, 'data') }] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [{ ...typing, Source: join(s.worktree, 'data') }] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 4,
       out: [
@@ -573,8 +598,9 @@ test('a recognised non-bind mount type is ignored and the worktree is removed', 
   const mounts = ['volume', 'tmpfs', 'npipe', 'cluster', 'image'].map((Type) => ({
     Type, Source: join(s.worktree, 'data'), ...(Type === 'volume' ? { Name: 'plain' } : {}),
   }));
-  s.state.docker.volumes = { plain: volumeInspect('plain', {}) };
-  s.state.docker.containers = [containerRecord(ID_A, { mounts })];
+  const docker = present(s.state.docker);
+  docker.volumes = { plain: volumeInspect('plain', {}) };
+  docker.containers = [containerRecord(ID_A, { mounts })];
   assert.deepEqual(await s.cleanup(), {
     exitCode: 0,
     out: [`removed worktree ${s.worktree}`, 'removed branch job/23', 'closeout-cleanup: 2 removed, 0 retained'],
@@ -587,7 +613,7 @@ test('a recognised non-bind mount type is ignored and the worktree is removed', 
 test('an unreachable docker daemon retains the worktree and the branch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const refusal = 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?';
-  s.state.docker.ls = reply(1, '', `${refusal}\n`);
+  present(s.state.docker).ls = reply(1, '', `${refusal}\n`);
   assert.deepEqual(await s.cleanup(), {
     exitCode: 4,
     out: [
@@ -604,8 +630,9 @@ test('an unreachable docker daemon retains the worktree and the branch', { skip:
 
 test('a container that vanished before inspection is read as gone', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(s.mainDir)] })];
-  s.state.docker.vanished = [ID_B];
+  const docker = present(s.state.docker);
+  docker.containers = [containerRecord(ID_A, { mounts: [bindMount(s.mainDir)] })];
+  docker.vanished = [ID_B];
   assert.deepEqual(await s.cleanup(), {
     exitCode: 0,
     out: [`removed worktree ${s.worktree}`, 'removed branch job/23', 'closeout-cleanup: 2 removed, 0 retained'],
@@ -618,8 +645,9 @@ test('a container that vanished before inspection is read as gone', { skip: SKIP
 test('a "No such container" reply naming another container retains the worktree', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const refusal = `Error response from daemon: No such container: ${ID_B}`;
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] })];
-  s.state.docker.refuse = { stop: `${refusal}\n` };
+  const docker = present(s.state.docker);
+  docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] })];
+  docker.refuse = { stop: `${refusal}\n` };
   assert.deepEqual(await s.cleanup(), {
     exitCode: 4,
     out: [
@@ -638,8 +666,9 @@ test('a "No such container" reply naming another container retains the worktree'
 test('a stop reply naming the container itself as no such container reports it absent and removes the worktree and branch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const refusal = `Error response from daemon: No such container: ${ID_A}`;
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] })];
-  s.state.docker.refuse = { stop: `${refusal}\n` };
+  const docker = present(s.state.docker);
+  docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] })];
+  docker.refuse = { stop: `${refusal}\n` };
   assert.deepEqual(await s.cleanup(), {
     exitCode: 0,
     out: [
@@ -685,7 +714,7 @@ test('a non-listening process using the worktree retains it and the branch', { s
     let reason;
     if (use === 'open file') {
       const path = placeFile(join(s.worktree, 'logs', 'output.log'));
-      s.state.lsof.open = [{ pid: 31337, command: 'tail', name: path }];
+      present(s.state.lsof).open = [{ pid: 31337, command: 'tail', name: path }];
       reason = 'pid 31337 (tail) uses it';
     } else {
       s.state.processes.push({ pid: 5150, ppid: 1, args: `node ${s.worktree}/worker.js --secret=private` });
@@ -703,7 +732,7 @@ test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a bus
   const idleFirst = (w) => lines('p4200', 'cbash', 'fcwd', `n${w}`);
   const idleRow = { pid: 4200, ppid: 1000, pgid: 4200, tpgid: 4200, args: 'bash' };
   // Each case: its name, the lsof listing for the worktree, the extra ps rows (null: unreadable ps) and the retention reason.
-  const retained = [
+  const retained = /** @type {Array<[string, (w: string) => string, ProcessFixture[] | ((w: string) => ProcessFixture[]) | null, string]>} */ ([
     ['busy', (w) => idleFirst(w) + lines('p4242', 'cbash', 'fcwd', `n${w}`),
       [idleRow, leader('bash'), { pid: 4300, ppid: 4242, pgid: 4300, tpgid: 4242, args: 'claude' }], 'pid 4242 (bash) uses it'],
     ['file open', (w) => idleFirst(w) + lines('p4242', 'czsh', 'fcwd', `n${w}`, 'f3', `n${w}/notes.md`), [idleRow, leader()], 'pid 4242 (zsh) uses it'],
@@ -734,11 +763,12 @@ test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a bus
       [idleRow, { pid: 4250, ppid: 1000, pgid: 4250, tpgid: 4300, args: 'bash' }, { pid: 4300, ppid: 4250, pgid: 4300, tpgid: 4300, args: 'npm run dev' },
         { pid: 4242, ppid: 4300, pgid: 4300, tpgid: 4300, args: 'bash' }],
       'pid 4242 (bash) uses it'],
-  ];
+  ]);
 
   const idle = scenario(t);
-  idle.state.lsof.l3Target = idle.worktree;
-  idle.state.lsof.l3 = reply(0, lines('p4242', 'c-zsh', 'fcwd', `n${idle.worktree}`, 'p4243', 'cbash', 'fcwd', `n${idle.worktree}/src`));
+  const idleLsof = present(idle.state.lsof);
+  idleLsof.l3Target = idle.worktree;
+  idleLsof.l3 = reply(0, lines('p4242', 'c-zsh', 'fcwd', `n${idle.worktree}`, 'p4243', 'cbash', 'fcwd', `n${idle.worktree}/src`));
   idle.state.processes.push(
     { pid: 1000, ppid: 1, args: 'alacritty' }, leader('-zsh'), { pid: 4243, ppid: 1000, pgid: 4243, tpgid: 4243, args: '/usr/bin/bash -l' },
   );
@@ -756,8 +786,9 @@ test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a bus
 
   for (const [, listing, processes, reason] of retained) {
     const s = scenario(t);
-    s.state.lsof.l3Target = s.worktree;
-    s.state.lsof.l3 = reply(0, listing(s.worktree));
+    const lsof = present(s.state.lsof);
+    lsof.l3Target = s.worktree;
+    lsof.l3 = reply(0, listing(s.worktree));
     if (processes === null) s.state.ps = reply(0, 'unreadable process row\n');
     else s.state.processes.push(...(typeof processes === 'function' ? processes(s.worktree) : processes));
     assertWorktreeRetained(s, await s.cleanup(), reason);
@@ -766,8 +797,9 @@ test('ANTI-REGRESSION: an idle shell sitting in a target does not hold it, a bus
 
   const s = scenario(t);
   const folder = dirname(placeFile(join(s.root, 'scratch', 'notes.md')));
-  s.state.lsof.l3Target = folder;
-  s.state.lsof.l3 = reply(0, lines('p612', 'czsh', 'fcwd', `n${folder}`));
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = folder;
+  lsof.l3 = reply(0, lines('p612', 'czsh', 'fcwd', `n${folder}`));
   s.state.processes.push(
     { pid: 1, ppid: 0, pgid: 1, tpgid: 0, tty: '??', args: '/sbin/launchd' },
     { pid: 600, ppid: 1, pgid: 600, tpgid: 0, tty: '??', args: '/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' },
@@ -787,8 +819,9 @@ test('unavailable worktree use observations retain it and the branch', { skip: S
     const s = scenario(t);
     let reason;
     if (observation === 'directory lookup timeout') {
-      s.state.lsof.l3Target = s.worktree;
-      s.state.lsof.l3 = { failed: 'ETIMEDOUT' };
+      const lsof = present(s.state.lsof);
+      lsof.l3Target = s.worktree;
+      lsof.l3 = { failed: 'ETIMEDOUT' };
       reason = 'lsof failed: ETIMEDOUT';
     } else {
       s.state.ps = { absent: true };
@@ -804,8 +837,9 @@ test('malformed worktree use observations retain it and the branch', { skip: SKI
     const s = scenario(t);
     let reason;
     if (observation === 'unexpected lsof field') {
-      s.state.lsof.l3Target = s.worktree;
-      s.state.lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${s.worktree}/notes.md\n`);
+      const lsof = present(s.state.lsof);
+      lsof.l3Target = s.worktree;
+      lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${s.worktree}/notes.md\n`);
       reason = 'lsof printed a field it was not asked for';
     } else {
       s.state.ps = reply(0, 'unreadable process row --secret=private\n');
@@ -835,7 +869,7 @@ test('only the cleanup process and its ancestors naming the worktree allow clean
 
 test('a server listening from inside the worktree retains it and the branch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.lsof.listeners = [
+  present(s.state.lsof).listeners = [
     { pid: 2927820, command: 'python3', cwd: s.mainDir },
     { pid: 2468002, command: 'node', cwd: join(s.worktree, 'site') },
   ];
@@ -844,8 +878,9 @@ test('a server listening from inside the worktree retains it and the branch', { 
 
 test('a listener whose working directory cannot be read retains the worktree', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.lsof.listeners = [{ pid: 2927820, command: 'python3', cwd: s.mainDir }, { pid: 1, command: 'systemd' }];
-  s.state.lsof.l2Stderr = LSOF_WARNINGS;
+  const lsof = present(s.state.lsof);
+  lsof.listeners = [{ pid: 2927820, command: 'python3', cwd: s.mainDir }, { pid: 1, command: 'systemd' }];
+  lsof.l2Stderr = LSOF_WARNINGS;
   assertWorktreeRetained(s, await s.cleanup(), 'pid 1 (systemd) listens, and its working directory could not be read');
 });
 
@@ -857,7 +892,7 @@ test('lsof not installed retains the worktree', { skip: SKIP_POSIX }, async (t) 
 
 test('a listener lookup that timed out retains the worktree', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.lsof.l1 = { failed: 'ETIMEDOUT' };
+  present(s.state.lsof).l1 = { failed: 'ETIMEDOUT' };
   assertWorktreeRetained(s, await s.cleanup(), 'lsof failed: ETIMEDOUT');
 });
 
@@ -875,7 +910,7 @@ test('a modified, an untracked or an unnamed ignored entry retains the worktree'
 
 test('ANTI-REGRESSION: unsafe index observations retain the worktree and branch', { skip: SKIP_POSIX }, async (t) => {
   const rejected = 'git index flags are hidden or unreadable; inspect git ls-files -v, resolve index flags and review local changes before retrying';
-  for (const [name, index, reason] of [
+  for (const [name, index, reason] of /** @type {Array<[string, Reply, string]>} */ ([
     ['absent executable', { absent: true }, 'could not read git index flags: not installed'],
     ['timeout', { failed: 'ETIMEDOUT' }, 'could not read git index flags: failed: ETIMEDOUT'],
     ['nonzero exit', reply(128, '', 'fatal: index unavailable\n'), 'could not read git index flags: fatal: index unavailable'],
@@ -885,7 +920,7 @@ test('ANTI-REGRESSION: unsafe index observations retain the worktree and branch'
     ['interior empty record', reply(0, 'H kept.txt\0\0H other.txt\0'), rejected],
     ['unknown tag', reply(0, 'X kept.txt\0'), rejected],
     ['ordinary record followed by hidden record', reply(0, 'H kept.txt\0S hidden.txt\0'), rejected],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       s.state.index = index;
@@ -937,7 +972,7 @@ test('ANTI-REGRESSION: unsafe ignored-link observations retain the worktree', { 
       } else {
         const other = join(s.root, 'other-checkout');
         symlinkSync('other-checkout', other, 'dir');
-        s.state.records.push({ path: other, detached: '' });
+        s.state.records.push({ path: other });
         symlinkSync(sentinel, join(s.worktree, path));
         reason = `could not resolve another linked worktree ${other}: ELOOP`;
       }
@@ -981,7 +1016,7 @@ test('ANTI-REGRESSION: changed ignored links retain the worktree', { skip: SKIP_
 });
 
 test('ANTI-REGRESSION: an ignored real directory holding no file does not hold the worktree', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, directory] of [['empty', ['.claude', 'worklog']], ['only nested empty directories', ['.claude', 'worklog', 'deep', 'deeper']]]) {
+  for (const [name, directory] of /** @type {Array<[string, string[]]>} */ ([['empty', ['.claude', 'worklog']], ['only nested empty directories', ['.claude', 'worklog', 'deep', 'deeper']]])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       mkdirSync(join(s.worktree, ...directory), { recursive: true });
@@ -997,11 +1032,11 @@ test('ANTI-REGRESSION: an ignored real directory holding no file does not hold t
 });
 
 test('ANTI-REGRESSION: a mount at or inside an ignored directory holding no file retains the worktree', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, mounted, made, optional] of [
+  for (const [name, mounted, made, optional] of /** @type {Array<[string, string, string, string[]]>} */ ([
     ['mount at the row', '.claude/worklog', '.claude/worklog', []],
     ['mount on a nested directory', '.claude/worklog/deep', '.claude/worklog/deep', ['shared:1']],
     ['mount path containing a space', '.claude/worklog/has\\040space', '.claude/worklog/has space', ['shared:2', 'master:1']],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       mkdirSync(join(s.worktree, made), { recursive: true });
@@ -1027,10 +1062,10 @@ test('ANTI-REGRESSION: a mount at or inside an ignored directory holding no file
 });
 
 test('ANTI-REGRESSION: an unreadable mount table retains an ignored directory holding no file', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, table] of [
+  for (const [name, table] of /** @type {Array<[string, Reply]>} */ ([
     ['cat exits nonzero', reply(1, '', 'cat: /proc/self/mountinfo: No such file or directory\n')],
     ['a line with no separator and too few fields', mountinfo(ROOT_MOUNT, '36 35 98:0 /mnt1 /mnt rw')],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const worklog = join(s.worktree, '.claude', 'worklog');
@@ -1060,7 +1095,7 @@ test('an ignored directory holding no file ignores mounts elsewhere', { skip: SK
 });
 
 test('ANTI-REGRESSION: an ignored directory that may hold content retains the worktree', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, row, place] of [
+  for (const [name, row, place] of /** @type {Array<[string, string, (s: Scenario) => { files?: string[], directories?: string[] }]>} */ ([
     ['file', '!! .claude/worklog/', (s) => ({ files: [placeFile(join(s.worktree, '.claude', 'worklog', 'job.md'))] })],
     ['nested file', '!! .claude/worklog/', (s) => ({ files: [placeFile(join(s.worktree, '.claude', 'worklog', 'deep', 'job.md'))] })],
     ['link to an outside folder', '!! .claude/worklog/', (s) => {
@@ -1092,7 +1127,7 @@ test('ANTI-REGRESSION: an ignored directory that may hold content retains the wo
     }],
     ['absent', '!! gone/', () => ({})],
     ['file at the path', '!! notes/', (s) => ({ files: [placeFile(join(s.worktree, 'notes'))] })],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const { files = [], directories = [] } = place(s);
@@ -1248,13 +1283,13 @@ test('ANTI-REGRESSION: merged PR cleanup authorizes the exact job branch', { ski
     ['modern advice explicitly enabled', "error: the branch 'job/23' is not fully merged\nhint: If you are sure you want to delete it, run 'git branch -D job/23'\n"],
     ['modern advice disabled', "error: the branch 'job/23' is not fully merged\n"],
   ];
-  for (const [name, origin, absent, refusal = NOT_MERGED] of [
+  for (const [name, origin, absent, refusal = NOT_MERGED] of /** @type {Array<[string, string, boolean, string?]>} */ ([
     ['HTTPS origin', 'https://github.com/example/workflow.git', false],
     ['scp SSH origin', 'git@github.com:example/workflow.git', false],
     ['SSH URL origin', 'ssh://git@github.com/example/workflow', false],
     ['absent worktree', 'https://github.com/example/workflow', true],
     ...releasedRefusals.map(([name, refusal]) => [name, 'https://github.com/example/workflow.git', false, refusal]),
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       s.state.pr = reply(0, JSON.stringify(mergedPr()));
@@ -1295,7 +1330,7 @@ test('ANTI-REGRESSION: merged PR cleanup rejects invalid proof', { skip: SKIP_PO
       assert.equal(s.state.branch, true);
     });
   }
-  const metadata = [
+  const metadata = /** @type {Array<[string, object]>} */ ([
     ['missing URL', { url: undefined }], ['foreign URL', { url: 'https://github.com/other/repo/pull/42' }],
     ['open PR', { state: 'OPEN' }], ['cross repository', { isCrossRepository: true }],
     ['missing repository kind', { isCrossRepository: undefined }], ['wrong branch', { headRefName: 'job/24' }],
@@ -1305,8 +1340,8 @@ test('ANTI-REGRESSION: merged PR cleanup rejects invalid proof', { skip: SKIP_PO
     ['nonstring merge commit', { mergeCommit: { oid: 222 } }], ['missing timestamp', { mergedAt: null }],
     ['unparseable timestamp', { mergedAt: 'not a date' }], ['invalid calendar timestamp', { mergedAt: '2026-02-30T10:00:00Z' }],
     ['nonstring state', { state: { MERGED: true } }], ['nonboolean repository kind', { isCrossRepository: 'false' }],
-  ].map(([name, change]) => [name, (s) => { s.state.pr = reply(0, JSON.stringify({ ...mergedPr(), ...change })); }]);
-  const cases = [
+  ]).map(([name, change]) => [name, (s) => { s.state.pr = reply(0, JSON.stringify({ ...mergedPr(), ...change })); }]);
+  const cases = /** @type {Array<[string, (s: Scenario & { args: string[], sentinel: string }) => void, boolean?]>} */ ([
     ['absent opt-in', (s) => { s.args = ['23']; s.state.pr = null; }],
     ['wrong origin', (s) => { s.state.origin = reply(0, 'https://github.com/other/workflow.git\n'); }],
     ['unsupported origin', (s) => { s.state.origin = reply(0, 'file:///tmp/workflow\n'); }],
@@ -1341,14 +1376,13 @@ test('ANTI-REGRESSION: merged PR cleanup rejects invalid proof', { skip: SKIP_PO
     ['failed force', (s) => { s.state.force = reply(1); }, true],
     ['absence readback fails', (s) => { s.state.force = reply(0); }, true],
     ...metadata,
-  ];
+  ]);
   for (const [name, configure, force = false] of cases) {
     await t.test(name, async (t) => {
-      const s = scenario(t);
+      const base = scenario(t);
+      const s = Object.assign(base, { args: ['23', '--pr', PR_URL], sentinel: placeFile(join(base.root, 'sentinel')) });
       s.state.pr = reply(0, JSON.stringify(mergedPr()));
       s.state.branchRefusal = NOT_MERGED;
-      s.args = ['23', '--pr', PR_URL];
-      s.sentinel = placeFile(join(s.root, 'sentinel'));
       configure(s);
       const result = await s.cleanup(s.args);
       assert.equal(result.exitCode, 4, JSON.stringify(result));
@@ -1366,7 +1400,7 @@ const onlyStepOne = [['git', 'worktree', 'list', '--porcelain', '-z'], ['git', '
 
 test('a working directory inside the worktree retains it and the branch but removes its containers', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
   assert.deepEqual(await s.cleanup(['23'], { cwd: join(s.worktree, 'scripts') }), {
     exitCode: 4,
     out: [
@@ -1377,14 +1411,14 @@ test('a working directory inside the worktree retains it and the branch but remo
     ],
     err: [],
   });
-  assert.deepEqual(s.state.docker.containers, []);
+  assert.deepEqual(present(s.state.docker).containers, []);
   assert.ok(existsSync(s.worktree));
   assert.deepEqual(s.unexpected, []);
 });
 
 test("the job worktree's own copy of the command retains everything with no docker call", { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
   const reason = "this is the job worktree's copy of the command; run the verifier checkout's copy";
   assert.deepEqual(await s.cleanup(['23'], { scriptPath: join(s.worktree, 'scripts', 'closeout-cleanup.mjs') }), {
     exitCode: 4,
@@ -1439,12 +1473,13 @@ test('malformed docker inspect output retains the worktree', { skip: SKIP_POSIX 
     reply(0, `${JSON.stringify({ Id: ID_C })}\n`),
     reply(0, ''),
     reply(1, '', `Error response from daemon: No such container: ${ID_C}\n`),
-    reply(1, `${JSON.stringify(s.state.docker.containers[0])}\n`, 'Error: something else\n'),
+    reply(1, `${JSON.stringify(present(s.state.docker).containers[0])}\n`, 'Error: something else\n'),
   ];
   for (let index = 0; index < 6; index += 1) {
     const s = scenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(s.mainDir)] })];
-    s.state.docker.inspect = malformed(s)[index];
+    const docker = present(s.state.docker);
+    docker.containers = [containerRecord(ID_A, { mounts: [bindMount(s.mainDir)] })];
+    docker.inspect = malformed(s)[index];
     const { exitCode, out } = await s.cleanup();
     assert.equal(exitCode, 4, `case ${index}`);
     assert.match(out[0], new RegExp(`^retained worktree ${s.worktree}: docker failed: `), `case ${index}`);
@@ -1555,17 +1590,17 @@ test('a scratch target holding a tracked file is retained', { skip: SKIP_POSIX }
 });
 
 test('outside scratch is retained by a container bound at, below or above it, or naming it in a label or working directory', { skip: SKIP_POSIX }, async (t) => {
-  const cases = [
+  const cases = /** @type {Array<[(target: string) => ContainerFixture, string]>} */ ([
     [(target) => containerRecord(ID_A, { mounts: [bindMount(target)] }), 'binds it'],
     [(target) => containerRecord(ID_A, { binds: [`${join(target, 'site')}:/site:ro`] }), 'binds it'],
     [(target) => containerRecord(ID_A, { hostMounts: [bindMount(dirname(target))] }), 'binds it'],
     [(target) => ({ ...containerRecord(ID_A), Config: { Labels: { 'proof.output': target }, WorkingDir: '' } }), 'names it'],
     [(target) => ({ ...containerRecord(ID_A), Config: { Labels: {}, WorkingDir: `${target}/run` } }), 'names it'],
-  ];
+  ]);
   for (const [record, reason] of cases) {
     const s = scenario(t);
     const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
-    s.state.docker.containers = [record(target)];
+    present(s.state.docker).containers = [record(target)];
     assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `container aaaaaaaaaaaa ${reason}`);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
   }
@@ -1574,7 +1609,7 @@ test('outside scratch is retained by a container bound at, below or above it, or
 test('ANTI-REGRESSION: a running container bound above the worktree retains inside scratch', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = dirname(placeFile(join(s.worktree, '_site', 'page.md')));
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
   assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
     exitCode: 4,
     out: [
@@ -1594,8 +1629,9 @@ test('inside scratch is retained when a container bound in the worktree could no
   const s = scenario(t);
   const target = dirname(placeFile(join(s.worktree, '_site', 'page.md')));
   const refusal = 'Error response from daemon: removal of container aaaaaaaaaaaa is already in progress';
-  s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.worktree, 'data'))] })];
-  s.state.docker.refuse = { rm: refusal };
+  const docker = present(s.state.docker);
+  docker.containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.worktree, 'data'))] })];
+  docker.refuse = { rm: refusal };
   assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
     exitCode: 4,
     out: [
@@ -1614,7 +1650,7 @@ test('inside scratch is retained when a container bound in the worktree could no
 test('a process holding a file in the scratch target retains it', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
-  s.state.lsof.open = [{ pid: 31337, command: 'tail', name: join(target, 'log.txt') }];
+  present(s.state.lsof).open = [{ pid: 31337, command: 'tail', name: join(target, 'log.txt') }];
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'pid 31337 (tail) uses it');
 });
 
@@ -1622,8 +1658,9 @@ test('an lsof row whose name lsof escaped still retains the scratch target', { s
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'résumé', 'report.log')));
   // lsof prints a name's non-ASCII bytes as \xNN escapes, so the name it prints differs from the path it matched.
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3 = reply(0, `p4242\ncless\nf3\nn${s.root}/r\\xc3\\xa9sum\\xc3\\xa9/report.log\n`);
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3 = reply(0, `p4242\ncless\nf3\nn${s.root}/r\\xc3\\xa9sum\\xc3\\xa9/report.log\n`);
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'pid 4242 (less) uses it');
 });
 
@@ -1631,8 +1668,9 @@ test('an lsof warning on the mount holding the scratch target retains it', { ski
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
   const mount = join(s.root, 'scratch');
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3Stderr = `lsof: WARNING: can't stat() overlay file system ${mount}\n      Output information may be incomplete.\n`;
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3Stderr = `lsof: WARNING: can't stat() overlay file system ${mount}\n      Output information may be incomplete.\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lookup incomplete: lsof could not stat the file system at ${mount}`);
 });
 
@@ -1641,16 +1679,18 @@ test('an lsof warning on a mount below the scratch directory retains it', { skip
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
   const mount = join(target, 'cache');
   mkdirSync(mount);
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3Stderr = `lsof: WARNING: can't stat() fuse.sshfs file system ${mount}\n      Output information may be incomplete.\n`;
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3Stderr = `lsof: WARNING: can't stat() fuse.sshfs file system ${mount}\n      Output information may be incomplete.\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lookup incomplete: lsof could not stat the file system at ${mount}`);
 });
 
 test('an lsof warning on an unrelated mount is ignored and the scratch target removed', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = dirname(placeFile(join(s.root, 'scratch', 'out', 'log.txt')));
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3Stderr = LSOF_WARNINGS;
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3Stderr = LSOF_WARNINGS;
   assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
     exitCode: 0,
     out: [`removed scratch ${target}`, ...jobRemoved(s), 'closeout-cleanup: 3 removed, 0 retained'],
@@ -1663,16 +1703,18 @@ test('an lsof warning on an unrelated mount is ignored and the scratch target re
 test('unrecognised lsof stderr retains the scratch target', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3Stderr = `lsof: status error on ${target}: Permission denied\n`;
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3Stderr = `lsof: status error on ${target}: Permission denied\n`;
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, `lsof reported: lsof: status error on ${target}: Permission denied`);
 });
 
 test('an lsof field the command did not ask for retains the scratch target', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
-  s.state.lsof.l3Target = target;
-  s.state.lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${target}\n`);
+  const lsof = present(s.state.lsof);
+  lsof.l3Target = target;
+  lsof.l3 = reply(0, `p4242\ncvim\nf3\ntREG\nn${target}\n`);
   assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'lsof printed a field it was not asked for');
 });
 
@@ -1728,7 +1770,7 @@ test('a retained scratch file inside the worktree retains the worktree and its b
   const s = scenario(t);
   const target = placeFile(join(s.worktree, '_site', 'proof.log'));
   s.state.status = '!! _site/\0';
-  s.state.lsof.open = [{ pid: 31337, command: 'tail', name: target }];
+  present(s.state.lsof).open = [{ pid: 31337, command: 'tail', name: target }];
   assert.deepEqual(await s.cleanup(['23', '--scratch', target, '--regenerated', '_site']), {
     exitCode: 4,
     out: [
@@ -1782,7 +1824,7 @@ test('a checked path nothing uses is reported unused and left in place', { skip:
 test('a checked path an lsof row holds is reported in use', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
-  s.state.lsof.open = [{ pid: 31337, command: 'tail', name: target }];
+  present(s.state.lsof).open = [{ pid: 31337, command: 'tail', name: target }];
   assert.deepEqual(await s.cleanup(['--check', target]), {
     exitCode: 4,
     out: [`in use path ${target}: pid 31337 (tail) uses it`, SUMMARY(0, 0, 1, 0)],
@@ -1795,7 +1837,7 @@ test('a checked path an lsof row holds is reported in use', { skip: SKIP_POSIX }
 test('a checked path under a bind source of a container is reported in use', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
   const target = placeFile(join(s.root, 'scratch', 'notes.md'));
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
   assert.deepEqual(await s.cleanup(['--check', target]), {
     exitCode: 4,
     out: [`in use path ${target}: container aaaaaaaaaaaa binds it`, SUMMARY(0, 0, 1, 0)],
@@ -1807,8 +1849,9 @@ test('a checked path under a bind source of a container is reported in use', { s
 
 // ID_A, running, mounting each named volume of `volumes` (the replies docker volume inspect gives by name).
 function mountVolumes(s, volumes, extra = {}) {
-  s.state.docker.volumes = volumes;
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: Object.keys(volumes).map(volumeMount), ...extra })];
+  const docker = present(s.state.docker);
+  docker.volumes = volumes;
+  docker.containers = [containerRecord(ID_A, { running: true, mounts: Object.keys(volumes).map(volumeMount), ...extra })];
 }
 
 // The one container, the worktree and the branch are retained for an unresolved bind source, with nothing stopped or removed.
@@ -1826,7 +1869,7 @@ function assertUnresolvedSource(s, result, reason) {
   assert.ok(existsSync(s.worktree));
   assertWorktreeNotRemoved(s);
   assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-  assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+  assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
   assert.deepEqual(s.unexpected, []);
 }
 
@@ -1835,12 +1878,12 @@ const missingVolume = reply(1, '', `${NO_SUCH_VOLUME}\n`);
 
 test('a container mounting a named volume bound inside the worktree is stopped and removed before the worktree', { skip: SKIP_POSIX }, async (t) => {
   const s = scenario(t);
-  s.state.docker.volumes = {
+  present(s.state.docker).volumes = {
     'a-site': volumeInspect('a-site', bindOptions(join(s.worktree, 'site'))),
     'b-work': volumeInspect('b-work', bindOptions(s.worktree, 'rw,rbind')),
     'c-data': volumeInspect('c-data', bindOptions(join(s.worktree, 'data'))),
   };
-  s.state.docker.containers = [
+  present(s.state.docker).containers = [
     containerRecord(ID_A, { running: true, mounts: [volumeMount('a-site')] }),
     containerRecord(ID_B, { binds: ['b-work:/work:rw'] }),
     containerRecord(ID_C, { hostMounts: [{ Type: 'volume', Source: 'c-data', Target: '/data' }] }),
@@ -1855,13 +1898,13 @@ test('a container mounting a named volume bound inside the worktree is stopped a
   });
   assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
   assert.deepEqual(dockerCalls(s, 'rm'), [['docker', 'rm', ID_A], ['docker', 'rm', ID_B], ['docker', 'rm', ID_C]]);
-  assert.deepEqual(s.state.docker.containers, []);
+  assert.deepEqual(present(s.state.docker).containers, []);
   assert.deepEqual(s.unexpected, []);
 
   const refused = scenario(t);
   const refusal = 'Error response from daemon: cannot stop container: permission denied';
   mountVolumes(refused, { 'a-site': volumeInspect('a-site', bindOptions(join(refused.worktree, 'site'))) });
-  refused.state.docker.refuse = { stop: `${refusal}\n` };
+  present(refused.state.docker).refuse = { stop: `${refusal}\n` };
   assert.deepEqual(await refused.cleanup(), {
     exitCode: 4,
     out: [
@@ -1878,18 +1921,18 @@ test('a container mounting a named volume bound inside the worktree is stopped a
 });
 
 test('ANTI-REGRESSION: a running container mounting a named volume bound above the worktree retains it and is not stopped', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, volumes] of [
+  for (const [name, volumes] of /** @type {Array<[string, (s: Scenario) => Record<string, Reply>]>} */ ([
     ['bound at s.root', (s) => ({ above: volumeInspect('above', bindOptions(s.root)) })],
     ['bound at s.root and a second volume inside the worktree', (s) => ({
       above: volumeInspect('above', bindOptions(s.root)), inside: volumeInspect('inside', bindOptions(join(s.worktree, 'data'))),
     })],
-  ]) {
+  ])) {
     const s = scenario(t);
     mountVolumes(s, volumes(s));
     assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], [], name);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A], name);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A], name);
   }
 });
 
@@ -1928,7 +1971,7 @@ test('a named volume with no bind device or one outside the target changes no re
   assert.deepEqual(anonymous.unexpected, []);
   // A HostConfig.Mounts volume with an empty Source names no volume to read.
   const unnamed = scenario(t);
-  unnamed.state.docker.containers = [
+  present(unnamed.state.docker).containers = [
     containerRecord(ID_A, { running: true, hostMounts: [{ Type: 'volume', Source: '', Target: '/data' }] }),
   ];
   assert.deepEqual(await unnamed.cleanup(), {
@@ -1943,7 +1986,7 @@ test('a named volume with no bind device or one outside the target changes no re
 
 test('ANTI-REGRESSION: a volume whose options cannot be read retains the worktree and names the reason', { skip: SKIP_POSIX }, async (t) => {
   const cannotRead = (why) => `volume v options could not be read: ${why}`;
-  for (const [volume, reason] of [
+  for (const [volume, reason] of /** @type {Array<[(s: Scenario) => Reply, string]>} */ ([
     [() => missingVolume, cannotRead(NO_SUCH_VOLUME)],
     [() => ({ failed: 'ETIMEDOUT' }), cannotRead('failed: ETIMEDOUT')],
     [() => reply(0, 'nonsense\n'), cannotRead('docker printed no readable record')],
@@ -1956,7 +1999,7 @@ test('ANTI-REGRESSION: a volume whose options cannot be read retains the worktre
     [() => reply(0, `${JSON.stringify({ Name: 'v', Options: { type: 'x' } })}\n`), cannotRead('docker printed no readable record')],
     [() => volumeInspect('v', { type: 'x' }, ' '), cannotRead('docker printed no readable record')],
     [(s) => volumeInspect('v', bindOptions(join(s.worktree, 'site')), 'acme'), 'volume v uses driver acme, whose bind options cannot be trusted'],
-  ]) {
+  ])) {
     const s = scenario(t);
     mountVolumes(s, { v: volume(s) });
     assertUnresolvedSource(s, await s.cleanup(), reason);
@@ -1965,26 +2008,26 @@ test('ANTI-REGRESSION: a volume whose options cannot be read retains the worktre
   const mixed = scenario(t);
   mountVolumes(mixed, { ok: volumeInspect('ok', bindOptions(join(mixed.worktree, 'site'))), v: missingVolume });
   assertUnresolvedSource(mixed, await mixed.cleanup(), cannotRead(NO_SUCH_VOLUME));
-  for (const [field, extra] of [
+  for (const [field, extra] of /** @type {Array<[string, { mounts?: unknown[], binds?: unknown[], hostMounts?: unknown[] }]>} */ ([
     ['a volume mount with no Name', { mounts: [{ Type: 'volume' }] }],
     ['an empty Name', { mounts: [volumeMount('')] }],
     ['a relative HostConfig.Binds name', { binds: ['relative/data:/x'] }],
     ['a HostConfig.Binds name spelling a flag', { binds: ['--format=x:/x'] }],
     ['a HostConfig.Mounts source spelling a flag', { hostMounts: [{ Type: 'volume', Source: '--flag', Target: '/data' }] }],
-  ]) {
+  ])) {
     const s = scenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, ...extra })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, ...extra })];
     assertUnresolvedSource(s, await s.cleanup(), 'a volume name is unreadable');
     assert.deepEqual(dockerCalls(s, 'volume'), [], field);
   }
-  for (const [field, record] of [
+  for (const [field, record] of /** @type {Array<[string, ContainerFixture]>} */ ([
     ['a null entry of Mounts', containerRecord(ID_A, { running: true, mounts: [null] })],
     ['a non-string entry of HostConfig.Binds', containerRecord(ID_A, { running: true, binds: [3] })],
     ['a null entry of HostConfig.Mounts', containerRecord(ID_A, { running: true, hostMounts: [null] })],
     ['a Mounts that is not a list', { ...containerRecord(ID_A, { running: true }), Mounts: 'x' }],
-  ]) {
+  ])) {
     const s = scenario(t);
-    s.state.docker.containers = [record];
+    present(s.state.docker).containers = [record];
     assertUnresolvedSource(s, await s.cleanup(), 'not a normalized absolute path');
     assert.deepEqual(dockerCalls(s, 'volume'), [], field);
   }
@@ -2112,7 +2155,7 @@ test('a check of several paths reports each on its own line and exits 4 when one
   const free = placeFile(join(s.root, 'scratch', 'free.md'));
   const gone = join(s.root, 'scratch', 'gone.md');
   const busy = placeFile(join(s.root, 'scratch', 'busy.md'));
-  s.state.lsof.open = [{ pid: 31337, command: 'tail', name: busy }];
+  present(s.state.lsof).open = [{ pid: 31337, command: 'tail', name: busy }];
   assert.deepEqual(await s.cleanup(['--check', free, '--check', gone, '--check', busy, '--check', free]), {
     exitCode: 4,
     out: [`unused path ${free}`, `absent path ${gone}`, `in use path ${busy}: pid 31337 (tail) uses it`, SUMMARY(1, 1, 1, 0)],
@@ -2147,6 +2190,7 @@ function cliFixture(t, docker, overrides = {}, worktreeParts = ['job-23']) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repository = join(root, 'repository');
   const worktree = join(root, ...worktreeParts);
+  /** @type {NodeJS.ProcessEnv} */
   const env = {
     ...gitEnvironment(),
     GIT_AUTHOR_NAME: 'Closeout Cleanup Test',
@@ -2454,11 +2498,11 @@ esac
 `;
 
 test('ANTI-REGRESSION: the CLI retains every target when a remote Docker bind matches the local worktree path', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, environment] of [
+  for (const [name, environment] of /** @type {Array<[string, { DOCKER_HOST?: string, DOCKER_CONTEXT?: string }]>} */ ([
     ['host-selected SSH', { DOCKER_HOST: 'ssh://fixture-remote.invalid' }],
     ['both host and context selectors', { DOCKER_HOST: 'ssh://fixture-remote.invalid', DOCKER_CONTEXT: 'fixture-local' }],
     ['saved remote context', { DOCKER_HOST: undefined, DOCKER_CONTEXT: undefined }],
-  ]) {
+  ])) {
     await t.test(name, (t) => {
       const f = cliFixture(t, REMOTE_DOCKER, {
         ...environment, FIXTURE_EXPECT_HOST: environment.DOCKER_HOST ?? '', FIXTURE_EXPECT_CONTEXT: environment.DOCKER_CONTEXT ?? '',
@@ -2498,7 +2542,7 @@ function routedProof(s, owners = ACTIVATED_SS) {
 
 function proofTargets(s) {
   const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
-  s.state.docker.containers = [
+  present(s.state.docker).containers = [
     containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] }),
     containerRecord(ID_B, { running: true, mounts: [bindMount(s.mainDir)] }),
   ];
@@ -2540,7 +2584,7 @@ test('ANTI-REGRESSION: passwordless Docker proof verifies every socket activatio
       assert.equal(existsSync(scratch), false);
       assert.equal(existsSync(s.worktree), false);
       assert.equal(s.state.branch, false);
-      assert.deepEqual(s.state.docker.containers.map(({ Id, State }) => [Id, State.Running]), [[ID_B, true]]);
+      assert.deepEqual(present(s.state.docker).containers.map(({ Id, State }) => [Id, State.Running]), [[ID_B, true]]);
       assert.deepEqual(dockerCalls(s, 'stop'), [['docker', 'stop', ID_A]]);
       assert.deepEqual(dockerCalls(s, 'rm'), [['docker', 'rm', ID_A]]);
       if (mode === 'routed') {
@@ -2630,7 +2674,7 @@ test('ANTI-REGRESSION: passwordless Docker proof preserves caller identity and l
       assert.ok(existsSync(scratch));
       assert.ok(existsSync(s.worktree));
       assertWorktreeNotRemoved(s);
-      assert.equal(s.state.docker.containers[1].State.Running, true);
+      assert.equal(present(s.state.docker).containers[1].State.Running, true);
       if (change.startsWith('one failed')) assert.equal(failedReads, 1);
       assert.deepEqual(s.unexpected, []);
     });
@@ -2684,11 +2728,11 @@ test('ANTI-REGRESSION: Docker privilege fallback is bounded and never prompts', 
     assert.deepEqual(s.executions.filter(({ command }) => command === '/usr/bin/sudo'), []);
     assert.deepEqual(s.executions.filter(({ command, args }) => command === 'stat' && args.length === 8), []);
   });
-  for (const [name, native] of [
+  for (const [name, native] of /** @type {Array<[string, Reply]>} */ ([
     ['absent native stat', { absent: true }], ['failed native execution', { failed: 'EACCES' }],
     ['malformed native stat', reply(0, 'partial\n')], ['native stderr', reply(0, PROOF_STAT, 'fixture warning')],
     ['native mismatch', reply(0, PROOF_STAT.replace('50:2:', '50:3:'))],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = proofTargets(s);
@@ -2831,7 +2875,7 @@ function checkWithNoNewPrivs(t, overrides = {}) {
   const child = spawnSync(carries ? process.execPath : 'setpriv', carries ? childArgs : ['--no-new-privs', process.execPath, ...childArgs], {
     input: JSON.stringify(request), env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 60_000,
   });
-  if (child.error?.code === 'ENOENT') {
+  if (/** @type {NodeJS.ErrnoException | undefined} */ (child.error)?.code === 'ENOENT') {
     t.skip('setpriv is not installed and this process lacks no_new_privs');
     return undefined;
   }
@@ -2846,7 +2890,7 @@ function assertRealFlagRoute(observed) {
   assert.match(status.result.stdout, /^NoNewPrivs:\t1$/m);
   assert.deepEqual(observed.calls.filter(({ command }) => command === '/usr/bin/sudo'), []);
   for (const { env } of observed.calls.filter(({ command }) => command === '/usr/bin/systemd-run')) {
-    assert.deepEqual(env, { PATH: process.env.PATH, LC_ALL: 'C', XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` });
+    assert.deepEqual(env, { PATH: process.env.PATH, LC_ALL: 'C', XDG_RUNTIME_DIR: `/run/user/${/** @type {() => number} */ (process.getuid)()}` });
   }
   assert.deepEqual(observed.unexpected, []);
 }
@@ -2943,7 +2987,7 @@ test('Docker filesystem proof rejects incomplete, ambiguous or mismatched native
     await t.test(name, async (t) => {
       const s = scenario(t);
       const target = placeFile(join(s.root, 'scratch', 'proof.txt'));
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       configure(s);
       const result = await s.cleanup(['23', '--scratch', target], seams);
       assert.equal(result.exitCode, 4);
@@ -2970,7 +3014,7 @@ test('Docker cleanup pins its endpoint after selection', async (t) => {
   const capturedPath = { ...process.env }.PATH;
   let selections = 0;
   s.state.metadata = () => reply(0, JSON.stringify({ Host: ++selections === 1 ? PROOF_HOST : 'ssh://changed.invalid' }));
-  s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+  present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
   const result = await s.cleanup();
   assert.equal(result.exitCode, 0);
   assert.equal(selections, 1);
@@ -2993,7 +3037,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
   await t.test('after a verified stop', async (t) => {
     const s = scenario(t);
     const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
-    s.state.docker.containers = [
+    present(s.state.docker).containers = [
       containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] }),
       containerRecord(ID_B, { running: true, mounts: [bindMount(s.mainDir)] }),
     ];
@@ -3004,8 +3048,9 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     assert.equal(result.exitCode, 4);
     assert.equal(dockerCalls(s, 'stop').length, 1);
     assert.deepEqual(dockerCalls(s, 'rm'), []);
-    assert.equal(s.state.docker.containers[0].State.Running, false);
-    assert.equal(s.state.docker.containers[1].State.Running, true);
+    const docker = present(s.state.docker);
+    assert.equal(docker.containers[0].State.Running, false);
+    assert.equal(docker.containers[1].State.Running, true);
     const reason = 'Docker filesystem relationship is unverifiable: native identity changed or became unreadable: socket descriptor does not match listener';
     assert.deepEqual(result.out.filter((line) => line.startsWith('retained container ')), [
       `retained container aaaaaaaaaaaa: ${reason}`,
@@ -3025,7 +3070,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
   await t.test('valid changed fingerprint is retained', async (t) => {
     const s = scenario(t);
     const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
     s.state.onDocker = ([verb]) => {
       if (verb === 'stop') {
         s.state.native.ss = reply(0, PROOF_SS.replace('700 *', '701 *'));
@@ -3044,7 +3089,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     ]);
     assert.equal(dockerCalls(s, 'stop').length, 1);
     assert.deepEqual(dockerCalls(s, 'rm'), []);
-    assert.equal(s.state.docker.containers[0].State.Running, false);
+    assert.equal(present(s.state.docker).containers[0].State.Running, false);
     assert.ok(existsSync(scratch));
     assert.ok(existsSync(s.worktree));
     assertWorktreeNotRemoved(s);
@@ -3055,7 +3100,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     const s = scenario(t);
     const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
     let observations = 0;
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
     s.state.onDocker = ([verb]) => {
       if (verb === 'stop') {
         s.state.native.ss = () => ++observations === 1 ? reply(1, 'fixture-secret', 'fixture warning') : PROOF_REPLIES.ss;
@@ -3074,7 +3119,7 @@ test('Docker cleanup retains remaining targets when filesystem proof changes', a
     ]);
     assert.equal(dockerCalls(s, 'stop').length, 1);
     assert.deepEqual(dockerCalls(s, 'rm'), []);
-    assert.equal(s.state.docker.containers[0].State.Running, false);
+    assert.equal(present(s.state.docker).containers[0].State.Running, false);
     assert.ok(existsSync(scratch));
     assert.ok(existsSync(s.worktree));
     assertWorktreeNotRemoved(s);
@@ -3170,7 +3215,7 @@ test('native Linux socket observations bind a listener to its descriptor and fil
   const canonicalSocket = join(directory, 'proof.sock');
   const target = placeFile(join(root, 'scratch.txt'));
   const server = createServer();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); });
+  await /** @type {Promise<void>} */ (new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); }));
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
     rmSync(root, { recursive: true, force: true });
@@ -3232,7 +3277,7 @@ test('native Linux socket observations bind a listener to its descriptor and fil
 
 
 test('ANTI-REGRESSION: optional socket shutdown markers never replace filesystem identity', async (t) => {
-  for (const [name, marker, admitted, foreignDescriptor] of [
+  for (const [name, marker, admitted, foreignDescriptor] of /** @type {Array<[string, string, boolean, boolean]>} */ ([
     ['absent marker', '', true, false],
     ['bidirectional marker', '<->', true, false],
     ['left marker', '<--', true, false],
@@ -3240,11 +3285,11 @@ test('ANTI-REGRESSION: optional socket shutdown markers never replace filesystem
     ['closed marker', '---', true, false],
     ['unknown marker', '<?>', false, false],
     ['absent marker with foreign descriptor', '', false, true],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       s.state.native.ss = reply(0, PROOF_SS.replace('<-> ', marker ? `${marker} ` : ''));
       if (foreignDescriptor) {
         s.state.native.stat = reply(0, PROOF_STAT.replace('10:700:0:10:socket', '10:701:0:10:socket'));
@@ -3273,7 +3318,7 @@ test('ANTI-REGRESSION: optional socket shutdown markers never replace filesystem
 
 
 test('ANTI-REGRESSION: Docker socket device encodings preserve filesystem identity', async (t) => {
-  for (const [name, printedDevice, socketRow, admitted] of [
+  for (const [name, printedDevice, socketRow, admitted] of /** @type {Array<[string, string, string, boolean]>} */ ([
     ['hosted physical device', '0/2049', '2049:95390:8:1:socket', true],
     ['high minor bit', '1/2048', '1050624:95390:8:256:socket', true],
     ['full 32-bit boundary', '4095/1048575', '4294967295:95390:4095:1048575:socket', true],
@@ -3281,11 +3326,11 @@ test('ANTI-REGRESSION: Docker socket device encodings preserve filesystem identi
     ['foreign minor', '0/2049', '2050:95390:8:2:socket', false],
     ['printed major overflow', '4096/2049', '2049:95390:8:1:socket', false],
     ['printed minor overflow', '0/1050625', '2049:95390:8:1:socket', false],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = scenario(t);
       const scratch = placeFile(join(s.root, 'scratch', 'proof.txt'));
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       s.state.native.ss = reply(0, PROOF_SS.replace('700 *', '17069 *')
         .replace('ino:90', 'ino:95390').replace('dev:0/5', `dev:${printedDevice}`));
       s.state.native.stat = reply(0, PROOF_STAT.replace('100:90:0:5:socket', socketRow)
@@ -3397,7 +3442,7 @@ test('ANTI-REGRESSION: a Codex outer folder holding anything but its empty marke
       },
       check: (s) => assert.ok(lstatSync(s.marker).isFIFO()) },
     { name: 'a process using the folder', reason: 'pid 4242 (bash) uses it',
-      place: (s) => { s.state.lsof.open = [{ pid: 4242, command: 'bash', name: s.outer }]; },
+      place: (s) => { present(s.state.lsof).open = [{ pid: 4242, command: 'bash', name: s.outer }]; },
       check: marked },
     { name: 'the folder gone after the worktree is', reason: 'could not be read: ENOENT',
       place: (s) => { s.state.onWorktreeRemoved = () => rmSync(s.outer, { recursive: true }); },
@@ -3587,7 +3632,7 @@ test('ANTI-REGRESSION: an unusable Codex worktree root setting keeps the outer f
       seams: (s) => ({ home: `${s.root}/` }) },
   ];
   for (const { name, reason, place, seams = () => ({}) } of cases) {
-    for (const [placement, parts] of [['default placement', undefined], ['custom placement', CUSTOM_PARTS]]) {
+    for (const [placement, parts] of /** @type {Array<[string, string[] | undefined]>} */ ([['default placement', undefined], ['custom placement', CUSTOM_PARTS]])) {
       await t.test(`${name}, ${placement}`, async (t) => {
         const s = codexScenario(t, parts);
         place(s);
@@ -3605,7 +3650,7 @@ test('ANTI-REGRESSION: an unusable Codex worktree root setting keeps the outer f
 });
 
 test('ANTI-REGRESSION: a parent folder without the Codex marker is untouched with no line, even while the root setting is unusable', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, build] of [
+  for (const [name, build] of /** @type {Array<[string, (t: import('node:test').TestContext) => Scenario]>} */ ([
     ['a Claude Code worktree under an invalid config.toml', (t) => {
       const s = scenario(t, ['.claude', 'worktrees', 'job-23']);
       codexConfig(s, '[desktop');
@@ -3616,7 +3661,7 @@ test('ANTI-REGRESSION: a parent folder without the Codex marker is untouched wit
       rmSync(s.marker);
       return s;
     }],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = build(t);
       assert.deepEqual(await s.cleanup(), outerUntouched(s));
@@ -3627,10 +3672,10 @@ test('ANTI-REGRESSION: a parent folder without the Codex marker is untouched wit
 });
 
 test("ANTI-REGRESSION: a worktree root in Codex's settings does not make a folder outside it removable", { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, parts] of [
+  for (const [name, parts] of /** @type {Array<[string, string[]]>} */ ([
     ['a folder beside the root', ['other', 'job-23', 'repository']],
     ['a folder two levels below the root', ['custom', 'job-23', 'deeper', 'repository']],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = codexScenario(t, parts);
       codexConfig(s, rootSetting(JSON.stringify(join(s.root, 'custom'))));
@@ -3692,6 +3737,7 @@ const stoppedReasonIn = (text, line) => desktopReason(
 
 // A job on a Mac whose Docker Desktop answers at <root>/.docker/run/docker.sock, with one scratch file; the worktree
 // stands at <root>/<worktreeParts>.
+/** @typedef {ReturnType<typeof desktopScenario>} DesktopScenario */
 function desktopScenario(t, worktreeParts) {
   const s = scenario(t, worktreeParts);
   const socket = join(s.root, '.docker', 'run', 'docker.sock');
@@ -3759,7 +3805,7 @@ test('macOS Docker Desktop: a running daemon with no bound container removes the
 test('macOS Docker Desktop: containers bound in the worktree are stopped and removed first, or retain it with the reason', { skip: SKIP_POSIX }, async (t) => {
   await t.test('running gets stop then rm and stopped gets rm, before the worktree', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [
+    present(s.state.docker).containers = [
       containerRecord(ID_A, { running: true, mounts: [bindMount(join(s.worktree, 'site'))] }),
       containerRecord(ID_B, { mounts: [bindMount(s.worktree)] }),
     ];
@@ -3783,8 +3829,9 @@ test('macOS Docker Desktop: containers bound in the worktree are stopped and rem
   await t.test('a refused stop retains the container, the worktree and the branch', async (t) => {
     const s = desktopScenario(t);
     const refusal = 'Error response from daemon: fixture refusal';
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
-    s.state.docker.refuse = { stop: `${refusal}\n` };
+    const docker = present(s.state.docker);
+    docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    docker.refuse = { stop: `${refusal}\n` };
     assert.deepEqual(await s.cleanup(), {
       exitCode: 4,
       out: [
@@ -3802,7 +3849,7 @@ test('macOS Docker Desktop: containers bound in the worktree are stopped and rem
   });
   await t.test('a running container bound above the worktree retains it and is not stopped', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.root)] })];
     assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
@@ -3810,18 +3857,18 @@ test('macOS Docker Desktop: containers bound in the worktree are stopped and rem
 });
 
 test('macOS Docker Desktop: an endpoint other than the local Desktop socket retains every target and makes no daemon call', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, host] of [
+  for (const [name, host] of /** @type {Array<[string, (s: DesktopScenario) => string]>} */ ([
     ['TCP', () => 'tcp://127.0.0.1:2375'],
     ['SSH', () => 'ssh://fixture.invalid'],
     ['the system socket', () => 'unix:///var/run/docker.sock'],
     ['the cloud socket', (s) => `unix://${join(s.root, '.docker', 'cloud', 'docker-cloud.sock')}`],
     ['another home', () => 'unix:///Users/someone-else/.docker/run/docker.sock'],
     ['an unnormalized path', (s) => `unix://${s.root}/.docker/run/../run/docker.sock`],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = desktopScenario(t);
       s.state.host = host(s);
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       assertEveryTargetRetained(s, await s.cleanup(['23', '--scratch', s.target]), desktopReason('unsupported endpoint'));
       assert.deepEqual(s.calls.filter(([command, flag]) => ['id', 'stat'].includes(command) || (command === 'docker' && flag === '--host')), []);
     });
@@ -3902,7 +3949,7 @@ test('macOS Docker Desktop: a socket or daemon that fails identification retains
   for (const [name, configure, stage] of cases) {
     await t.test(name, async (t) => {
       const s = desktopScenario(t);
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       configure(s);
       const result = await s.cleanup(['23', '--scratch', s.target]);
       assertEveryTargetRetained(s, result, desktopReason(stage));
@@ -3912,7 +3959,7 @@ test('macOS Docker Desktop: a socket or daemon that fails identification retains
 });
 
 test('macOS Docker Desktop: a stopped daemon retains every target with its reason, a stopped bound container included', { skip: SKIP_POSIX }, async (t) => {
-  for (const [name, stop] of [
+  for (const [name, stop] of /** @type {Array<[string, (s: DesktopScenario) => string]>} */ ([
     ['a clean stop, with no socket file', stopDesktopCleanly],
     ['a stale socket file that refuses', leaveStaleSocket],
     ['only the first line of a longer reply', (s) => {
@@ -3920,15 +3967,15 @@ test('macOS Docker Desktop: a stopped daemon retains every target with its reaso
       s.state.desktop.version = reply(1, '', `${line}\nfixture second line\n`);
       return line;
     }],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = desktopScenario(t);
-      s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(s.worktree)] })];
       const line = stop(s);
       const result = await s.cleanup(['23', '--scratch', s.target]);
       assertEveryTargetRetained(s, result, stoppedReasonIn(result.out[0] ?? '', line));
       assert.ok(result.out[0].endsWith(STOPPED_ENDING), result.out[0]);
-      assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+      assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     });
   }
 });
@@ -3936,15 +3983,15 @@ test('macOS Docker Desktop: a stopped daemon retains every target with its reaso
 test('macOS Docker Desktop: a changed socket or a daemon that stops answering latches retention', { skip: SKIP_POSIX }, async (t) => {
   const changed = /^Docker filesystem relationship is unverifiable: native identity changed since initial observation$/;
   const unreadable = /^Docker filesystem relationship is unverifiable: native identity changed or became unreadable: ./;
-  for (const [name, change, expected] of [
+  for (const [name, change, expected] of /** @type {Array<[string, (s: DesktopScenario) => void, RegExp]>} */ ([
     ['a changed socket inode', (s) => { s.state.desktop.stat = reply(0, DESKTOP_STAT.replace(':543703623', ':543703624')); }, changed],
     ['a changed daemon name', (s) => { s.state.desktop.version = reply(0, '"Docker Desktop 4.97.0 (243775)"\n'); }, changed],
     ['a daemon that refuses, its socket file left behind', leaveStaleSocket, unreadable],
     ['a clean stop, its socket file gone', stopDesktopCleanly, unreadable],
-  ]) {
+  ])) {
     await t.test(name, async (t) => {
       const s = desktopScenario(t);
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
       s.state.onDocker = ([verb]) => { if (verb === 'stop') change(s); };
       const result = await s.cleanup(['23', '--scratch', s.target]);
       const reason = result.out[0]?.slice('retained container aaaaaaaaaaaa: '.length);
@@ -3971,7 +4018,7 @@ test('macOS Docker Desktop: a changed socket or a daemon that stops answering la
   await t.test('the first failed recheck stays latched', async (t) => {
     const s = desktopScenario(t);
     let observations = 0;
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
     s.state.onDocker = ([verb]) => {
       if (verb === 'stop') s.state.desktop.stat = () => (++observations === 1 ? reply(1, '', 'fixture warning') : reply(0, DESKTOP_STAT));
     };
@@ -4006,11 +4053,11 @@ test("macOS Docker Desktop: check mode gives cleanup's answer for the same targe
     assert.equal(existsSync(s.target), false);
     assert.deepEqual(s.unexpected, []);
   });
-  for (const [name, refuse] of [
+  for (const [name, refuse] of /** @type {Array<[string, (s: DesktopScenario) => (text: string) => string]>} */ ([
     ['a remote endpoint', (s) => { s.state.host = 'tcp://127.0.0.1:2375'; return () => desktopReason('unsupported endpoint'); }],
     ['a cleanly stopped daemon', (s) => { const line = stopDesktopCleanly(s); return (text) => stoppedReasonIn(text, line); }],
     ['a stale socket file', (s) => { const line = leaveStaleSocket(s); return (text) => stoppedReasonIn(text, line); }],
-  ]) {
+  ])) {
     await t.test(`${name}: the identical reason`, async (t) => {
       const s = desktopScenario(t);
       const reasonIn = refuse(s);
@@ -4023,7 +4070,7 @@ test("macOS Docker Desktop: check mode gives cleanup's answer for the same targe
   }
   await t.test('a bound container: in use, then stopped and removed', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(s.worktree)] })];
     assert.deepEqual(await s.cleanup(['--check', s.worktree]), {
       exitCode: 4, out: [`in use path ${s.worktree}: container aaaaaaaaaaaa binds it`, SUMMARY(0, 0, 1, 0)], err: [],
     });
@@ -4047,7 +4094,7 @@ test('macOS Docker Desktop: the real stat reads a socket and refuses a link in i
   const realSocket = join(runDirectory(realHome), 'docker.sock');
   mkdirSync(runDirectory(realHome), { recursive: true });
   const server = createServer();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(realSocket, resolve); });
+  await /** @type {Promise<void>} */ (new Promise((resolve, reject) => { server.once('error', reject); server.listen(realSocket, resolve); }));
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
     rmSync(base, { recursive: true, force: true });
@@ -4103,7 +4150,7 @@ test('macOS Docker Desktop: the real stat reads a socket and refuses a link in i
 test('macOS Docker Desktop: a bind spelled under the VM mount prefix counts as its host path', { skip: SKIP_POSIX }, async (t) => {
   await t.test('a stopped container bound in the worktree gets rm alone, before the worktree and the branch', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.worktree}/site`)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.worktree}/site`)] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: ['removed container aaaaaaaaaaaa', ...jobRemoved(s), 'closeout-cleanup: 3 removed, 0 retained'],
@@ -4116,49 +4163,49 @@ test('macOS Docker Desktop: a bind spelled under the VM mount prefix counts as i
   });
   await t.test('a running container bound above the worktree holds it and is not stopped', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(`/host_mnt${s.root}`)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(`/host_mnt${s.root}`)] })];
     assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
   });
   await t.test('a running container bound at exactly the prefix counts as bound at the root and holds the worktree', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount('/host_mnt')] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount('/host_mnt')] })];
     assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
   });
   await t.test('a running container with one bind in the worktree and one above it holds it with no names-it line', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [
+    present(s.state.docker).containers = [
       containerRecord(ID_A, { running: true, mounts: [bindMount(`/host_mnt${s.worktree}/site`), bindMount(`/host_mnt${s.root}`)] }),
     ];
     // assertWorktreeRetained takes the whole output, so a retained container line for a mount field naming it fails.
     assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
   });
   await t.test('a container bound at a target outside the worktree binds it', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.target}`)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.target}`)] })];
     assertScratchRetained(s, await s.cleanup(['23', '--scratch', s.target]), s.target, 'container aaaaaaaaaaaa binds it');
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
   });
   await t.test('a longer first component is not the prefix, so its container is not removed', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mntx${s.worktree}/site`)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mntx${s.worktree}/site`)] })];
     // The source stays absolute and readable; the worktree's own fate here belongs to the test of an unknown prefix.
     const { out } = await s.cleanup();
     assert.doesNotMatch(out.join('\n'), /could not be resolved/);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     assert.deepEqual(s.unexpected, []);
   });
   await t.test('an unrelated source under a longer first component leaves the worktree removable and its container alone', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount('/host_mntx/elsewhere')] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount('/host_mntx/elsewhere')] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'],
@@ -4166,12 +4213,12 @@ test('macOS Docker Desktop: a bind spelled under the VM mount prefix counts as i
     });
     assert.equal(existsSync(s.worktree), false);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     assert.deepEqual(s.unexpected, []);
   });
   await t.test('a non-string source stays unresolved and retains the worktree', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(3)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(3)] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 4,
       out: [
@@ -4189,14 +4236,14 @@ test('macOS Docker Desktop: a bind spelled under the VM mount prefix counts as i
   });
   await t.test('the same record on Linux keeps its prefix, so its container is not removed', async (t) => {
     const s = scenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.worktree}/site`)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(`/host_mnt${s.worktree}/site`)] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'],
       err: [],
     });
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     assert.deepEqual(s.unexpected, []);
   });
 });
@@ -4254,7 +4301,7 @@ test('macOS Docker Desktop: a bind source naming the worktree under an unknown p
   const boundUnderUnknownPrefix = (s) => [containerRecord(ID_A, { running: true, mounts: [bindMount(`/run/x${s.worktree}`)] })];
   await t.test('on a Mac nothing is stopped or removed and a retained line says the mount field names it', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = boundUnderUnknownPrefix(s);
+    present(s.state.docker).containers = boundUnderUnknownPrefix(s);
     const { exitCode, out, err } = await s.cleanup();
     assert.equal(exitCode, 4, out.join('\n'));
     assert.ok(out.some((line) => line.startsWith(`retained worktree ${s.worktree}: container aaaaaaaaaaaa names it`)), out.join('\n'));
@@ -4262,13 +4309,13 @@ test('macOS Docker Desktop: a bind source naming the worktree under an unknown p
     assert.ok(existsSync(s.worktree));
     assertWorktreeNotRemoved(s);
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     assert.deepEqual(s.unexpected, []);
   });
   await t.test('a scratch folder inside the worktree stays with it', async (t) => {
     const s = desktopScenario(t);
     const target = dirname(placeFile(join(s.worktree, '_site', 'page.md')));
-    s.state.docker.containers = boundUnderUnknownPrefix(s);
+    present(s.state.docker).containers = boundUnderUnknownPrefix(s);
     const reason = 'container aaaaaaaaaaaa names it in a mount field no host path matched';
     assert.deepEqual(await s.cleanup(['23', '--scratch', target]), {
       exitCode: 4,
@@ -4293,7 +4340,7 @@ test('macOS Docker Desktop: a bind source naming the worktree under an unknown p
   for (const [field, record] of Object.entries(namingIt)) {
     await t.test(`a record naming the worktree in ${field} retains it`, async (t) => {
       const s = desktopScenario(t);
-      s.state.docker.containers = [record(`/run/x${s.worktree}`)];
+      present(s.state.docker).containers = [record(`/run/x${s.worktree}`)];
       const { exitCode, out, err } = await s.cleanup();
       assert.equal(exitCode, 4, out.join('\n'));
       assert.ok(out.some((line) => line.startsWith(`retained worktree ${s.worktree}: container aaaaaaaaaaaa names it`)), out.join('\n'));
@@ -4311,11 +4358,11 @@ test('macOS Docker Desktop: a bind source naming the worktree under an unknown p
     symlinkSync('real', join(s.root, 'link'), 'dir');
     return { s, canonical: join(s.root, 'real', 'wt') };
   };
-  for (const [form, spelled] of [['given', (s) => s.worktree], ['canonical', (s, canonical) => canonical]]) {
+  for (const [form, spelled] of /** @type {Array<[string, (s: DesktopScenario, canonical: string) => string]>} */ ([['given', (s) => s.worktree], ['canonical', (s, canonical) => canonical]])) {
     await t.test(`a record naming only the worktree's ${form} path retains it`, async (t) => {
       const { s, canonical } = behindLink(t);
       assert.notEqual(canonical, s.worktree);
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(`/run/x${spelled(s, canonical)}`)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(`/run/x${spelled(s, canonical)}`)] })];
       const { exitCode, out, err } = await s.cleanup();
       assert.equal(exitCode, 4, out.join('\n'));
       assert.ok(out.some((line) => line.startsWith(`retained worktree ${s.worktree}: container aaaaaaaaaaaa names it`)), out.join('\n'));
@@ -4328,7 +4375,7 @@ test('macOS Docker Desktop: a bind source naming the worktree under an unknown p
   }
   await t.test('on Linux the worktree is removed', async (t) => {
     const s = scenario(t);
-    s.state.docker.containers = boundUnderUnknownPrefix(s);
+    present(s.state.docker).containers = boundUnderUnknownPrefix(s);
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: [...jobRemoved(s), 'closeout-cleanup: 2 removed, 0 retained'],
@@ -4351,7 +4398,7 @@ test('macOS: a bind spelled in another letter case matches the real path', { ski
   }
   await t.test('a stopped container bound in the worktree gets rm and the worktree is removed', async (t) => {
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'WT', 'site'))] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'WT', 'site'))] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: ['removed container aaaaaaaaaaaa', ...jobRemoved(s), 'closeout-cleanup: 3 removed, 0 retained'],
@@ -4366,7 +4413,7 @@ test('macOS: a bind spelled in another letter case matches the real path', { ski
     const s = desktopScenario(t);
     mkdirSync(join(s.worktree, 'site'));
     const target = join(s.root, 'WT', 'site');
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'Wt', 'site'))] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(join(s.root, 'Wt', 'site'))] })];
     assert.deepEqual(await s.cleanup(['--check', target]), {
       exitCode: 4, out: [`in use path ${target}: container aaaaaaaaaaaa binds it`, SUMMARY(0, 0, 1, 0)], err: [],
     });
@@ -4384,7 +4431,7 @@ test('macOS: a target named in another letter case matches a bind at its real sp
     const s = desktopScenario(t);
     const real = join(s.root, 'Scratch');
     renameSync(dirname(s.target), real);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(real)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(real)] })];
     return { s, real, target: join(s.root, 'SCRATCH') };
   };
   await t.test('check mode answers in use', async (t) => {
@@ -4399,7 +4446,7 @@ test('macOS: a target named in another letter case matches a bind at its real sp
     assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'container aaaaaaaaaaaa binds it');
     assert.ok(existsSync(real));
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
   });
 });
 
@@ -4418,7 +4465,7 @@ test('macOS: a folder spelled through the Data volume is the same folder', { ski
   const boundScratch = (t) => {
     const s = desktopScenario(t);
     const scratch = dirname(s.target);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(scratch)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(scratch)] })];
     return { s, scratch, target: dataSpelling(scratch) };
   };
   await t.test('check mode answers in use for a target in the Data spelling', async (t) => {
@@ -4436,10 +4483,11 @@ test('macOS: a folder spelled through the Data volume is the same folder', { ski
       t.skip(`${target} does not exist on this Mac`);
       return;
     }
-    assert.equal(data.dev, ordinary.dev);
-    assert.notEqual(data.ino, ordinary.ino);
+    // /usr exists on every Mac this runs on.
+    assert.equal(data.dev, /** @type {import('node:fs').BigIntStats} */ (ordinary).dev);
+    assert.notEqual(data.ino, /** @type {import('node:fs').BigIntStats} */ (ordinary).ino);
     const s = desktopScenario(t);
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount('/usr')] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount('/usr')] })];
     assert.deepEqual(await s.cleanup(['--check', target]), { exitCode: 0, out: [`unused path ${target}`, SUMMARY(1, 0, 0, 0)], err: [] });
     assertNothingChanged(s);
   });
@@ -4448,10 +4496,10 @@ test('macOS: a folder spelled through the Data volume is the same folder', { ski
     assertScratchRetained(s, await s.cleanup(['23', '--scratch', target]), target, 'container aaaaaaaaaaaa binds it');
     assert.ok(existsSync(scratch));
     assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-    assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+    assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
   });
   const assertBoundContainerRemoved = async (s, source) => {
-    s.state.docker.containers = [containerRecord(ID_A, { mounts: [bindMount(source)] })];
+    present(s.state.docker).containers = [containerRecord(ID_A, { mounts: [bindMount(source)] })];
     assert.deepEqual(await s.cleanup(), {
       exitCode: 0,
       out: ['removed container aaaaaaaaaaaa', ...jobRemoved(s), 'closeout-cleanup: 3 removed, 0 retained'],
@@ -4477,11 +4525,11 @@ test('macOS: a folder spelled through the Data volume is the same folder', { ski
   await t.test('a running container bound at the Data volume or above it holds the worktree and is not stopped', async (t) => {
     for (const source of [DATA_VOLUME, '/System/Volumes', '/System']) {
       const s = desktopScenario(t);
-      s.state.docker.containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(source)] })];
+      present(s.state.docker).containers = [containerRecord(ID_A, { running: true, mounts: [bindMount(source)] })];
       assertWorktreeRetained(s, await s.cleanup(), 'container aaaaaaaaaaaa binds a parent folder of it');
       assertWorktreeNotRemoved(s);
       assert.deepEqual([...dockerCalls(s, 'stop'), ...dockerCalls(s, 'rm')], []);
-      assert.deepEqual(s.state.docker.containers.map(({ Id }) => Id), [ID_A]);
+      assert.deepEqual(present(s.state.docker).containers.map(({ Id }) => Id), [ID_A]);
     }
   });
   await t.test('a target in the Data spelling with no container relationship is removed', async (t) => {

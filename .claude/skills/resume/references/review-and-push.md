@@ -28,7 +28,8 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   |---|---|---|
   | Paperwork slip | The four conditions below hold, but the validation verdict was recorded after implementation dispatch or not at all | The coordinating session |
   | Selection slip | The four conditions below hold, but the red run selected tests beyond the frozen identities | The coordinating session |
-  | Code before red | Any other gap: implementation for the claim existed before its frozen tests logged their red, or the record cannot show which came first | The owner |
+  | Test-order gap settled on proof | Code before red: implementation for the claim existed before its frozen tests logged their red, or the record cannot show which came first, and a valid executed mutation proves those tests | The coordinating session |
+  | Test-order gap with no possible break | Code before red where no mutation of that code can be made | The owner |
 
   The four conditions: the test-only stage held evidence changes only, shown by a validation verdict recorded before
   implementation dispatch or by the stage commit's diff; its red receipt was logged in that stage, and no earlier
@@ -50,14 +51,19 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   implementation dispatch and the red receipt it accepted where that is the proof; the quoted red receipt line; and
   the check of the frozen contract. For a paperwork slip that record is also its validation verdict. Name the slip
   with that evidence on the claim's row of the pull request body's Test receipts. A selection slip's red discharges no
-  discrimination proof: the claim takes the executed mutation `docs/TESTING-STRATEGY.md` names. Code before red
-  goes to the owner before review as the existing decision on accepting that claim without its required red run.
-  Follow `AGENTS.md`'s Owner gates and Compact instructions: record the gap and accepted scope, quoting the exact
-  question and owner approval verbatim. Reuse that acceptance only within the session that obtained it and its
-  exact scope, following those gates after compaction; do not repeatedly ask about the same accepted gap there. A
-  fresh session cannot infer approval from an earlier session, worklog or memory. Later checks against the base or
-  convergence mutations prove current behaviour only: they never repair chronology, turn code before red into a
-  slip, or waive the decision automatically. A new claim or gap outside that acceptance needs its own decision.
+  discrimination proof: the claim takes the executed mutation `docs/TESTING-STRATEGY.md` names. A test-order gap settles
+  on proof: cite that mutation where its receipts still hold for the frozen tests and their code, or have it run as that
+  strategy says. A late test without that proof goes back for it, and one a mutation leaves green goes to a builder
+  under a revised test contract; neither reaches the owner. Name the gap with its receipts on the claim's Test receipts
+  row as a test-order gap settled on proof. No mutation can be made only when no change to the code in the job worktree
+  makes the focused test fail by its own assertion and pass once restored: the code lies outside the worktree, or every
+  break stops the test running. Only that gap goes to the owner before review, to decide only whether to accept the
+  claim without its red run; its discrimination proof stays under the strategy's alternative or stop rule, and the
+  protected-invariant mutation still applies. Follow `AGENTS.md`'s Owner gates and Compact instructions: record the gap
+  and accepted scope, quoting the exact question and owner approval verbatim. Reuse that acceptance only within the
+  session that obtained it and its exact scope, following those gates after compaction; do not repeatedly ask about the
+  same accepted gap there. A fresh session cannot infer approval from an earlier session, worklog or memory. A new claim
+  or gap outside that acceptance needs its own decision.
 - Before dispatching the review, file every card the acceptance criteria require, in this repository or another, as
   the `to-tickets` skill says. A card that can only be filed after the merge, such as one that must cite the merge
   commit, is named under **Not done** in the pull request body as closeout's to file.
@@ -141,15 +147,11 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   the repository has no settings file, or where the file is one JSON object that holds no `greptile` key or holds
   `false`. It is on where the file holds `"greptile": true`. A command that fails, a file that is not one JSON object,
   any other value, or a key spelt nearly like it leaves the setting unknown, which is never off: open no pull request
-  for a `sign-off` tier change and tell the owner what the commands printed. A job that changes the setting is delivered
-  under the value the fetched `main` held. A job that turns the add-on off therefore still owes the external review
-  where its tier is `sign-off`, though its own change has removed the add-on's files from its worktree: it reads the
-  add-on's skill from the fetched `main` with `git show origin/main:.agents/skills/<name>/SKILL.md`, `<name>` being that
-  skill's name, `greptile`, and follows what that prints wherever section 8 says to read the skill. A read that fails is
-  told to the owner with the draft kept open; it is never `UNAVAILABLE`. Where the add-on is on, the `greptile` skill
-  owns every other rule of the review: the pool it is metered from, the allowance read before a request, how each thread
-  is settled, whether a review still stands after a rebase, and when an attempt counts as unavailable. The `shared-files`
-  skill says how a repository turns the add-on on or off.
+  for a `sign-off` tier change and tell the owner what the commands printed. Where the add-on is on, the `greptile`
+  skill owns every other rule of the review: the pool it is metered from, the allowance read before a request, how
+  each thread is settled, whether a review still stands after a rebase, and when an attempt counts as unavailable.
+  The `shared-files` skill says how a repository turns the add-on on or off, and a job that changes the setting
+  reads that rule whole before it opens its draft.
 - A guard keeps the heaviest tier in both directions. The rule covers a guard, which is a hook, a permission rule or a
   ruleset that refuses an action, a gate a guard runs, and its classifier, with every surface in the Surfaces table's
   `sign-off` row: a change to any of them is `sign-off` tier whether it loosens or tightens and whatever the two
@@ -161,8 +163,9 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   applied state in the repository's record carries the setting read through `gh api`, bypass list included, and that
   commit is the diff the `sign-off` tier reviews, whatever the gate says of its paths.
 - `security-reviewer` only when a change widens a surface in the Surfaces table's `security review` row; in a release
-  update only an adopter part counts, as **Release update in an adopting repository** below says. Its dispatch and a
-  capped security reviewer follow "4. Plan".
+  update only an adopter part counts, as **Release update in an adopting repository** below says. Every
+  `security-reviewer` dispatch names its result file, `.claude/worklog/<branch>-security-review.md`. For missing
+  locations, its Claude charter permits only bounded `explorer` discovery, completed before its own trust judgment.
 - Under `## Merge Danger`, the pull request body records both answers and why: a line beginning `Undo:` that reads
   `easy` or `hard` with one sentence of reason, a line beginning `Reach:` that reads `narrow` or `wide` with one
   sentence of reason, and one sentence more where the gate's exit or the guard rule set the tier. For a mixed change
@@ -171,14 +174,23 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   review not requested, on tier grounds or because the add-on is off, is neither `UNAVAILABLE` nor a clean review.
 - For paired dispatches, wait for the `cross-review` barrier before settling findings. Deduplicate and prove or refute
   the findings. Fix each true finding by the cheapest valid fix it names. A true finding whose every fix costs more than it is worth goes to the owner as a plain-language decision, and the owner may set it aside as deferred; a finding is dismissed,
-  with a reason, only when it is false. Then one pass scoped to the repaired hunks and what they can break, by the
-  same reviewer with its context intact or by the session. No further pass when a repair adds no factual claim;
+  with a reason, only when it is false. Then one repair pass, by the same reviewer with its context intact or by the
+  session. That pass is given the last reviewed commit, the repair's head commit and the behaviours the repair can
+  affect, and judges the repair against those, never the whole job afresh. No further pass when a repair adds no
+  factual claim;
   no third full review follows the paired initial passes. Record the review in the pull request body's review line, in the format the Review section of
   [the pull request template](../../../../.github/pull_request_template.md) specifies.
-- When two repair-and-re-review cycles still produce true findings, new or repeated, judge them. If each is bounded
-  and verifiable, run one more round that fixes all of them. Bring the owner the choice, with a recommendation, only
-  when a finding needs an unsettled design, owner judgment or evidence that cannot be bounded, or when that round
-  still does not converge. Findings are never ignored.
+- When two repair-and-re-review cycles still produce true findings, new or repeated, judge them. Where most of those
+  two cycles' true findings land on code, tests or a refusal the job added that the card's acceptance criteria do
+  not name, and the smallest design without it still meets every acceptance criterion and keeps every required test and
+  constraint, stop repairing, since more rounds build what the card never asked for: bring the owner that design,
+  what it gives up and a recommendation. The job builds the owner's pick, and findings it removes are settled by
+  removal. Otherwise, and for every finding that remains, if each is bounded and verifiable, run one more round
+  that fixes all of them; bring the owner the choice, with a recommendation, only when a finding needs an unsettled
+  design, owner judgment or evidence that cannot be bounded. After that round this bullet alone settles findings:
+  fix each further true finding by the same repair and scoped re-check without asking, and bring the owner the
+  choice only for one that would change the card's outcome, product meaning or a trade-off it rests on, such as one
+  whose every fix costs more than it is worth. Findings are never ignored.
 - **Release update in an adopting repository.** A release update's own writes are the shared files and the manifest
   it writes from the verified release, for `AGENTS.md` its shared region alone, with the seat values the seat
   settings file names, the shared files it removes because the verified release no longer lists them, and the two
@@ -266,8 +278,7 @@ to `shown-hash` in that folder. Before section 8 begins `git rev-parse HEAD` mus
 that showed the card compares it with `shown-hash`, a coordinator that showed a job whose named session still runs
 compares it with the identity it printed, and a session acting on a recorded answer compares it with the identity that
 record names; neither of the last two reads `shown-hash`, which a card shown again at the same head rewrites. Otherwise
-the yes does not count: save again and show the card again. A cloud session saves no folder and asks nothing; its draft's body is the
-write-up, and the local session that takes the draft up saves the folder at the head it kept before it shows the card.
+the yes does not count: save again and show the card again.
 
 **Owner answer.** How the owner's answer reaches a waiting card, as the record owner-answer.md gives for the job's route, the fix path and who acts on a
 record, is in [references/owner-answer.md](owner-answer.md), read whole before a session records or acts on an answer.

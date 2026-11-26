@@ -35,6 +35,7 @@ const {
   intakeOutcome,
   isEpic,
   isInFlight,
+  QUIET_LIMIT_MS,
   scanBoard,
   scanOutcome,
   stalledClaimDrift,
@@ -312,6 +313,65 @@ test('rule 5 — a claim with no closing pull request at all is an advisory; an 
   assert.deepEqual(rowsFor(drifted, 3), []);
   assert.deepEqual(rowsFor(drifted, 4), []);
   assert.equal(closeoutExit(drifted), 0);
+});
+
+// Rule 5 classifies a claim from the observation the edge gathered, keyed by card number. The fixture is an
+// In progress card with no closing pull request; its twin (card 2) has no observation and keeps the plain reason.
+const ACTIVE_AT = new Date('2026-05-01T10:30:00Z');
+const SINCE = '2026-05-01T10:30Z';
+const stalledReason = (suffix) =>
+  `claimed in "In progress" with no closing pull request — ${suffix} — if no session is building it, resume it or return it to Ready`;
+const observedReasons = (observation) => {
+  const { drifted } = scanBoard(
+    parsedLeanItems([issueNode({ number: 1, status: 'In progress' }), issueNode({ number: 2, status: 'In progress' })]),
+    new Map([[1, observation]]),
+  );
+  return { observed: rowsFor(drifted, 1).map((d) => d.reason), twin: rowsFor(drifted, 2).map((d) => d.reason) };
+};
+const checkable = (liveness, quietMs) => ({ checkable: true, liveness, activeAt: ACTIVE_AT, quietMs, lastStep: 'S1, pass, completed 2026-05-01T10:30Z' });
+
+test('new behaviour: rule 5 — a claim with no running terminal and nothing recorded past the limit is stalled, and its twin is untouched', () => {
+  const { observed, twin } = observedReasons(checkable({ running: null }, 2 * 60 * 60 * 1000 + 1));
+  assert.deepEqual(observed, [stalledReason(`stalled: no running Herdr job terminal here and nothing recorded since ${SINCE}; last step: S1, pass, completed 2026-05-01T10:30Z`)]);
+  assert.deepEqual(twin, ['claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready']);
+});
+
+test('new behaviour: rule 5 — a claim whose Herdr job terminal is running is live, never stalled', () => {
+  const { observed } = observedReasons(checkable({ running: 'term-7' }, QUIET_LIMIT_MS * 10));
+  assert.deepEqual(observed, [stalledReason('live: Herdr terminal term-7 is running its job')]);
+  assert.ok(!observed[0].includes('stalled'));
+});
+
+test('new behaviour: rule 5 — a running Herdr job terminal with recent activity is live, never idle', () => {
+  const { observed } = observedReasons(checkable({ running: 'term-7' }, QUIET_LIMIT_MS - 1));
+  assert.deepEqual(observed, [stalledReason('live: Herdr terminal term-7 is running its job')]);
+});
+
+test('new behaviour: rule 5 — quiet exactly at the limit with no running terminal is idle, not stalled', () => {
+  const { observed } = observedReasons(checkable({ running: null }, 2 * 60 * 60 * 1000));
+  assert.deepEqual(observed, [stalledReason(`idle since ${SINCE}; no running Herdr job terminal here`)]);
+});
+
+test('new behaviour: rule 5 — quiet under the limit with no live-process check is idle and names why it could not check', () => {
+  const { observed } = observedReasons(checkable({ unavailable: 'hc is not available' }, QUIET_LIMIT_MS - 1));
+  assert.deepEqual(observed, [stalledReason(`idle since ${SINCE}; no live-process check here: hc is not available`)]);
+});
+
+test('new behaviour: rule 5 — a claim this machine cannot check is unknown, never live or stalled', () => {
+  const foreign = observedReasons({ checkable: false, cause: 'claimed on other-box, Claude Code; this machine cannot check it' }).observed;
+  const cloud = observedReasons({ checkable: false, cause: 'claimed on cloud-box, Claude Code cloud; this machine cannot check it' }).observed;
+  assert.deepEqual(foreign, [stalledReason('unknown: claimed on other-box, Claude Code; this machine cannot check it')]);
+  assert.deepEqual(cloud, [stalledReason('unknown: claimed on cloud-box, Claude Code cloud; this machine cannot check it')]);
+});
+
+test('new behaviour: rule 5 — old activity with no live-process check is unknown, with the last step', () => {
+  const { observed } = observedReasons(checkable({ unavailable: 'hc is not available' }, 2 * 60 * 60 * 1000 + 1));
+  assert.deepEqual(observed, [stalledReason(`unknown: nothing recorded since ${SINCE} and no live-process check here: hc is not available; last step: S1, pass, completed 2026-05-01T10:30Z`)]);
+});
+
+test('new behaviour: rule 5 — a claim with no observation keeps the plain reason byte for byte', () => {
+  const { drifted } = scanBoard(parsedLeanItems([issueNode({ number: 1, status: 'In progress' })]), new Map());
+  assert.deepEqual(rowsFor(drifted, 1).map((d) => d.reason), ['claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready']);
 });
 
 // This repository's own config parks no lane, so no card this file's board read produces is

@@ -58,6 +58,7 @@ for agent_prefix in '' 'src/'; do
     if [ -z "$agent_prefix" ]; then
       agent_settings='.agents/factory-settings.json'
     fi
+    # shellcheck disable=SC2016 # The single-quoted text is the script xargs passes to sh -c; that shell expands it.
     if ! git -C "$repo_root" ls-files -z -- "${agent_prefix}.claude/agents" "${agent_prefix}.codex/agents" "${agent_prefix}scripts/lib/check-agents.mjs" "${agent_prefix}scripts/lib/runtimes.mjs" $agent_settings >"$agent_snap/staged.list" \
       || ! xargs -0 sh -c 'snap=$1 root=$2; shift 2; for p; do mkdir -p "$snap/$(dirname "$p")" && git -C "$root" cat-file blob ":$p" >"$snap/$p" || exit 255; done' sh "$agent_snap" "$repo_root" <"$agent_snap/staged.list"; then
       rm -rf "$agent_snap"

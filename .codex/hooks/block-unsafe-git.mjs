@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck
 // PreToolUse(Bash) guard — stop Codex bypassing the local gates.
 // Governs Codex's Bash tool calls ONLY (a manual commit in your own terminal is not a
 // tool call), so your escape hatch survives. It is not a security boundary: the head of
@@ -15,12 +14,14 @@ import { CODEX_HERDR_BIND, bindCodexHerdrJob, codexCommandForGuard, codexCwdForG
 
 const operatingRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 
+/** @returns {never} */
 function refuse(reason, terminalHint = false) {
   const hint = terminalHint ? " Guards Codex's tool calls only; run it in your own terminal if you truly need it." : "";
   console.error(`Blocked: ${reason}.${hint}`);
   process.exit(2);
 }
 
+/** @returns {never} */
 function refusePreApproved(why) {
   refuse(`a pre-approved run session ${why}`);
 }
@@ -29,7 +30,7 @@ function refusePreApproved(why) {
 async function preApprovedOptions(start, appJob, boundCard, codexHerdr) {
   if (start === undefined) return null;
   try {
-    const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
+    const { TRACKER } = /** @type {{ TRACKER?: string }} */ (await import("../../scripts/lib/board-config.mjs"));
     return { start, tracker: TRACKER ?? "github", appJob, boundCard, codexHerdr };
   } catch {
     return refusePreApproved("publishes nothing: the board configuration could not be loaded to name this repository's tracker");
@@ -84,7 +85,7 @@ process.stdin.on("end", async () => {
       codexHerdr = await readCodexHerdrDeliveryBinding({ herdr, payload, operatingRoot });
       runUnavailable = undefined;
     } catch (error) {
-      runUnavailable = error.message;
+      runUnavailable = /** @type {Error} */ (error).message;
     }
   }
   const reason = blockReason(cmd, checkout, {

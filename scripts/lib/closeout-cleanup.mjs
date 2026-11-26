@@ -1,4 +1,3 @@
-// @ts-nocheck
 // closeout-cleanup.mjs — the checks and removals behind scripts/closeout-cleanup.mjs.
 //
 // Every external call goes through one injected `run`, and each answers only the argument vectors this file
@@ -69,6 +68,11 @@ function parsePr(value) {
 
 // One external command, no shell and no working directory: { absent: true } when it is not installed,
 // { failed: <code or signal> } when it could not finish, else { status, stdout, stderr }.
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ */
 export function runCommand(command, args, { env } = {}) {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
@@ -77,13 +81,19 @@ export function runCommand(command, args, { env } = {}) {
     windowsHide: true,
     env,
   });
-  if (result.error?.code === 'ENOENT') return { absent: true };
-  if (result.error) return { failed: result.error.code ?? result.error.message };
+  const error = /** @type {NodeJS.ErrnoException | undefined} */ (result.error);
+  if (error?.code === 'ENOENT') return { absent: true };
+  if (error) return { failed: errorReason(error) };
   if (result.signal) return { failed: result.signal };
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 const unique = (values) => [...new Set(values)];
+// A thrown file system or process error's code, else its message.
+const errorReason = (/** @type {unknown} */ error) => {
+  const thrown = /** @type {NodeJS.ErrnoException} */ (error);
+  return thrown.code ?? thrown.message;
+};
 const isCleanAbsolute = (path) =>
   isAbsolute(path) && path === normalize(path) && (path === '/' || !path.endsWith('/')) && !CONTROL.test(path);
 const isCleanRelative = (path) =>
@@ -107,7 +117,7 @@ export function parseCleanupArgs(args) {
       },
     });
   } catch (error) {
-    return { error: error.message };
+    return { error: /** @type {Error} */ (error).message };
   }
   const { positionals, values } = parsed;
   if (values.check) {
@@ -135,10 +145,14 @@ export function parseCleanupArgs(args) {
 
 // The records of `git worktree list --porcelain -z`, the main worktree first, each { path, ...attributes } with an
 // attribute's value '' when it has none; null when any record is unreadable.
+/** @typedef {{ path: string, [attribute: string]: string | undefined }} WorktreeRecord */
+/** @param {string} stdout */
 export function parseWorktreeList(stdout) {
   const fields = stdout.split('\0');
   if (fields.pop() !== '') return null;
+  /** @type {WorktreeRecord[]} */
   const records = [];
+  /** @type {WorktreeRecord | null} */
   let record = null;
   for (const field of fields) {
     if (field === '') {
@@ -219,6 +233,8 @@ function wholeRunRefusal(mainRecord, job, worktree, seams) {
   return null;
 }
 
+/** @typedef {{ path: string, retained: string | null, canonical?: string }} JobWorktree */
+
 // Job mode: the job's containers, run folders and the processes carrying them, named scratch, worktree, Codex's empty outer folder and branch, each removed only when every check passes.
 export function cleanupJob(request, seams) {
   const job = `job/${request.issue}`;
@@ -233,13 +249,17 @@ export function cleanupJob(request, seams) {
 
   const [mainRecord, ...linked] = records;
   const record = linked.find(({ branch }) => branch === `refs/heads/${job}`);
+  /** @type {JobWorktree | undefined} */
   const worktree = record && { path: record.path, retained: null };
-  const retainWorktree = (reason) => {
-    worktree.retained ??= reason;
+  // Called only once the job has a worktree.
+  const retainWorktree = (/** @type {string} */ reason) => {
+    /** @type {JobWorktree} */ (worktree).retained ??= reason;
   };
-  const canonical = worktree && canonicalPath(worktree.path);
-  if (canonical?.unresolved) retainWorktree(`could not be resolved: ${canonical.unresolved}`);
-  if (canonical?.path) worktree.canonical = canonical.path;
+  if (worktree) {
+    const canonical = canonicalPath(worktree.path);
+    if (canonical.unresolved) retainWorktree(`could not be resolved: ${canonical.unresolved}`);
+    if (canonical.path) worktree.canonical = canonical.path;
+  }
 
   const report = createReport();
   const refusal = wholeRunRefusal(mainRecord, job, worktree, seams);
@@ -259,7 +279,7 @@ export function cleanupJob(request, seams) {
     const cwd = canonicalPath(seams.cwd);
     if (cwd.unresolved) retainWorktree(`the working directory could not be resolved: ${cwd.unresolved}`);
     else if (atOrBelow(cwd.path, worktree.canonical)) retainWorktree('the command runs inside it');
-    if (record.prunable !== undefined) retainWorktree('run `git worktree prune`, then this command again');
+    if (/** @type {WorktreeRecord} */ (record).prunable !== undefined) retainWorktree('run `git worktree prune`, then this command again');
     if (!worktree.retained) {
       const listener = listenerRetention(seams.run, [worktree.path, worktree.canonical]);
       if (listener) retainWorktree(listener);
@@ -292,12 +312,13 @@ export function cleanupJob(request, seams) {
     if (held) retainWorktree(held.reason);
   }
   const codexFolder = worktree && !worktree.retained ? codexOuterFolder(worktree, seams) : null;
-  if (worktree && !worktree.retained) removeWorktree(context, request.regenerated, retainWorktree, docker.verify);
+  // The snapshot is always taken when the job has a worktree.
+  if (worktree && !worktree.retained) removeWorktree(context, request.regenerated, retainWorktree, /** @type {NonNullable<typeof docker>} */ (docker).verify);
   if (!worktree) report.absent('worktree', job);
   else if (worktree.retained) report.retained('worktree', worktree.path, worktree.retained);
   else report.removed('worktree', worktree.path);
   // Judged before the branch, so a retained outer folder stops the merged PR exception below.
-  if (codexFolder && !worktree.retained) removeCodexOuterFolder(codexFolder, context, report);
+  if (codexFolder && !(/** @type {JobWorktree} */ (worktree)).retained) removeCodexOuterFolder(codexFolder, context, report);
 
   if (!branchPresent) {
     report.absent('branch', job);
@@ -442,7 +463,7 @@ function dockerSnapshot({ run, platform, home }) {
   const command = (...args) => run('docker', ['--host', proof.host, ...args], { env });
   const finish = (records) => {
     const volumes = new Map(unique(records.flatMap(volumeNames)).map((name) => [name, readVolume(name, command)]));
-    const read = (record) => volumeNames(record).map((name) => volumes.get(name)).filter(Boolean);
+    const read = (record) => volumeNames(record).map((name) => volumes.get(name)).filter((volume) => volume != null);
     return {
       records,
       verify: proof.verify,
@@ -563,11 +584,11 @@ function dockerIdentity(stdout, listener, role) {
   if (socket[1] !== listener.inode) return { failure: 'filesystem socket inode does not match listener' };
   if (socket[2] !== listener.major || socket[3] !== listener.minor) return { failure: 'filesystem socket device does not match listener' };
   if (descriptor[1] !== listener.kernel) return { failure: 'socket descriptor does not match listener' };
-  for (const [index, failure] of [
+  for (const [index, failure] of /** @type {Array<[number, string]>} */ ([
     [2, `${role} mount namespace differs from local process`],
     [4, `${role} root differs from local root`],
     [6, `${role} executable differs from resolved executable`],
-  ]) {
+  ])) {
     if (rows[index].numbers[0] !== rows[index + 1].numbers[0] || rows[index].numbers[1] !== rows[index + 1].numbers[1]) return { failure };
   }
   return { identity: rows.map(({ numbers, type }) => `${numbers.join(':')}:${type}`).join('\n') };
@@ -575,6 +596,7 @@ function dockerIdentity(stdout, listener, role) {
 
 // A verifier that re-observes until the first failure or change, and from then on repeats that reason.
 function latchedVerify(observe, identity) {
+  /** @type {string | null} */
   let failure = null;
   return () => {
     if (!failure) {
@@ -596,8 +618,10 @@ function desktopStatRows(stdout, count) {
 // The server name `docker version` printed as its one JSON string line, or null.
 function desktopDaemonName(result) {
   if (!completeCommand(result)) return null;
+  const line = completeLine(result.stdout);
+  if (line === null) return null;
   try {
-    const name = JSON.parse(completeLine(result.stdout));
+    const name = JSON.parse(line);
     return typeof name === 'string' ? name : null;
   } catch {
     return null;
@@ -813,7 +837,8 @@ function canonicalPath(path) {
     try {
       return { path: join(realpath(prefix), ...missing) };
     } catch (error) {
-      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return { unresolved: error.code ?? error.message };
+      const { code } = /** @type {NodeJS.ErrnoException} */ (error);
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return { unresolved: errorReason(error) };
       missing.unshift(basename(prefix));
     }
   }
@@ -830,7 +855,7 @@ function loadTomlParser(path) {
   try {
     return { parse: createRequire(import.meta.url)(path).parse };
   } catch (error) {
-    return { unavailable: error.code ?? error.message };
+    return { unavailable: errorReason(error) };
   }
 }
 
@@ -841,15 +866,15 @@ function codexRootSetting(file, parserPath) {
   try {
     stat = statSync(file);
   } catch (error) {
-    if (error.code === 'ENOENT' && !lstatSync(file, { throwIfNoEntry: false })) return {};
-    return { unusable: `config.toml could not be read: ${error.code ?? error.message}` };
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' && !lstatSync(file, { throwIfNoEntry: false })) return {};
+    return { unusable: `config.toml could not be read: ${errorReason(error)}` };
   }
   if (!stat.isFile()) return { unusable: 'config.toml is not a regular file' };
   let bytes;
   try {
     bytes = readFileSync(file);
   } catch (error) {
-    return { unusable: `config.toml could not be read: ${error.code ?? error.message}` };
+    return { unusable: `config.toml could not be read: ${errorReason(error)}` };
   }
   const parser = loadTomlParser(parserPath);
   if (parser.unavailable) return { unusable: `the TOML parser could not be loaded: ${parser.unavailable}` };
@@ -876,6 +901,7 @@ function codexRootSetting(file, parserPath) {
 // CODEX_HOME. { root } canonical; { unusable } with why the setting names no root, a CODEX_HOME (or the home folder
 // standing in for an empty one) that is not a normalized absolute path included; null only when the default root
 // cannot be resolved, which no resolved worktree can sit inside.
+/** @returns {{ root?: string, unusable?: string } | null} */
 function codexWorktreeRoot({ codexHome, home, tomlParserPath }) {
   const source = codexHome === '' ? home : codexHome;
   if (!isCleanAbsolute(source)) {
@@ -904,7 +930,7 @@ function codexOuterFolder(worktree, seams) {
   try {
     return { path, forms, before: lstatSync(path), unusable };
   } catch (error) {
-    return { path, forms, unreadable: error.code ?? error.message, unusable };
+    return { path, forms, unreadable: errorReason(error), unusable };
   }
 }
 
@@ -918,7 +944,7 @@ function outerContents(path) {
     if (!entries.includes(CODEX_MARKER)) return { unmarked: true };
     marker = lstatSync(join(path, CODEX_MARKER));
   } catch (error) {
-    return { reason: `could not be read: ${error.code ?? error.message}` };
+    return { reason: `could not be read: ${errorReason(error)}` };
   }
   const others = entries.filter((entry) => entry !== CODEX_MARKER).sort();
   if (others.length) {
@@ -934,6 +960,9 @@ function outerContents(path) {
 // only the same empty marker: the marker, then the folder, never recursively. A folder without the marker is left with
 // no line; every other outcome retains it with its reason; a marked folder is retained while the root setting of Codex
 // is unusable.
+/**
+ * @param {{ path: string, forms: string[], before?: import('node:fs').Stats, unreadable?: string, unusable?: string }} folder
+ */
 function removeCodexOuterFolder({ path, forms, before, unreadable, unusable }, context, report) {
   const retain = (reason) => report.retained('outer folder', path, reason);
   if (unreadable) return retain(`could not be read: ${unreadable}`);
@@ -947,7 +976,7 @@ function removeCodexOuterFolder({ path, forms, before, unreadable, unusable }, c
   try {
     after = lstatSync(path);
   } catch (error) {
-    return retain(`could not be read again: ${error.code ?? error.message}`);
+    return retain(`could not be read again: ${errorReason(error)}`);
   }
   if (!sameEntry(before, after)) return retain('it changed during the checks');
   const last = outerContents(path);
@@ -955,12 +984,12 @@ function removeCodexOuterFolder({ path, forms, before, unreadable, unusable }, c
   try {
     unlinkSync(join(path, CODEX_MARKER));
   } catch (error) {
-    return retain(`removal failed: ${error.code ?? error.message}`);
+    return retain(`removal failed: ${errorReason(error)}`);
   }
   try {
     rmdirSync(path);
   } catch (error) {
-    return retain(`removal failed: ${error.code ?? error.message}; its ${CODEX_MARKER} is already gone`);
+    return retain(`removal failed: ${errorReason(error)}; its ${CODEX_MARKER} is already gone`);
   }
   report.removed('outer folder', path);
 }
@@ -1017,6 +1046,7 @@ export function parsePs(stdout) {
 
 // lsof's stderr as the mounts it warned it could not stat: { mounts }, or { unrecognised } with the first line that
 // is not such a warning and its continuation.
+/** @param {string} stderr */
 export function classifyLsofStderr(stderr) {
   const lines = stderr.split('\n');
   if (lines.at(-1) === '') lines.pop();
@@ -1047,11 +1077,11 @@ function readLsof(result, targets) {
 // The reason a listening process serves the worktree, or null when none does.
 function listenerRetention(run, targets) {
   const listening = readLsof(run('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-Fpc']), targets);
-  if (listening.retain) return listening.retain;
+  if (listening.retain !== undefined) return listening.retain;
   if (!listening.processes.length) return null;
   const pids = listening.processes.map(({ pid }) => pid).join(',');
   const directories = readLsof(run('lsof', ['-nP', '-a', '-p', pids, '-d', 'cwd', '-Fpn']), targets);
-  if (directories.retain) return directories.retain;
+  if (directories.retain !== undefined) return directories.retain;
   for (const { pid, command } of listening.processes) {
     const cwd = directories.processes.find((entry) => entry.pid === pid)?.files[0]?.name;
     if (cwd === undefined) return `pid ${pid} (${command}) listens, and its working directory could not be read`;
@@ -1173,7 +1203,7 @@ function readIgnoredLink(relative, worktree, records) {
       try {
         canonical = realpath(other);
       } catch (error) {
-        return retained(`could not resolve another linked worktree ${other}: ${error.code ?? error.message}`);
+        return retained(`could not resolve another linked worktree ${other}: ${errorReason(error)}`);
       }
       if (relates([destination, resolved], [other, canonical], ['equal', 'below'])) {
         return retained(`points into another linked worktree ${other}`);
@@ -1181,7 +1211,7 @@ function readIgnoredLink(relative, worktree, records) {
     }
     return { before: target.before, linkText, target: resolved };
   } catch (error) {
-    return retained(`could not resolve its target: ${error.code ?? error.message}`);
+    return retained(`could not resolve its target: ${errorReason(error)}`);
   }
 }
 
@@ -1242,7 +1272,7 @@ function removeWorktree({ git, worktree, records, seams }, regenerated, retainWo
         return retainWorktree(`regenerated path ${directory} is not a real directory within the worktree`);
       }
     } catch (error) {
-      return retainWorktree(`could not verify regenerated directory ${directory}: ${error.code ?? error.message}`);
+      return retainWorktree(`could not verify regenerated directory ${directory}: ${errorReason(error)}`);
     }
     directories.push(directory);
   }
@@ -1316,13 +1346,15 @@ function removeRunFolders(canonicalRoot, context, report) {
   try {
     entries = readdirSync(folder).filter((entry) => entry.startsWith(prefix));
   } catch (error) {
-    report.retained('run folders', folder, `could not be read: ${error.code ?? error.message}`);
+    report.retained('run folders', folder, `could not be read: ${errorReason(error)}`);
     return `its run folders in ${folder} could not be read`;
   }
+  /** @type {string | null} */
   let worktreeRetained = null;
   for (const path of entries.map((entry) => join(folder, entry))) {
     const scan = () => processesUsing(path, { platform, procRoot });
     const carriers = scan();
+    /** @type {string | null} */
     let retained = null;
     if (carriers !== 'unchecked' && carriers.length) {
       const { stopped, survivors } = stopProcesses(carriers, { kill, processesUsing: scan, sleep });
@@ -1362,15 +1394,15 @@ function readTarget(path) {
   try {
     before = lstatSync(path);
   } catch (error) {
-    if (error.code === 'ENOENT') return { absent: true };
-    return { retained: `could not be read: ${error.code ?? error.message}`, forms: [path] };
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return { absent: true };
+    return { retained: `could not be read: ${errorReason(error)}`, forms: [path] };
   }
   let canonical;
   try {
     // A link stays named as itself, since removing it removes the link; anything else takes its on-disk spelling whole.
     canonical = before.isSymbolicLink() ? join(realpath(dirname(path)), basename(path)) : realpath(path);
   } catch (error) {
-    return { retained: `could not be resolved: ${error.code ?? error.message}`, forms: [path] };
+    return { retained: `could not be resolved: ${errorReason(error)}`, forms: [path] };
   }
   return { before, canonical, forms: unique([path, canonical]) };
 }
@@ -1388,12 +1420,12 @@ function useChecks(path, forms, inside, directory, { seams, docker, containers, 
   const container = containerRetention(forms, inside, { docker, containers });
   if (container) return container;
   const lsof = readLsof(seams.run('lsof', directory ? ['-nP', '-Fpcfn', '-x', 'f', '+D', path] : ['-nP', '-Fpcfn', path]), forms);
-  if (lsof.retain) return unverifiable(lsof.retain);
+  if (lsof.retain !== undefined) return unverifiable(lsof.retain);
   const uses = ({ pid, command }) => found(`pid ${pid} (${command}) uses it`);
   const busy = lsof.processes.find((user) => !sittingShell(user));
   if (busy) return uses(busy);
   const ps = readPs(seams.run);
-  if (ps.retain) return unverifiable(ps.retain);
+  if (ps.retain !== undefined) return unverifiable(ps.retain);
   const parents = new Set(ps.rows.map(({ ppid }) => ppid));
   const withChild = lsof.processes.find(({ pid }) => parents.has(pid));
   if (withChild) return uses(withChild);
@@ -1535,7 +1567,7 @@ function removal(path, before) {
   try {
     after = lstatSync(path);
   } catch (error) {
-    return `could not be read again: ${error.code ?? error.message}`;
+    return `could not be read again: ${errorReason(error)}`;
   }
   if (!sameEntry(before, after)) return 'it changed during the checks';
   try {
@@ -1543,7 +1575,7 @@ function removal(path, before) {
     else unlinkSync(path);
   } catch (error) {
     const partly = before.isDirectory() ? '; some contents may already be gone' : '';
-    return `removal failed: ${error.code ?? error.message}${partly}`;
+    return `removal failed: ${errorReason(error)}${partly}`;
   }
   return null;
 }

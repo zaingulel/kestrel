@@ -35,7 +35,7 @@
 // (SWEEP_STANDARD). A tree whose sweep is off leaves them out; a reference to one of them, or to one of the two manuals
 // the sweep runs by, need not resolve there (sweepOmits).
 // The settings file's `docsSite` key is one of DOCS_SITE_LEVELS; with no key it is off. The docs site's files are
-// everything under docs-site/ and its publishing workflow (DOCS_SITE_WORKFLOW). A tree installs the folder only where
+// everything under docs-site/ and its build workflow (DOCS_SITE_WORKFLOW). A tree installs the folder only where
 // its docs site is local or online, and the workflow only where it is online.
 
 import { lstatSync, readFileSync } from 'node:fs';
@@ -118,7 +118,7 @@ const SWEEP_SHARED = new Set([...SWEEP_PATHS, SWEEP_STANDARD]);
 /** Whether a tree whose sweep is `docSweep` leaves the path out: the sweep's six files, the documentation standard and its two manuals, only where it is off. Exact string comparison. */
 export const sweepOmits = (docSweep, path) => !docSweep && (SWEEP_SHARED.has(path) || SWEEP_MANUALS.includes(path));
 
-const DOCS_SITE_WORKFLOW = '.github/workflows/docs-site-deploy.yml';
+export const DOCS_SITE_WORKFLOW = '.github/workflows/docs-site-build.yml';
 const isDocsSitePath = (path) => path.startsWith('docs-site/') || path === DOCS_SITE_WORKFLOW;
 
 const runtimeCause = (path) => `the settings file names no ${runtimeOf(path)} runtime`;
@@ -200,7 +200,7 @@ export const SETTINGS_KEYS = Object.freeze(['version', 'runtimes', 'seats', 'pla
 // its evidence unless a wait reason holds.
 export const WAIT_LEVELS = Object.freeze(['always', 'on-screen', 'when-needed']);
 
-// The levels of `docsSite`: off leaves the docs site out, local installs its folder, online also its publishing workflow.
+// The levels of `docsSite`: off leaves the docs site out, local installs its folder, online also its build workflow.
 export const DOCS_SITE_LEVELS = Object.freeze(['off', 'local', 'online']);
 
 // The efforts a Claude session accepts, lowest first: the values of a seat's `effort` and of the coordinator's.

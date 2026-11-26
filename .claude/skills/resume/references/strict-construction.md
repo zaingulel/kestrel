@@ -37,8 +37,9 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   implementation handoff follows validation. A strict repair never writes its test and fix in one handoff. A
   repair's new test that passes on the reviewed tree logs no red. When the behaviour it covers is present at the
   job base, it is an `existing behaviour` test: it takes the `evidence-required` route with its executed mutation
-  and goes to no owner. Otherwise the behaviour was built before its test, which the chronology audit treats as
-  code before red.
+  and goes to no owner. Otherwise the behaviour was built before its test: the chronology audit treats it as code before
+  red, a test-order gap that settles on an executed mutation of that code, never on the owner unless no mutation can be
+  made.
 - **Clerical corrections.** After planning and required plan review are complete, the coordinator may authorize and
   record a clerical correction. This route is unavailable while owner approval of the completed plan is pending,
   whether from the optional gate or an owner instruction; it introduces no approval requirement when none applies
@@ -65,5 +66,6 @@ This file is part of the `resume` skill: a section number or quoted heading in i
   Invalid, misselected or collection-failure receipts supply no meaningful red. Strict construction requires
   the red the plan names, with the correct frozen identities and coordinator validation, before implementation.
   Correcting plan text does not invalidate an actually correct receipt; existing receipt policy applies.
-  Implementation already completed without valid red goes to the chronology audit in Verify and review, which
-  alone decides whether the gap is a slip; later checks cannot manufacture earlier evidence.
+  Implementation already completed without valid red goes to the chronology audit in Verify and review, which alone
+  decides whether the gap is a slip or a test-order gap settled on an executed mutation; later checks cannot manufacture
+  earlier evidence.

@@ -120,6 +120,9 @@ The scan reports known drift, a card whose column contradicts a known fact. Exam
 not in Done, and an open issue whose card is in Done. Others are a claimed card with no closing pull request, an open
 blocker on a claimed card, and an epic whose children have all closed. Some rows are advisory, because the fact
 behind them can change within minutes. `scripts/lib/board-rules.mjs` owns each rule.
+Under `--intake`, the row for a claimed card with no closing pull request also says whether the claim is live, idle
+since a given time, stalled with its last recorded step, or unknown because this machine cannot check it; the check
+reclaims and moves nothing.
 
 The scan also keeps an unreadable card apart from drift. Drift means a card contradicts something known, while an
 unreadable card means the scan knows nothing about it. So the scan never claims it covered a board holding an unreadable

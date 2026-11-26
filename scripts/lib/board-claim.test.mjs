@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,7 +12,9 @@ import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 // depends on the board this install's own board-config.mjs names.
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
-const { BOARD_CLAIM_HELP, RUNTIMES, main } = await toolkit.load('lib/board-claim.mjs');
+// A namespace, so the file loads while a test reads an export the module may lack.
+const claimModule = await toolkit.load('lib/board-claim.mjs');
+const { BOARD_CLAIM_HELP, RUNTIMES, main } = claimModule;
 const { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_PROJECT_NUMBER, BOARD_REPOSITORY } = await toolkit.load('lib/board-config.mjs');
 const { claimLines } = await toolkit.load('lib/board.mjs');
 
@@ -166,6 +167,7 @@ const OTHER_SECTION = [
 // The intake document: the listing, then the card summaries, then the end line counting every
 // line including itself. `endShift` miscounts that end line, and `endLine: false` leaves it out, as a
 // truncated capture would.
+/** @param {{ board?: string, section?: string[] | null, endShift?: number, endLine?: boolean }} [options] */
 function intakeFile({ board = BOARD_LINE, section = cardSection(), endShift = 0, endLine = true } = {}) {
   const lines = [
     board,
@@ -200,6 +202,7 @@ const commentOf = (comment, index) => ({
 });
 
 // The card read's reply, oldest comment first, as `gh issue view --json state,assignees,comments` gives it.
+/** @param {{ state?: string, assignees?: string[], comments?: (string | object)[] }} [options] */
 function cardReply({ state = 'OPEN', assignees = [], comments = [] } = {}) {
   return JSON.stringify({
     state,
@@ -256,6 +259,7 @@ const claimWrites = (runtime) => [ITEM_EDIT, ASSIGN, postClaim(runtime)];
 // GitHub's "Create an issue comment" reply for the posted body; `id: null` leaves the id out.
 const OWN_ID = 4123456789;
 const OWN_URL = `https://github.com/${REPO}/issues/${ISSUE}#issuecomment-${OWN_ID}`;
+/** @param {string} body @param {{ id?: number | null }} [options] */
 function commentCreated(body, { id = OWN_ID } = {}) {
   return JSON.stringify({
     ...(id === null ? {} : { id }),
@@ -342,8 +346,11 @@ function judge(scenario, mode) {
   return { status, calls, stdout: sink.stdout, stderr: sink.stderr };
 }
 
+/** @typedef {{ check: [number, string], claim: [number, string], writes?: (runtime: string) => string[][] }} ClaimExpectation */
+
 // Judges the scenario in `--check` and in claim mode for every runtime, each expecting its exit,
 // an `outcome:` last line naming its outcome, and exactly the writes given: none for `--check`.
+/** @param {object} scenario @param {ClaimExpectation} expected */
 function assertJudged(scenario, { check, claim, writes = () => [] }) {
   for (const mode of MODES) {
     const [status, outcome] = mode === '--check' ? check : claim;
@@ -355,9 +362,9 @@ function assertJudged(scenario, { check, claim, writes = () => [] }) {
 }
 
 // Claim mode on a free card makes the claim's three writes and holds the card.
-const FREE = { check: [0, 'Free'], claim: [0, 'Free'], writes: claimWrites };
-const NOT_FREE = { check: [3, 'Not free'], claim: [3, 'Not free'] };
-const UNCONFIRMED = { check: [2, 'Could not confirm'], claim: [2, 'Could not confirm'] };
+const FREE = /** @satisfies {ClaimExpectation} */ ({ check: [0, 'Free'], claim: [0, 'Free'], writes: claimWrites });
+const NOT_FREE = /** @satisfies {ClaimExpectation} */ ({ check: [3, 'Not free'], claim: [3, 'Not free'] });
+const UNCONFIRMED = /** @satisfies {ClaimExpectation} */ ({ check: [2, 'Could not confirm'], claim: [2, 'Could not confirm'] });
 
 test('board-claim judges a card with no claim Free: --check exits 0 and claim mode claims it', () => {
   assertJudged({}, FREE);
@@ -541,7 +548,9 @@ test('board-claim claims a free card: the move, the assignee and the claim comme
     assert.deepEqual(kinds.slice(2), ['status field', 'board item', ITEM_EDIT, ASSIGN, postClaim(runtime), 'card read'], runtime);
     assert.match(stdout, /^(before: [^\n]+\n)+(intake: [^\n]+\n)+(wrote: [^\n]+\n){3}(after: [^\n]+\n)+outcome: Free: [^\n]+\n$/, runtime);
     assertWrote(stdout, runtime, 3);
-    assert.ok(stdout.split('\n').find((line) => line.startsWith('wrote: ') && line.includes(claimBody(runtime))).includes(OWN_URL), stdout);
+    const wroteClaim = stdout.split('\n').find((line) => line.startsWith('wrote: ') && line.includes(claimBody(runtime)));
+    assert.ok(wroteClaim, stdout);
+    assert.ok(wroteClaim.includes(OWN_URL), stdout);
     assert.ok(stdout.split('\n').some((line) => line.startsWith('after: ') && line.includes(OWN_URL)), stdout);
   }
 });
@@ -782,4 +791,277 @@ test('board-claim as a process: --runtime "Codex " exits 1 and makes no gh call'
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /--runtime must be exactly one of/);
   assert.deepEqual(calls, []);
+});
+
+// observeClaims: one observation of card 829, claimed on this machine `here` at CLAIMED, made at NOW. Each test builds
+// its own integration checkout folder; `hc` answers as Herdr does (a listing with no labels, filtered by the labels
+// asked for, and each record by `hc get`), the git runner answers as spawnSync does with `git worktree list
+// --porcelain -z`, and the file readers are node:fs's own (`lstatSync` for the stat), each call recorded, unless a test
+// passes its own `readDir` or `stat`.
+const OBSERVED_CARD = 829;
+const HERE = 'here';
+const CLAIMED = '2026-11-25T08:00Z';
+const CLAIMED_AT = '2026-11-25T08:00:00.000Z';
+const NOW = new Date('2026-11-25T13:00:00.000Z');
+const observeScratch = mkdtempSync(join(tmpdir(), 'observe-claims-'));
+after(() => rmSync(observeScratch, { recursive: true, force: true }));
+
+// A live job terminal of the card as `hc ls --json` lists it, launched from `cwd`.
+const jobTerminal = (address, cwd) => ({ address, agent: 'claude', cwd, name: `fabraik-job-${OBSERVED_CARD}`, parent: 't1', state: 'live', turn: 1 });
+// Its `hc get --json` record: a runtime in the foreground, or the shell a kept terminal holds once its program is gone.
+const jobRecord = (address, cwd, foreground) => ({
+  address, cwd, name: `fabraik-job-${OBSERVED_CARD}`, state: 'live', keep: true, pid: 4005,
+  argv: foreground === 'bash' ? ['/usr/bin/bash'] : ['/usr/bin/env', 'claude'],
+  foreground: { name: foreground, pid: 4005 },
+  status: foreground === 'bash' ? null : { app: 'claude-code', state: 'working' },
+  labels: { 'fabraik.role': 'job', 'fabraik.card': String(OBSERVED_CARD) },
+});
+
+// A receipt line as run-log writes it.
+const receiptLine = (started, label, outcome, completed) =>
+  `- ${started} | ${label} | \`["node","--test"]\` | ${outcome} | completed=${completed} | elapsedMs=1000.5 | rerunReason=\`null\` | temp=empty | scope=root | head=${'a'.repeat(40)} tree=dirty diff=0123456789abcdef`;
+
+/**
+ * @param {{ claim?: string, worktree?: boolean, secondTree?: boolean, detail?: Record<string, any>,
+ *   hcReply?: (args: string[]) => Promise<{ code: number, stdout: string, stderr: string }>,
+ *   readDir?: (path: string) => string[], stat?: (path: string) => { isFile(): boolean, mtime: Date } }} [options]
+ */
+function observing({ claim = `Claim: ${HERE}, Codex, ${CLAIMED}`, worktree = false, secondTree = false, detail, hcReply, readDir = readdirSync, stat = lstatSync } = {}) {
+  const root = mkdtempSync(join(observeScratch, 'checkout-'));
+  const tree = join(root, 'job-829');
+  const calls = { hc: /** @type {string[][]} */ ([]), files: /** @type {string[][]} */ ([]) };
+  const terminals = /** @type {Record<string, any>[]} */ ([]);
+  const records = /** @type {Record<string, any>} */ ({});
+  const listing = [
+    `worktree ${root}`, `HEAD ${'a'.repeat(40)}`, 'branch refs/heads/main', '',
+    ...(worktree ? [`worktree ${tree}`, `HEAD ${'b'.repeat(40)}`, `branch refs/heads/job/${OBSERVED_CARD}`, ''] : []),
+    ...(secondTree ? [`worktree ${tree}-again`, `HEAD ${'c'.repeat(40)}`, `branch refs/heads/job/${OBSERVED_CARD}`, ''] : []),
+  ].join('\0') + '\0';
+  const rungit = () => ({ status: 0, stdout: listing, stderr: '' });
+  const hc = async (args) => {
+    calls.hc.push(args);
+    if (hcReply) return hcReply(args);
+    if (args[0] === 'ls') {
+      const labelled = args.includes('fabraik.role=job') && args.includes(`fabraik.card=${OBSERVED_CARD}`);
+      return { code: 0, stdout: JSON.stringify({ hidden_finished: 0, machines: [], terminals: labelled ? terminals : [] }), stderr: '' };
+    }
+    const record = records[args[1]];
+    return args[0] === 'get' && record ? { code: 0, stdout: JSON.stringify(record), stderr: '' } : { code: 1, stdout: '', stderr: `no terminal ${args[1]}` };
+  };
+  const reader = (name, read) => (...params) => {
+    calls.files.push([name, String(params[0])]);
+    return read(...params);
+  };
+  const run = () => claimModule.observeClaims({
+    claims: [{ number: OBSERVED_CARD, title: 'Observed card', status: 'In progress' }],
+    details: new Map([[OBSERVED_CARD, detail ?? { number: OBSERVED_CARD, body: 'Outcome', comments: [claim], commentCount: 1, commentsUnavailable: null }]]),
+    hostname: HERE, now: NOW, rungit, hc,
+    readDir: reader('readDir', readDir), stat: reader('stat', stat), readFile: reader('readFile', readFileSync),
+  });
+  return { root, worklog: join(tree, '.claude', 'worklog'), calls, terminals, records, run };
+}
+
+// The observation of a checkable claim whose last activity is `activeAt`.
+const checked = (liveness, activeAt, lastStep) =>
+  new Map([[OBSERVED_CARD, { checkable: true, liveness, activeAt: new Date(activeAt), quietMs: NOW.getTime() - Date.parse(activeAt), lastStep }]]);
+
+// A file in the worklog folder, last modified at `modified`.
+function worklogFile(world, name, text, modified) {
+  mkdirSync(world.worklog, { recursive: true });
+  writeFileSync(join(world.worklog, name), text);
+  utimesSync(join(world.worklog, name), new Date(modified), new Date(modified));
+}
+
+test('new behaviour: observeClaims reports a running Herdr job terminal launched from the integration checkout as running', async () => {
+  const world = observing();
+  world.terminals.push(jobTerminal('t5', world.root));
+  world.records.t5 = jobRecord('t5', world.root, 'claude');
+  assert.deepEqual(await world.run(), checked({ running: 't5' }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports a kept job terminal holding only its shell as running null', async () => {
+  const world = observing();
+  world.terminals.push(jobTerminal('t5', world.root));
+  world.records.t5 = jobRecord('t5', world.root, 'bash');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims ignores a labelled job terminal launched from another folder', async () => {
+  const world = observing();
+  const elsewhere = join(observeScratch, 'another-repository');
+  world.terminals.push(jobTerminal('t5', elsewhere));
+  world.records.t5 = jobRecord('t5', elsewhere, 'claude');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports hc missing from the machine as unavailable', async () => {
+  const world = observing({ hcReply: async () => { throw Object.assign(new Error('spawn hc ENOENT'), { code: 'ENOENT', syscall: 'spawn hc' }); } });
+  assert.deepEqual(await world.run(), checked({ unavailable: 'hc is not available' }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports an hc ls reply that is not JSON as unavailable with its cause', async () => {
+  const world = observing({ hcReply: async () => ({ code: 0, stdout: 'not json', stderr: '' }) });
+  assert.deepEqual(await world.run(), checked({ unavailable: 'hc ls could not list the job terminals: exit 0' }, CLAIMED_AT, 'no job worktree here'));
+});
+
+for (const [kind, claim, cause] of [
+  ['a malformed claim time', `Claim: ${HERE}, Codex, t`, 'claim time unreadable'],
+  ['a claim on another machine', `Claim: other-box, Codex, ${CLAIMED}`, 'claimed on other-box, Codex; this machine cannot check it'],
+  ['a cloud claim', `Claim: ${HERE}, Claude Code cloud, ${CLAIMED}`, `claimed on ${HERE}, Claude Code cloud; this machine cannot check it`],
+]) {
+  test(`new behaviour: observeClaims finds ${kind} not checkable and reads neither Herdr nor the worklog`, async () => {
+    const world = observing({ claim, worktree: true });
+    worklogFile(world, 'job_829.md', `${receiptLine('2026-11-25T07:20:00.000Z', 's3 red', 'exit 1', '2026-11-25T07:21:05.000Z')}\n`, '2026-11-25T07:30:00.000Z');
+    assert.deepEqual(await world.run(), new Map([[OBSERVED_CARD, { checkable: false, cause }]]));
+    assert.deepEqual(world.calls.hc, []);
+    assert.deepEqual(world.calls.files, []);
+  });
+}
+
+test('new behaviour: observeClaims with no registered job worktree takes the claim time as the last activity', async () => {
+  const world = observing();
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports no step recorded where the job worktree holds no worklog', async () => {
+  const world = observing({ worktree: true });
+  worklogFile(world, 'job-829-plan.md', '# Plan\n', '2026-11-25T07:00:00.000Z');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no step recorded'));
+});
+
+test('new behaviour: observeClaims skips corrupt receipt lines and shows the last valid receipt as the last step', async () => {
+  const world = observing({ worktree: true });
+  worklogFile(world, 'job_829.md', [
+    '# Worklog',
+    receiptLine('2026-11-25T07:10:00.000Z', 'first', 'exit 0', '2026-11-25T07:10:02.000Z'),
+    receiptLine('2026-11-25T07:20:00.000Z', 's3 red', 'exit 1', '2026-11-25T07:21:05.000Z'),
+    '- 2026-11-25T07:22:00.000Z | broken | `not json` | exit 0 | completed=2026-11-25T07:22:01.000Z | elapsedMs=1 | rerunReason=`null` | scope=root | head=abc tree=clean diff=none',
+    '- 2026-11-25T07:23:00.000Z | cut | `["npm"]` | exit 0 | compl',
+    'A note after the runs.',
+    '',
+  ].join('\n'), '2026-11-25T07:30:00.000Z');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 's3 red, exit 1, completed 2026-11-25T07:21:05.000Z'));
+});
+
+test('new behaviour: observeClaims reports a worklog it cannot read with the error code', async () => {
+  const world = observing({ worktree: true });
+  mkdirSync(join(world.worklog, 'job_829.md'), { recursive: true });
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'worklog unreadable: not a regular file'));
+});
+
+test('evidence-required: observeClaims ignores a labelled job terminal running claude whose address is not a local Herdr terminal address', async () => {
+  const world = observing();
+  world.terminals.push(jobTerminal('m1:t5', world.root));
+  world.records['m1:t5'] = jobRecord('m1:t5', world.root, 'claude');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('evidence-required: observeClaims ignores a labelled job terminal that is not live although its record reads as running', async () => {
+  const world = observing();
+  world.terminals.push({ ...jobTerminal('t5', world.root), state: 'finished' });
+  world.records.t5 = jobRecord('t5', world.root, 'claude');
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+for (const time of ['2026-11-25', '2026-11-25T07:00:00Z']) {
+  test(`evidence-required: observeClaims finds a claim time ${time} that is not in the written form not checkable`, async () => {
+    const world = observing({ claim: `Claim: ${HERE}, Codex, ${time}` });
+    assert.deepEqual(await world.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'claim time unreadable' }]]));
+    assert.deepEqual(world.calls.hc, []);
+  });
+}
+
+test('evidence-required: observeClaims finds a card whose comments could not be read not checkable with the reason', async () => {
+  const unread = observing({ detail: { number: OBSERVED_CARD, body: 'Outcome', unavailable: 'gh is down' } });
+  assert.deepEqual(await unread.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'comments not read: gh is down' }]]));
+  const partial = observing({ detail: { number: OBSERVED_CARD, body: 'Outcome', comments: [], commentCount: 0, commentsUnavailable: 'rate limited' } });
+  assert.deepEqual(await partial.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'comments not read: rate limited' }]]));
+});
+
+test('evidence-required: observeClaims reports no step recorded, last activity the claim time, where the job worktree has no worklog folder', async () => {
+  const world = observing({ worktree: true });
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no step recorded'));
+});
+
+test('new behaviour: observeClaims takes the newest of the claim time and the worklog file times as the last activity', async () => {
+  const world = observing({ worktree: true });
+  worklogFile(world, 'job-829-plan.md', '# Plan\n', '2026-11-25T10:40:00.000Z');
+  worklogFile(world, 'job_829.md', `${receiptLine('2026-11-25T10:14:00.000Z', 's3 green', 'exit 0', '2026-11-25T10:14:30.000Z')}\n`, '2026-11-25T10:15:00.000Z');
+  assert.deepEqual(await world.run(), checked({ running: null }, '2026-11-25T10:40:00.000Z', 's3 green, exit 0, completed 2026-11-25T10:14:30.000Z'));
+});
+
+test('new behaviour: observeClaims skips a worklog entry that vanishes between listing and stat and still counts the newer file after it', async () => {
+  const world = observing({
+    worktree: true,
+    readDir: () => ['gone.md', 'job-829-plan.md'],
+    stat: (path) => {
+      if (path.endsWith('gone.md')) throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${path}'`), { code: 'ENOENT' });
+      return lstatSync(path);
+    },
+  });
+  worklogFile(world, 'job-829-plan.md', '# Plan\n', '2026-11-25T11:00:00.000Z');
+  assert.deepEqual(await world.run(), checked({ running: null }, '2026-11-25T11:00:00.000Z', 'no step recorded'));
+});
+
+test('new behaviour: observeClaims finds a claim whose worklog folder cannot be listed not checkable with the error code', async () => {
+  const world = observing({
+    worktree: true,
+    readDir: (path) => { throw Object.assign(new Error(`EACCES: permission denied, scandir '${path}'`), { code: 'EACCES' }); },
+  });
+  assert.deepEqual(await world.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'worklog unreadable: EACCES' }]]));
+});
+
+test('new behaviour: observeClaims reports a live local job terminal that hc ls gives no launch folder as unavailable', async () => {
+  const world = observing();
+  const { cwd, ...listed } = jobTerminal('t5', world.root);
+  world.terminals.push(listed);
+  world.records.t5 = jobRecord('t5', cwd, 'claude');
+  assert.deepEqual(await world.run(), checked({ unavailable: 'hc ls gave job terminal t5 no launch folder' }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports running null where hc ls lists the job terminal live but its hc get record has finished', async () => {
+  const world = observing();
+  world.terminals.push(jobTerminal('t5', world.root));
+  world.records.t5 = { ...jobRecord('t5', world.root, 'claude'), state: 'finished' };
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('new behaviour: observeClaims reports an hc get reply for another terminal as unavailable', async () => {
+  const world = observing();
+  world.terminals.push(jobTerminal('t5', world.root));
+  world.records.t5 = jobRecord('t6', world.root, 'claude');
+  assert.deepEqual(await world.run(), checked({ unavailable: 'hc get t5 returned another terminal' }, CLAIMED_AT, 'no job worktree here'));
+});
+
+test('evidence-required: observeClaims does not count a symlink in the worklog folder to a recently modified file elsewhere as activity', async (t) => {
+  const world = observing({ worktree: true });
+  const outside = join(world.root, 'outside.md');
+  writeFileSync(outside, 'elsewhere\n');
+  utimesSync(outside, new Date('2026-11-25T12:00:00.000Z'), new Date('2026-11-25T12:00:00.000Z'));
+  mkdirSync(world.worklog, { recursive: true });
+  try {
+    symlinkSync(outside, join(world.worklog, 'linked.md'), 'file');
+  } catch (error) {
+    const { code } = /** @type {NodeJS.ErrnoException} */ (error);
+    if (code !== 'EPERM') throw error;
+    t.skip(`this account cannot create a file symlink (${code})`);
+    return;
+  }
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no step recorded'));
+});
+
+test('new behaviour: observeClaims finds a job branch checked out in more than one worktree not checkable', async () => {
+  const world = observing({ worktree: true, secondTree: true });
+  assert.deepEqual(await world.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'job/829 is checked out in more than one worktree' }]]));
+});
+
+test('new behaviour: observeClaims finds a claim time in the written form that is no calendar date not checkable', async () => {
+  const world = observing({ claim: `Claim: ${HERE}, Codex, 2026-02-30T07:00Z` });
+  assert.deepEqual(await world.run(), new Map([[OBSERVED_CARD, { checkable: false, cause: 'claim time unreadable' }]]));
+  assert.deepEqual(world.calls.hc, []);
+});
+
+test('new behaviour: observeClaims reads a claim whose first line ends with a carriage return alone as the plain claim', async () => {
+  const world = observing({ claim: `Claim: ${HERE}, Codex, ${CLAIMED}\rnote` });
+  assert.deepEqual(await world.run(), checked({ running: null }, CLAIMED_AT, 'no job worktree here'));
 });

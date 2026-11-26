@@ -1,4 +1,3 @@
-// @ts-nocheck
 // board-portability.test.mjs — the adoption contract for the board toolkit.
 // Run: node --test scripts/lib/board-portability.test.mjs
 //
@@ -187,6 +186,7 @@ test('a user-owned config still roots every board query at user(login:"example-o
 });
 
 function recordingOutput() {
+  /** @type {{ log: string[], error: string[] }} */
   const lines = { log: [], error: [] };
   return { lines, log: (line) => lines.log.push(line), error: (line) => lines.error.push(line) };
 }
@@ -271,7 +271,7 @@ test('with no routing field, board-move names a board-add command that takes a S
   const { exec } = recordingGh('organization', await boardPageFor(root));
   assert.throws(() => moveCards([{ issueNumber: 999, statusName: 'Ready' }], (args) =>
     args[3]?.includes('projectItems') ? offBoard : exec(args)), (error) => {
-    assert.equal(error.cause.message, 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>');
+    assert.equal(/** @type {Error & { cause: Error }} */ (error).cause.message, 'issue #999 is not on the board — add it with a Status: node scripts/board-add.mjs 999 <Status>');
     return true;
   });
 });
@@ -774,7 +774,7 @@ test('markdown board: intake shows the columns derived from real local, origin a
   assert.ok(readFileSync(join(folder, '3.txt'), 'utf8').split('\n').includes('| Body of the card.'));
   // The two pushed branches with no counted draft are the stalled claims; the Awaiting push card is not.
   const stalled = (number, word) =>
-    `#${number} [In progress] Card ${word} — claimed in "In progress" but no closing pull request exists — if no session is actively building it, resume it or return it to Ready`;
+    `#${number} [In progress] Card ${word} — claimed in "In progress" with no closing pull request — unknown: no claim names a machine — if no session is building it, resume it or return it to Ready`;
   const stderr = run.stderr.split('\n');
   assert.deepEqual(stderr.filter((line) => line.startsWith('#')), [stalled(3, 'three'), stalled(7, 'seven')]);
   assert.ok(stderr.includes('⚠ BOARD DRIFT — cards out of sync with reality:'), run.stderr);
@@ -905,8 +905,9 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
   try {
     symlinkSync(outsideCard, join(worktree, CARDS_DIR, '1.md'), 'file');
   } catch (error) {
-    if (error.code !== 'EPERM') throw error;
-    t.skip(`this account cannot create a file symlink (${error.code})`);
+    const { code } = /** @type {NodeJS.ErrnoException} */ (error);
+    if (code !== 'EPERM') throw error;
+    t.skip(`this account cannot create a file symlink (${code})`);
     return;
   }
   const before = readFileSync(outsideCard);
@@ -1059,7 +1060,7 @@ test('markdown lifecycle: file, claim, close, interrupted push, race, draft, int
   assert.deepEqual(other.sections, ['=== #3 [In progress] Card three ===']);
   assert.equal(other.claimed, claimCount(1));
   assert.deepEqual(other.claims, ['claim: branch job/3 (origin)']);
-  assert.ok(other.run.stderr.includes('#3 [In progress] Card three — claimed in "In progress" but no closing pull request exists'), other.run.stderr);
+  assert.ok(other.run.stderr.includes('#3 [In progress] Card three — claimed in "In progress" with no closing pull request — unknown: no claim names a machine — if no session is building it, resume it or return it to Ready'), other.run.stderr);
 
   // 4. The race: B's own job/3 does not hold origin's tip, so B's claim command refuses.
   git(cloneB, 'switch', '-c', `job/${N}`, 'main');
@@ -1136,6 +1137,12 @@ if (process.env.FAKE_LINEAR_FAIL) {
 after(() => linearTransport.cleanup());
 
 const linearState = (id, name, type) => ({ id, name, type });
+/**
+ * @param {string} identifier
+ * @param {string} title
+ * @param {{ id: string, name: string, type: string }} state
+ * @param {{ parent?: string | null, relations?: string[], description?: string | null }} [fields]
+ */
 const linearNode = (identifier, title, state, { parent = null, relations = [], description = null } = {}) => ({
   id: `id-${identifier}`,
   identifier,
@@ -1310,16 +1317,27 @@ function completeBoardRead(result) {
 // tracker and team are the ones the summary's `Board linear team <KEY>` header names, and its column the one
 // in the card's heading.
 function freeAgainst(document, id, cardRead, boardRead) {
-  const [, team] = /^Board linear team (\S+) — /.exec(document[0]);
+  const teamMatch = /^Board linear team (\S+) — /.exec(document[0]);
+  assert.ok(teamMatch);
+  const [, team] = teamMatch;
   const start = document.findIndex((line) => line.startsWith(`=== ${id} [`));
   const section = document.slice(start, document.indexOf('', start));
-  const [, column] = /^=== \S+ \[([^\]]+)\] /.exec(section[0]);
-  const listed = section.find((line) => line.startsWith('assignees: ')).slice('assignees: '.length);
+  const columnMatch = /^=== \S+ \[([^\]]+)\] /.exec(section[0]);
+  assert.ok(columnMatch);
+  const [, column] = columnMatch;
+  const listedLine = section.find((line) => line.startsWith('assignees: '));
+  assert.ok(listedLine);
+  const listed = listedLine.slice('assignees: '.length);
   const documentAssignees = listed === 'none' ? [] : listed.split(', ').map((name) => name.slice(1));
   const claimAt = section.findIndex((line) => line.startsWith('claim: '));
-  const documentClaim = section[claimAt].startsWith('claim: none')
-    ? null
-    : [Number(/^claim: comment (\d+) of /.exec(section[claimAt])[1]), section[claimAt + 1].slice('| '.length)];
+  const claimLine = section[claimAt];
+  /** @type {[number, string] | null} */
+  let documentClaim = null;
+  if (!claimLine.startsWith('claim: none')) {
+    const claimMatch = /^claim: comment (\d+) of /.exec(claimLine);
+    assert.ok(claimMatch);
+    documentClaim = [Number(claimMatch[1]), section[claimAt + 1].slice('| '.length)];
+  }
   const field = (name) => cardRead.find(([key]) => key === name)[1];
   const claims = cardRead.filter(([key]) => key === 'claim');
   const lastClaim = claims.length === 0 ? null : [claims.at(-1)[1], claims.at(-1)[5]];
@@ -1449,7 +1467,11 @@ test('linear lifecycle: file, claim through the card and board reads judged by t
   // Every write, in order: none for a read, a no-op or a move Linear made.
   const writes = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     .filter(({ query }) => query.startsWith('mutation'))
-    .map(({ query, variables }) => [/^mutation\([^)]*\) \{ (\w+)\(/.exec(query)[1], variables]);
+    .map(({ query, variables }) => {
+      const mutation = /^mutation\([^)]*\) \{ (\w+)\(/.exec(query);
+      assert.ok(mutation);
+      return [mutation[1], variables];
+    });
   assert.deepEqual(writes, [
     ['issueCreate', { input: { teamId: 'team-eng', title: 'Card thirteen', description: BODY, stateId: 's-backlog', labelIds: ['label-task'], parentId: 'id-ENG-2' } }],
     ['issueRelationCreate', { issueId: 'id-ENG-12', relatedIssueId: 'id-ENG-13' }],
@@ -1466,7 +1488,9 @@ test('native types: a malformed issue type stops the board read', async (t) => {
   const root = adoptToolkit(t, GITHUB_KIND_TYPES_TEST_CONFIG);
   const { parseBoardPage } = await load(root, 'lib/board.mjs');
   const { leanBoardPage, leanNode } = await load(root, 'lib/board-fixtures.mjs');
+  /** @param {unknown} issueType */
   const pageWith = (issueType) => {
+    /** @type {ReturnType<typeof issue> & { labels: string[], issueType?: unknown }} */
     const content = { ...issue(11), labels: ['task'] };
     if (issueType !== undefined) content.issueType = issueType;
     return leanBoardPage([leanNode({ id: 'PVTI_11', content, status: 'Ready' })]);
@@ -1480,6 +1504,11 @@ test('native types: a malformed issue type stops the board read', async (t) => {
 });
 
 // A board card of the types configuration, spelling its issue type as the query returns it.
+/**
+ * @param {number} number
+ * @param {string | null} issueType
+ * @param {{ labels?: string[], status?: string, content?: object }} [fields]
+ */
 const typedCard = (number, issueType, { labels = [], status = 'Ready', content = {} } = {}) => ({
   id: `PVTI_${number}`,
   content: { ...issue(number), issueType: issueType === null ? null : { name: issueType }, labels, ...content },

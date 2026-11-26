@@ -122,17 +122,17 @@ function worklogLocation(run, cwd) {
   return { logFile: join(root || cwd, '.claude', 'worklog', worklogFileName(branch)), root };
 }
 
-// A receipt line's decoded fields, or null when it is not a whole valid receipt of this writer. Decodes only the
-// writer's final fixed fields: permitted label delimiters cannot supply the command.
+// A receipt line's decoded fields, or null when it is not a whole valid receipt of this writer. The command is decoded
+// from the writer's final fixed fields, so permitted label delimiters cannot supply it; the label is what lies before them.
 export function parseReceipt(line) {
-  const receipt = /^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \| .* \| `([^`]*)` \| (exit -?\d+|spawn failed \([^)]*\)|killed by [A-Z0-9]+) \| completed=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \| elapsedMs=([0-9]+(?:\.[0-9]+)?(?:e[+-]?\d+)?) \| rerunReason=`([^`]*)` \| (?:temp=[A-Za-z0-9_-]+ \| )?scope=root \| head=(\S+) tree=(\S+) diff=(\S+)$/.exec(line);
+  const receipt = /^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \| (.*) \| `([^`]*)` \| (exit -?\d+|spawn failed \([^)]*\)|killed by [A-Z0-9]+) \| completed=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) \| elapsedMs=([0-9]+(?:\.[0-9]+)?(?:e[+-]?\d+)?) \| rerunReason=`([^`]*)` \| (?:temp=[A-Za-z0-9_-]+ \| )?scope=root \| head=(\S+) tree=(\S+) diff=(\S+)$/.exec(line);
   if (!receipt) return null;
   try {
-    const command = JSON.parse(receipt[1]);
-    const reason = JSON.parse(receipt[4]);
+    const command = JSON.parse(receipt[2]);
+    const reason = JSON.parse(receipt[6]);
     if (!Array.isArray(command) || !command.every((arg) => typeof arg === 'string') ||
-        !(reason === null || typeof reason === 'string') || !Number.isFinite(Number(receipt[3]))) return null;
-    return { command, outcome: receipt[2], head: receipt[5], tree: receipt[6], diff: receipt[7] };
+        !(reason === null || typeof reason === 'string') || !Number.isFinite(Number(receipt[5]))) return null;
+    return { label: receipt[1], command, outcome: receipt[3], completed: receipt[4], head: receipt[7], tree: receipt[8], diff: receipt[9] };
   } catch {
     return null;
   }

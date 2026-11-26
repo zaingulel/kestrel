@@ -14,8 +14,11 @@
 This file is part of the `resume` skill: a section number or quoted heading in it names a section of
 [its SKILL.md](../SKILL.md).
 
-For a coordinated Herdr job, start the reservation in step 4 before step 1's rebase. Wait for readiness before
-proceeding. For a Codex Herdr job, use the shared preparation, direct-route eligibility and squash checks, and draft
+A coordinated Herdr job prepares and reviews without the reservation: on the pull request route it takes steps 1 and 2,
+and step 3 up to its **Open** state, and on the direct route the eligibility and convergence checks below, before it
+reserves. It starts the reservation in step 4 only once its review is settled, every finding is closed and nothing waits
+on the owner, so that the reservation covers only the final rebase, the required checks and the merge, as [the merge
+route](herdr-job.md#the-merge-route) says. Wait for readiness before that final rebase. For a Codex Herdr job, use the shared preparation, direct-route eligibility and squash checks, and draft
 review steps here. A Herdr job on either runtime follows [the merge route](herdr-job.md#the-merge-route), and a Codex
 Herdr job uses [Codex Herdr delivery](herdr-job.md#codex-herdr-jobs) for the marker wait, the final push or merge
 commands, required checks and confirmation.
@@ -41,11 +44,13 @@ Codex Herdr job uses its [checked squash push](herdr-job.md#deliver-directly-to-
 ineligible change. Keep a coordinated job's reservation while its standalone push command runs, then release it
 when the tool finishes. A direct push has no pull request status. Skip the draft, external review, ready, auto-merge
 and merge-watch steps and run `closeout` on success. A refusal from the gate or the direct push guard means the pull
-request route. Before returning to that route, a coordinated job obtains fresh readiness if it released its holder.
-Then the session confirms that `git rev-parse HEAD^{tree}` still prints what
+request route. After a refused push, which released a coordinated job's holder when the push tool finished, the session
+confirms that `git rev-parse HEAD^{tree}` still prints what
 `git rev-parse <head>^{tree}` prints and returns its branch to the version it showed with `git reset --soft <head>`, so
 the pull request publishes the head the saved write-up and any owner answer name; where the two differ it stops, and the
-work is saved and shown again as a new version. For a Claude Code job that a Herdr coordinator started, the guard
+work is saved and shown again as a new version. A coordinated job whose preflight refused before any squash restores
+nothing and releases its holder. Either way it then prepares that route's draft, settles the review that route needs and
+reserves again as **Reserve for the final rebase** says. For a Claude Code job that a Herdr coordinator started, the guard
 admits `git push origin HEAD:main` only where HEAD is one commit whose parent is the fetched `origin/main`, an ancestor
 of `<head>`, and whose tree is `<head>`'s, `<head>` being what `ORIG_HEAD` names after the squash's `git reset --soft`,
 so nothing that moves `ORIG_HEAD` or fetches `main` again runs between the squash and the push; only where
@@ -151,8 +156,9 @@ whenever a path the testing strategy does not cover was investigated.
    matches the rounds actually run and the findings actually raised and settled. For the sign-off tier with the add-on
    on, also require the same reviewed head and a settled `COMPLETE` or `UNAVAILABLE` attempt. If a rebase is needed, do
    it while draft, reverify under the Receipt reuse rule and push. Repeat step 2 only when the change requires the
-   external review and the skill it points to says the rebased head needs a new attempt. For a coordinated Herdr job,
-   publish the checked draft's **Open** state as step 4 says before Ready. For a Codex Herdr job,
+   external review and the skill it points to says the rebased head needs a new attempt. A coordinated Herdr job pushes
+   here only as **Release while waiting** in step 4 allows, then reserves, takes the final rebase and publishes the
+   draft's **Open** state as step 4 says before Ready. For a Codex Herdr job,
    continue with its [checked pull request route](herdr-job.md#deliver-a-pull-request) from `before ready` through
    confirmation. For other jobs, before each `gh pr ready <pr>`, take the step the `before ready` row of the Conventions
    table in `.agents/REPOSITORY.md` names. A row that is absent, reads "None" or still holds its "Starter:" prompt names
@@ -162,7 +168,8 @@ whenever a path the testing strategy does not cover was investigated.
    merge --squash --delete-branch --match-head-commit <head> <pr>` of [the merge route](herdr-job.md#the-merge-route).
    Every other job runs the standalone `gh pr merge --auto --squash --delete-branch <pr>`, a merge form so GitHub waits
    for the required `test` check.
-   If CI needs a repair, use `gh pr ready <pr> --undo` before pushing. Complete local repair evidence, settling the
+   If CI needs a repair, use `gh pr ready <pr> --undo` before pushing; a coordinated job instead releases its
+   reservation as **Release while waiting** in step 4 says, which orders its return to draft. Complete local repair evidence, settling the
    convergence checks under the Receipt reuse rule, and
    reassess the full pull-request diff against the section 6 tiers; repeat step 2 only when the external review is
    required. An unchanged-head CI retry needs no new review.
@@ -170,11 +177,14 @@ whenever a path the testing strategy does not cover was investigated.
    In a coordinated Herdr job, use the runtime's tasks in the job terminal. Run each delivery command from the
    registered job worktree.
 
-   **Reserve before step 1.** Run `node scripts/merge-watch.mjs --hold-delivery`; a Claude Code job runs it as
+   **Reserve for the final rebase.** Only once the job's review is settled, every finding is closed and nothing waits on
+   the owner, since a held reservation keeps every other ready job from delivering, run `node scripts/merge-watch.mjs --hold-delivery`; a Claude Code job runs it as
    `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" --hold-delivery`, and every later merge-watch command here
    takes the same pinned spelling, whole and with plain arguments, because its guard admits no other. Start it in
    Claude Code with a background Bash task and keep its task ID. In Codex, start it with unified execution,
-   `tty: true` and `yield_time_ms: 1000`, then keep the yielded holder session ID.
+   `tty: true` and `yield_time_ms: 1000`, then keep the yielded holder session ID. A job that learns while its holder is
+   still queued that it is no longer ready, a new finding, the marker or an owner question, ends that holder as
+   **Release the reservation** says.
 
    Each delivery form reads the job's own `.agents/factory-settings.json` only for `herdr`, so a pull request may
    introduce a setting the pinned copy does not know: that read passes over a top-level key its copy does not know
@@ -190,6 +200,34 @@ whenever a path the testing strategy does not cover was investigated.
    reason at the check-in and wait again on the same holder. On exit 1, follow
    [stopped delivery](herdr-job.md#recover-stopped-delivery) before proceeding.
 
+   **Final rebase.** On exit 0, and before fetching, run `node scripts/board.mjs --waits <card> --herdr` again and
+   confirm the review still has no open finding; any other line, a failed command or a new finding releases at once as
+   **Release while waiting** says. Then fetch `main` and rebase onto it as step 1 says; this is the one path for a first
+   attempt and for every retry, and step 1 of [the merge route](herdr-job.md#the-merge-route) says when the review
+   stands. Where it stands, a pull request job publishes in this turn: it pushes with `git push --force-with-lease
+   origin job/<issue>`, which changes nothing where GitHub already shows its head; brings into the saved write-up the
+   external review records the `greptile` skill keeps in the published body, its allowance, requests and outcomes each
+   with the head it named, and makes the one `Review:` line total every local and external round and disposition so far,
+   then replaces the draft's body with it through `gh pr edit <pr> --body-file <body>`; attaches each screenshot again
+   from the review folder of its head as [the visual reference](visual.md) says under **Attaching screenshots**; and
+   verifies the pull request as below. On the direct route, the eligibility check, `<origin-main>`, `<head>`, the
+   receipts and the squash above take the base and head this rebase leaves. If the push, the body update, an attachment
+   or the verification fails, the job releases as **Release while waiting** says and takes the **Final rebase** again on
+   its next turn, starting from what GitHub shows.
+
+   **Push-only turn.** A Claude Code job that armed since it last held, and whose external review add-on needs an
+   attempt on its head that it has not settled, takes this turn instead of the final rebase once its local review is
+   settled, every known finding is closed, except an external finding the `greptile` skill closes only once its fix is
+   pushed, which this turn publishes and which counts as closed for its reservation and recheck, and nothing waits on
+   the owner. It reserves and takes readiness and the recheck as **Final rebase** says, does not rebase, pushes its
+   local head with `git push --force-with-lease origin job/<issue>` unless GitHub already shows it, replaces the draft's
+   body and attaches its screenshots again as **Final rebase** says, and ends its holder as **Release the reservation**
+   says without arming, the pull request still a draft. It then requests the attempt as the `greptile` skill says and,
+   once the attempt settles, reserves again for the final rebase. If the push, the body update or an attachment fails,
+   it still ends its holder without arming: where the push succeeded, it finishes the draft update and requests the
+   attempt outside the turn; where the push failed, it settles the cause and gets the attempt as step 1 of [the merge
+   route](herdr-job.md#the-merge-route) says for a job that has not armed since it last held.
+
    **Verify the pull request.** Use literal values for the pull request number `<pr>` and full checked Git object ID
    `<head>`. While holding the reservation, use `node scripts/merge-watch.mjs --delivery-pr <pr> <head>` (pinned for Claude Code) to verify
    the draft and show **Open**. A Herdr job uses this command again after its pinned merge, including after a branch
@@ -200,7 +238,7 @@ whenever a path the testing strategy does not cover was investigated.
    `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" --delivery-pr <pr> <head> --arm`, which writes the receipt and
    refuses a pull request that already has an auto-merge queued. Then start
    `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" <pr> --held-delivery` as its own background Bash task. Keep its task ID and await
-   its native completion notification. Ordinary idle keeps the reservation while the task is live. The watch exits 0
+   its native completion notification. Ordinary idle keeps the reservation while the task is live; an owner question or a repair does not, as **Release while waiting** below says. The watch exits 0
    with `required checks passed on <head>` once every required check has passed or skipped on that head, and 1 on a
    failed check, a moved head or a closed pull request. After it exits 0, run the pinned merge, then
    `node "$FABRAIK_WORKFLOW_ROOT/scripts/merge-watch.mjs" --delivery-pr <pr> <head>`, which shows **Merged** only on
@@ -211,6 +249,22 @@ whenever a path the testing strategy does not cover was investigated.
    before ending the holder separately with `TaskStop`. In Codex, send Ctrl+C with `write_stdin` to the holder's
    terminal session. If the job stops while GitHub still has its merge queued, the next delivery follows
    [stopped delivery](herdr-job.md#recover-stopped-delivery).
+
+   **Release while waiting.** A coordinated job holding the reservation releases it before it asks the owner anything
+   and, on a new finding or a failed required check, before it starts the repair, so the next queued job delivers
+   meanwhile. Before it releases, where it has an open pull request, GitHub must show it as a draft with no auto-merge
+   request, on the head it armed where it armed one since it last held, because the next job's reservation stops on a
+   ready pull request or a moved head; a job with no pull request ends its holder directly. It runs `gh pr ready <pr>
+   --undo` first where the pull request is ready, and where GitHub shows another head while the pull request is still
+   ready, it first arms that head with `--delivery-pr <pr> <head GitHub shows> --arm`, pinned for Claude Code, which
+   replaces its own receipt. Where the pull request is already a draft on another head, it keeps the reservation through
+   the wait or repair and arms the new head itself, since no other job can settle a receipt that names another head.
+   From arming until it next holds the reservation, a Claude Code job neither pushes its branch nor replaces its draft's
+   body: it repairs and is reviewed on local commits and publishes in its next **Final rebase** or **Push-only turn**. Otherwise it releases
+   as **Release the reservation** says and waits until the holder has ended. Once the answer arrives, or the repair is
+   done and its review settled with every finding closed, it reserves again as **Reserve for the final rebase** says and
+   takes the **Final rebase** with its open draft rather than opening another. A stop for a job waiting for a machine it
+   can start itself keeps the reservation and the pull request ready, as **Merge watch results** says.
 
    **Merge watch results.** Use the literal pull request number for `<pr>`. The watch waits on GitHub events
    through one short-lived forwarding webhook it puts on the repository with `gh webhook forward` and removes when it ends, and it reads
@@ -236,9 +290,13 @@ whenever a path the testing strategy does not cover was investigated.
 
    Follow the action for the stall reason.
 
-   - **No test run created.** Return the pull request to draft with `gh pr ready <pr> --undo` to cancel the queued
-     merge. Follow step 3 again, starting with its `before ready` step, then use this step's watch command for the
-     same runtime. Step 3 covers an unchanged-head CI retry.
-   - **A job waiting for a machine.** The stop names the job and its runner labels. Start that runner where the repository
-     says how, or tell the owner which machine is offline and what it waits for, then run the watch again once the
-     runner is up. Never mark the pull request draft for this stop.
+   - **No test run created.** A coordinated job, whatever retry the watch prints, goes straight to **Release while
+     waiting** and then **Reserve for the final rebase**, its review standing where the head has not moved. Any other
+     job returns the pull request to draft with `gh pr ready <pr> --undo` to cancel the queued merge, follows step 3
+     again from its `before ready` step, then uses this step's watch command for the same runtime; step 3 covers an
+     unchanged-head CI retry.
+   - **A job waiting for a machine.** The stop names the job and its runner labels. Start that runner where the
+     repository says how, then run the watch again once the runner is up, never marking the pull request draft for this
+     stop. Where only the owner can start it, a coordinated job first releases as **Release while waiting** says, which
+     returns the pull request to draft, and then tells the owner which machine is offline and what it waits for; any
+     other job tells the owner and keeps the pull request ready.

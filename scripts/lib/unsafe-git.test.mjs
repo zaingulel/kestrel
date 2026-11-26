@@ -1,4 +1,3 @@
-// @ts-nocheck
 // unsafe-git.test.mjs — mutation-proof unit tests for the PreToolUse(Bash) guard rules.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
@@ -1283,7 +1282,7 @@ const WIN_ROOT = 'C:\\Users\\someone\\Claude Code\\repo';
 const WIN_JOB = 'C:\\Users\\someone\\Claude Code\\repo\\.claude\\worktrees\\1170';
 const winCheckout = (root, cwd) => ({
   cwd,
-  platform: 'win32',
+  platform: /** @type {'win32'} */ ('win32'),
   isRootCheckout: (dir) => dir === root || (dir.startsWith(`${root}\\`) && !dir.startsWith(`${root}\\.claude\\worktrees\\`)),
 });
 
@@ -1305,7 +1304,7 @@ test('on Windows a rooted path other than a drive is an unresolved target', () =
 test('on macOS and Linux a /c/ folder is judged as the real folder it names', () => {
   const posixCheckout = (root, cwd) => ({
     cwd,
-    platform: 'linux',
+    platform: /** @type {'linux'} */ ('linux'),
     isRootCheckout: (dir) => dir === root || (dir.startsWith(`${root}/`) && !dir.startsWith(`${root}/.claude/worktrees/`)),
   });
   const root = '/c/Users/someone/repo';
@@ -1386,8 +1385,11 @@ test('ANTI-REGRESSION: the retired product manager option refuses no publish, an
     'gh pr merge --auto --squash --delete-branch 406',
   ];
   for (const options of [undefined, { runSession: true }]) {
+    // @ts-expect-error card 770's retired runSession option, passed on purpose to prove it restricts nothing
     for (const command of publishing) assert.equal(blockReason(command, undefined, options), '', command);
+    // @ts-expect-error card 770's retired runSession option, passed on purpose to prove it restricts nothing
     assert.equal(blockReason('git push --force origin job/1', undefined, options), REASON_PUSH_FORCE);
+    // @ts-expect-error card 770's retired runSession option, passed on purpose to prove it restricts nothing
     assert.equal(blockReason('gh pr create --title x', undefined, options), REASON_CREATE);
   }
 });
@@ -1510,7 +1512,7 @@ const labelsOf = (...names) => ({ pageInfo: { hasNextPage: false }, nodes: names
 // A session directory holding `files` in the review folder of HEAD and, given `answered`, those files in the review
 // folder of ANSWERED_COMMIT; `cleanup` registers its removal.
 function sessionDirectory(files, cleanup, answered) {
-  const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'pre-approved-session-')));
+  const cwd = realpathSync.native(mkdtempSync(join(tmpdir(), 'pre-approved-session-')));
   cleanup(() => rmSync(cwd, { recursive: true, force: true }));
   const folders = [[REVIEW_FOLDER, files], ...(answered === undefined ? [] : [[`.claude/worklog/job_7-review-${ANSWERED_COMMIT}`, answered]])];
   for (const [folder, held] of folders) {
@@ -1529,6 +1531,32 @@ const cardComment = (login, createdAt, body) => ({ author: { login }, editor: nu
 const claimBy = (login, createdAt) => cardComment(login, createdAt, `Claim: fixture-machine, claude, ${createdAt}`);
 const OWN_CLAIM = claimBy('owner', '2026-11-04T12:05:00Z');
 
+/**
+ * @typedef {{
+ *   commit: string, origHead: string | null, origHeadRefs: string, parents: string[], trees: string[], ancestor: boolean,
+ *   hooksPath: string | null, githooks: string[], githooksStatus: string, indexTag: string, fsmonitor: boolean,
+ *   prePushExecutable: boolean, top: string, mainHooks: string[][], topHooks: { name: string, file: boolean, executable?: boolean }[],
+ *   edited?: string[]
+ * }} SquashFixture
+ */
+
+/**
+ * @typedef {{
+ *   start?: string, tracker?: string, boundCard?: string, env?: NodeJS.ProcessEnv, branch?: string, pushUrls?: string,
+ *   originPush?: string | { status: number, message: string }, mergeBase?: string | { status: number, message: string },
+ *   unscopedId?: string, repository?: Record<string, any>, pullRequest?: Record<string, any>, pinnedPull?: object | Error,
+ *   pinnedNumber?: number, gitTop?: string, objectFormat?: string, requiredChecks?: object[], localHead?: string,
+ *   pinnedReads?: string[], issue?: Record<string, any>, comments?: object[], viewer?: string, repositoryId?: string,
+ *   graphqlError?: string, settingOid?: string, settingMode?: string, settingText?: string, settingError?: string,
+ *   ancestry?: string, sessionAncestry?: string, answeredAncestor?: boolean, squash?: Partial<SquashFixture>, cwd?: string,
+ *   pullBody?: string | Error, openPulls?: object[] | Error, platform?: NodeJS.Platform
+ * }} PreApprovedFixture
+ */
+
+/**
+ * @param {PreApprovedFixture} [fixture]
+ * @returns {{ calls: string[], cwd: string, preApproved: import('./unsafe-git.mjs').PreApprovedRun }}
+ */
 function preApprovedRun({
   start = RUN_START,
   tracker = 'github',
@@ -1555,7 +1583,7 @@ function preApprovedRun({
   graphqlError,
   settingOid = 'a'.repeat(40),
   settingMode = '100644\n',
-  settingText = '{"version":1,"waitForOwner":"when-needed"}',
+  settingText = '{"version":1,"waitForOwner":"when-needed","herdr":true}',
   settingError,
   ancestry,
   sessionAncestry,
@@ -1582,11 +1610,11 @@ function preApprovedRun({
   // that name is 100755; and `edited` names the top's files whose bytes differ from fetched main's, by default those
   // githooksStatus reports modified, so a same-size edit the index reports clean sets it alone. As Git does, an ls-tree
   // without --full-tree from a `cwd` below the top lists only that folder's part of the tree, which holds nothing here.
-  const squashed = squash === undefined ? undefined : {
+  const squashed = /** @type {SquashFixture | undefined} */ (squash === undefined ? undefined : {
     commit: SQUASH_COMMIT, origHead: HEAD_COMMIT, origHeadRefs: '', parents: [settingOid], trees: ['d'.repeat(40), 'd'.repeat(40)], ancestor: true,
     hooksPath: '.githooks', githooks: ['c'.repeat(40), 'c'.repeat(40)], githooksStatus: '', indexTag: 'H', fsmonitor: false, prePushExecutable: true, top: cwd,
     mainHooks: [['100755', 'blob', '5'.repeat(40), 'pre-push']], topHooks: [{ name: 'pre-push', file: true }], ...squash,
-  };
+  });
   if (squashed !== undefined && squashed.edited === undefined) {
     squashed.edited = [...squashed.githooksStatus.matchAll(/^ M \.githooks\/(.+)$/gm)].map(([, name]) => name);
   }
@@ -1598,7 +1626,7 @@ function preApprovedRun({
     throw new Error(`unexpected read: executable ${path}`);
   };
   // The hooks folder walk, asked of a .githooks folder by its absolute path; `cwd`'s own below the top is fetched main's.
-  const mainExecutable = (name) => squashed.mainHooks.some(([mode, , , listed]) => listed === name && mode === '100755');
+  const mainExecutable = (name) => /** @type {SquashFixture} */ (squashed).mainHooks.some(([mode, , , listed]) => listed === name && mode === '100755');
   const listHooks = (folder) => {
     calls.push(`listHooks ${folder}`);
     if (squashed !== undefined && folder === join(squashed.top, '.githooks')) return squashed.topHooks.map((entry) => ({ executable: mainExecutable(entry.name), ...entry }));
@@ -1625,7 +1653,7 @@ function preApprovedRun({
           const name = path.slice(folder.length).split(sep).join('/');
           const entry = squashed.mainHooks.find(([, , , listed]) => listed === name);
           if (entry === undefined) throw new Error(`unexpected read: ${call}`);
-          return `${squashed.edited.includes(name) ? '6'.repeat(40) : entry[2]}\n`;
+          return `${/** @type {string[]} */ (squashed.edited).includes(name) ? '6'.repeat(40) : entry[2]}\n`;
         }).join('');
       }
     }
@@ -2284,7 +2312,7 @@ test('ANTI-REGRESSION: on Windows the advance approval reads run git.exe and gh.
   // A spawn names the file it was given in its own error, which is how a reason shows the path used.
   const here = { cwd: process.cwd(), isRootCheckout: () => false, platform: process.platform };
   const BIN = 'C:\\fabraik-absent\\bin';
-  const onWindows = (PATH, exists, runners = {}) => ({ start: RUN_START, tracker: 'github', env: { PATH }, platform: 'win32', exists, ...runners });
+  const onWindows = /** @type {(PATH: string, exists: (candidate: string) => boolean, runners?: object) => import('./unsafe-git.mjs').PreApprovedRun} */ ((PATH, exists, runners = {}) => ({ start: RUN_START, tracker: 'github', env: { PATH }, platform: 'win32', exists, ...runners }));
   const { git } = preApprovedRun().preApproved;
   const relativeGit = blockReason(PUSH, here, { preApproved: onWindows('tools\\bin', () => true) });
   assert.ok(relativeGit.startsWith(PRE_APPROVED) && relativeGit.includes('git.exe') && !relativeGit.includes('tools\\bin'), JSON.stringify(relativeGit));
@@ -2531,6 +2559,77 @@ test('ANTI-REGRESSION: a pre-approved run session marks ready or merges a held c
   );
 });
 
+// new behaviour: the Herdr mark counts only where fetched main turns the Herdr add-on on. Where it does not, a marked
+// session is held as an ordinary job is, by the wait level and every wait reason, and keeps its exact pull request checks
+// and its refusal of any owner answer. The expected outcomes come from AGENTS.md gate 2 and the herdr-job reference: only
+// a job a Herdr coordinator started ignores waitForOwner.
+test('1057 a Herdr mark is inert where fetched main leaves the Herdr add-on off', (t) => {
+  const cleanup = (remove) => t.after(remove);
+  const level = (/** @type {string} */ waitForOwner, /** @type {boolean | undefined} */ herdr = undefined) => JSON.stringify({ version: 1, waitForOwner, ...(herdr === undefined ? {} : { herdr }) });
+  const disabled = `${PRE_APPROVED}publishes nothing: pre-approved run disabled on fetched main; waitForOwner must be on-screen or when-needed in .agents/factory-settings.json on main`;
+  const draft = { ...PINNED_PULL, isDraft: true };
+  const signedOff = { cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup), pullBody: SIGN_OFF, pinnedPull: draft };
+  const answer = cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), 'yes'));
+  const document = edit(CLEAR, 'tier=code', 'tier=document');
+  const direct = { cwd: sessionDirectory({ 'body.md': document }, cleanup), squash: {}, localHead: SQUASH_COMMIT };
+  const marks = /** @type {[string, DeliveryMark, string][]} */ ([
+    ['Claude Code coordinated', { verified: false, coordinated: true }, 'git push origin HEAD:main'],
+    ['Codex Herdr', {}, `git push --no-follow-tags origin ${SQUASH_COMMIT}^{object}:refs/heads/main`],
+  ]);
+  const bodyReads = (calls) => calls.filter((call) => call === 'gh pr view 12 --json body').length;
+  const actual = {};
+  const expected = {};
+  const row = (label, got, want) => {
+    actual[label] = got;
+    expected[label] = want;
+  };
+  for (const [mark, options, directPush] of marks) {
+    const judge = (command, fixture) => pinnedDelivery(command, fixture, options);
+    row(`${mark}: 1 marking ready at always`, judge(READY, { pinnedPull: draft, settingText: level('always') }).reason, disabled);
+    const merged = judge(PINNED_MERGE, { pinnedPull: PINNED_PULL, settingText: level('when-needed') });
+    row(`${mark}: 2 a clear pinned merge at when-needed`, { reason: merged.reason, bodyReads: bodyReads(merged.calls) }, { reason: '', bodyReads: 1 });
+    row(`${mark}: 3 pushing at always`, judge(PUSH, { settingText: level('always') }).reason, disabled);
+    row(`${mark}: 4 marking ready a sign-off card at when-needed`, judge(READY, { ...signedOff, settingText: level('when-needed') }).reason, heldRefusal(READY, ['sign-off']));
+    row(
+      `${mark}: 5 its own direct form at when-needed`,
+      judge(directPush, { ...direct, settingText: level('when-needed') }).reason,
+      `${PRE_APPROVED}pushes only its own branch, as git push -u origin job/7 or git push --force-with-lease origin job/7`,
+    );
+    row(
+      `${mark}: 6 merging into an enabled merge queue with herdr false`,
+      judge(PINNED_MERGE, { pinnedPull: { ...PINNED_PULL, isMergeQueueEnabled: true }, settingText: level('when-needed', false) }).reason,
+      `${PRE_APPROVED}acts only on a pull request with no active or enabled merge queue: #12 has a different or unreadable queue state`,
+    );
+    row(
+      `${mark}: 7 marking ready a sign-off card with show-me-first and an owner answer`,
+      judge(READY, { ...signedOff, settingText: level('when-needed'), issue: { labels: labelsOf('show-me-first') }, comments: [OWN_CLAIM, answer] }).reason,
+      heldRefusal(READY, ['sign-off', 'show-me-first']),
+    );
+    row(`${mark}: 8 marking ready at always with herdr true`, judge(READY, { pinnedPull: draft, settingText: level('always', true) }).reason, '');
+    row(
+      `${mark}: 10 marking ready work on screen with its screenshot at on-screen with herdr false`,
+      judge(READY, {
+        cwd: sessionDirectory({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, cleanup),
+        pullBody: ATTACHED_BODY,
+        pinnedPull: draft,
+        settingText: level('on-screen', false),
+      }).reason,
+      heldRefusal(READY, ['on-screen']),
+    );
+  }
+  // The Claude direct push judges its reviewed base against the fetched main the policy was read from: the squash's parent
+  // is B, the fetched main the delivery policy reads is not.
+  const base = 'b0'.repeat(20);
+  const run = preApprovedRun({ ...direct, squash: { parents: [base] }, boundCard: '7', pinnedReads: [], settingText: level('when-needed', true) });
+  const git = (args) => (args.join(' ') === '--no-replace-objects rev-parse --verify --quiet refs/remotes/origin/main^{commit}' ? `${base}\n` : run.preApproved.git(args));
+  row(
+    'Claude Code coordinated: 9 a direct push whose reviewed base is not the fetched main the policy read',
+    blockReason('git push origin HEAD:main', { ...inJob, cwd: run.cwd }, { preApproved: { ...run.preApproved, coordinated: true, git } }),
+    `${PRE_APPROVED}pushes main only while the reviewed base matches the fetched main used for delivery policy`,
+  );
+  assert.deepEqual(actual, expected);
+});
+
 test('ANTI-REGRESSION: an owner answer asking for a fix admits the fixed head only from a fix built on the answered head by the same account holding no new wait reason', (t) => {
   assert.equal(blobHash(SHOT_1), SHOT_1_HASH, "blobHash gives Git's own blob hash");
   const cleanup = (remove) => t.after(remove);
@@ -2540,6 +2639,7 @@ test('ANTI-REGRESSION: an owner answer asking for a fix admits the fixed head on
   const FIX = fixBy('owner', '2026-11-04T12:45:00Z');
   // The H1-to-H2 example: the owner answered at ANSWERED_COMMIT, whose saved write-up is `answered` (null for no
   // folder there), a fix line names HEAD_COMMIT, whose saved write-up is `at`, and the ancestor read is true.
+  /** @param {PreApprovedFixture & { at?: string, answered?: string | null }} [options] */
   const fixed = ({ at = SIGN_OFF, answered = SIGN_OFF, comments = [OWN_CLAIM, answerTo(answered ?? SIGN_OFF), FIX], ...rest } = {}) => ({
     cwd: sessionDirectory({ 'body.md': at }, cleanup, answered === null ? undefined : { 'body.md': answered }),
     pullBody: at,
@@ -2686,7 +2786,14 @@ test('ANTI-REGRESSION: a coordinated job pushes main only as the squash of the v
   );
 });
 
+/** @typedef {{ verified?: boolean, coordinated?: boolean, appRun?: boolean }} DeliveryMark */
+
 // The test owns this verified context. Only the Git and provider reads cross a simulated boundary.
+/**
+ * @param {string} command
+ * @param {PreApprovedFixture} fixture
+ * @param {DeliveryMark} [mark]
+ */
 function pinnedDelivery(command, fixture, { verified = true, coordinated = false, appRun = false } = {}) {
   const pinnedReads = [];
   const run = preApprovedRun({ ...fixture, boundCard: '7', pinnedReads });
@@ -2706,7 +2813,7 @@ function pinnedDelivery(command, fixture, { verified = true, coordinated = false
     try {
       return read(arg);
     } catch (error) {
-      if (error.message.startsWith('unexpected read: ')) unexpected.push(error.message);
+      if (/** @type {Error} */ (error).message.startsWith('unexpected read: ')) unexpected.push(/** @type {Error} */ (error).message);
       throw error;
     }
   };
@@ -2782,7 +2889,7 @@ function pinnedMergeCases(t, options) {
     ['an extra command', `${merge} && pwd`],
   ]) refuse(label, command, {}, syntaxLapse);
 
-  for (const [label, fields] of [
+  for (const [label, fields] of /** @type {[string, object][]} */ ([
     ['wrong provider pull request number', { number: 13 }],
     ['another job branch', { headRefName: 'job/8' }],
     ['another base branch', { baseRefName: 'develop' }],
@@ -2790,7 +2897,7 @@ function pinnedMergeCases(t, options) {
     ['a cross-repository pull request', { isCrossRepository: true }],
     ['a closed pull request', { state: 'CLOSED' }],
     ['a draft pull request', { isDraft: true }],
-  ]) refuse(label, merge, { pinnedPull: { ...pull, ...fields } }, ownPull, [providerRead]);
+  ])) refuse(label, merge, { pinnedPull: { ...pull, ...fields } }, ownPull, [providerRead]);
   refuse('different literal expected head', commandFor(ANSWERED_COMMIT, '12'), {}, pinLapse);
   refuse('local head has moved', merge, { localHead: ANSWERED_COMMIT }, pinLapse, [(call) => call === 'git rev-parse HEAD']);
   refuse('remote pull request head has moved', merge, { pinnedPull: { ...pull, headRefOid: ANSWERED_COMMIT } }, pinLapse, [providerRead]);
@@ -2875,6 +2982,8 @@ test('967 a Herdr publication needs the head its review named', (t) => {
     ['with the line doubled', edit(CLEAR, reviewed, reviewed + reviewed), 'no single'],
     ['malformed, an abbreviated commit', edit(CLEAR, reviewed, `Reviewed commit: ${HEAD_COMMIT.slice(0, 12)}\n`), 'no single'],
     ['malformed, an upper-case commit', edit(CLEAR, reviewed, `Reviewed commit: ${HEAD_COMMIT.toUpperCase()}\n`), 'no single'],
+    // existing behaviour: a `Review carried from:` line beside the one line is admitted.
+    ['with a Review carried from line beside it',edit(CLEAR, reviewed, reviewed + `Review carried from: ${beforeRebase}\n`), 'admitted'],
     ['with the line only under Review', edit(edit(CLEAR, reviewed, ''), `${REVIEW_LINE}\n`, `${REVIEW_LINE}\n${reviewed}`), 'no single'],
   ];
   const verdict = (reason) => {
@@ -2885,7 +2994,7 @@ test('967 a Herdr publication needs the head its review named', (t) => {
   };
   const actual = {};
   const expected = {};
-  for (const [mark, options] of [['Codex Herdr', {}], ['Claude Code coordinated', { verified: false, coordinated: true }]]) {
+  for (const [mark, options] of /** @type {[string, DeliveryMark][]} */ ([['Codex Herdr', {}], ['Claude Code coordinated', { verified: false, coordinated: true }]])) {
     const judge = (saved, published) => verdict(pinnedDelivery(PINNED_MERGE, {
       pinnedPull: PINNED_PULL, cwd: sessionDirectory({ 'body.md': saved }, (remove) => t.after(remove)), pullBody: published,
     }, options).reason);
@@ -2920,10 +3029,10 @@ test('967 a Herdr direct push to main needs the head its review named', (t) => {
     if (reason.startsWith(PRE_APPROVED) && covered && covered[2] === HEAD_COMMIT) return `covered ${covered[1]}`;
     return reason.startsWith(PRE_APPROVED) && /names no single Reviewed commit/.test(reason) ? 'no single' : reason;
   };
-  const marks = [
+  const marks = /** @type {[string, string, DeliveryMark][]} */ ([
     ['Claude Code coordinated', 'git push origin HEAD:main', { verified: false, coordinated: true }],
     ['Codex Herdr', `git push --no-follow-tags origin ${SQUASH_COMMIT}^{object}:refs/heads/main`, {}],
-  ];
+  ]);
   const actual = {};
   const expected = {};
   for (const [mark, command, options] of marks) {
@@ -2944,10 +3053,10 @@ test('967 a Herdr job still holds a failed check or a missing screenshot', (t) =
     isInMergeQueue: false, isMergeQueueEnabled: false,
   };
   const pinnedMerge = `gh pr merge --squash --delete-branch --match-head-commit ${HEAD_COMMIT} 12`;
-  const marks = [
+  const marks = /** @type {[string, DeliveryMark, [string, PreApprovedFixture][]][]} */ ([
     ['a coordinated Claude Code job', { verified: false, coordinated: true }, [[READY, { pinnedPull: { ...pull, isDraft: true } }], [pinnedMerge, { pinnedPull: pull }]]],
     ['a Codex Herdr job', {}, [[READY, { pinnedPull: { ...pull, isDraft: true } }], [pinnedMerge, { pinnedPull: pull }]]],
-  ];
+  ]);
   const holding = [
     ['a failed check', { 'body.md': edit(CLEAR, 'Failed: none', 'Failed: lint, cause unknown') }, ['check']],
     ['work on screen with no screenshot', { 'body.md': ON_SCREEN }, ['screenshot']],
@@ -2968,16 +3077,16 @@ test('967 a Herdr job still holds a failed check or a missing screenshot', (t) =
 // sign-off tier, a hard Undo answer, a Not done item nor the wait level always holds an unmarked card; a session
 // without the Herdr mark keeps today's policy, under which always publishes nothing.
 test("967 a Herdr job's unmarked card waits on no review tier or level", (t) => {
-  const always = '{"version":1,"waitForOwner":"always"}';
+  const always = '{"version":1,"waitForOwner":"always","herdr":true}';
   const draft = {
     number: 12, state: 'OPEN', headRefName: 'job/7', baseRefName: 'main', baseRefOid: 'b'.repeat(40),
     headRepository: { id: ORIGIN_ID }, isCrossRepository: false, headRefOid: HEAD_COMMIT, isDraft: true, autoMergeRequest: null,
     isInMergeQueue: false, isMergeQueueEnabled: false,
   };
-  const marks = [
+  const marks = /** @type {[string, DeliveryMark, PreApprovedFixture][]} */ ([
     ['a coordinated Claude Code job', { verified: false, coordinated: true }, { pinnedPull: draft }],
     ['a Codex Herdr job', {}, { pinnedPull: draft }],
-  ];
+  ]);
   const writeUps = [
     ['a sign-off review tier', edit(CLEAR, 'tier=code', 'tier=sign-off')],
     ['an Undo answer of hard', edit(CLEAR, UNDO_EASY, UNDO_HARD)],
@@ -3107,7 +3216,7 @@ test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) =>
     return { cwd, ...rest };
   };
   // [label, fixture, admitted]: a marked card is refused whatever it records; an unmarked one is admitted.
-  const versions = [
+  const versions = /** @type {[string, PreApprovedFixture, boolean][]} */ ([
     ['a marked card with a note naming HEAD and its saved identity', session(noteAt(7, HEAD_COMMIT), marked), false],
     ['a marked card with an owner answer comment naming HEAD', session(undefined, { ...marked, comments: [OWN_CLAIM, answerAt(HEAD_COMMIT)] }), false],
     [
@@ -3126,13 +3235,13 @@ test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) =>
       session(noteAt(7, ANSWERED_COMMIT), { comments: [OWN_CLAIM, answerAt(ANSWERED_COMMIT), FIX] }),
       true,
     ],
-  ];
+  ]);
   const draft = { pinnedPull: { ...PINNED_PULL, isDraft: true } };
   const ready = { pinnedPull: PINNED_PULL };
-  const marks = [
+  const marks = /** @type {[string, DeliveryMark, [string, PreApprovedFixture][]][]} */ ([
     ['a coordinated Claude Code job', { verified: false, coordinated: true }, [[READY, draft], [PINNED_MERGE, ready], [DIRECT, { squash: {} }]]],
     ['a Codex Herdr job', {}, [[READY, draft], [PINNED_MERGE, ready]]],
-  ];
+  ]);
   // The refusal naming only the marker, with nothing after it.
   const markerHold = (command) => (command === DIRECT
     ? `${PRE_APPROVED}pushes nothing to main while a wait reason holds for ${HEAD_COMMIT}: show-me-first`
@@ -3312,7 +3421,7 @@ test('the direct push\'s hooks folder walk lists nested regular files and refuse
       symlinkSync(target, path, type);
       return true;
     } catch (error) {
-      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+      if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
       st.skip('this Windows account may not create symbolic links (EPERM)');
       return false;
     }
@@ -3567,7 +3676,7 @@ const unlock = (path) => {
 // and the three shared contracts, with a job worktree, the review folder of a clear HEAD and that commit's verified
 // snapshot at its canonical store path, `root`.
 function pinnedWorkflow(t) {
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'pinned-workflow-')));
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), 'pinned-workflow-')));
   t.after(() => {
     unlock(repo);
     rmSync(repo, { recursive: true, force: true });
@@ -3594,6 +3703,11 @@ function pinnedWorkflow(t) {
 
 // The judgment of a coordinated Claude session whose guard entry verifies `env`'s pin in `pin.repo`. Its ready and
 // merge read pull request 12 on the exact publication path, a draft before ready and ready before the pinned merge.
+/**
+ * @param {{ repo: string, root: string }} pin
+ * @param {string} command
+ * @param {{ env?: NodeJS.ProcessEnv, fixture?: PreApprovedFixture }} [options]
+ */
 const coordinatedJudged = (pin, command, { env = { FABRAIK_WORKFLOW_ROOT: pin.root }, fixture = {} } = {}) => {
   const pinnedPull = command === READY ? { ...PINNED_PULL, isDraft: true } : PINNED_PULL;
   const run = preApprovedRun({ cwd: pin.repo, pinnedReads: [], pinnedPull, ...fixture });
@@ -3705,10 +3819,10 @@ test("pinned delivery code runs only from the job's workflow version", { skip: w
       const { reason } = coordinatedJudged(pin, command);
       outcomes[`coordinated: ${command}`] = reason !== '' && reason.includes(PINNED_WATCH) ? `refused naming ${PINNED_WATCH}` : reason;
       expected[`coordinated: ${command}`] = `refused naming ${PINNED_WATCH}`;
-      for (const [label, judge] of [
+      for (const [label, judge] of /** @type {[string, () => string][]} */ ([
         ['unmarked run session', () => blockReason(command, inJob, { preApproved: preApprovedRun({ cwd: pin.repo }).preApproved })],
         ['ordinary session', () => blockReason(command, inJob)],
-      ]) {
+      ])) {
         outcomes[`${label}: ${command}`] = judge();
         expected[`${label}: ${command}`] = '';
       }

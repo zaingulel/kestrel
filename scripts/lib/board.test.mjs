@@ -1,4 +1,3 @@
-// @ts-nocheck
 // board.test.mjs — mutation-proof unit tests for the board read+filter+format logic.
 // Run: node --test scripts/lib/   (or `npm run test:scripts`)
 //
@@ -20,6 +19,10 @@ import { GITHUB_TEST_CONFIG, NEEDS_PARSER, copyToolkit, flagLiterals } from './b
 const toolkit = copyToolkit(GITHUB_TEST_CONFIG);
 after(() => toolkit.cleanup());
 
+// The fixtures load untyped; only the builders the recovery fixture is made of carry their module's types.
+/** @typedef {'hydratedItem' | 'issuesPage' | 'membership' | 'membershipsPage' | 'walkedIssue'} RecoveryBuilder */
+/** @typedef {Pick<typeof import('./board-fixtures.mjs'), RecoveryBuilder> & { [Name in Exclude<keyof typeof import('./board-fixtures.mjs'), RecoveryBuilder>]: any }} RecoveryFixtures */
+
 const {
   boardReadExec,
   boardRequestKind,
@@ -32,7 +35,7 @@ const {
   onePageAtATime,
   READD_WARNING,
   walkedIssue,
-} = await toolkit.load('lib/board-fixtures.mjs');
+} = /** @type {RecoveryFixtures} */ (await toolkit.load('lib/board-fixtures.mjs'));
 const { closedNotDoneDrift } = await toolkit.load('lib/board-rules.mjs');
 // The copy's own gh-exec: the board reader tells an oversized read apart by the error class its own copy exports.
 const { GhUnavailableError, ghExec } = await toolkit.load('lib/gh-exec.mjs');
@@ -114,7 +117,10 @@ test('parseBoardArgs: fails loud on an unrecognised argument or a valueless --st
   for (const bad of ['--closout', '-closeout', '--closeout=true', '--status=', '--all=yes', 'Ready']) {
     assert.throws(
       () => parseBoardArgs([bad]),
-      (err) => err.message.includes(bad) && err.message.includes('usage: node scripts/board.mjs'),
+      (err) => {
+        const { message } = /** @type {Error} */ (err);
+        return message.includes(bad) && message.includes('usage: node scripts/board.mjs');
+      },
       bad,
     );
   }
@@ -209,9 +215,12 @@ test('flagLiterals: reads a flag from `--name=` or `--name$` in a regular expres
 test('parseBoardArgs: rejects a --status= value that is not a board column, and accepts every one that is', () => {
   assert.throws(
     () => parseBoardArgs(['--status=Rady']),
-    (err) => err.message.includes('--status=Rady is not a board column')
-      && STATUS_OPTIONS.every((column) => err.message.includes(column))
-      && err.message.includes('usage: node scripts/board.mjs'),
+    (err) => {
+      const { message } = /** @type {Error} */ (err);
+      return message.includes('--status=Rady is not a board column')
+        && STATUS_OPTIONS.every((column) => message.includes(column))
+        && message.includes('usage: node scripts/board.mjs');
+    },
   );
   // Case is part of the name: the board has no lower-case column.
   assert.throws(() => parseBoardArgs([`--status=${STATUS_OPTIONS[1].toLowerCase()}`]), /is not a board column/);
@@ -409,6 +418,7 @@ test("fetchBoard asks for the board's own order and keeps each listed card's pla
 });
 
 test('fetchBoard rejects a short read and accepts an exact one', () => {
+  /** @param {{ totalCount: number, nodes?: object[], hasNextPage?: boolean, endCursor?: string | null }} fields */
   const page = ({ totalCount, nodes = [REAL_ISSUE_NODE], hasNextPage = false, endCursor = null }) =>
     leanBoardPage(nodes, { totalCount, pageInfo: { hasNextPage, endCursor } });
   const fetchPages = (...pages) => fetchBoard(boardReadExec({ board: pages }).exec);
@@ -458,13 +468,21 @@ test('fetchBoard throws when the project identity or the field schema changes ac
 // by hand from the fixtures: an unarchived membership on this board is a card exactly once, and
 // nothing else is.
 
+// The issue numbers of the recovery fixture: one listed, one omitted, one omitted past the first page of 100
+// memberships, and one number the fixture does not use (past all three).
+const LISTED_ISSUE = 10;
+const OMITTED_ISSUE = 11;
+const OVERFLOW_ISSUE = 12;
+const UNUSED_ISSUE = Math.max(LISTED_ISSUE, OMITTED_ISSUE, OVERFLOW_ISSUE) + 1;
+
 const RECOVERY_LISTED = leanNode({
   id: 'PVTI_listed',
-  content: { __typename: 'Issue', number: 10, title: 'Listed card' },
+  content: { __typename: 'Issue', number: LISTED_ISSUE, title: 'Listed card' },
   status: 'Ready',
   routing: 'Product',
 });
 
+/** @type {(id: string, number: number, state: string, status: string) => import('./board-fixtures.mjs').IssueCard} */
 const omittedCard = (id, number, state, status) => ({
   id,
   content: { __typename: 'Issue', number, title: `Omitted card ${number}`, state },
@@ -497,7 +515,7 @@ function recoveryReads() {
     board: [leanBoardPage([RECOVERY_LISTED, draft, unresolved])],
     issues: [
       issuesPage([
-        walkedIssue(10, [membership('PVTI_listed')]),
+        walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')]),
         walkedIssue(11, [membership('PVTI_open_backlog')]),
         walkedIssue(12, [
           membership('PVTI_closed_done'),
@@ -541,7 +559,7 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   assert.deepEqual(sortedById(items).map((i) => [i.id, i.content.number ?? null, i.status, i.content.state ?? null]), [
     ['PVTI_closed_backlog', 13, 'Backlog', 'CLOSED'],
     ['PVTI_closed_done', 12, 'Done', 'CLOSED'],
-    ['PVTI_listed', 10, 'Ready', 'OPEN'],
+    ['PVTI_listed', LISTED_ISSUE, 'Ready', 'OPEN'],
     ['PVTI_listed_draft', null, 'Backlog', null],
     ['PVTI_listed_unresolved', null, 'Backlog', null],
     ['PVTI_open_backlog', 11, 'Backlog', 'OPEN'],
@@ -571,7 +589,7 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   for (const id of ['PVTI_listed', 'PVTI_listed_draft', 'PVTI_listed_unresolved', 'PVTI_archived', 'PVTI_other_project', 'PVTI_other_owner']) {
     assert.equal(namesId(advisory, id), false, `${id}: ${advisory}`);
   }
-  for (const number of [10, 14]) assert.equal(namesNumber(advisory, number), false, advisory);
+  for (const number of [LISTED_ISSUE, 14]) assert.equal(namesNumber(advisory, number), false, advisory);
   assert.match(advisory, READD_WARNING);
 
   // The open walk asks for open issues and their archived memberships, in one paginated process.
@@ -587,7 +605,7 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   const quiet = [];
   const listedOnly = boardReadExec({
     board: [leanBoardPage([RECOVERY_LISTED, draft])],
-    issues: [issuesPage([walkedIssue(10, [membership('PVTI_listed')])])],
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
   });
   assert.deepEqual(
     sortedById(fetchBoard(listedOnly.exec, { onOmission: (advisory) => quiet.push(advisory) })).map((i) => i.id),
@@ -596,49 +614,65 @@ test('ANTI-REGRESSION: board reads recover independently visible GitHub cards', 
   assert.deepEqual(quiet, []);
 });
 
-// One card listed (#10), one omitted (#11) and one omitted past the first page of 100
-// memberships (#12, its board membership the first one the walk saw): the read the refusal
-// cases below each break one fact of.
+/**
+ * The mutable read the refusal cases below break. A case reads each field as the valid shape
+ * the fixtures build, so a misspelt field fails the type check, and overwrites it with a
+ * deliberately wrong value, so each field's setter takes `unknown`.
+ * @typedef {{
+ *   board: unknown,
+ *   get issues(): import('./board-fixtures.mjs').IssuesPage[], set issues(value: unknown),
+ *   memberships: { get [OVERFLOW_ISSUE](): import('./board-fixtures.mjs').MembershipsPage[], set [OVERFLOW_ISSUE](value: unknown) } & { [issue: number]: unknown },
+ *   get items(): import('./board-fixtures.mjs').HydratedItem[], set items(value: unknown),
+ * }} RecoveryBase
+ */
+
+/** @returns {RecoveryBase} */
 function recoveryBase() {
   const firstObservation = [membership('PVTI_overflow'), ...elsewhere(99)];
   return {
     board: [leanBoardPage([RECOVERY_LISTED])],
     issues: [
       issuesPage([
-        walkedIssue(10, [membership('PVTI_listed')]),
-        walkedIssue(11, [membership('PVTI_omitted')]),
+        walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')]),
+        walkedIssue(OMITTED_ISSUE, [membership('PVTI_omitted')]),
       ], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }),
-      issuesPage([walkedIssue(12, firstObservation, { totalCount: 101 })], { totalCount: 3 }),
+      issuesPage([walkedIssue(OVERFLOW_ISSUE, firstObservation, { totalCount: 101 })], { totalCount: 3 }),
     ],
     memberships: {
-      12: [
-        membershipsPage(12, structuredClone(firstObservation), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
-        membershipsPage(12, elsewhere(1, 99), { totalCount: 101 }),
+      [OVERFLOW_ISSUE]: [
+        membershipsPage(OVERFLOW_ISSUE, structuredClone(firstObservation), { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+        membershipsPage(OVERFLOW_ISSUE, elsewhere(1, 99), { totalCount: 101 }),
       ],
     },
     items: [
-      hydratedItem(omittedCard('PVTI_omitted', 11, 'OPEN', 'Backlog')),
-      hydratedItem(omittedCard('PVTI_overflow', 12, 'OPEN', 'Ready')),
+      hydratedItem(omittedCard('PVTI_omitted', OMITTED_ISSUE, 'OPEN', 'Backlog')),
+      hydratedItem(omittedCard('PVTI_overflow', OVERFLOW_ISSUE, 'OPEN', 'Ready')),
     ],
   };
 }
 
-const walked = (base, page, index) => base.issues[page].data.repository.issues.nodes[index];
-const issuesOf = (base, page) => base.issues[page].data.repository.issues;
-const overflowPage = (base, page) => base.memberships[12][page].data.repository.issue;
+const walked = (/** @type {RecoveryBase} */ base, /** @type {number} */ page, /** @type {number} */ index) => base.issues[page].data.repository.issues.nodes[index];
+const issuesOf = (/** @type {RecoveryBase} */ base, /** @type {number} */ page) => base.issues[page].data.repository.issues;
+const overflowPage = (/** @type {RecoveryBase} */ base, /** @type {number} */ page) => base.memberships[OVERFLOW_ISSUE][page].data.repository.issue;
+const issueWalk = (/** @type {RecoveryBase} */ base) => base.issues;
+const overflowWalk = (/** @type {RecoveryBase} */ base) => base.memberships[OVERFLOW_ISSUE];
+const itemRead = (/** @type {RecoveryBase} */ base) => base.items;
+// A list as its slots, where a case puts a deliberately wrong element in place of a valid one.
+const slots = (/** @type {unknown[]} */ list) => list;
 const failing = () => { throw new Error('gh: HTTP 502'); };
 
+/** @type {[string, (base: RecoveryBase) => void][]} */
 const REFUSED_RECOVERY = [
   // Malformed, failed and null replies.
   ['the issue walk is not JSON', (b) => { b.issues = 'not json'; }],
-  ['the issue walk is not slurped', (b) => { b.issues = b.issues[0]; }],
+  ['the issue walk is not slurped', (b) => { b.issues = issueWalk(b)[0]; }],
   ['the issue walk is empty', (b) => { b.issues = []; }],
   ['the issue walk fails', (b) => { b.issues = failing; }],
-  ['an issue walk page carries GraphQL errors', (b) => { b.issues[1] = { errors: [{ message: 'Something went wrong' }] }; }],
-  ['an issue walk page is null', (b) => { b.issues[1] = null; }],
-  ['an issue walk page has a null repository', (b) => { b.issues[1].data.repository = null; }],
-  ['an issue walk page has no issues connection', (b) => { b.issues[1].data.repository.issues = null; }],
-  ['a walked issue is null', (b) => { issuesOf(b, 0).nodes[1] = null; }],
+  ['an issue walk page carries GraphQL errors', (b) => { slots(issueWalk(b))[1] = { errors: [{ message: 'Something went wrong' }] }; }],
+  ['an issue walk page is null', (b) => { slots(issueWalk(b))[1] = null; }],
+  ['an issue walk page has a null repository', (b) => { issueWalk(b)[1].data.repository = null; }],
+  ['an issue walk page has no issues connection', (b) => { issueWalk(b)[1].data.repository.issues = null; }],
+  ['a walked issue is null', (b) => { slots(issuesOf(b, 0).nodes)[1] = null; }],
   ['a walked issue has no number', (b) => { walked(b, 0, 1).number = null; }],
   ['a walked issue has no membership connection', (b) => { walked(b, 0, 1).projectItems = null; }],
   ['a membership is null', (b) => { walked(b, 0, 1).projectItems.nodes = [null]; }],
@@ -652,25 +686,25 @@ const REFUSED_RECOVERY = [
   ['the item read fails', (b) => { b.items = failing; }],
   ['the item read carries GraphQL errors', (b) => { b.items = { errors: [{ message: 'Something went wrong' }] }; }],
   ['the item read answers no node list', (b) => { b.items = { data: { nodes: null } }; }],
-  ['the item read answers null for an item', (b) => { b.items = [b.items[1]]; }],
-  ['the overflow walk fails', (b) => { b.memberships[12] = failing; }],
-  ['the overflow walk answers no issue', (b) => { b.memberships[12] = [{ data: { repository: { issue: null } } }]; }],
+  ['the item read answers null for an item', (b) => { b.items = [itemRead(b)[1]]; }],
+  ['the overflow walk fails', (b) => { b.memberships[OVERFLOW_ISSUE] = failing; }],
+  ['the overflow walk answers no issue', (b) => { b.memberships[OVERFLOW_ISSUE] = [{ data: { repository: { issue: null } } }]; }],
   // Truncated walks.
-  ['the issue walk stops while a page remains', (b) => { b.issues = [b.issues[0]]; }],
+  ['the issue walk stops while a page remains', (b) => { b.issues = [issueWalk(b)[0]]; }],
   ['the issue walk continues past a page with no next page', (b) => { issuesOf(b, 0).pageInfo = { hasNextPage: false, endCursor: null }; }],
   ['an issue walk page reports a next page with no cursor', (b) => { issuesOf(b, 0).pageInfo.endCursor = null; }],
   ['the issue walk fetches fewer issues than its count', (b) => { issuesOf(b, 0).totalCount = 4; issuesOf(b, 1).totalCount = 4; }],
   ['a walked issue holds fewer memberships than its count under the cap', (b) => { walked(b, 0, 1).projectItems.totalCount = 2; }],
   ['a walked issue holds more memberships than its count', (b) => { walked(b, 0, 1).projectItems.totalCount = 0; }],
-  ['the overflow walk stops while a page remains', (b) => { b.memberships[12] = [b.memberships[12][0]]; }],
+  ['the overflow walk stops while a page remains', (b) => { b.memberships[OVERFLOW_ISSUE] = [overflowWalk(b)[0]]; }],
   ['the overflow walk fetches fewer memberships than its count', (b) => { overflowPage(b, 1).projectItems.nodes = []; }],
   ['the project walk is short of its count however many cards recovery finds', (b) => { b.board = [leanBoardPage([RECOVERY_LISTED], { totalCount: 3 })]; }],
   // Repeated cursors.
   ['the issue walk repeats a cursor', (b) => {
-    b.issues.splice(1, 0, issuesPage([], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }));
+    issueWalk(b).splice(1, 0, issuesPage([], { totalCount: 3, pageInfo: { hasNextPage: true, endCursor: 'issues-1' } }));
   }],
   ['the overflow walk repeats a cursor', (b) => {
-    b.memberships[12].splice(1, 0, membershipsPage(12, [], { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }));
+    overflowWalk(b).splice(1, 0, membershipsPage(OVERFLOW_ISSUE, [], { totalCount: 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }));
   }],
   // Counts that change.
   ['the issue count changes across pages', (b) => { issuesOf(b, 1).totalCount = 4; }],
@@ -682,14 +716,14 @@ const REFUSED_RECOVERY = [
   ['the overflow walk loses the board membership the first observation saw', (b) => {
     overflowPage(b, 0).projectItems.nodes[0] = membership('PVTI_elsewhere_swapped', { project: 3000 });
   }],
-  ['the overflow walk answers for another issue', (b) => { for (const page of [0, 1]) overflowPage(b, page).number = 13; }],
+  ['the overflow walk answers for another issue', (b) => { for (const page of [0, 1]) overflowPage(b, page).number = UNUSED_ISSUE; }],
   // Duplicate and conflicting identities.
   ['an issue is walked twice', (b) => {
-    issuesOf(b, 1).nodes.push(walkedIssue(11, [membership('PVTI_omitted')]));
+    issuesOf(b, 1).nodes.push(walkedIssue(OMITTED_ISSUE, [membership('PVTI_omitted')]));
     for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
   }],
   ['one item id is walked under two issues', (b) => {
-    issuesOf(b, 1).nodes.push(walkedIssue(13, [membership('PVTI_omitted')]));
+    issuesOf(b, 1).nodes.push(walkedIssue(UNUSED_ISSUE, [membership('PVTI_omitted')]));
     for (const page of [0, 1]) issuesOf(b, page).totalCount = 4;
   }],
   ['one item id is listed twice under one issue', (b) => {
@@ -697,7 +731,7 @@ const REFUSED_RECOVERY = [
   }],
   ['one issue holds two items on this board', (b) => {
     walked(b, 0, 1).projectItems = { totalCount: 2, nodes: [membership('PVTI_omitted'), membership('PVTI_omitted_twin')] };
-    b.items.push(hydratedItem(omittedCard('PVTI_omitted_twin', 11, 'OPEN', 'Backlog')));
+    itemRead(b).push(hydratedItem(omittedCard('PVTI_omitted_twin', OMITTED_ISSUE, 'OPEN', 'Backlog')));
   }],
   ['the listed item is walked under another issue', (b) => {
     walked(b, 0, 0).projectItems = { totalCount: 0, nodes: [] };
@@ -708,19 +742,19 @@ const REFUSED_RECOVERY = [
     const firstPage = walked(b, 1, 0).projectItems.nodes;
     firstPage[99] = structuredClone(firstPage[98]);
   }],
-  ['the item read answers one item twice', (b) => { b.items = { data: { nodes: [b.items[0], b.items[0]] } }; }],
-  ['the item read answers another item id', (b) => { b.items = { data: { nodes: [{ ...b.items[0], id: 'PVTI_someone_else' }, b.items[1]] } }; }],
+  ['the item read answers one item twice', (b) => { b.items = { data: { nodes: [itemRead(b)[0], itemRead(b)[0]] } }; }],
+  ['the item read answers another item id', (b) => { b.items = { data: { nodes: [{ ...itemRead(b)[0], id: 'PVTI_someone_else' }, itemRead(b)[1]] } }; }],
   // Wrong repository, project or content.
-  ['a read item belongs to another repository', (b) => { b.items[0].content.repository = { nameWithOwner: 'someone-else/other-repo' }; }],
-  ['a read item is on another project', (b) => { b.items[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
-  ["a read item is on another owner's project", (b) => { b.items[0].project.owner.login = 'someone-else'; }],
+  ['a read item belongs to another repository', (b) => { itemRead(b)[0].content.repository = { nameWithOwner: 'someone-else/other-repo' }; }],
+  ['a read item is on another project', (b) => { itemRead(b)[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
+  ["a read item is on another owner's project", (b) => { itemRead(b)[0].project.owner.login = 'someone-else'; }],
   ['the listed item is walked on another project', (b) => { walked(b, 0, 0).projectItems.nodes[0].project.number = BOARD_PROJECT_NUMBER + 1; }],
   ["the listed item is walked on another owner's project", (b) => { walked(b, 0, 0).projectItems.nodes[0].project.owner.login = 'someone-else'; }],
-  ['a read item has no project', (b) => { b.items[0].project = null; }],
-  ['a read item resolves to another issue', (b) => { b.items[0].content.number = 99; }],
-  ['a read item has no issue content', (b) => { b.items[0].content = null; }],
+  ['a read item has no project', (b) => { itemRead(b)[0].project = null; }],
+  ['a read item resolves to another issue', (b) => { itemRead(b)[0].content.number = 99; }],
+  ['a read item has no issue content', (b) => { itemRead(b)[0].content = null; }],
   // Archive observations that disagree.
-  ['a read item is archived though its membership is not', (b) => { b.items[0].isArchived = true; }],
+  ['a read item is archived though its membership is not', (b) => { itemRead(b)[0].isArchived = true; }],
   ['the overflow walk sees the board membership archived', (b) => { overflowPage(b, 0).projectItems.nodes[0].isArchived = true; }],
   ['a listed card is archived on its issue', (b) => { walked(b, 0, 0).projectItems.nodes[0].isArchived = true; }],
 ];
@@ -770,7 +804,7 @@ test('fetchBoard reads the closed issue walk only after the open issue walk has 
   const { exec: answer } = boardReadExec({
     board: [leanBoardPage([RECOVERY_LISTED])],
     // The open walk answers without #41, which closed by then; the closed walk has it only once the open walk has answered.
-    issues: [issuesPage([walkedIssue(10, [membership('PVTI_listed')])])],
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
     closedIssues: () => [issuesPage(openWalkAnswered ? [walkedIssue(41, [membership(card.id)])] : [])],
     items: [hydratedItem(card)],
   });
@@ -791,7 +825,7 @@ test('an issue reopened between the two walks is recovered from the recently upd
     board: [leanBoardPage([RECOVERY_LISTED])],
     // The open walk answered while #27 was closed; the second walk finds it open again, as GitHub does for a request
     // that asks for open and closed issues updated within the window, and never for one that asks for closed issues only.
-    issues: [issuesPage([walkedIssue(10, [membership('PVTI_listed')])])],
+    issues: [issuesPage([walkedIssue(LISTED_ISSUE, [membership('PVTI_listed')])])],
     closedIssues: (args) => {
       const query = args.find((arg) => arg.startsWith('query=')) ?? '';
       return [issuesPage(/states:\[OPEN, CLOSED\]/.test(query) ? [walkedIssue(27, [membership(card.id)])] : [])];
@@ -830,7 +864,7 @@ test('ANTI-REGRESSION: board reads recover a dropped open card and a dropped car
 
   assert.deepEqual(sortedById(items).map((i) => [i.id, i.content.number]), [
     ['PVTI_closed_42', 42],
-    ['PVTI_listed', 10],
+    ['PVTI_listed', LISTED_ISSUE],
     ['PVTI_open_41', 41],
   ]);
   assert.equal(advisories.length, 1);
@@ -849,7 +883,7 @@ test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () =>
       () => fetchBoard(boardReadExec(base).exec),
       (error) => {
         // A request the fixture never expected is a broken test, not a refusal by the reader.
-        assert.doesNotMatch(error.message, /unexpected gh invocation/, label);
+        assert.doesNotMatch(/** @type {Error} */ (error).message, /unexpected gh invocation/, label);
         return true;
       },
       label,
@@ -857,19 +891,19 @@ test('ANTI-REGRESSION: board reads refuse inconsistent recovery evidence', () =>
   }
   // The unbroken read is what each case departs from, so it has to be accepted whole.
   assert.deepEqual(sortedById(fetchBoard(boardReadExec(recoveryBase()).exec)).map((i) => [i.id, i.content.number]), [
-    ['PVTI_listed', 10],
-    ['PVTI_omitted', 11],
-    ['PVTI_overflow', 12],
+    ['PVTI_listed', LISTED_ISSUE],
+    ['PVTI_omitted', OMITTED_ISSUE],
+    ['PVTI_overflow', OVERFLOW_ISSUE],
   ]);
 });
 
 test('an issue in both walks whose two observations disagree, or whose closed observation is malformed, fails the read naming the issue', () => {
   const open41 = walkedIssue(41, [membership('PVTI_open_41')]);
   const hydrated = [hydratedItem(omittedCard('PVTI_open_41', 41, 'OPEN', 'Backlog'))];
-  const cases = [
+  const cases = /** @satisfies {[string, import('./board-fixtures.mjs').WalkedIssue, import('./board-fixtures.mjs').WalkedIssue | { number: number, projectItems: null }][]} */ ([
     ['the open walk saw no membership and the closed walk saw one', walkedIssue(41, []), walkedIssue(41, [membership('PVTI_open_41')])],
     ['the closed walk record is malformed', open41, { number: 41, projectItems: null }],
-  ];
+  ]);
   for (const [label, openRecord, closedRecord] of cases) {
     assert.throws(
       () => fetchBoard(boardReadExec({
@@ -878,7 +912,10 @@ test('an issue in both walks whose two observations disagree, or whose closed ob
         closedIssues: [issuesPage([closedRecord])],
         items: hydrated,
       }).exec),
-      (error) => namesNumber(error.message, 41) && !/unexpected gh invocation/.test(error.message),
+      (error) => {
+        const { message } = /** @type {Error} */ (error);
+        return namesNumber(message, 41) && !/unexpected gh invocation/.test(message);
+      },
       label,
     );
   }
@@ -888,22 +925,25 @@ test('an issue in both walks whose observation repeats a membership fails the re
   const base = recoveryBase();
   const first = [membership('PVTI_overflow'), ...elsewhere(99)];
   const overflowReply = (repeated) => [
-    membershipsPage(12, structuredClone(first), { totalCount: repeated ? 102 : 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
-    membershipsPage(12, repeated ? [...elsewhere(1, 99), ...elsewhere(1, 99)] : elsewhere(1, 99), { totalCount: repeated ? 102 : 101 }),
+    membershipsPage(OVERFLOW_ISSUE, structuredClone(first), { totalCount: repeated ? 102 : 101, pageInfo: { hasNextPage: true, endCursor: 'members-1' } }),
+    membershipsPage(OVERFLOW_ISSUE, repeated ? [...elsewhere(1, 99), ...elsewhere(1, 99)] : elsewhere(1, 99), { totalCount: repeated ? 102 : 101 }),
   ];
   let reads = 0;
   const { exec } = boardReadExec({
     board: base.board,
-    issues: [issuesPage([walkedIssue(12, structuredClone(first), { totalCount: 101 })])],
-    closedIssues: [issuesPage([walkedIssue(12, structuredClone(first), { totalCount: 102 })])],
+    issues: [issuesPage([walkedIssue(OVERFLOW_ISSUE, structuredClone(first), { totalCount: 101 })])],
+    closedIssues: [issuesPage([walkedIssue(OVERFLOW_ISSUE, structuredClone(first), { totalCount: 102 })])],
     // Only the second overflow walk read, the closed observation's, repeats the last id; every other read holds each once.
-    memberships: { 12: () => overflowReply((reads += 1) === 2) },
+    memberships: { [OVERFLOW_ISSUE]: () => overflowReply((reads += 1) === 2) },
     items: base.items,
   });
 
   assert.throws(
     () => fetchBoard(exec, { onOmission: () => {} }),
-    (error) => namesNumber(error.message, 12) && !/unexpected gh invocation/.test(error.message),
+    (error) => {
+      const { message } = /** @type {Error} */ (error);
+      return namesNumber(message, OVERFLOW_ISSUE) && !/unexpected gh invocation/.test(message);
+    },
   );
 });
 
@@ -971,7 +1011,7 @@ test("a started opening read's time counts against the read's retry budget", () 
   assert.throws(
     () => fetchBoard(listingFailing(), { opening, budget, pause: (ms) => pauses.push(ms) }),
     (error) => error instanceof GhUnavailableError
-      && error.message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.',
+      && /** @type {Error} */ (error).message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.',
   );
   assert.deepEqual(pauses, []);
 });
@@ -1612,10 +1652,14 @@ test('formatGrouped warns when an unrecognised routing value is rendered without
 
 // The address a test comment carries, made from its text so that an expectation can name it.
 const commentUrl = (body) => `https://github.com/example-owner/example/issues/7#issuecomment-${encodeURIComponent(body).slice(0, 40)}`;
+/**
+ * @param {string[]} bodies
+ * @param {{ totalCount?: number | string, hasPreviousPage?: boolean, startCursor?: string | null }} [fields]
+ */
 const commentPage = (bodies, { totalCount = bodies.length, hasPreviousPage = false, startCursor = null } = {}) => ({
   totalCount,
   pageInfo: { hasPreviousPage, startCursor },
-  nodes: bodies.map((body) => ({ body, url: commentUrl(body), author: { login: 'example-owner' } })),
+  nodes: bodies.map((body) => ({ body, url: commentUrl(body), author: /** @type {{ login: string } | null} */ ({ login: 'example-owner' }) })),
 });
 // What a detail read reports of a comment `commentPage` made: who posted it and where it is.
 const commentSource = (body) => ({ login: 'example-owner', url: commentUrl(body) });
@@ -1862,6 +1906,12 @@ test('cardDetailsQuery asks for body, parent and the newest comment page with it
 
 // Every expected line below is written by hand from the intake contract (the summary on
 // stdout, one text file per card), never produced by the function under test.
+/**
+ * @param {number | string} number
+ * @param {string} status
+ * @param {string | number} title
+ * @param {{ routing?: unknown, labels?: string[], openBlockers?: number[], assignees?: string[] }} [fields]
+ */
 const intakeCard = (number, status, title, { routing = 'Product', labels = [], openBlockers = [], assignees = [] } = {}) => ({
   number, status, title, routing, labels, openBlockers, assignees,
 });
@@ -2519,8 +2569,9 @@ test('markerOf: a card carrying show-me-first in any letter case is marked, one 
     try {
       return markerOf(card, items);
     } catch (error) {
-      return new RegExp(`\\bcard ${card}\\b`).test(error.message) && /labels cannot be read|unreadable labels/.test(error.message)
-        ? unreadable : `throws ${error.message}`;
+      const { message } = /** @type {Error} */ (error);
+      return new RegExp(`\\bcard ${card}\\b`).test(message) && /labels cannot be read|unreadable labels/.test(message)
+        ? unreadable : `throws ${message}`;
     }
   };
   assert.deepEqual([10, 11, 12].map(outcome), [unreadable, unreadable, true]);
@@ -2539,8 +2590,11 @@ test('every request of one board read shares one retry budget', () => {
 
   assert.throws(
     () => fetchBoard(exec, { budget: { now: () => t, endsAt: 90_000 }, pause: (ms) => pauses.push(ms) }),
-    (error) => error.code === 'GH_UNAVAILABLE'
-      && error.message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.',
+    (error) => {
+      const failure = /** @type {NodeJS.ErrnoException} */ (error);
+      return failure.code === 'GH_UNAVAILABLE'
+        && failure.message === 'GitHub is temporarily unavailable (HTTP 503). Nothing retries on its own: try again in a minute.';
+    },
   );
   assert.deepEqual(pauses, []);
 });

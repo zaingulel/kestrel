@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck
 // PreToolUse(Bash) guard: apply Git refusals, then grant cleanup-specific permission only
 // from this installed root. The classifier documents the accident-catcher's wider limits.
 // The run's mark reaches the publishing rule here: PRE_APPROVED_RUN_SESSION=<run start> admits only the delivery forms of its own card,
@@ -31,6 +30,7 @@ const environmentMarks = {
 const environmentMarked = environmentMarks.preApprovedStart !== undefined;
 const inDesktopApp = process.env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop";
 
+/** @returns {never} */
 function refusePublishing(session, why) {
   console.error(`Blocked: ${session} ${why}.`);
   process.exit(2);
@@ -55,7 +55,7 @@ function publishingSession(marks) {
 async function preApprovedOptions(start, boundCard, coordinated, verifyPin) {
   if (start === undefined) return null;
   try {
-    const { TRACKER } = await import("../../scripts/lib/board-config.mjs");
+    const { TRACKER } = /** @type {{ TRACKER?: string }} */ (await import("../../scripts/lib/board-config.mjs"));
     return { start, tracker: TRACKER ?? "github", boundCard, coordinated, verifyJobPin: verifyPin };
   } catch {
     return refusePublishing("a pre-approved run session", "publishes nothing: the board configuration could not be loaded to name this repository's tracker");

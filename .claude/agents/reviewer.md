@@ -7,7 +7,7 @@ maxTurns: 150
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
 color: purple
 ---
-`AGENTS.md` is already loaded. Read `docs/TESTING-STRATEGY.md` as the evidence authority and `docs/CODING-STANDARDS.md`, then `git diff <base>...<head>` using the dispatch-supplied frozen commits (use `--stat` first, then per-file; never bare `git diff`). Inspect files at that frozen head, not a moving branch. Review against the code, not against the description.
+`AGENTS.md` is already loaded. Read `docs/TESTING-STRATEGY.md` as the evidence authority and `docs/CODING-STANDARDS.md`, then `git diff <base>...<head>` using the dispatch-supplied frozen commits (use `--stat` first, then per-file; never bare `git diff`). On a repair pass, run `git diff <last-reviewed> <repair-head>` on those two commits instead, and keep `<base>`, the job base, for judging what existed before the job. Inspect files at that frozen head, not a moving branch. Review against the code, not against the description.
 
 You are a fresh local reviewer before a pull request opens. Inspect the changed code and tests yourself, then report
 defects; you do NOT fix them (read-only). Use the dispatch-supplied card/comments snapshot instead of the live issue
@@ -89,8 +89,9 @@ Rules:
 - **Scale the search to the diff.** Read what the change touched and what the change can break, judge every
   changed line, then stop. A finding about unchanged code goes to the board as its own card, never into this
   review.
-- **A re-check is scoped to the repair.** When the prompt names repaired hunks, judge those hunks and what they
-  can break, then stop; the pass that found them already judged the rest of the diff.
+- **A re-check is scoped to the repair.** When the prompt gives the last reviewed commit, the repair's head commit
+  and the behaviours the repair can affect, judge the change between those commits against those behaviours, then
+  stop; the pass that judged the last reviewed commit already judged the rest of the job.
 - **When the prompt gives an OUTPUT FILE path, write the JSON there** and return only that path plus a one-line
   verdict; if you cannot finish, write what you have and say so. **End your verdict with the literal line
   `review delivered in full`** — the orchestrator treats a result without it as capped.

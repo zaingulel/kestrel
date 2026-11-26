@@ -10,7 +10,8 @@ the project tile shows **Saved default**. Under **Choose for this session**, use
 Close that session before choosing again. The opener replaces a verified stopped tab. Claude Code uses
 `coordinator.model` and `coordinator.effort` from fetched `main`. Codex uses its own model and effort settings.
 
-The coordinator has no board watcher or polling timer. Jobs have visible tabs. The session that owns a background
+The coordinator has no board watcher or polling timer. Jobs have visible tabs, and the notes forwarder shows in tab
+`job notes`. The session that owns a background
 terminal names and reports it so `hc get` and `hc read` can show it. The job wait, coordinator alarm and loss watch
 carry no `herdr.space` or `herdr.tab` label. Read the board through the coordinator commands first, then use any
 `gh` or repository command needed. Fix problems in the project's cards and report the changes to the owner.
@@ -26,7 +27,7 @@ Reserve each gate's yes for the owner.
   `sleep`, a loop or a timed read. Before ending any turn its last reads are its jobs (`hc ls --label fabraik.role=job
   --all --json`) and then `cards`, so whatever arrives after them is queued input that wakes it.
 - **Wakes.** The owner's message wakes it, as do Herdr's notes from its jobs, the line `A card moved to Ready.` that
-  `board-move` and `board-add` type into it after a move to Ready, and the exit notes of its alarm and its loss watch. A
+  `board-move` and `board-add` type into it after a move to Ready, and the exit notes of its alarm, its loss watch and its notes forwarder. A
   GitHub event wakes it only where a listener exists, and a move on GitHub's own board page is seen at the next wake. A
   wake waits up to Herdr's draft wait (60 seconds by default) while the owner has an unsent message in the coordinator,
   and is refused while the coordinator is blocked on a question, which the read when the owner answers makes up.
@@ -52,9 +53,30 @@ Reserve each gate's yes for the owner.
   where the watch before it had also ended that way, it starts none in that turn; the next wake from anything else
   starts one again. While it is blocked on its own question no note reaches it, so a loss in that time is sorted in
   the turn the owner's answer starts.
+- **A notes forwarder.** Herdr sends a job's notes only to the parent it had at launch, so the notes of a job an
+  earlier coordinator started never reach the current one. Whenever its jobs read shows a live job whose `parent` is
+  not its own `HC_TERMINAL_ID`, it runs `node scripts/coordinator.mjs forward` first in every turn, after the loss
+  watch and before any other read of its jobs. `forward` exits 0 where it starts the forwarder in tab `job notes`
+  once the forwarder shows `forward-ready`, where one of its own is already running, or where no job of an earlier
+  coordinator runs, and it removes the finished forwarders of an earlier coordinator, one printed line each. It exits
+  1 where it is not the sole running coordinator, where its own forwarder has stopped with a non-zero exit, which it
+  prints with the forwarder's last line, or where the forwarder never shows `forward-ready`; it starts nothing in the
+  first two cases, and the terminal stays visible in the third. The forwarder types one line into the coordinator when
+  such a job becomes `blocked`, `done` or `error` or finishes: `Card <N>'s job <address>, started by an earlier
+  coordinator, is <blocked|done|error|finished>. See: hc read <address>`. While the coordinator is blocked on its own
+  question, the forwarder prints `not forwarded while the coordinator asks the owner` and goes on, and the read when
+  the owner answers makes up that note. It treats a forwarded line as that job's own note: `blocked` follows **A job
+  that needs the owner**; `done` reads `hc read <address> --lines 5` and handles `Card <N> merged.` as **A merged
+  job**, and where that line is not on the job's screen, since an earlier coordinator's job sent its merged line to a
+  parent that may be gone, it settles from its board read whether the card merged (the card closed by a merged pull
+  request) and handles it as **A merged job** if so; `error` and `finished` follow [herdr-stopped-job.md](herdr-stopped-job.md). Its exit note wakes the
+  coordinator, and on it `hc get <address> --json` shows the forwarder's exit. Exit 0 means no job of an earlier
+  coordinator runs and needs nothing. Any other exit it tells the owner with `hc read <address> --lines 5`, then
+  removes the forwarder with `hc rm`, and it runs `forward` again unless the previous forwarder also ended that way;
+  the next wake from anything else runs it again.
 - **Moments to read the board.** The coordinator reads the board at its start, when a child's blocked note reaches it,
-  when a job tells it its card merged, when a job tab ends, when `A card moved to Ready.`, its alarm's note or its loss
-  watch's note reaches it and when the owner speaks. At each it runs `start` for the next startable card from `cards` and repeats until a start
+  when a job tells it its card merged, when a job tab ends, when `A card moved to Ready.`, its alarm's note, its loss
+  watch's note, its notes forwarder's note or a forwarded line reaches it and when the owner speaks. At each it runs `start` for the next startable card from `cards` and repeats until a start
   refuses or no card is startable. Before each start it applies [the overlap hold of the `resume` skill's "2.
   Work-pick"](../SKILL.md#2-work-pick-owner-gate-one), so that two jobs never change the same files at once: a job
   started earlier in the round, working outside this Herdr space or holding a card that `node scripts/board.mjs --all`,
@@ -66,8 +88,10 @@ Reserve each gate's yes for the owner.
   skill](../SKILL.md), then reads the job's final report with `hc read <address> --lines 40`, gives it to the owner, and
   ends that job's terminal with `hc kill` and `hc rm`. It then closes the job's tab with
   `herdr-app do tab.close --id <its tab id>`. A job that is blocked, failed, ended without `Card <N> merged.` or
-  unreadable keeps its tab. When the owner speaks, it first reads with `hc read <address> --lines 5` each of its job
-  children whose status is `done`, and takes one whose last line is `Card <N> merged.` as having told it.
+  unreadable keeps its tab. When the owner speaks, it first reads with `hc read <address> --lines 5` each job of
+  the space whose status is `done`, its own children and jobs an earlier coordinator started alike, since a forwarded
+  `done` refused while it was blocked reaches it no other way, and takes one whose last line is `Card <N> merged.` as
+  having told it.
 - **Cards.** `node scripts/coordinator.mjs cards --login <login>` lists the startable `Ready` cards in build order,
   leaving out a card an open blocker holds, a proposal, an assigned card, an epic parent and a card with a closing pull
   request.
@@ -120,8 +144,8 @@ Reserve each gate's yes for the owner.
   after a Coordinator restart.
 - **At its start.** Run `unfinished` and report jobs in flight with their state. Include the details of `held` and
   `elsewhere` jobs at startup only. Report blocked jobs as **A job that needs the owner** says. Report live running jobs
-  whose `parent` differs from `HC_TERMINAL_ID`: Herdr fixes their parent at launch, so their notes go to the old
-  coordinator. Read [herdr-stopped-job.md](herdr-stopped-job.md) whole at start and every wake for inspection and
+  whose `parent` differs from `HC_TERMINAL_ID` as started by an earlier coordinator, whose notes **A notes
+  forwarder** carries. Read [herdr-stopped-job.md](herdr-stopped-job.md) whole at start and every wake for inspection and
   recovery, then run the start round. Close `Coordinator start` in this space with `herdr-app do tab.close --id <id>`.
   A failed opener leaves that tab with its message for the owner.
 - **At login.** A per-project user unit opens the opener as a `Coordinator start` tab, so a start that fails stays in

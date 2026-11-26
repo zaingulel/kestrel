@@ -1091,8 +1091,9 @@ async function jobOwnershipFixture(t, { enablePreApproved = false } = {}) {
   const runStart = '2026-11-05T10:00:00Z';
   const claimTime = '2026-11-05T10:01:00Z';
   const claimUrl = `https://github.com/${repository}/issues/92#issuecomment-1092`;
-  const root = join(toolkit.root, 'repository');
-  const worktree = join(toolkit.root, 'job-92');
+  const physicalRoot = realpathSync.native(toolkit.root);
+  const root = join(physicalRoot, 'repository');
+  const worktree = join(physicalRoot, 'job-92');
   mkdirSync(root);
   const env = { ...gitEnvironment(), GIT_AUTHOR_NAME: 'Ownership Test', GIT_AUTHOR_EMAIL: 'ownership@workflow.invalid',
     GIT_COMMITTER_NAME: 'Ownership Test', GIT_COMMITTER_EMAIL: 'ownership@workflow.invalid' };

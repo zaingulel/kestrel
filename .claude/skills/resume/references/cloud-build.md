@@ -102,7 +102,7 @@ authorisation answers no permission prompt or safety check from the runtime: eac
    `npm ci` and check the hooks path as that section says. Then follow "4. Plan" to "6.
    Verify and review" with their cloud routes: every review runs in the cloud on this family's seats, the plan review
    and the review of the final tree included, declared as "Reviews in a cloud build" below says. Every commit made after
-   the review of the final tree gets the pass scoped to the repaired hunks that "6. Verify and review" describes, on the
+   the review of the final tree gets the repair pass that "6. Verify and review" describes, on the
    `reviewer` seat, before the draft opens, a repair that adds no factual claim included. The plan review settles before
    any builder starts, as "4. Plan" says. Where a review needs `plan-reviewer`, `reviewer` or `security-reviewer` and
    that seat cannot be dispatched in the cloud, the build stops and the owner is told: no review is left to the local
@@ -115,6 +115,8 @@ authorisation answers no permission prompt or safety check from the runtime: eac
    the eligibility check of "8. Deliver" with `<origin-main>` as `git merge-base HEAD origin/main`: the commit the job
    was cut from, found the same way after a worktree was created again, never the commit it was created again from.
    Where that check would choose the direct route, open nothing and tell the owner, as the opening of this section says.
+   A cloud session saves no folder and asks nothing; its draft's body is the write-up, and the local session that
+   takes the draft up saves the folder at the head it kept before it shows the card.
    Write the body as "7. Push authorisation" says. Its evidence names, for the git guard, each hook, the seats and the
    review, whether it ran in the cloud, waits for local delivery, or did not run. Its Review section carries, on a line
    of its own after the review line, `Reviewed commit: ` followed by the full commit the last review pass covered, as

@@ -145,7 +145,7 @@ const receiptLine = (argv) => `- 2026-11-22T10:00:00.000Z | red | \`${JSON.strin
 
 // A temporary repository on branch job/1 whose run log holds one receipt line.
 function runLogRepo(t, receipt) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "handoff-check-")));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "handoff-check-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const args of [["init", "-q"], ["symbolic-ref", "HEAD", "refs/heads/job/1"]]) {
     const run = spawnSync("git", args, { cwd: root, encoding: "utf8" });

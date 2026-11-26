@@ -133,6 +133,9 @@ The session commits every green slice on the job branch, so a crash costs at mos
 regenerates any artifact the `generated artifacts` row of the Conventions table in
 [`.agents/REPOSITORY.md`](../.agents/REPOSITORY.md) names, and the session commits it with its source. Nobody merges
 such an artifact by hand, and the hooks keep it from landing stale.
+
+The `tester` seat runs after each committed slice that adds or changes tests. It breaks each new behaviour on purpose in a throwaway copy outside the job and runs the tests that claim to cover it. A break the tests leave green goes back to a builder before any review starts, as a review finding would. The tester fixes nothing, writes nothing in the job's files and replaces none of the evidence the session logs. [The `resume` skill's tester reference](../.agents/skills/resume/references/tester.md) owns its steps.
+
 [The `resume` skill](../.agents/skills/resume/SKILL.md#5-build) owns the build steps under "5. Build".
 
 ### Verifying and reviewing
@@ -324,7 +327,7 @@ the two.
 | The session stops while a plan awaits approval | The agents have built nothing; the branch, claim and plan stay on that machine | A later session there presents the plan and asks again; an earlier approval does not carry over |
 | A check passes but misses part of the claim | The receipt is green, yet the check never observes that part | That part of acceptance stays unproved; a receipt cannot show that the session chose the right command |
 | A review finding is true | The reviewer names a real defect or gap | A builder repairs it and the session verifies it, or the session takes it to the owner where judgment remains |
-| Two repair rounds still raise true findings | The repair review still raises findings | The session runs one more round or brings the owner a decision |
+| Two repair rounds still raise true findings | The repair review still raises findings | The session settles them as [the rule after two repair cycles](../.agents/skills/resume/references/review-and-push.md#6-verify-and-review) says |
 | A reviewer is unreachable | A usage, sign-in or provider failure | The substitution route runs and the pull request body declares it; unavailable is never a clean review |
 | `main` moves during delivery | The job's base and the remote history differ | The session rebases while draft, and receipt reuse decides which checks run again |
 | A required check fails, or the pull request is blocked or closed | The merge watch ends with its reason | The session reports it and returns the pull request to draft before pushing a repair |

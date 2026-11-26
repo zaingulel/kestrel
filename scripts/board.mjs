@@ -30,7 +30,9 @@
 // board read here opens, then one query per batch of 20 cards' details. The reads that
 // need a reply follow one at a time: a card the listing left out, a batch too large to
 // read in one, a card's older comments (a markdown install reads its cards, origin/main and
-// its job branches instead; Linear, Jira and Azure use native reads). It creates <folder> and writes each read card's full text to
+// its job branches instead; Linear, Jira and Azure use native reads). For each claimed card whose newest claim names
+// this machine it also reads Herdr's job terminals (`hc`), `git worktree list` and the job's worklog folder
+// (observeClaims, scripts/lib/board-claim.mjs), so the scan tells a live claim from a stalled one. It creates <folder> and writes each read card's full text to
 // <folder>/<id>.txt, and writes nothing else. Stdout is the summary alone, one section per
 // card naming its file, and ends with a line counting itself. The scan, the details outcome and the line count go to stderr.
 // Exit 0: whole and clean. 1: a rejected argument, or a folder that cannot be created. 2: the
@@ -59,7 +61,9 @@
 // scanBoard/scanOutcome/intakeCards/intakeOutcome (scripts/lib/board-rules.mjs), so this
 // file holds no judgment of its own and the whole contract is unit-testable.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
 import { defaultRunner, heldReasons, readWaitLevel } from './lib/merge-evidence.mjs';
@@ -86,6 +90,7 @@ import {
   parkedLine,
   pickable,
 } from './lib/board.mjs';
+import { herdrCommand, observeClaims } from './lib/board-claim.mjs';
 import { linearTeamKey } from './lib/board-linear.mjs';
 import { isFailedEmptyRead, readBoard, readDetails } from './lib/board-read.mjs';
 import { intakeCards, intakeOutcome, scanBoard, scanOutcome } from './lib/board-rules.mjs';
@@ -154,16 +159,17 @@ async function waitsLine(card, herdr, tracker, boardReads) {
 
 // The board line and the card summaries on stdout, the full card texts in the directory; the
 // scan and the details outcome on stderr, so a caller that captures stdout holds the summary alone.
-async function printIntake(items, args, { executor, start, linear, jira, azure, output, tracker, markdown, writeFile }) {
+async function printIntake(items, args, { executor, start, linear, jira, azure, output, tracker, markdown, writeFile, observing }) {
   const { candidates, claims, numberless, unplaced } = intakeCards(items);
   const numbers = [...candidates, ...claims].map((card) => card.number);
   const started = tracker === 'github' ? await startTogether(start, cardDetailRequests(numbers)) : [];
   const details = readDetails(tracker, { executor, linear, jira, azure, markdown, started }, numbers);
+  const observations = await observeClaims({ claims, details, ...observing });
   const picks = pickable(items);
   const listing = intakeListing(headerLine(PICKABLE_STATUSES.join('/'), picks, items, tracker), picks);
   const files = writeCardFiles(intakeCardFiles({ candidates, claims, details }), details, args.intake, writeFile);
   const document = intakeSummary({ listing, candidates, claims, numberless, details, directory: args.intake, files, readyOrder: tracker === 'github' ? { unplaced } : null });
-  const { lines, exitCode } = intakeOutcome({ ...scanBoard(items), details });
+  const { lines, exitCode } = intakeOutcome({ ...scanBoard(items, observations), details });
   output.log(document.join('\n'));
   const parkedNote = parkedLine(items, args);
   if (parkedNote) output.error(parkedNote);
@@ -249,7 +255,16 @@ export async function main(args = process.argv.slice(2), dependencies = {}) {
 
   if (parsed.intake) {
     const writeFile = dependencies.writeFile ?? writeFileSync;
-    return printIntake(items, parsed, { executor, start, linear, jira, azure, output, tracker, markdown, writeFile });
+    const observing = {
+      hostname: dependencies.hostname ?? hostname(),
+      now: new Date((dependencies.now ?? Date.now)()),
+      rungit: dependencies.rungit ?? ((gitArgs) => spawnSync(gitExecutable() ?? 'git.exe', gitArgs, { encoding: 'utf8' })),
+      hc: dependencies.hc ?? herdrCommand('hc', 5_000),
+      readDir: dependencies.readDir ?? readdirSync,
+      stat: dependencies.stat ?? lstatSync,
+      readFile: dependencies.readFile ?? readFileSync,
+    };
+    return printIntake(items, parsed, { executor, start, linear, jira, azure, output, tracker, markdown, writeFile, observing });
   }
 
   // Under --json stdout is a document a caller parses, so the scan goes to stderr rather

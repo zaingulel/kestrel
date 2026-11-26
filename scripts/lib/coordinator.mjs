@@ -6,13 +6,14 @@
 // tracker through these tools, so a read GitHub refuses for quota reaches it as a line naming the reset.
 // scripts/coordinator.mjs is the command. Herdr and tracker calls are injected here.
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { herdrCommand, jobTerminals, interpretTerminal, isLive, LAUNCH_PROGRAM, readRecord, readTerminal } from './board-claim.mjs';
 import { BOARD_OWNER, BOARD_REPOSITORY } from './board-config.mjs';
 import { moveCards } from './board-move.mjs';
 import { fetchBoard, fetchCardDetails, isClaim, isContentUnresolved, newestClaim, normalizeItem, pickable, sortForDisplay } from './board.mjs';
@@ -27,21 +28,14 @@ import { isRecord, LOCAL_HERDR_TERMINAL, readSettingsHeader } from './runtimes.m
 import { cardRef } from './tracker.mjs';
 import { onReviewedMain, repairWorkflowSnapshot, selectWorkflowVersion, verifyJobPin, verifyWorkflowSnapshot, workflowDrift, workflowStore } from './workflow-pin.mjs';
 
-// A Herdr command line, `hc` or `herdr-app`: resolves its exit code and output, and rejects only when it cannot run.
-export const herdrCommand = (executable, timeout = 0) => (commandArgs) => new Promise((resolve, reject) => {
-  execFile(executable, commandArgs, { encoding: 'utf8', timeout }, (error, stdout, stderr) => {
-    if (error && typeof error.code !== 'number') reject(error);
-    else resolve({ code: error ? error.code : 0, stdout, stderr });
-  });
-});
+export { herdrCommand };
+
+/** @typedef {import('./board-claim.mjs').HerdrCommand} HerdrCommand */
 
 export const COORDINATOR_TAB = 'Coordinator';
 const TURNED_OFF = 'HERDR_OFF';
 
 const coordinatorPrompt = (login) => `Coordinate this project from its Herdr space: read .agents/skills/resume/references/herdr-lead.md whole and follow its "Coordinator" section.\n${JSON.stringify({ login })}`;
-
-// A Herdr command line, `hc` or `herdr-app`, run with its arguments: its exit code and output.
-/** @typedef {(args: string[]) => Promise<{ code: number, stdout: string, stderr: string }>} HerdrCommand */
 
 // The spaces `herdr-app ls` lists, or throws when it fails or lists them in a shape this does not read.
 export async function listSpaces(herdrApp) {
@@ -290,56 +284,6 @@ export async function listCards({ print, ...tracker }) {
   return 0;
 }
 
-// The terminals `hc ls` lists with the labels `labels` (`key=value` words), finished ones too where `all`, or throws, naming the
-// cause, when it cannot list them.
-async function jobTerminals(hc, labels, all = false) {
-  const listing = await hc(['ls', ...labels.flatMap((label) => ['--label', label]), ...(all ? ['--all'] : []), '--json']);
-  try {
-    if (listing.code !== 0) throw new Error();
-    const { terminals } = JSON.parse(listing.stdout);
-    if (!Array.isArray(terminals)) throw new Error();
-    return terminals;
-  } catch {
-    throw new Error(`hc ls could not list the job terminals: ${listing.stderr.trim() || `exit ${listing.code}`}`);
-  }
-}
-
-// The `hc get --json` record of terminal `address` as `interpret` reads it, or throws, naming what it could not do (`reading`).
-async function readRecord(hc, address, reading, interpret) {
-  const read = await hc(['get', address, '--json']);
-  try {
-    if (read.code !== 0) throw new Error();
-    return interpret(JSON.parse(read.stdout));
-  } catch {
-    throw new Error(`hc get ${address} could not ${reading}: ${read.stderr.trim() || (read.code === 0 ? 'unreadable reply' : `exit ${read.code}`)}`);
-  }
-}
-
-// The program `startJob` launches a job through; Herdr's record keeps it as `argv[0]` until the program is lost.
-const LAUNCH_PROGRAM = '/usr/bin/env';
-
-// Whether the `hc ls` entry of terminal `address` is live, or throws, naming the address, where its state is no string.
-function isLive(address, state) {
-  if (typeof state !== 'string') throw new Error(`hc ls listed terminal ${address} with no readable state`);
-  return state === 'live';
-}
-
-// What `hc get` reads of terminal `address`: whether it is `running` a program, its status and its labels. A live terminal
-// is running when its foreground is a known runtime, is a different process from the terminal or uses the job launch form.
-// A finished record is stopped. Throws when a field a live record needs cannot be read.
-function interpretTerminal(record, live) {
-  if (!live) return { running: false, status: undefined, labels: record.labels };
-  const { pid, argv, foreground, status } = record;
-  if (!Number.isInteger(pid) || !Number.isInteger(foreground.pid)) throw new Error();
-  if (!Array.isArray(argv) || typeof argv[0] !== 'string') throw new Error();
-  if (status !== null && typeof status.state !== 'string') throw new Error();
-  const runtime = foreground.name === 'claude' || foreground.name === 'codex';
-  return { running: runtime || foreground.pid !== pid || argv[0] === LAUNCH_PROGRAM, status: status?.state, labels: record.labels };
-}
-
-// `interpretTerminal` over the `hc get --json` record of terminal `address`, or throws, naming the cause, when `hc get` cannot be read.
-const readTerminal = (hc, address, live) => readRecord(hc, address, 'tell whether it is running and its status', (record) => interpretTerminal(record, live));
-
 // A same-process foreground only proves a tab stopped if it is a recognized interactive shell with nothing to run.
 const INTERACTIVE_SHELLS = new Set(['bash', 'dash', 'fish', 'ksh', 'sh', 'zsh']);
 const interactiveShellName = (program) => basename(program).replace(/^-/, '');
@@ -442,6 +386,214 @@ export async function wakeCoordinator({ root, herdrApp, hc, print }) {
   }
   print(`Woke the coordinator ${target.address}.`);
   return 0;
+}
+
+// What the note forwarder reads of one job terminal: its `hc get` state, status (null where it has none or is finished),
+// status time, parent and card label.
+/** @typedef {{ state: string, status: string | null, statusMs: unknown, parent: unknown, card: unknown }} ForwardedJob */
+
+// A job's state or status the coordinator hears of when the job is not its own child; `finished` stands for a finished job.
+const FORWARDED_STATES = new Set(['blocked', 'done', 'error', 'finished']);
+const FORWARDED_CARD = /^[1-9]\d*$/;
+// Keyed on the status time as well, so a second `done` after a new turn is forwarded again.
+const forwardKey = ({ state, status, statusMs }) => JSON.stringify([state, status, statusMs]);
+
+// The lines that tell coordinator `coordinator` of each change from `before` to `after` (address -> ForwardedJob) of a job
+// whose parent is another terminal: its status became blocked, done or error, or it finished. The coordinator's own children
+// are skipped, since Herdr notes them to it itself. Throws, naming the address, where a line would carry a malformed card or
+// address, since the line is typed into the coordinator.
+/** @param {Map<string, ForwardedJob>} before @param {Map<string, ForwardedJob>} after @param {string} coordinator */
+export function forwardedNotes(before, after, coordinator) {
+  const lines = [];
+  for (const [address, job] of after) {
+    const now = job.state === 'live' ? job.status : 'finished';
+    const previous = before.get(address);
+    if (job.parent === coordinator || !FORWARDED_STATES.has(now ?? '') || (previous && forwardKey(previous) === forwardKey(job))) continue;
+    if (!LOCAL_HERDR_TERMINAL.test(address) || typeof job.card !== 'string' || !FORWARDED_CARD.test(job.card)) {
+      throw new Error(`job ${address} has a malformed card or address, so its change is not forwarded`);
+    }
+    lines.push(`Card ${job.card}'s job ${address}, started by an earlier coordinator, is ${now}. See: hc read ${address}`);
+  }
+  return lines;
+}
+
+// Every job terminal of space `space`, finished ones included, as ForwardedJob by address, or throws, naming the cause and,
+// where the listing names an address twice or a record carries a state or parent Herdr cannot produce, the address.
+/** @param {HerdrCommand} hc @param {string} space @returns {Promise<Map<string, ForwardedJob>>} */
+async function forwardedJobs(hc, space) {
+  const jobs = new Map();
+  for (const { address } of await jobTerminals(hc, ['fabraik.role=job', `fabraik.space=${space}`], true)) {
+    if (jobs.has(address)) throw new Error(`hc ls names job ${address} twice, so no change is forwarded`);
+    const job = await readRecord(hc, address, 'tell its parent, card and status', ({ state, status, status_ms: statusMs, parent, labels }) => {
+      if (typeof state !== 'string' || (status !== null && typeof status?.state !== 'string')) throw new Error();
+      return { state, status: status?.state ?? null, statusMs, parent, card: labels?.['fabraik.card'] };
+    });
+    // Herdr documents only these two states, and every job is an hc child of a local terminal.
+    if (!['live', 'finished'].includes(job.state) || typeof job.parent !== 'string' || !LOCAL_HERDR_TERMINAL.test(job.parent)) {
+      throw new Error(`job ${address} has a state or parent Herdr cannot produce, so no change is forwarded`);
+    }
+    jobs.set(address, job);
+  }
+  return jobs;
+}
+
+// Forwards to coordinator `coordinator`, through `hc send`, each change forwardedNotes finds in a job of space `space` that an
+// earlier coordinator started. `events` starts the `hc events` stream it is given the arguments of. Its first line is Herdr's
+// subscription snapshot, which only says the subscription holds; each later line is only a cue to read the jobs again. The
+// first read waits for that snapshot, so no change between them is missed, and `forward-ready` is printed after that read,
+// which forwards nothing.
+// Exit 0 once no job of an earlier coordinator is live; 1 where a read, a record or a send fails, or the stream ends first,
+// before the snapshot included.
+// A send refused with exit 9, while the coordinator asks the owner, is printed and the watch goes on.
+// The part of an async iterator of lines forwardNotes uses: it reads only whether the stream has ended.
+/** @typedef {{ [Symbol.asyncIterator](): { next(): Promise<{ done?: boolean }>, return?(): Promise<unknown> } }} LineStream */
+/** @param {{ hc: HerdrCommand, events: (args: string[]) => LineStream, coordinator: string, space: string, print: (line: string) => void }} options */
+export async function forwardNotes({ hc, events, coordinator, space, print }) {
+  const stream = events(['events', '--label', 'fabraik.role=job', '--label', `fabraik.space=${space}`, '--json'])[Symbol.asyncIterator]();
+  try {
+    if ((await stream.next()).done) {
+      print('Job notes stopped: hc events ended before Herdr subscribed.');
+      return 1;
+    }
+    let jobs = await forwardedJobs(hc, space);
+    print('forward-ready');
+    for (;;) {
+      if (![...jobs.values()].some(({ state, parent }) => state === 'live' && parent !== coordinator)) {
+        print('No job of an earlier coordinator is running.');
+        return 0;
+      }
+      if ((await stream.next()).done) {
+        print('Job notes stopped: hc events ended while a job of an earlier coordinator is still running.');
+        return 1;
+      }
+      const after = await forwardedJobs(hc, space);
+      for (const line of forwardedNotes(jobs, after, coordinator)) {
+        const sent = await hc(['send', coordinator, line]);
+        if (sent.code === 9) print(`${line} (not forwarded while the coordinator asks the owner)`);
+        else if (sent.code !== 0) {
+          print(`Job notes stopped: hc send ${coordinator} failed: ${sent.stderr.trim() || `exit ${sent.code}`}`);
+          return 1;
+        }
+      }
+      jobs = after;
+    }
+  } catch (error) {
+    print(`Job notes stopped: ${/** @type {Error} */ (error).message}`);
+    return 1;
+  } finally {
+    await stream.return?.();
+  }
+}
+
+const NOTES_TAB = 'job notes';
+const FORWARD_READY = 'forward-ready';
+
+// Every note forwarder terminal of space `space`, finished ones included: its address, state, parent, exit code and the tab
+// its `herdr.tab` label names.
+/** @param {HerdrCommand} hc @param {string} space */
+async function forwarderRecords(hc, space) {
+  const forwarders = [];
+  for (const { address } of await jobTerminals(hc, ['fabraik.role=forwarder', `fabraik.space=${space}`], true)) {
+    forwarders.push(await readRecord(hc, address, 'tell its parent, state and exit', ({ state, parent, exit_code: exit, labels }) => {
+      if (typeof state !== 'string') throw new Error();
+      return { address, state, parent, exit, tab: labels?.['herdr.tab'] };
+    }));
+  }
+  return forwarders;
+}
+
+// Removes the finished forwarder terminal `address`, or throws, naming the cause.
+async function removeForwarder(hc, address, print) {
+  const removed = await hc(['rm', address]);
+  if (removed.code !== 0) throw new Error(`hc rm ${address} failed: ${removed.stderr.trim() || `exit ${removed.code}`}`);
+  print(`Removed the finished note forwarder ${address}.`);
+}
+
+// Starts forwardNotes for coordinator `parent` as its notifying hc child in tab `job notes` of the project's space, only while a
+// job of space that an earlier coordinator started is live. Finished forwarders of another coordinator are removed first.
+// With no such job it removes this coordinator's finished forwarders that exited 0, then closes, by id, only the tabs the
+// `herdr.tab` labels of the forwarders it removed name, so a tab it did not make keeps running.
+// Exit 0 started and showing `forward-ready`, already running, or nothing to forward; 1 where `parent` is not a local Herdr
+// terminal (before any change) or the sole running Claude or Codex Coordinator, a read or change fails, this coordinator's
+// forwarder stopped with a failure (printed with its last line and kept for reading, none started), or the started watch shows
+// no `forward-ready` within 50 reads 100 ms apart (left visible).
+/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, parent: string | undefined, print: (line: string) => void }} options */
+export async function startForwarder({ root, herdrApp, hc, parent, print }) {
+  // The parent is typed into the watch's command line, so only an address Herdr gives passes.
+  if (!parent || !LOCAL_HERDR_TERMINAL.test(parent)) {
+    print('Job notes not started: HC_TERMINAL_ID names no coordinator terminal.');
+    return 1;
+  }
+  const { space, code } = await projectSpace({ root, herdrApp, print });
+  if (code !== undefined) return code;
+  if (!space) {
+    print(`No Herdr space has folder ${root}; open the coordinator first.`);
+    return 1;
+  }
+  try {
+    const { currentSpace } = await soleCoordinator({ root, herdrApp, hc, space: space.id, parent });
+    const forwarders = await forwarderRecords(hc, space.id);
+    const removedTabs = new Set();
+    for (const { address, state, parent: owner, tab } of forwarders) {
+      if (state === 'live' || owner === parent) continue;
+      await removeForwarder(hc, address, print);
+      removedTabs.add(tab);
+    }
+    const own = forwarders.filter(({ parent: owner }) => owner === parent);
+    const live = own.find(({ state }) => state === 'live');
+    if (live) {
+      print(`The note forwarder ${live.address} is already running.`);
+      return 0;
+    }
+    const jobs = await forwardedJobs(hc, space.id);
+    if (![...jobs.values()].some(({ state, parent: owner }) => state === 'live' && owner !== parent)) {
+      for (const { address, exit, tab } of own) {
+        if (exit !== 0) continue;
+        await removeForwarder(hc, address, print);
+        removedTabs.add(tab);
+      }
+      for (const { id } of currentSpace.tabs.filter(({ id: tab }) => removedTabs.has(tab))) {
+        const closed = await herdrApp(['do', 'tab.close', '--id', id]);
+        if (closed.code !== 0) throw new Error(`herdr-app could not close the ${NOTES_TAB} tab ${id}: ${closed.stderr.trim() || `exit ${closed.code}`}`);
+      }
+      print('No job of an earlier coordinator is running.');
+      return 0;
+    }
+    const stopped = own.find(({ exit }) => exit !== 0);
+    if (stopped) {
+      const read = await hc(['read', stopped.address, '--lines', '5']);
+      const last = read.code === 0 ? read.stdout.trim().split('\n').at(-1) : `hc read failed: ${read.stderr.trim() || `exit ${read.code}`}`;
+      print(`Job notes not started: the note forwarder ${stopped.address} stopped with exit ${stopped.exit}: ${last}`);
+      return 1;
+    }
+
+    const { tab, helpPane } = await openHelpTab({ root, herdrApp, space: space.id, tabs: currentSpace.tabs, tabName: NOTES_TAB });
+    const launched = await hc(['run', '--bg', '--parent', parent, '--name', `${parent}-notes`, '--cwd', root,
+      '--label', `herdr.space=${space.id}`, '--label', `herdr.tab=${tab.id}`, '--label', 'fabraik.role=forwarder', '--label', `fabraik.space=${space.id}`,
+      '--json', '--', process.execPath, join(root, 'scripts', 'coordinator.mjs'), 'forward-watch', '--coordinator', parent, '--space', space.id]);
+    if (launched.code !== 0) throw new Error(`hc run failed: ${launched.stderr.trim() || `exit ${launched.code}`}`);
+    const address = launchedAddress(launched, parent, 'hc run returned no distinct local forwarder terminal');
+    if (helpPane) {
+      try {
+        await closeAdoptedHelpPane({ root, herdrApp, space: space.id, tab: tab.id, tabName: NOTES_TAB, helpPane, address });
+      } catch (error) {
+        print(`The ${NOTES_TAB} Help pane ${helpPane} was kept: ${/** @type {Error} */ (error).message}.`);
+      }
+    }
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (attempt > 0) await delay(100);
+      const read = await hc(['read', address, '--lines', '5']);
+      if (read.code === 0 && read.stdout.split('\n').some((line) => line.trim() === FORWARD_READY)) {
+        print(`Started the note forwarder ${address} in tab ${NOTES_TAB}.`);
+        return 0;
+      }
+    }
+    print(`Job notes not started: the note forwarder ${address} showed no ${FORWARD_READY}; it is left in tab ${NOTES_TAB}, and hc read ${address} shows why.`);
+    return 1;
+  } catch (error) {
+    print(`Job notes not started: ${/** @type {Error} */ (error).message}`);
+    return 1;
+  }
 }
 
 // Every job terminal record of card `card` in space `space`, finished ones included: its address, whether it is live, and what
@@ -1055,6 +1207,81 @@ function coordinatorSetting(git) {
   }
 }
 
+// The project space as listed now, its sole running Coordinator terminal and that terminal's runtime, or a throw where
+// terminal `parent` is not the one running Claude or Codex Coordinator in space `space`.
+/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, space: string, parent: string }} options */
+async function soleCoordinator({ root, herdrApp, hc, space, parent }) {
+  const { space: currentSpace, terminals } = await coordinatorTerminals({ root, herdrApp, hc });
+  const running = terminals.filter((terminal) => terminal.running);
+  const [coordinator] = running;
+  const runtime = coordinator?.foregroundName;
+  if (currentSpace?.id !== space || running.length !== 1 || (runtime !== 'claude' && runtime !== 'codex')
+    || coordinator.address !== parent) {
+    throw new Error(`HC_TERMINAL_ID ${parent} is not the sole running Claude or Codex Coordinator in space ${space}`);
+  }
+  return { currentSpace, coordinator, runtime };
+}
+
+// Tab `tabName` with id `tabId` as `herdr-app ls` shows it now, with every listed tab, or a throw unless it shows that tab
+// once, in the project's space `space`.
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabId: string, tabName: string }} options */
+async function listOwnTab({ root, herdrApp, space, tabId, tabName }) {
+  const spaces = await listSpaces(herdrApp);
+  const [here] = localProjectSpaces(spaces, root);
+  const tabs = spaces.flatMap(({ tabs }) => tabs);
+  const ownTab = here?.tabs.find(({ id, name }) => id === tabId && name === tabName);
+  if (here?.id !== space || !ownTab || tabs.filter(({ id }) => id === tabId).length !== 1) {
+    throw new Error(`herdr-app ls does not uniquely show ${tabName} as ${tabId} in space ${space}`);
+  }
+  return { ownTab, tabs };
+}
+
+// Tab `tabName` of space `space`, found among `tabs` or opened holding only a Help pane, which `helpPane` names when it was
+// opened; a throw names why it could not be opened.
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabs: { id: string, name: string }[], tabName: string }} options */
+async function openHelpTab({ root, herdrApp, space, tabs, tabName }) {
+  const tab = tabs.find(({ name: open }) => open === tabName);
+  if (tab) return { tab, helpPane: undefined };
+  // Herdr opens a shell by default. The bundled Help mod occupies a pane without starting a terminal.
+  const opened = await herdrApp(['do', 'tab.new', '--space', space, '--name', tabName, '--folder', root, '--focus', 'false', '--mod', 'help']);
+  if (opened.code !== 0) throw new Error(opened.stderr.trim() || `exit ${opened.code}`);
+  const created = JSON.parse(opened.stdout);
+  if (created?.space !== space || typeof created.tab !== 'string' || !created.tab
+    || tabs.some(({ id }) => id === created.tab) || typeof created.pane !== 'string' || !created.pane) {
+    throw new Error('herdr-app tab.new returned no distinct job tab and Help pane in the project space');
+  }
+  return { tab: (await listOwnTab({ root, herdrApp, space, tabId: created.tab, tabName })).ownTab, helpPane: /** @type {string} */ (created.pane) };
+}
+
+// The local terminal address `hc run --json` reply `launched` names, distinct from `parent`, or throws `refusal`.
+/** @param {{ stdout: string }} launched @param {string | undefined} parent @param {string} refusal @returns {string} */
+function launchedAddress(launched, parent, refusal) {
+  const address = JSON.parse(launched.stdout)?.address;
+  if (typeof address !== 'string' || !LOCAL_HERDR_TERMINAL.test(address) || address === parent) throw new Error(refusal);
+  return address;
+}
+
+// Closes Help pane `helpPane` once the app shows terminal `address`, which `hc run` started in tab `tab`; a throw names why
+// the pane was kept.
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tab: string, tabName: string, helpPane: string, address: string }} options */
+async function closeAdoptedHelpPane({ root, herdrApp, space, tab, tabName, helpPane, address }) {
+  // Close the Help pane only after the app has adopted the terminal in this tab.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (attempt > 0) await delay(100);
+    const { ownTab, tabs } = await listOwnTab({ root, herdrApp, space, tabId: tab, tabName });
+    if (!Array.isArray(ownTab.terminals)) throw new Error(`herdr-app ls returned no terminal list for ${tabName}`);
+    if (tabs.some(({ terminals }) => Array.isArray(terminals) && terminals.some((entry) => entry?.pane === helpPane))) {
+      throw new Error(`herdr-app ls shows Help pane ${helpPane} as a terminal`);
+    }
+    if (ownTab.terminals.some((entry) => entry?.terminal === address && typeof entry.pane === 'string' && entry.pane)) {
+      const closed = await herdrApp(['do', 'pane.close', JSON.stringify({ pane: helpPane })]);
+      if (closed.code !== 0) throw new Error(`herdr-app pane.close failed: ${closed.stderr.trim() || `exit ${closed.code}`}`);
+      return;
+    }
+  }
+  throw new Error(`herdr-app ls did not show ${address} in ${tabName}`);
+}
+
 // Starts card `card`'s job as a kept session running the resume skill, an hc child of terminal `parent`, the coordinator's,
 // in tab `job <card>` of the project's space, opened when it is not. The session starts under the run mark `now()`, the
 // binding to this one card and the coordinated-job mark FABRAIK_COORDINATED_JOB=1; its model and effort are fetched main's `coordinator` setting, read through `git`. It is not observed: it is reported as starting.
@@ -1150,14 +1377,7 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
         print(`Card ${card} not started: ${taken.length} of ${limit} running places are taken (cards ${taken.join(', ')}); a job waiting on the owner takes none.`);
         return 1;
       }
-      const { space: currentSpace, terminals } = await coordinatorTerminals({ root, herdrApp, hc });
-      const running = terminals.filter((terminal) => terminal.running);
-      const [coordinator] = running;
-      const runtime = coordinator?.foregroundName;
-      if (currentSpace?.id !== space.id || running.length !== 1 || (runtime !== 'claude' && runtime !== 'codex')
-        || coordinator.address !== parent) {
-        throw new Error(`HC_TERMINAL_ID ${parent} is not the sole running Claude or Codex Coordinator in space ${space.id}`);
-      }
+      const { currentSpace, coordinator, runtime } = await soleCoordinator({ root, herdrApp, hc, space: space.id, parent });
       if (!settings.installed.includes(runtime)) throw new Error(`the Coordinator runtime ${runtime} is not installed on fetched main`);
       if (runtime === 'codex' && (!checkCodexHooks || !observeCodexBinding)) throw new Error(CODEX_LAUNCH_HELD);
 
@@ -1300,35 +1520,14 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
         }
       }
       const tabName = `job ${card}`;
-      let tab = currentSpace.tabs.find(({ name: open }) => open === tabName);
-      let helpPane;
       const failed = (reply) => reply.stderr.trim() || `exit ${reply.code}`;
-      const listJobTab = async (tabId) => {
-        const spaces = await listSpaces(herdrApp);
-        const [here] = localProjectSpaces(spaces, root);
-        const tabs = spaces.flatMap(({ tabs }) => tabs);
-        const jobTab = here?.tabs.find(({ id, name }) => id === tabId && name === tabName);
-        if (here?.id !== space.id || !jobTab || tabs.filter(({ id }) => id === tabId).length !== 1) {
-          throw new Error(`herdr-app ls does not uniquely show ${tabName} as ${tabId} in space ${space.id}`);
-        }
-        return { jobTab, tabs };
-      };
-      if (!tab) {
-        // Herdr opens a shell by default. The bundled Help mod occupies a pane without starting a terminal.
-        const opened = await herdrApp(['do', 'tab.new', '--space', space.id, '--name', tabName, '--folder', root, '--focus', 'false', '--mod', 'help']);
-        try {
-          if (opened.code !== 0) throw new Error(failed(opened));
-          const created = JSON.parse(opened.stdout);
-          if (created?.space !== space.id || typeof created.tab !== 'string' || !created.tab
-            || currentSpace.tabs.some(({ id }) => id === created.tab) || typeof created.pane !== 'string' || !created.pane) {
-            throw new Error('herdr-app tab.new returned no distinct job tab and Help pane in the project space');
-          }
-          tab = (await listJobTab(created.tab)).jobTab;
-          helpPane = created.pane;
-        } catch (error) {
-          print(`Card ${card} not started: tab ${tabName} could not be opened: ${/** @type {Error} */ (error).message}`);
-          return 1;
-        }
+      let tab;
+      let helpPane;
+      try {
+        ({ tab, helpPane } = await openHelpTab({ root, herdrApp, space: space.id, tabs: currentSpace.tabs, tabName }));
+      } catch (error) {
+        print(`Card ${card} not started: tab ${tabName} could not be opened: ${/** @type {Error} */ (error).message}`);
+        return 1;
       }
       const runStart = predecessor?.binding.runStart ?? recorded?.runStart ?? new Date(now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
       const launch = async (runtimeLabels, argv) => {
@@ -1337,29 +1536,12 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
           '--label', `fabraik.card=${card}`, ...runtimeLabels.flatMap((label) => ['--label', label]), '--label', `fabraik.runstart=${runStart}`, '--json', '--', ...argv]);
         if (launched.code !== 0 || !helpPane) return launched;
         try {
-          const address = JSON.parse(launched.stdout)?.address;
-          if (typeof address !== 'string' || !LOCAL_HERDR_TERMINAL.test(address) || address === parent) {
-            throw new Error('hc run returned no distinct local job terminal');
-          }
-          // Close the Help pane only after the app has adopted the job in this tab.
-          for (let attempt = 0; attempt < 20; attempt += 1) {
-            if (attempt > 0) await delay(100);
-            const { jobTab, tabs } = await listJobTab(tab.id);
-            if (!Array.isArray(jobTab.terminals)) throw new Error(`herdr-app ls returned no terminal list for ${tabName}`);
-            if (tabs.some(({ terminals }) => Array.isArray(terminals) && terminals.some((entry) => entry?.pane === helpPane))) {
-              throw new Error(`herdr-app ls shows Help pane ${helpPane} as a terminal`);
-            }
-            if (jobTab.terminals.some((entry) => entry?.terminal === address && typeof entry.pane === 'string' && entry.pane)) {
-              const closed = await herdrApp(['do', 'pane.close', JSON.stringify({ pane: helpPane })]);
-              if (closed.code !== 0) throw new Error(`herdr-app pane.close failed: ${failed(closed)}`);
-              return launched;
-            }
-          }
-          throw new Error(`herdr-app ls did not show ${address} in ${tabName}`);
+          await closeAdoptedHelpPane({ root, herdrApp, space: space.id, tab: tab.id, tabName, helpPane,
+            address: launchedAddress(launched, parent, 'hc run returned no distinct local job terminal') });
         } catch (error) {
           print(`Card ${card}'s Help pane ${helpPane} was kept: ${/** @type {Error} */ (error).message}.`);
-          return launched;
         }
+        return launched;
       };
       const marks = jobLaunchMarks(card, runStart, pin?.dir);
       if (codexPreflight) {

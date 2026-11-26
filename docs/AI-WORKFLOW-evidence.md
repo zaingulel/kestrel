@@ -116,11 +116,15 @@ a mutation: the coordinating session breaks the code on purpose, sees the check 
 pass. A builder never runs a mutation cycle. Every changed protected rule, such as a trust or honesty rule, keeps one
 deliberate mutation even when a qualifying failure exists.
 
-Nobody can recreate a missed sequence afterwards. A later mutation can show the check discriminates on the code as it
-stands, never that a failure came first. The final audit under "6. Verify and review" in the `resume` skill sorts each
-gap. Sometimes the commits and receipts still show the failure came first, and only the record slipped. The coordinating
-session then settles the gap and names it in the pull request. Code built before its failing check stays a gap, and the
-decision stays with the owner. A saved record of the gap is never fresh authorisation.
+Nobody can recreate a missed sequence afterwards. A later mutation cannot show that a failure came first, but it shows
+what test-first order exists to show: the check fails without the code and passes with it. The final audit under "6.
+Verify and review" in the `resume` skill sorts each gap. Sometimes the commits and receipts still show the failure came
+first, and only the record slipped. The coordinating session then settles the gap and names it in the pull request. Code
+built before its failing check is a test-order gap, settled on a recorded mutation of that code that turns the check red
+and passes once restored, and the pull request names it as settled on proof. Only a gap where no break of the code can
+make the check fail by its own assertion, because the code lies outside the job's worktree or every break stops the
+check running, goes to the owner, who decides only whether to accept the claim without its failing check; the proof it
+still needs stays owed. A saved record of the gap is never fresh authorisation.
 
 ### Recording each check
 

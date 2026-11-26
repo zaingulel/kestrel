@@ -60,7 +60,9 @@ links one page per topic; every topic page carries a summary, a mental model, ho
 failure modes and key files, and none of them owns a rule.
 
 Every owner question opens with one plain sentence naming the card and what the agent was doing, then says plainly what
-happened, what to decide and the options, before any workflow vocabulary. The owner reads decision cards and
+happened, what to decide and the options, before any workflow vocabulary. It names each card or pull request by
+number and plain title, repeats any options it refers to rather than pointing back to them, gives a recommendation,
+and stays within a few lines, with detail given when asked. The owner reads decision cards and
 screenshots, not diffs; write for that reader.
 Present Markdown deliverables in chat, using verified GitHub permalinks once published; open a local Markdown file
 for presentation only when the owner explicitly asks. The closeout skill owns lasting links before worktree cleanup.
@@ -114,7 +116,8 @@ Every rule this file does not hold in full has one home:
    leave `waitForOwner` at `always`, as a missing key does, or one of the wait reasons the `resume` skill lists under
    "7. Push authorisation" holds, and reports the result with its screenshots after the merge. A job a Herdr coordinator
    started, on either runtime, ignores `waitForOwner` and every other wait reason: only a failed or missing required
-   check, a missing screenshot and the card's `show-me-first` marker hold it, it merges the exact head its review named,
+   check, a missing screenshot and the card's `show-me-first` marker hold it, it merges the exact head its review named
+   or, recorded on a `Review carried from:` line, the head a clean final rebase carried that review to,
    and the owner removing that marker, himself or by his own message telling the Herdr coordinator to, is its only
    yes, which no note, comment or menu answer replaces. Work that waits
    names the reason that held it and waits for one yes to its decision card and screenshot; any owner instruction to push is that yes, and it covers

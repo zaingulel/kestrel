@@ -719,27 +719,36 @@ test('ANTI-REGRESSION: both guards refuse an unparseable payload or one holding 
   assert.equal(unmarked.stderr, '');
 });
 
-// The expected outcomes come from card #967's rule that a Herdr job reads no note, receipt, menu answer or comment as
-// approval: only its card's show-me-first marker holds it, and the guard learns the job is coordinated from
-// FABRAIK_COORDINATED_JOB=1 in its environment. The same marked card and owner answer comment admit an uncoordinated
-// session's merge, so only the mark tells the two apart.
-// Recurring cost: one disposable Git fixture and two hook starts, no network.
-test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from its environment, so a comment never admits a coordinated job\'s merge', { skip: without('claude') || withoutStandInGh }, (t) => {
+// Builds a coordinated Claude job whose fetched main commits the given settings text, and returns its committed head
+// and pinned workflow root.
+function coordinatedJobFixture(t, settingsText) {
   const { dir, git, hook } = guardFixture(t, 'claude', 'job/7');
   git('remote', 'add', 'origin', 'https://github.com/o/fixture.git');
   mkdirSync(join(dir, 'repo/.agents'));
-  writeFileSync(join(dir, 'repo/.agents/factory-settings.json'), '{"version":1,"waitForOwner":"when-needed"}');
+  const settings = join(dir, 'repo/.agents/factory-settings.json');
+  writeFileSync(settings, settingsText);
   // The coordinated job's verified workflow version: the commit holds the shared contracts its drift check compares.
   cpSync(join(ROOT, '.claude/settings.json'), join(dir, 'repo/.claude/settings.json'));
   writeFileSync(join(dir, 'repo/scripts/lib/delivery-lane-contract.test.mjs'), '// The fixture delivery-lane contract.\n');
+  const commit = (message) => git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message);
   git('add', '.agents/factory-settings.json', '.claude/settings.json', 'scripts/lib/workflow-pin.mjs', 'scripts/lib/delivery-lane-contract.test.mjs');
-  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'enabled fetched settings');
+  commit('fetched settings');
   git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   const head = git('rev-parse', 'HEAD');
   const log = t.mock.method(console, 'log', () => {});
   repairWorkflowSnapshot({ cwd: join(dir, 'repo'), commit: head });
   log.mock.restore();
   const pinned = { FABRAIK_WORKFLOW_ROOT: join(workflowStore(join(dir, 'repo')), head) };
+  return { dir, git, hook, settings, commit, head, pinned };
+}
+
+// The expected outcomes come from card #967's rule that a Herdr job reads no note, receipt, menu answer or comment as
+// approval: only its card's show-me-first marker holds it, and the guard learns the job is coordinated from
+// FABRAIK_COORDINATED_JOB=1 in its environment. The same marked card and owner answer comment admit an uncoordinated
+// session's merge, so only the mark tells the two apart.
+// Recurring cost: one disposable Git fixture and two hook starts, no network.
+test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from its environment, so a comment never admits a coordinated job\'s merge', { skip: without('claude') || withoutStandInGh }, (t) => {
+  const { dir, git, hook, head, pinned } = coordinatedJobFixture(t, '{"version":1,"waitForOwner":"when-needed","herdr":true}');
   const writeUp = [
     '## Not done', '', 'Nothing', '',
     '## Merge Danger', '', 'Undo: easy, a later commit reverts it.', 'Reach: narrow, one file.', '',
@@ -764,6 +773,24 @@ test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from
   const uncoordinated = merge('gh pr merge --auto --squash --delete-branch 12', { FABRAIK_COORDINATED_JOB: undefined });
   assert.equal(uncoordinated.status, 0, uncoordinated.stderr);
   assert.equal(uncoordinated.stderr, '');
+});
+
+// new behaviour: a coordinated job's Herdr policy follows the true fetched main, never a local replacement object that
+// would turn the Herdr add-on on. The expected refusal is the disabled level of an ordinary job at always.
+// Recurring cost: one disposable Git fixture and one hook start with a stand-in gh, no network.
+test('1057 a coordinated job reads the fetched Herdr setting past a local replacement', { skip: without('claude') || withoutStandInGh }, (t) => {
+  const { dir, git, hook, settings, commit, head, pinned } = coordinatedJobFixture(t, '{"version":1,"waitForOwner":"always"}');
+  // The job branch's next commit changes only the settings, and the fixture registers it as the replacement of fetched main.
+  writeFileSync(settings, '{"version":1,"waitForOwner":"when-needed","herdr":true}');
+  git('add', '.agents/factory-settings.json');
+  commit('replacement settings');
+  git('replace', head, git('rev-parse', 'HEAD'));
+  const gh = standInGh(dir);
+  const push = hook('git push -u origin job/7', {
+    PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START, FABRAIK_COORDINATED_JOB: '1', ...pinned,
+  });
+  assert.equal(push.status, 2, push.stderr);
+  assert.ok(push.stderr.includes('a pre-approved run session publishes nothing: pre-approved run disabled on fetched main; waitForOwner must be on-screen or when-needed in .agents/factory-settings.json on main'), push.stderr);
 });
 
 test('ANTI-REGRESSION: the real Claude hook admits a marked delivery push for its own card at when-needed',{ skip: without('claude') || withoutStandInGh }, (t) => {
@@ -999,7 +1026,7 @@ test('ANTI-REGRESSION: the sweep scope workflow retains its reviewed job gate an
   const workflow = readFileSync(resolve(ROOT, '.github/workflows/sweep-scope.yml'));
   assert.equal(
     createHash('sha256').update(workflow).digest('hex'),
-    '82dcb5cd201eaba3335e49a6645564d650dc0a3979f6393dc36e53fefe31f972',
+    '0cfbb9d2c02076baf7711da71f28ca2aa42798ff571fa8d69261ae9ffa8401d1',
     'the sweep workflow changed: independently review its configuration before updating this fixed oracle',
   );
 });
@@ -1386,10 +1413,11 @@ test('each fixed phase prompt routes to run reference files that exist', () => {
   assert.ok(links(reference('pre-approved-run.md')).includes('pre-approved-phase.md'), 'the pre-approved run reference must link the phase reference');
 });
 
-// Every strict-tdd chronology gap but the two record slips reaches the owner. Pins the table's exact kinds and
-// deciders in any row order, never a definition's wording, which fresh review judges. Recurring cost: one scan of
-// text this file already reads.
-test('ANTI-REGRESSION: the strict chronology audit settles only the two record slips itself and sends code before red to the owner', () => {
+// A strict-tdd chronology gap reaches the owner only where no deliberate break can be made: the two record slips and a
+// test-order gap settled on an executed break stay with the session. Pins the table's exact kinds and deciders in any
+// row order, never a definition's wording, which fresh review judges. Recurring cost: one scan of text this file
+// already reads.
+test('ANTI-REGRESSION: the strict chronology audit sends only a test-order gap no deliberate break can exercise to the owner', () => {
   const lines = RESUME_CORPUS.split('\n').map((line) => line.trim());
   const headers = lines.flatMap((line, at) => (line.startsWith('| Chronology gap |') ? [at] : []));
   assert.equal(headers.length, 1, 'the resume skill must hold exactly one chronology gap table');
@@ -1399,9 +1427,10 @@ test('ANTI-REGRESSION: the strict chronology audit settles only the two record s
     rows.push(`${cells[0]} | ${cells.at(-1)}`);
   }
   assert.deepEqual(rows.sort(), [
-    'Code before red | The owner',
     'Paperwork slip | The coordinating session',
     'Selection slip | The coordinating session',
+    'Test-order gap settled on proof | The coordinating session',
+    'Test-order gap with no possible break | The owner',
   ]);
 });
 
@@ -1600,6 +1629,11 @@ test('ANTI-REGRESSION: a one-shot Claude Code session waits for its helpers in t
   const waiting = RESUME.slice(start, RESUME.indexOf('## 6. Verify and review')).replace(/\n\s*/g, ' ');
   assert.ok(waiting.includes('`run_in_background: false`'), 'the Waiting bullet lacks the `run_in_background: false` setting for helpers');
   assert.ok(waiting.includes('600000'), 'the Waiting bullet lacks the 600000 Bash timeout setting for commands');
+});
+
+// Recurring cost: none beyond one existence check.
+test('the resume tester reference exists', () => {
+  assert.ok(existsSync(resolve(ROOT, RESUME_REFERENCES, 'tester.md')), 'references/tester.md does not exist');
 });
 
 // The resume skill reads one result as "the hooks are running": a guard hook refusing this command in these words.

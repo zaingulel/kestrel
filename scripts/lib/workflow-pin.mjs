@@ -316,9 +316,23 @@ const settingsHooks = (where, bytes) => {
   }
 };
 
+/** CRLF and LF count as the same because a checkout writes LF as CRLF where `core.autocrlf` or an `eol` attribute asks; every other byte must match, compared in place so a copy of any size needs no second buffer. */
+const sameLines = (/** @type {Buffer} */ a, /** @type {Buffer} */ b) => {
+  let i = 0;
+  let j = 0;
+  for (;;) {
+    if (a[i] === 0x0d && a[i + 1] === 0x0a) i++;
+    if (b[j] === 0x0d && b[j + 1] === 0x0a) j++;
+    if (i === a.length || j === b.length) return i === a.length && j === b.length;
+    if (a[i] !== b[j]) return false;
+    i++;
+    j++;
+  }
+};
+
 /**
  * Returns the shared contracts, as repository-relative paths, whose copy under `root` differs from the commit's or
- * cannot be read from either. The settings file is compared by its parsed `hooks` value, every other path by bytes.
+ * cannot be read from either. The settings file is compared by its parsed `hooks` value, every other path by bytes, CRLF and LF counting as the same.
  * Throws an Error naming the settings copy that is not JSON.
  * @param {{ cwd: string, commit: string, root: string }} options
  * @returns {string[]}
@@ -335,7 +349,7 @@ export function workflowDrift({ cwd, commit, root }) {
     } catch {
       return true;
     }
-    if (path !== SETTINGS) return !pinned.equals(current);
+    if (path !== SETTINGS) return !sameLines(pinned, current);
     return !isDeepStrictEqual(settingsHooks(`${commit}:${path}`, pinned), settingsHooks(join(root, path), current));
   });
 }

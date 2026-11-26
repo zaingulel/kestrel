@@ -281,8 +281,10 @@ startable cards build meanwhile.
   is written only after reading [references/visual.md](references/visual.md) whole.
 - Every plan, the architect's and the session's own short plan alike, first considers doing less or a native feature,
   then weighs a mechanism's recurring run time and upkeep against the failure it prevents, states that cost for any
-  new or extended test or tooling, and names existing machinery the change makes unnecessary. The build-seat choice
-  keeps its own rule: cost and latency break only equal-reliability ties. Use `builder` for bounded substantive
+  new or extended test or tooling, and names existing machinery the change makes unnecessary. A plan that sets the
+  doing-less option aside quotes the card's words that require the extra it keeps, or asks the owner that trade-off
+  with the **Owner ask** below and builds only what the awaited answer approves, so no unasked extra is built. The build-seat choice keeps its
+  own rule: cost and latency break only equal-reliability ties. Use `builder` for bounded substantive
   implementation, `builder-max` from the outset when uncertainty or failure consequence warrants deeper reasoning, and
   `builder-lite` only for mechanical edits with strong verification and no remaining judgment.
 - An `architect` dispatch carries completed findings or, on Claude Code, a bounded unresolved lookup that its charter
@@ -299,9 +301,7 @@ startable cards build meanwhile.
 - Every `oracle` dispatch names its result file, `.claude/worklog/<branch>-oracle-<name>.md`, and carries an
   `explorer`'s completed findings, with each findings-file path as above. On Claude Code it may instead carry a
   bounded unresolved lookup and named findings-file destination: the oracle sends only that lookup to `explorer`
-  and waits for completed findings before reasoning. Every `security-reviewer` dispatch names its result file,
-  `.claude/worklog/<branch>-security-review.md`. For missing locations, its Claude charter permits only bounded
-  `explorer` discovery, completed before its own trust judgment.
+  and waits for completed findings before reasoning.
 - A plan names its scope: the files each slice changes and the claim each slice proves, never a line estimate.
   Size is the owner's judgment before work-pick, through the `to-tickets` size signals; after work-pick no seat
   splits, stops or replans work for its estimated or actual size. An architect's finding that the card holds more
@@ -358,6 +358,7 @@ startable cards build meanwhile.
   and the next session reads the branch, not the worktree, to see what was already green. A local commit needs
   no authorisation; only the push does. Commit green work before any stop, handoff, replan or split proposal as
   well, so nothing green waits uncommitted in the worktree.
+- **Tester.** Read [references/tester.md](references/tester.md) whole before the first slice of a job that changes code.
 - Wrap every executed check in `node scripts/run-log.mjs <label words> -- <command>` (plain unquoted label,
   then a bare `--`) so the exit code is recorded by a script, not asserted: focused tests, the discrimination
   evidence `docs/TESTING-STRATEGY.md` selects, lint,

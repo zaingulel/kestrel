@@ -196,7 +196,7 @@ export function checkBuilderParity(dir, seats = SHARED_BUILDER_SEATS) {
     .map(({ seat }) => `${dir}/${seat}.md: shared builder charter (from \`Workflow:\` down) differs from ${first.seat}.md — edit the builder seats together`);
 }
 
-const FIRST_PARTY_SEATS = new Set(['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer']);
+const FIRST_PARTY_SEATS = new Set(['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer', 'tester']);
 
 // Both runtimes carry matching first-party charter bodies; runtime metadata is validated separately.
 // Only marked skill invocations differ (`/name` on Claude, `$name` on Codex).

@@ -12,7 +12,7 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -408,6 +408,70 @@ test('the intake summary carries no approval line and makes no approval read', a
   // The board line, the listing's blank line, then the summaries.
   assert.equal(document.findIndex((line) => line.startsWith('Card summaries:')), 2, run.stdout);
   assert.equal(run.status, 3, run.stderr);
+});
+
+// One card claimed into In progress with no closing pull request.
+const CLAIMED_PAGE = leanBoardPage([
+  leanNode({
+    id: 'PVTI_claimed_stalled',
+    content: { __typename: 'Issue', number: 30, title: 'Stalled claimed card', assignees: ['dev-one'] },
+    status: 'In progress',
+    routing: 'Product',
+  }),
+]);
+
+test('new behaviour: board CLI --intake prints a claim on this machine with no running job terminal and nothing recorded as stalled', async () => {
+  // This machine is `here`; Herdr lists no job terminal and git registers no job worktree, so the claim time is the last activity.
+  const herdr = [];
+  const hc = async (args) => {
+    herdr.push(args);
+    return { code: 0, stdout: JSON.stringify({ hidden_finished: 0, machines: [], terminals: [] }), stderr: '' };
+  };
+  const checkout = newIntakeFolder();
+  const rungit = () => ({ status: 0, stdout: `worktree ${checkout}\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0\0`, stderr: '' });
+  const run = await runBoardInProcess(['--intake', newIntakeFolder()], CLAIMED_PAGE, detailsFor([30, 'Claimed outcome', 'Claim: here, Codex, 2020-01-01T00:00Z']), {},
+    { hostname: 'here', hc, rungit });
+
+  assert.equal(run.status, 3, run.stderr);
+  assert.ok(linesOf(run.stderr).includes('#30 [In progress] Stalled claimed card — claimed in "In progress" with no closing pull request — stalled: no running Herdr job terminal here and nothing recorded since 2020-01-01T00:00Z; last step: no job worktree here — if no session is building it, resume it or return it to Ready'), run.stderr);
+  assert.ok(herdr.some((args) => args[0] === 'ls'), JSON.stringify(herdr));
+});
+
+test('new behaviour: board CLI --intake does not count a symlink in the job worklog as activity', async (t) => {
+  // main's own file readers: the job worktree's worklog folder holds only a link to a file outside it, written just now,
+  // well inside the quiet limit; counted, it would make the 2020 claim idle instead of stalled.
+  const hc = async () => ({ code: 0, stdout: JSON.stringify({ hidden_finished: 0, machines: [], terminals: [] }), stderr: '' });
+  const checkout = newIntakeFolder();
+  const tree = join(checkout, 'job-30');
+  const worklog = join(tree, '.claude', 'worklog');
+  mkdirSync(worklog, { recursive: true });
+  const outside = join(checkout, 'outside.md');
+  writeFileSync(outside, 'written just now\n');
+  try {
+    symlinkSync(outside, join(worklog, 'linked.md'), 'file');
+  } catch (error) {
+    const { code } = /** @type {NodeJS.ErrnoException} */ (error);
+    if (code !== 'EPERM') throw error;
+    t.skip(`this account cannot create a file symlink (${code})`);
+    return;
+  }
+  const listing = [`worktree ${checkout}`, `HEAD ${'a'.repeat(40)}`, 'branch refs/heads/main', '', `worktree ${tree}`, `HEAD ${'b'.repeat(40)}`, 'branch refs/heads/job/30', ''];
+  const rungit = () => ({ status: 0, stdout: `${listing.join('\0')}\0`, stderr: '' });
+  const run = await runBoardInProcess(['--intake', newIntakeFolder()], CLAIMED_PAGE, detailsFor([30, 'Claimed outcome', 'Claim: here, Codex, 2020-01-01T00:00Z']), {},
+    { hostname: 'here', hc, rungit });
+
+  assert.equal(run.status, 3, run.stderr);
+  const row = linesOf(run.stderr).find((line) => line.startsWith('#30 [In progress] Stalled claimed card — '));
+  assert.equal(row, '#30 [In progress] Stalled claimed card — claimed in "In progress" with no closing pull request — stalled: no running Herdr job terminal here and nothing recorded since 2020-01-01T00:00Z; last step: no step recorded — if no session is building it, resume it or return it to Ready', run.stderr);
+});
+
+test('new behaviour: board CLI --intake reports a claim whose time cannot be read as unknown', () => {
+  // The claim time is unreadable, so the real process consults no reader: no Herdr, git or worklog read.
+  const run = runBoard(['--intake', newIntakeFolder()], CLAIMED_PAGE, { FAKE_DETAILS: detailsFor([30, 'Claimed outcome', 'Claim: m, codex, t']) });
+
+  assert.equal(run.status, 3, run.stderr);
+  const row = linesOf(run.stderr).find((line) => line.startsWith('#30 [In progress] Stalled claimed card — '));
+  assert.equal(row, '#30 [In progress] Stalled claimed card — claimed in "In progress" with no closing pull request — unknown: claim time unreadable — if no session is building it, resume it or return it to Ready', run.stderr);
 });
 
 // ── --waits ──────────────────────────────────────────────────────────────────

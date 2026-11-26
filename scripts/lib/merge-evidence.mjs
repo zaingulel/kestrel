@@ -141,12 +141,11 @@ export function readCoordinator(options) {
 // Fetched main's wait level once it lets finished work merge on its evidence: refuses,
 // with code ALWAYS_WAITS, unless waitForOwner is on-screen or when-needed.
 export function requireMergeOnEvidence({ git, herdr = false }) {
-  return deliverySettings({ git, herdr }).waitForOwner;
+  return evidenceLevel(readFetchedSettings({ git, herdr })).waitForOwner;
 }
 
-/** @param {{ git: (args: string[]) => string, herdr?: boolean, workflowPin?: WorkflowPin }} options */
-function deliverySettings({ git, herdr = false, workflowPin }) {
-  const settings = readFetchedSettings({ git, herdr, workflowPin });
+/** @param {ReturnType<typeof readFetchedSettings>} settings */
+function evidenceLevel(settings) {
   if (settings.waitForOwner !== 'on-screen' && settings.waitForOwner !== 'when-needed') throw Object.assign(new Error('pre-approved run disabled on fetched main; waitForOwner must be on-screen or when-needed in .agents/factory-settings.json on main'), { code: 'ALWAYS_WAITS' });
   return settings;
 }
@@ -954,7 +953,7 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
   }
   try {
     const lookup = { platform, env, exists };
-    const gitEnv = codexHerdr ? { ...env, GIT_NO_REPLACE_OBJECTS: '1' } : env;
+    const gitEnv = coordinated || codexHerdr ? { ...env, GIT_NO_REPLACE_OBJECTS: '1' } : env;
     const gitPath = git ? null : gitExecutable(lookup);
     const gitAt = (at) => git ?? defaultRunner(gitPath, 'git.exe', { cwd: at, env: gitEnv });
     let readCwd = cwd;
@@ -979,11 +978,19 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
       return refuse('publishes only its bound card');
     }
     if (codexHerdr && start !== codexHerdr.runStart) return refuse('publishes only during its bound run');
+    const undo = (kind === 'ready' || kind === 'merge') && /(?:^|\s)--undo(?:\s|$)/.test(segment);
+    const herdrMark = coordinated || !!codexHerdr;
+    // A Herdr job, Claude Code's coordinated one or Codex's bound one, keeps its exact pull request checks wherever it
+    // runs, but its wait policy and direct push to main follow fetched main's Herdr setting, so it reads that before
+    // judging its push form; any other session reads the settings below, after its own checks. Taking its own pull
+    // request back to draft reads no setting.
+    let settings = herdrMark && !undo ? readFetchedSettings({ git: runners.git, workflowPin }) : undefined;
+    const herdr = herdrMark && settings?.herdr === true;
     const pushes = [`git push -u origin job/${card}`, `git push --force-with-lease origin job/${card}`];
-    const legacyDirect = !codexHerdr && coordinated;
-    const direct = kind === 'push' && (codexHerdr ? pinnedSource !== undefined : legacyDirect && segment === 'git push origin HEAD:main');
+    const legacyDirect = !codexHerdr && herdr;
+    const direct = kind === 'push' && (codexHerdr ? herdr && pinnedSource !== undefined : legacyDirect && segment === 'git push origin HEAD:main');
     if (kind === 'push' && !direct && !pushes.includes(segment)) {
-      const mainForm = codexHerdr ? ' or main as `git push --no-follow-tags origin <squash>^{object}:refs/heads/main`'
+      const mainForm = codexHerdr && herdr ? ' or main as `git push --no-follow-tags origin <squash>^{object}:refs/heads/main`'
         : legacyDirect ? ' or main as `git push origin HEAD:main`' : '';
       return refuse(`pushes only its own branch, as ${pushes.join(' or ')}${mainForm}`);
     }
@@ -1018,14 +1025,10 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
       }
       if (mergeBase !== undefined) return refuse(`opens a pull request only into the default branch, and branch.job/${card}.gh-merge-base is set: ${mergeBase}`);
     }
-    // A Herdr job, Claude Code's coordinated one or Codex's bound one, ignores the wait level: only the marker holds it.
-    // It marks ready and merges only on its exact pull request.
-    const herdr = coordinated || !!codexHerdr;
     let number;
     let pr;
     if (kind === 'ready' || kind === 'merge') {
-      const undo = /(?:^|\s)--undo(?:\s|$)/.test(segment);
-      const exact = herdr && !undo;
+      const exact = herdrMark && !undo;
       number = pinnedMerge?.number ?? /** @type {RegExpExecArray} */ (/\d+/.exec(segment))[0];
       if (exact && (!Number.isSafeInteger(Number(number)) || Number(number) < 1)) {
         return refuse('acts only on its own pull request with a positive safe decimal number');
@@ -1055,7 +1058,8 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
         if (pr.autoMergeRequest !== null) return refuse(`acts only on a pull request with no auto-merge: #${number} has an active or unreadable auto-merge state`);
       }
     }
-    const { waitForOwner: level, oid: settingsBase } = (herdr ? readFetchedSettings : deliverySettings)({ git: runners.git, workflowPin });
+    settings ??= readFetchedSettings({ git: runners.git, workflowPin });
+    const { waitForOwner: level, oid: settingsBase } = herdr ? settings : evidenceLevel(settings);
     let read;
     try {
       read = readCard(card, { exec: runners.exec, repository: origin, complete: !!codexHerdr });
@@ -1071,7 +1075,7 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
       const marked = cardMarked(card, read.issue);
       const policy = { level, marked, herdr };
       const heldAction = `${kind === 'ready' ? 'marks ready' : 'merges'} nothing while a wait reason holds for HEAD`;
-      if (herdr) {
+      if (herdrMark) {
         const localHead = runners.git(['rev-parse', 'HEAD']).trim();
         if (pr.headRefOid !== localHead) throw new Error(`pull request #${number} head ${pr.headRefOid} does not match the checked HEAD ${localHead}`);
         const shown = { head: localHead, base: pr.baseRefOid };
@@ -1107,7 +1111,7 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
       if (pinnedSource !== undefined && (!('squash' in shown) || shown.squash !== pinnedSource)) {
         return refuse('pushes main only when the literal source object matches the checked-out squash');
       }
-      if (codexHerdr && shown.base !== settingsBase) return refuse('pushes main only while the reviewed base matches the fetched main used for delivery policy');
+      if (shown.base !== settingsBase) return refuse('pushes main only while the reviewed base matches the fetched main used for delivery policy');
       const ungated = gateLapse(runners.git, { platform, executable, listHooks });
       if (ungated !== undefined) return refuse(`pushes main only where the pre-push hook on the remote's main judges it: ${ungated}`);
       const marked = cardMarked(card, read.issue);

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // unsafe-git.mjs: Git refusals shared by the Claude and Codex PreToolUse(Bash) guards, plus
 // cleanup-specific permission for the Claude root hook. The hooks supply checkout facts; direct unit
 // tests cover the policy and subprocess tests cover its wiring. The rules read nothing, except that a
@@ -18,11 +17,13 @@
 //                                the saved write-up at HEAD nor the published body to hold a wait
 //                                reason, the card's show-me-first label and, at on-screen, work on
 //                                screen among them, unless the card's recorded owner answer admits
-//                                that head outside a Herdr job, and every label of the card readable;
-//                                a coordinated Claude job's push to main is held by any wait reason. In a
-//                                Herdr job only check, screenshot and the label are wait reasons. A
-//                                Herdr job marks ready and merges on its exact pull request, and holds
-//                                without using either legacy answer; verified Codex Herdr delivery
+//                                that head for a session without the Herdr job mark, and every label
+//                                of the card readable; a coordinated Claude job's push to main is held
+//                                by any wait reason. Where fetched main turns Herdr on, a marked
+//                                session is a Herdr job, whose only wait reasons are check, screenshot
+//                                and the label; elsewhere the level and every wait reason hold it. A
+//                                marked session marks ready and merges on its exact pull request, and
+//                                holds without using either legacy answer; verified Codex Herdr delivery
 //                                also checks the bound worktree and version. Taking its own
 //                                job pull request back to draft is always admitted. Judged only when
 //                                the hook passes `{ preApproved }`.
@@ -397,6 +398,14 @@ function apiClearsMarker(args, cwd) {
 // `runMarkUnreadable` is the cause where a desktop app session's first message, which may hold a run mark, cannot
 // be read: that session publishes nothing. `herdrTerminal` marks a Codex Herdr job terminal whose binding could not be
 // read: it publishes nothing, as `runUnavailable` says, and still never clears the show-me-first marker.
+/** @typedef {Omit<import('./merge-evidence.mjs').PublicationOptions, 'start' | 'tracker' | 'pinnedMerge' | 'pinnedSource' | 'workflowPin' | 'cwd'> & { start: string, tracker: string, verifyJobPin?: (options: { drift: boolean }) => import('./merge-evidence.mjs').WorkflowPin }} PreApprovedRun */
+/** @typedef {{ preApproved?: PreApprovedRun | null, appRun?: boolean, runUnavailable?: string, runMarkUnreadable?: string, herdrTerminal?: boolean }} BlockOptions */
+
+/**
+ * @param {string | undefined} cmd
+ * @param {{ cwd?: string, isRootCheckout: (dir: string) => boolean, platform?: NodeJS.Platform }} [checkout]
+ * @param {BlockOptions} [options]
+ */
 export function blockReason(cmd, checkout, { preApproved = null, appRun = false, runUnavailable = '', runMarkUnreadable = '', herdrTerminal = false } = {}) {
   cmd = cmd ?? "";
   const codexHerdr = preApproved?.codexHerdr;
@@ -405,9 +414,9 @@ export function blockReason(cmd, checkout, { preApproved = null, appRun = false,
   // The verified workflow version `{ commit, root }`, or the cause `verifyJobPin` throws.
   const pinCheck = (drift) => {
     try {
-      return { pin: verifyJobPin({ drift }), cause: '' };
+      return { pin: /** @type {NonNullable<PreApprovedRun['verifyJobPin']>} */ (verifyJobPin)({ drift }), cause: '' };
     } catch (error) {
-      return { cause: error.message };
+      return { cause: /** @type {Error} */ (error).message };
     }
   };
   const codexHerdrUnavailable = runUnavailable.startsWith(CODEX_HERDR_UNAVAILABLE);
@@ -616,10 +625,11 @@ export function blockReason(cmd, checkout, { preApproved = null, appRun = false,
   // A Herdr job's command is read as segments of such words, split at each unquoted separator, with the assignments
   // that lead a segment left out.
   if (herdrJob || herdrTerminal) {
+    /** @type {string[][]} */
     const segments = [[]];
     for (const [, word] of deheredoc.matchAll(new RegExp(String.raw`((?:${WORD_PIECE})+)|[;&|()\n]`, 'g'))) {
       if (word === undefined) segments.push([]);
-      else if (segments.at(-1).length || !/^\w+=/.test(word)) segments.at(-1).push(unquoteWord(word));
+      else if (/** @type {string[]} */ (segments.at(-1)).length || !/^\w+=/.test(word)) /** @type {string[]} */ (segments.at(-1)).push(unquoteWord(word));
     }
     if (clearsMarker(segments, checkout?.cwd)) return NEVER_CLEARS_MARKER;
   }
@@ -801,7 +811,7 @@ export function blockReason(cmd, checkout, { preApproved = null, appRun = false,
     // Only taking its own pull request back to draft stays open while a shared contract has moved on.
     const { pin: workflowPin, cause: unpinned } = verifyJobPin ? pinCheck(!(kind === 'ready' && /--undo/.test(raw))) : { cause: '' };
     if (unpinned) return refuse(`publishes nothing without its job's verified workflow version: ${unpinned}`);
-    return publishCheck(kind, raw, { ...preApproved, pinnedMerge, pinnedSource, workflowPin, cwd: checkout.cwd });
+    return publishCheck(kind, raw, { .../** @type {PreApprovedRun} */ (preApproved), pinnedMerge, pinnedSource, workflowPin, cwd: checkout.cwd });
   };
   const ruleReason = (s, raw) => {
     const publishes = isPush(s) || GH_PR_CREATE.test(s) || GH_PR_MERGE.test(raw) || GH_PR_READY.test(raw);
@@ -917,7 +927,7 @@ export function blockReason(cmd, checkout, { preApproved = null, appRun = false,
     if (/(?:^|\s)--(?:git-dir|work-tree)(?:=|\s)/.test(options) || !isBranchWork(subcommand, args)) return '';
     const hops = [...options.matchAll(/(?:^|\s)-C\s+(\S+)/g)].map((hop) => hop[1]);
     const at = dirs.map((dir) => hops.reduce(relocate, dir));
-    if (!at.some((dir) => dir !== null && checkout.isRootCheckout(dir))) return '';
+    if (!at.some((dir) => dir !== null && /** @type {NonNullable<typeof checkout>} */ (checkout).isRootCheckout(dir))) return '';
     return `git ${subcommand} in the integration checkout: the root stays on main and nothing is branched, switched, or committed there — open a job checkout with git worktree add and run it from there`;
   };
   // A coordinated Claude job runs the merge watch only from its verified workflow version, so the delivery code that

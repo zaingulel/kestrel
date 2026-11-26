@@ -52,6 +52,7 @@ git_trace_vars=$(
     esac
   done
 )
+# shellcheck disable=SC2046,SC2086 # Both expand to lists of variable names that must split into separate words for unset.
 unset $(git rev-parse --local-env-vars) $git_trace_vars GIT_NAMESPACE NODE_TEST_CONTEXT \
   GIT_CURL_VERBOSE GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
@@ -209,6 +210,7 @@ else
     reuse_lint=no
     reuse_scripts=no
     # Self-contained hooks repeat this bridge; reusableLocalChecks owns receipt policy.
+    # shellcheck disable=SC2016 # The single-quoted text is a Node script; its $ and backticks are JavaScript, not shell.
     if reuse_probe=$(node --input-type=module -e '
   import { pathToFileURL } from "node:url";
   const { reusableLocalChecks } = await import(pathToFileURL(process.argv[2]).href);

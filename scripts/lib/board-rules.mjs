@@ -124,6 +124,30 @@ export function unassignedClaimDrift(card) {
   return advisory(card, `claimed in "${card.status}" with no assignee — assign the session's owner (${remedy}) or return it to ${PICKABLE_PHRASE}`);
 }
 
+// How long a claim may record nothing before, with no running terminal found, it reads as stalled. A
+// judgement, not a measurement: a working session writes to its worklog folder far more often than this.
+export const QUIET_LIMIT_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * What the edge learned about one claimed card: not checkable here, or checked with the liveness of its Herdr
+ * job terminal, its last activity and the last step its worklog recorded.
+ * @typedef {{ checkable: false, cause: string }
+ *   | { checkable: true, liveness: { running: string | null } | { unavailable: string }, activeAt: Date, quietMs: number, lastStep: string }} Observation
+ */
+
+/** @param {Observation} observation */
+function observationSuffix(observation) {
+  if (!observation.checkable) return `unknown: ${observation.cause}`;
+  const { liveness, activeAt, quietMs, lastStep } = observation;
+  if ('running' in liveness && liveness.running !== null) return `live: Herdr terminal ${liveness.running} is running its job`;
+  const since = activeAt.toISOString().slice(0, 16) + 'Z';
+  if (quietMs <= QUIET_LIMIT_MS) {
+    return `idle since ${since}; ${'unavailable' in liveness ? `no live-process check here: ${liveness.unavailable}` : 'no running Herdr job terminal here'}`;
+  }
+  if ('unavailable' in liveness) return `unknown: nothing recorded since ${since} and no live-process check here: ${liveness.unavailable}; last step: ${lastStep}`;
+  return `stalled: no running Herdr job terminal here and nothing recorded since ${since}; last step: ${lastStep}`;
+}
+
 // 5. The #654 failure mode, the reverse direction of #319: a card CLAIMED into an
 // in-flight column that then produced nothing — #646 and #618 sat stranded for days
 // while both mandatory bookends reported clean. Evidence is closing pull-request
@@ -138,10 +162,13 @@ export function unassignedClaimDrift(card) {
 // covers an epic claim instead); and a parked card waits on an answer from outside the
 // session, not on a session, so no closing pull request is the expected shape there too
 // (rules 3, 4 and 7 still judge it).
-export function stalledClaimDrift(card) {
+export function stalledClaimDrift(card, observation) {
   if (card.state !== 'OPEN' || !isInFlight(card.status) || card.parked) return null;
   if (WAIT_STATUSES.includes(card.status) || isEpic(card) || card.closingPullRequests.length > 0) return null;
-  return advisory(card, `claimed in "${card.status}" but no closing pull request exists — if no session is actively building it, resume it or return it to ${READY}`);
+  if (!observation) {
+    return advisory(card, `claimed in "${card.status}" but no closing pull request exists — if no session is actively building it, resume it or return it to ${READY}`);
+  }
+  return advisory(card, `claimed in "${card.status}" with no closing pull request — ${observationSuffix(observation)} — if no session is building it, resume it or return it to ${READY}`);
 }
 
 // 6. The #337 failure mode: an epic still OPEN and not terminal whose every child is
@@ -328,13 +355,14 @@ const CARD_RULES = [
 // typename the draft/pull-request exemption needs) and then excluded from the rules:
 // blank fields on a card whose content did not resolve are not trustworthy repair
 // evidence, and every other rule would skip it anyway for want of an issue state.
-export function scanBoard(items) {
+/** @param {Map<number, Observation>} [observations] */
+export function scanBoard(items, observations = new Map()) {
   const unreadable = unreadableCards(items);
   const cards = items.filter((item) => !isContentUnresolved(item)).map(normalizeItem);
   const drifted = [];
   for (const card of cards) {
     for (const rule of CARD_RULES) {
-      const found = rule(card);
+      const found = rule(card, observations.get(card.number));
       if (found) drifted.push(found);
     }
   }

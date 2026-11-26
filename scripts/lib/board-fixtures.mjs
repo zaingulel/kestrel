@@ -130,36 +130,60 @@ export function issueItemReply(nodes = [], { issueId = 'I_fixture', totalCount =
 
 const LAST_PAGE = { hasNextPage: false, endCursor: null };
 
+// The valid shapes of the recovery fixtures below. A field a guard test overwrites with a
+// malformed value (null, a wrong type) is an accessor pair: a read sees the valid type, so a
+// misspelt field fails the type check, while the write takes any value.
+/** @typedef {{ hasNextPage: boolean, endCursor: string | null }} PageInfo */
+/** @typedef {{ number: number, get owner(): { login: string }, set owner(value: unknown) }} MembershipProject */
+/** @typedef {{ get id(): string, set id(value: unknown), get isArchived(): boolean, set isArchived(value: unknown), get project(): MembershipProject, set project(value: unknown) }} Membership */
+/** @typedef {{ totalCount: number, get nodes(): Membership[], set nodes(value: unknown) }} MembershipConnection */
+/** @typedef {{ get number(): number, set number(value: unknown), get projectItems(): MembershipConnection, set projectItems(value: unknown) }} WalkedIssue */
+/** @template [Node=WalkedIssue] @typedef {{ totalCount: number, pageInfo: PageInfo, nodes: Node[] }} IssueConnection */
+/** @template [Node=WalkedIssue] @typedef {{ data: { get repository(): { get issues(): IssueConnection<Node>, set issues(value: unknown) }, set repository(value: unknown) } }} IssuesPage */
+/** @typedef {{ data: { repository: { issue: { number: number, projectItems: { totalCount: number, pageInfo: PageInfo, nodes: Membership[] } } } } }} MembershipsPage */
+/** @typedef {{ id: string, isArchived: boolean, get content(): { number: number, get repository(): { nameWithOwner: string }, set repository(value: unknown) }, set content(value: unknown), get project(): { number: number, owner: { login: string } }, set project(value: unknown) }} HydratedItem */
+/** A card whose content is an issue: leanNode normalizes it, so its repository is the board's own unless the card names another. */
+/** @typedef {Omit<NonNullable<Parameters<typeof leanNode>[0]>, 'id' | 'content'> & { id: string, content: Record<string, unknown> & { __typename: 'Issue', number: number, repository?: { nameWithOwner: string } } }} IssueCard */
+
 // The part of the omission advisory every test holds it to: it tells the reader not to add the
 // recovered cards to the board again, however the sentence around it is worded.
 export const READD_WARNING = /\b(not|never|don't)\b[^.\n]*\b(re-?add|add)\b/i;
 
 // One project membership as the issue side reports it: an unarchived item on the configured
 // board unless `project`, `owner` or `isArchived` says otherwise.
+/** @type {(id: string, options?: { isArchived?: boolean, project?: number, owner?: string }) => Membership} */
 export function membership(id, { isArchived = false, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER } = {}) {
   return { id, isArchived, project: { number: project, owner: { login: owner } } };
 }
 
 // One issue of the repository issue walk with its first page of memberships, counted whole
 // unless `totalCount` says GitHub holds more.
+/** @type {(number: number, memberships: Membership[], options?: { totalCount?: number }) => WalkedIssue} */
 export function walkedIssue(number, memberships, { totalCount = memberships.length } = {}) {
   return { number, projectItems: { totalCount, nodes: memberships } };
 }
 
 // One page of the repository issue walk; `--slurp` hands the reader a list of these.
+/** @type {<Node = WalkedIssue>(issues: Node[], options?: { totalCount?: number, pageInfo?: PageInfo }) => IssuesPage<Node>} */
 export function issuesPage(issues, { totalCount = issues.length, pageInfo = LAST_PAGE } = {}) {
   return { data: { repository: { issues: { totalCount, pageInfo, nodes: issues } } } };
 }
 
 // One page of an overflowing issue's own membership walk; `--slurp` hands a list of these too.
+/** @type {(number: number, memberships: Membership[], options?: { totalCount?: number, pageInfo?: PageInfo }) => MembershipsPage} */
 export function membershipsPage(number, memberships, { totalCount = memberships.length, pageInfo = LAST_PAGE } = {}) {
   return { data: { repository: { issue: { number, projectItems: { totalCount, pageInfo, nodes: memberships } } } } };
 }
 
 // A board item as the hydration by id answers it: leanNode's card fields plus the item's own
 // project identity and archive flag.
+/** @type {(card: IssueCard, options?: { isArchived?: boolean, project?: number, owner?: string }) => HydratedItem} */
 export function hydratedItem(card, { isArchived = false, project = BOARD_PROJECT_NUMBER, owner = BOARD_OWNER } = {}) {
-  return { ...leanNode(card), isArchived, project: { number: project, owner: { login: owner } } };
+  const node = leanNode(card);
+  /** @type {HydratedItem['content']} */
+  // @ts-expect-error leanNode types its content as Record or null; the card's issue content, which the parameter requires, comes back normalized with its number and repository.
+  const content = node.content;
+  return { ...node, content, isArchived, project: { number: project, owner: { login: owner } } };
 }
 
 // Which board-read request an argv is, by the connection its query asks for: the project walk

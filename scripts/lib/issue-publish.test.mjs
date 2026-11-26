@@ -1,4 +1,3 @@
-// @ts-nocheck
 // issue-publish.test.mjs — mutation-proof contract tests for issue publication.
 // Run: node --test scripts/lib/issue-publish.test.mjs
 
@@ -46,6 +45,7 @@ const { issuesPage: typesIssuesPage, leanBoardPage: typesLeanBoardPage, leanNode
 const { verifyIssuePublication: typesVerifyIssuePublication } = await typesToolkit.load('lib/issue-publish.mjs');
 const { main: typesMain } = await typesToolkit.load('verify-issue-publish.mjs');
 
+/** @type {{ content: { number: number }, status?: string | null, routing?: string | null, labels?: string[] }[]} */
 const BOARD = [
   { content: { number: 475 }, status: 'Ready', routing: 'Platform', labels: [KIND_LABELS.epic, 'area:board'] },
   { content: { number: 476 }, status: 'Ready', routing: 'Product', labels: [KIND_LABELS.task, 'area:board'] },
@@ -182,7 +182,7 @@ test('issue-publish under linear verifies board presence, Status, one kind label
   assert.equal(standalone.status, 0, standalone.stderr.join('\n'));
   assert.equal(standalone.stdout.at(-1), 'issue-publish: ENG-1 verified as a standalone issue; it has 2 child issues (none supplied; pass them as arguments to verify an Epic).');
 
-  const refusals = [
+  const refusals = /** @satisfies {[string[], { active?: ReturnType<typeof linearIssue>[], direct?: object }, string][]} */ ([
     [['ENG-1', 'ENG-3'], {}, 'Epic ENG-1 child mismatch: supplied but not native children: none; native children but not supplied: ENG-2'],
     [['ENG-1', 'ENG-2', 'ENG-3', 'ENG-4'], { active: [linearIssue('ENG-1', LINEAR_TODO, [KIND_LABELS.epic]), linearIssue('ENG-3', LINEAR_TODO, [KIND_LABELS.task]), linearIssue('ENG-4', LINEAR_TODO, [KIND_LABELS.task])] }, 'Epic ENG-1 child mismatch: supplied but not native children: ENG-4; native children but not supplied: none'],
     [['ENG-1'], { active: [linearIssue('ENG-1', linearState('s-triage', 'Triage', 'triage'), [KIND_LABELS.epic])] }, 'requested issue ENG-1 has no non-empty Status'],
@@ -190,7 +190,7 @@ test('issue-publish under linear verifies board presence, Status, one kind label
     [['ENG-1'], { active: [], direct: { 'ENG-1': { identifier: 'ENG-1', team: { key: 'ENG' }, archivedAt: null, state: LINEAR_TODO, labels: linearList([{ name: KIND_LABELS.epic }]) } } }, 'requested issue ENG-1 is not in this board read, which lagged the card; re-run this check rather than adding the card again.'],
     [['ENG-1', 'ENG-2', 'ENG-3'], { direct: { 'ENG-2': { identifier: 'ENG-2', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'started' }, labels: linearList([{ name: KIND_LABELS.bug }]) } } }, 'requested issue ENG-2 is archived while still open; unarchive it, never add a second.'],
     [['ENG-1', 'ENG-2', 'ENG-3'], { direct: { 'ENG-2': { identifier: 'ENG-2', team: { key: 'ENG' }, archivedAt: '2026-01-05T00:00:00.000Z', state: { type: 'completed' }, labels: linearList([{ name: 'area:board' }], { hasNextPage: true }) } } }, 'ENG-2\'s labels run past one page, so its kind label cannot be checked'],
-  ];
+  ]);
   for (const [args, fixture, message] of refusals) {
     const refused = runLinearCheck(args, linearPublication(fixture));
     assert.equal(refused.status, 1, message);
@@ -269,6 +269,10 @@ const UNRESOLVED_NODE = leanNode({
   status: 'Backlog',
 });
 
+/**
+ * @param {object[]} nodes
+ * @param {{ probeProjects?: number[], probeResponse?: string, children?: number[], childrenTotal?: number }} [options]
+ */
 function boardRead(nodes, { probeProjects = [], probeResponse, children = [], childrenTotal } = {}) {
   const queries = [];
   const ghExec = (command) => {
@@ -323,7 +327,7 @@ test('issue-publish: a card that was never added still fails loud as absent from
 
   assert.throws(
     () => verifyIssuePublication(['999'], dependencies),
-    (error) => {
+    (/** @type {Error} */ error) => {
       assert.match(error.message, /requested issue #999 is absent from the board/);
       // The draft card must not soften the verdict into the propagation wording.
       assert.doesNotMatch(error.message, /did not resolve|Re-run/);
@@ -341,7 +345,7 @@ test('issue-publish: a card the board read could not resolve is reported as a la
 
   assert.throws(
     () => verifyIssuePublication(['999'], dependencies),
-    (error) => {
+    (/** @type {Error} */ error) => {
       assert.match(error.message, /#999/);
       assert.doesNotMatch(error.message, /absent from the board/);
       assert.match(error.message, /1 card\(s\) whose content did not resolve/);
@@ -354,7 +358,7 @@ test('issue-publish: a card the board read could not resolve is reported as a la
   // cards are still lag evidence, and reporting only the probe failure would hide it.
   assert.throws(
     () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE, UNRESOLVED_NODE], { probeResponse: 'not json at all' }).dependencies),
-    (error) => {
+    (/** @type {Error} */ error) => {
       assert.match(error.message, /1 card\(s\) whose content did not resolve/);
       assert.doesNotMatch(error.message, /could not confirm whether/);
       return true;
@@ -381,7 +385,7 @@ test('issue-publish: an open card archived on the board is reported as archived 
 
   assert.throws(
     () => verifyIssuePublication(['999'], dependencies),
-    (error) => {
+    (/** @type {Error} */ error) => {
       assert.match(error.message, /#999 is archived on the board while still open/);
       assert.match(error.message, /unarchive the card rather than adding it again/);
       assert.doesNotMatch(error.message, /re-run this check/);
@@ -439,17 +443,17 @@ test('issue-publish: a probe reply whose items outnumber its count is refused, n
 test('issue-publish: an archived board item that cannot be read as this issue\'s card is never accepted', () => {
   // Each case is a closed archived item the parser cannot judge as #999. None may pass, and none
   // may send the operator to unarchive a card they cannot see.
-  const cases = [
+  const cases = /** @satisfies {[object, RegExp][]} */ ([
     [{ content: null }, /resolved to no issue/],
     [{ content: { ...ARCHIVED_CARD.content, number: 1000 } }, /resolved to #1000/],
     [{ content: { ...ARCHIVED_CARD.content, labels: { totalCount: 25, nodes: [] } } }, /has 25 labels but only 0 fetched/],
-  ];
+  ]);
 
   for (const [card, expected] of cases) {
     const { dependencies } = boardRead([RESOLVED_NODE], { probeResponse: archivedProbe(card) });
     assert.throws(
       () => verifyIssuePublication(['999'], dependencies),
-      (error) => {
+      (/** @type {Error} */ error) => {
         assert.match(error.message, /#999 is archived on the board, but its board item could not be read/);
         assert.match(error.message, expected);
         assert.doesNotMatch(error.message, /unarchive/);
@@ -514,7 +518,7 @@ test('issue-publish: a probe that cannot prove it read every project item never 
   delete missingCount.data.repository.issue.projectItems.totalCount;
   const unreadableIssue = issueItemReply();
   unreadableIssue.data.repository.issue = null;
-  const incomplete = [
+  const incomplete = /** @satisfies {[string, RegExp][]} */ ([
     // Truncated: the board item could be the one on page two.
     [graphProbe([99], 21), /has 21 project items but only 1 fetched.*raise the projectItems first: cap in issueItemQuery/],
     // No totalCount: every comparison against it is false, so a bare truncation check passes
@@ -537,12 +541,12 @@ test('issue-publish: a probe that cannot prove it read every project item never 
       JSON.stringify(issueItemReply([{ id: 'bad', project: { number: BOARD_PROJECT_NUMBER, owner: { login: BOARD_OWNER } }, value: null }])),
       /board item probe GraphQL response has a non-boolean isArchived/,
     ],
-  ];
+  ]);
 
   for (const [probeResponse, expected] of incomplete) {
     assert.throws(
       () => verifyIssuePublication(['999'], boardRead([RESOLVED_NODE], { probeResponse }).dependencies),
-      (error) => {
+      (/** @type {Error} */ error) => {
         assert.match(error.message, /could not confirm whether issue #999 is on the board/);
         assert.match(error.message, expected);
         assert.doesNotMatch(error.message, /absent from the board/);
@@ -576,7 +580,9 @@ test('issue-publish: fails when a requested board card has a missing or blank St
 
 function boardWithLabels(number, labels) {
   const board = structuredClone(BOARD);
-  board.find((card) => card.content.number === number).labels = labels;
+  const card = board.find((entry) => entry.content.number === number);
+  assert.ok(card);
+  card.labels = labels;
   return board;
 }
 
@@ -641,6 +647,10 @@ test('issue-publish: passes an issue with exactly one kind label among other lab
 
 // Bound to the native types copy: `boardRead` and `verify` above are bound to the labels copy, whose
 // board read never asks for an issue type.
+/**
+ * @param {object[]} nodes
+ * @param {{ probeResponse?: string }} [options]
+ */
 function typesBoardRead(nodes, { probeResponse } = {}) {
   const ghExec = (command) => {
     const query = command.find((arg) => arg.startsWith('query='));
@@ -740,7 +750,7 @@ function runMain(mainFn, args, dependencies) {
 }
 
 function assertRefused(verifyFn, mainFn, makeDependencies, args, expected) {
-  assert.throws(() => verifyFn(args, makeDependencies()), (error) => {
+  assert.throws(() => verifyFn(args, makeDependencies()), (/** @type {Error} */ error) => {
     assert.match(error.message, expected);
     assert.doesNotMatch(error.message, LAG_TEXT);
     return true;
@@ -942,7 +952,7 @@ test('issue-publish: fails when the supplied children match the native child cou
   // boarded but never natively linked, and unrelated #999 quietly keeps the count equal.
   assert.throws(
     () => verify(['475', '476', '477'], { graph: graphChildren([999, 476]) }),
-    (error) => {
+    (/** @type {Error} */ error) => {
       assert.match(error.message, /Epic #475/);
       assert.match(error.message, /supplied but not native children: #477/);
       assert.match(error.message, /native children but not supplied: #999/);

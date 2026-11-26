@@ -102,6 +102,13 @@ install, after the owner connects the repository to the review service in that s
 install does; it is changed later the same way as the runtimes: the update writes or removes the add-on's files to match, and the
 owner connects or disconnects the repository in the service's dashboard, which no update does.
 
+A job that changes the setting is delivered under the value the fetched `main` held. A job that turns the add-on off
+therefore still owes the external review where its tier is `sign-off`, though its own change has removed the add-on's
+files from its worktree: it reads the add-on's skill from the fetched `main` with
+`git show origin/main:.agents/skills/<name>/SKILL.md`, `<name>` being that skill's name, `greptile`, and follows what
+that prints wherever the `resume` skill's "8. Deliver" says to read the skill. A read that fails is told to the owner
+with the draft kept open; it is never `UNAVAILABLE`.
+
 **How a repository turns the Herdr add-on on or off.** The same settings file may carry `herdr`, `true` or `false`;
 without it, as with `false`, the add-on is off. The add-on runs the repository's work in Herdr, a terminal app. Its own
 files are the `herdr-setup` skill, that skill's `.claude/skills/` copy, the queue panel, the queue reader with its library
@@ -138,8 +145,9 @@ site renders the repository's own documents as one website. `local` installs the
 build, its page, link and search checks, and one command, `npm --prefix docs-site run docs:open`, which installs the
 site's locked packages, builds the site inside that folder and opens it on the owner's machine. It needs no account,
 credential, sign-in or publishing workflow, reads no published release, and says so on every page, linking no hosted
-site. `online` installs the same and the publishing workflow `docs-site-deploy.yml` under the repository's workflows,
-which runs only on a push to `main` and builds with no secret. `off` installs none of them.
+site. `online` installs the same and the build workflow `docs-site-build.yml` under the repository's workflows, which
+runs only on a push to `main`, builds with no secret and keeps the finished site as a build output; where it is
+published is the repository's own choice. `off` installs none of them.
 `scripts/lib/runtimes.mjs` names their paths. An install and a release update write them only where the setting asks
 for them and keep every entry in the manifest, and the contract test requires each of their paths to hold nothing
 where the setting leaves it out and refuses anything found there. The setting is chosen at install, by the

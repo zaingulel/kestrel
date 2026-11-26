@@ -25,7 +25,7 @@ import { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_REPOSITORY, KIND_LABELS } from './
 import { KIND_TYPES } from './board.mjs';
 import { boardReadExec, boardRequestKind, issueItemReply, issuesPage, leanBoardPage, leanNode, membership, onePageAtATime } from './board-fixtures.mjs';
 import { wakeCoordinator as wakeAfterMove } from './board-move.mjs';
-import { jobPrompt, listCards, listUnfinished, openCoordinator, startJob, wakeCoordinator } from './coordinator.mjs';
+import { forwardedNotes, forwardNotes, jobPrompt, listCards, listUnfinished, openCoordinator, startForwarder, startJob, wakeCoordinator } from './coordinator.mjs';
 import { installFakeGh } from './fake-gh.mjs';
 import { runGh } from './gh-exec.mjs';
 import { capLock, readCap, standingLead, standingLeadProcessCommand } from './cap-lock.mjs';
@@ -429,6 +429,7 @@ function jobFixture({ root = ROOT, spaces, pages, refuseDetails, refuseOlder, de
       return { code: 0, stdout: JSON.stringify(record), stderr: '' };
     }
     if (args[0] === 'send') return fixture.replies[`send ${args[1]}`] ?? { code: 0, stdout: '{}', stderr: '' };
+    if (args[0] === 'read') return fixture.replies[`read ${args[1]}`] ?? missing;
     if (args[0] === 'run' && fixture.launch.code === 0) {
       const label = (name) => args.find((arg, index) => args[index - 1] === '--label' && arg.startsWith(`${name}=`))?.slice(name.length + 1);
       const tab = spaces.find(({ id }) => id === label('herdr.space'))?.tabs.find(({ id }) => id === label('herdr.tab'));
@@ -445,13 +446,15 @@ function jobFixture({ root = ROOT, spaces, pages, refuseDetails, refuseOlder, de
     ...options, print: (line) => fixture.lines.push(line) }));
   fixture.unfinished = (options = {}) => listUnfinished(/** @type {any} */ ({ root, login: 'owner', herdrApp, hc, ...tracker.options, hostname: 'here', git,
     ...options, print: (line) => fixture.lines.push(line) }));
+  fixture.forward = (options = {}) => startForwarder(/** @type {any} */ ({ root, herdrApp, hc, parent: 't0', ...options, print: (line) => fixture.lines.push(line) }));
   fixture.runs = () => fixture.calls.filter((args) => args[0] === 'run');
   // A live job terminal of card `card` as `hc ls --json` lists it (no labels, as a real Herdr lists) and `hc get --json` reads it
   // (with its labels), running `foreground`: 'bash' is the shell a kept terminal holds once its program is gone, any other name a
   // program started by the launch form `/usr/bin/env ...`, which keeps the terminal's pid.
   // Its `hc get` status is `status` (a real Herdr state: `working`, `blocked` at a question menu, `done`), or null where the session is still starting.
   // `labels` are further labels of its record, such as the `fabraik.stopped` kind. A test sets `replies['send <address>']` to make
-  // `hc send` answer otherwise than exit 0, and `hc label <address> k=v` (or `k=`) sets that label on the record.
+  // `hc send` answer otherwise than exit 0, and `replies['read <address>']` to answer `hc read`, which fails otherwise;
+  // `hc label <address> k=v` (or `k=`) sets that label on the record.
   fixture.addJob = (address, card, foreground, status = 'done', labels = {}) => {
     const name = `fabraik-job-${card}`;
     const pid = 1000 + Number(address.slice(1));
@@ -2313,14 +2316,15 @@ test('coordinator open refuses a space holding more than one Coordinator tab', a
 
 // A project folder and a bin folder of fakes whose every call is appended to one log.
 // `hc` is the fake hc's answer per subcommand (its stdout), empty for any it does not name, or a function of the project's
-// local main commit that returns them. The project folder holds only a repository of one empty commit (see committedRoot):
+// local main commit that returns them. An answer that is a list is given in order, one per call, its last once used up;
+// a counter file in the bin folder holds each list's place. `events` prints its answer and exits, as a stream that ends. The project folder holds only a repository of one empty commit (see committedRoot):
 // the fake git passes the workflow version's selection, snapshot and drift reads through to the real git there. It also answers the
 // job branches and worktrees `repository` names, as gitFor does. The fake gh answers the tracker reads one page per request
 // as the tracker gate makes them: the board listing of `tracker.nodes`, empty open and recently closed issue walks, each board card's
 // comments from `tracker.comments` (none where it names none), the open draft pull requests `tracker.drafts`, and a
 // `rate_limit` probe with an allowance left; any other call fails. When enabled, the fake Codex records the app-server
 // working directory and the incoming messages in the same log as Herdr.
-/** @param {import('node:test').TestContext} t @param {{ listing: any, hc?: Record<string, string> | ((main: string) => Record<string, string>), text?: string, login?: string | null, inventoryUnread?: boolean, codexHooks?: (root: string) => unknown, repository?: { branches: number[], worktrees: number[] }, tracker?: { nodes: any[], comments: Record<number, string[]>, drafts: { number: number, headRefName: string }[] } }} options */
+/** @param {import('node:test').TestContext} t @param {{ listing: any, hc?: Record<string, string | string[]> | ((main: string) => Record<string, string | string[]>), text?: string, login?: string | null, inventoryUnread?: boolean, codexHooks?: (root: string) => unknown, repository?: { branches: number[], worktrees: number[] }, tracker?: { nodes: any[], comments: Record<number, string[]>, drafts: { number: number, headRefName: string }[] } }} options */
 function wireFixture(t, { listing, hc = {}, text = settingsText({ coordinator: { model: 'sonnet', effort: 'high' } }),
   login = 'octocat\n', inventoryUnread = false, codexHooks, repository = { branches: [], worktrees: [] },
   tracker = { nodes: [], comments: {}, drafts: [] } }) {
@@ -2368,7 +2372,16 @@ else if (line === ${JSON.stringify(worktreeReadNul.join(' '))}) say(${JSON.strin
 else { process.stderr.write('fake git: unexpected ' + line); process.exit(1); }`);
   fake('herdr-app', `process.stdout.write(args[0] === 'ls' ? ${JSON.stringify(JSON.stringify(listing(basename(root), root)))} : '{}');`);
   fake('hc', `const replies = ${JSON.stringify(hcReplies)};
-process.stdout.write(replies[args.join(':')] ?? replies[args[0]] ?? '');`);
+const key = [args.join(':'), args[0]].find((name) => replies[name] !== undefined);
+let reply = key === undefined ? '' : replies[key];
+if (Array.isArray(reply)) {
+  const fs = require('node:fs');
+  const counter = require('node:path').join(${JSON.stringify(bin)}, 'hc-' + encodeURIComponent(key) + '.count');
+  const used = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;
+  fs.writeFileSync(counter, String(used + 1));
+  reply = reply[Math.min(used, reply.length - 1)];
+}
+process.stdout.write(reply);`);
   if (codexHooks) fake('codex', `const hooks = ${JSON.stringify(codexHooks(root))};
 const lines = require('node:readline').createInterface({ input: process.stdin });
 lines.on('line', (line) => {
@@ -2698,7 +2711,7 @@ function deliveryWorld(t, { previous = OPEN_PR } = {}) {
       if (number === 18) return JSON.stringify(differentPull);
       return typeof provider === 'string' ? provider : JSON.stringify(provider);
     };
-    const stop = Promise.withResolvers();
+    let stop = Promise.withResolvers();
     const output = [];
     const dependencies = {
       cwd: worktree, root, lockRoot, accountHome, watchStateDir: watchDir, pid,
@@ -2741,7 +2754,7 @@ function deliveryWorld(t, { previous = OPEN_PR } = {}) {
     };
     const history = () => labels.filter((label) => label.address === address);
     const waitLabel = (reason) => observed(() => history().some((label) => label.reason === reason));
-    return { address, terminal, root, worktree, ghExec, run, go, history, waitLabel, output, stop: () => stop.resolve('SIGTERM') };
+    return { address, terminal, root, worktree, ghExec, run, go, history, waitLabel, output, stop: () => stop.resolve('SIGTERM'), restart: () => { stop = Promise.withResolvers(); } };
   }
   return {
     job, scratch, repository: originalRepo, lockRoot, durable, durableDir, watchStateDir, watchFile, watchProcesses, terminals, reads, tick, observed,
@@ -3378,36 +3391,129 @@ test('967 a held Claude delivery arms only a pull request with no auto-merge req
   await stopDelivery(a, holder);
 });
 
-// new behaviour: a Herdr job merges with no owner question after an in-job repair. A held watch that ends on a failed
-// required check leaves the delivery unsettled, so the job keeps its reservation, returns the pull request to draft,
-// pushes its repaired head, marks it ready, and arms and watches that head as it did the first.
-test('967 a held Claude delivery whose watch failed a required check arms and watches its repaired head', async (t) => {
+// existing behaviour: a held watch that ends on a failed required check leaves the delivery unsettled. The job returns
+// the pull request to draft (gh pr ready 17 --undo) and releases its reservation, so the next queued job settles the
+// receipt, takes the turn and is ready. The first job then holds again behind it, and once it has the turn back it
+// marks its repaired head ready, arms and watches that head as it did the first.
+test('967 a held Claude delivery whose watch failed a required check releases for its repair, lets the next job deliver and rearms its repaired head', async (t) => {
   if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
   const world = deliveryWorld(t);
   const a = world.job(17);
-  const holder = await heldDelivery(world, a);
-  await armPrior(world, a);
-  const failed = 'required check "test" failed';
-  assert.equal(await a.run(['17', '--held-delivery'], { watch: async (_pr, { output }) => { output.log(failed); return 1; } }), 1, a.output.join('\n'));
-  assert.match(a.history().at(-1)?.reason ?? '', new RegExp(escaped(failed)));
+  const b = world.job(19);
+  const aHold = a.go(HOLD);
+  let bHold;
+  try {
+    await heldDelivery(world, a, aHold);
+    await armPrior(world, a);
+    const failed = 'required check "test" failed';
+    assert.equal(await a.run(['17', '--held-delivery'], { watch: async (_pr, { output }) => { output.log(failed); return 1; } }), 1, a.output.join('\n'));
+    assert.match(a.history().at(-1)?.reason ?? '', new RegExp(escaped(failed)));
 
-  // The repair: gh pr ready 17 --undo, the repaired head pushed, then gh pr ready 17 again, so GitHub reads it ready there.
-  const repaired = 'b'.repeat(40);
-  world.setProvider({ ...OPEN_PR, headRefOid: repaired });
-  assert.equal(holder.done, false, 'the reservation is kept through the repair');
-  assert.equal(await a.run(READY), 0, a.output.join('\n'));
-  assert.equal(await a.run(['--delivery-pr', '17', repaired, '--arm']), 0, a.output.join('\n'));
-  assert.equal(JSON.parse(readFileSync(world.durable, 'utf8')).head, repaired, 'the receipt names the repaired head');
-  const watched = [];
-  assert.equal(await a.run(['17', '--held-delivery'], { watch: async (pr, { output, coordinated }) => {
-    watched.push([pr, coordinated.head]);
-    output.log(`required checks passed on ${coordinated.head}`);
-    return 0;
-  } }), 0, a.output.join('\n'));
-  assert.deepEqual(watched, [['17', repaired]]);
-  assert.equal(a.output.at(-1), `required checks passed on ${repaired}`);
-  assert.equal(a.history().at(-1)?.phase, 'open');
-  await stopDelivery(a, holder);
+    bHold = b.go(HOLD);
+    await b.waitLabel(CONTENTION_WAIT);
+    world.setProvider({ ...OPEN_PR, isDraft: true });
+    await stopDelivery(a, aHold);
+    await heldDelivery(world, b, bHold);
+    assert.equal(existsSync(world.durable), false, "the released job's receipt is settled");
+
+    a.restart();
+    const retake = a.go(HOLD);
+    try {
+      await a.waitLabel(CONTENTION_WAIT);
+      assert.equal(a.history().at(-1)?.phase, 'waiting');
+      assert.equal(retake.done, false);
+      assert.equal(bHold.done, false);
+      await stopDelivery(b, bHold);
+      await heldDelivery(world, a, retake);
+
+      // The repair: the repaired head pushed, then gh pr ready 17 again, so GitHub reads it ready there.
+      const repaired = 'b'.repeat(40);
+      world.setProvider({ ...OPEN_PR, headRefOid: repaired });
+      assert.equal(await a.run(READY), 0, a.output.join('\n'));
+      assert.equal(await a.run(['--delivery-pr', '17', repaired, '--arm']), 0, a.output.join('\n'));
+      assert.equal(JSON.parse(readFileSync(world.durable, 'utf8')).head, repaired, 'the receipt names the repaired head');
+      const watched = [];
+      assert.equal(await a.run(['17', '--held-delivery'], { watch: async (pr, { output, coordinated }) => {
+        watched.push([pr, coordinated.head]);
+        output.log(`required checks passed on ${coordinated.head}`);
+        return 0;
+      } }), 0, a.output.join('\n'));
+      assert.deepEqual(watched, [['17', repaired]]);
+      assert.equal(a.output.at(-1), `required checks passed on ${repaired}`);
+      assert.equal(a.history().at(-1)?.phase, 'open');
+    } finally {
+      a.stop();
+      await retake.result;
+    }
+  } finally {
+    a.stop();
+    b.stop();
+    await aHold.result;
+    await bHold?.result;
+  }
+});
+
+// existing behaviour: a held Claude delivery whose still-ready pull request now shows a head the job did not arm
+// rearms that head itself (its own receipt is replaced), returns the pull request to draft and releases, so the next
+// queued job settles a receipt naming the head GitHub shows, takes the turn and the receipt is gone.
+test('967 a held Claude delivery whose pull request head moved rearms the moved head, returns to draft and lets the next job deliver', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const a = world.job(17);
+  const b = world.job(19);
+  const aHold = a.go(HOLD);
+  let bHold;
+  try {
+    await heldDelivery(world, a, aHold);
+    await armPrior(world, a);
+    bHold = b.go(HOLD);
+    await b.waitLabel(CONTENTION_WAIT);
+
+    const moved = 'c'.repeat(40);
+    world.setProvider({ ...OPEN_PR, headRefOid: moved });
+    assert.equal(await a.run(['--delivery-pr', '17', moved, '--arm']), 0, a.output.join('\n'));
+    assert.equal(JSON.parse(readFileSync(world.durable, 'utf8')).head, moved, 'the receipt names the moved head');
+    world.setProvider({ ...OPEN_PR, headRefOid: moved, isDraft: true });
+    await stopDelivery(a, aHold);
+    await heldDelivery(world, b, bHold);
+    assert.equal(existsSync(world.durable), false, "the released job's receipt is settled");
+  } finally {
+    a.stop();
+    b.stop();
+    await aHold.result;
+    await bHold?.result;
+  }
+});
+
+// existing behaviour: a released Claude delivery that no other job followed still holds its own receipt, and its own
+// next hold settles and removes that receipt; with the turn back it marks its repaired head ready and arms it.
+test('967 a released Claude delivery with no successor settles its own receipt when it holds again and arms its repaired head', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const a = world.job(17);
+  const aHold = a.go(HOLD);
+  let retake;
+  try {
+    await heldDelivery(world, a, aHold);
+    await armPrior(world, a);
+    world.setProvider({ ...OPEN_PR, isDraft: true });
+    await stopDelivery(a, aHold);
+    assert.equal(existsSync(world.durable), true, 'with no successor the receipt still stands');
+
+    a.restart();
+    retake = a.go(HOLD);
+    await heldDelivery(world, a, retake);
+    assert.equal(existsSync(world.durable), false, 'its own hold settles and removes its receipt');
+
+    const repaired = 'b'.repeat(40);
+    world.setProvider({ ...OPEN_PR, headRefOid: repaired });
+    assert.equal(await a.run(['--delivery-pr', '17', repaired, '--arm']), 0, a.output.join('\n'));
+    assert.equal(JSON.parse(readFileSync(world.durable, 'utf8')).head, repaired, 'the receipt names the repaired head');
+  } finally {
+    a.stop();
+    await aHold.result;
+    await retake?.result;
+  }
 });
 
 // existing behaviour: while a held Claude delivery's receipt stands, arming another pull request, or the same pull
@@ -3424,6 +3530,13 @@ test("967 a held Claude delivery never replaces another pull request's receipt",
   assert.equal(await a.run(['--delivery-pr', '18', OID, '--arm']), 1, 'another pull request');
   assert.ok(a.output.join('\n').includes(refusal), a.output.join('\n'));
   assert.equal(readFileSync(world.durable, 'utf8'), armed);
+
+  // Its own holder rearming its own pull request on a repaired head replaces the receipt.
+  const repaired = 'b'.repeat(40);
+  world.setProvider({ ...OPEN_PR, headRefOid: repaired });
+  assert.equal(await a.run(['--delivery-pr', '17', repaired, '--arm']), 0, a.output.join('\n'));
+  assert.deepEqual(JSON.parse(readFileSync(world.durable, 'utf8')), { ...JSON.parse(armed), head: repaired }, 'the receipt is the armed one on the repaired head');
+  world.setProvider(OPEN_PR);
 
   // A standing receipt that names another holder of the same pull request is not this holder's to replace.
   const elsewhere = JSON.stringify({ ...JSON.parse(armed), holder: { pid: process.ppid, start: '1' } });
@@ -4292,6 +4405,356 @@ test('board wake returns undefined and runs nothing when the command path is mis
   const { root, calls } = wireFixture(t, { listing: (name, folder) => ({ spaces: [space('spproject1', name, [], null, folder)] }) });
   assert.equal(wakeAfterMoveIn(root, join(root, 'absent', 'coordinator.mjs')), undefined);
   assert.deepEqual(calls(), []);
+});
+
+// What forwardedNotes reads of one job terminal: card `card`'s job, a child of `parent`, live at `status` since `statusMs`
+// unless `state` is finished.
+const forwardJob = (card, { parent = 't2', state = 'live', status = 'working', statusMs = 100 } = {}) =>
+  ({ state, status: state === 'live' ? status : null, statusMs: state === 'live' ? statusMs : null, parent, card });
+const jobsBy = (entries) => new Map(Object.entries(entries));
+
+// new behaviour: a job an earlier coordinator started is forwarded once on each change to blocked, done, error or finished
+test('forwardedNotes sends one line per change of a job an earlier coordinator started', () => {
+  const before = jobsBy({ t5: forwardJob('42'), t6: forwardJob('43'), t7: forwardJob('44', { status: 'done' }), t8: forwardJob('45') });
+  const after = jobsBy({ t5: forwardJob('42', { status: 'blocked', statusMs: 200 }), t6: forwardJob('43', { state: 'finished' }),
+    t7: forwardJob('44', { status: 'done', statusMs: 300 }), t8: forwardJob('45', { status: 'error', statusMs: 200 }) });
+  assert.deepEqual(forwardedNotes(before, after, 't9').sort(), [
+    "Card 42's job t5, started by an earlier coordinator, is blocked. See: hc read t5",
+    "Card 43's job t6, started by an earlier coordinator, is finished. See: hc read t6",
+    "Card 44's job t7, started by an earlier coordinator, is done. See: hc read t7",
+    "Card 45's job t8, started by an earlier coordinator, is error. See: hc read t8",
+  ]);
+});
+
+// new behaviour: the coordinator's own children keep Herdr's native notes, and a job with no new state is not forwarded again
+test('forwardedNotes skips the coordinator own jobs and unchanged ones', () => {
+  const before = jobsBy({ t4: forwardJob('41'), t5: forwardJob('42', { parent: 't9' }), t6: forwardJob('43', { status: 'blocked' }),
+    t7: forwardJob('44', { status: 'blocked' }), t8: forwardJob('45', { parent: 't9' }) });
+  const after = jobsBy({ t4: forwardJob('41', { status: 'done', statusMs: 200 }), t5: forwardJob('42', { parent: 't9', status: 'blocked', statusMs: 200 }),
+    t6: forwardJob('43', { status: 'blocked' }), t7: forwardJob('44', { status: 'working', statusMs: 200 }), t8: forwardJob('45', { parent: 't9', state: 'finished' }) });
+  assert.deepEqual(forwardedNotes(before, after, 't9'), ["Card 41's job t4, started by an earlier coordinator, is done. See: hc read t4"]);
+});
+
+// new behaviour: a card or address the line would carry is checked before it is typed into the coordinator
+test('forwardedNotes refuses a record with a malformed card or address', () => {
+  assert.throws(() => forwardedNotes(jobsBy({ t5: forwardJob('04') }), jobsBy({ t5: forwardJob('04', { status: 'blocked', statusMs: 200 }) }), 't9'),
+    /\bt5\b/);
+  assert.throws(() => forwardedNotes(jobsBy({ 'host:t5': forwardJob('42') }),
+    jobsBy({ 'host:t5': forwardJob('42', { status: 'blocked', statusMs: 200 }) }), 't9'), /host:t5/);
+});
+
+// The `hc get --json` record of card `card`'s job terminal, a child of `parent` in space sp1, live at `status` since
+// `statusMs` unless `state` is finished.
+const forwardRecord = (card, { parent = 't2', state = 'live', status = 'working', statusMs = 100 } = {}) => ({
+  state, pid: 200, argv: ['/usr/bin/env', 'claude'], foreground: { name: 'claude', pid: 201 }, parent,
+  status: state === 'live' ? { state: status } : null, status_ms: state === 'live' ? statusMs : null,
+  labels: { 'fabraik.role': 'job', 'fabraik.space': 'sp1', 'fabraik.card': card } });
+
+// The first line `hc events --json` prints: Herdr's subscription snapshot, as observed live.
+const SUBSCRIPTION_SNAPSHOT = JSON.stringify({ channel: null, seq: 79880, terminals: [] });
+
+// A hc over the job terminals `jobs` holds by address, which a case changes as its events arrive, recording every call:
+// `ls` lists the live ones, finished ones too with --all, and each address `twice` holds two times; `get` answers a record;
+// `send` answers the codes `sendCodes` gives in order, then 0.
+/** @param {Record<string, any>} jobs @param {string[][]} calls @param {number[]} sendCodes @param {Set<string>} twice */
+function forwardHc(jobs, calls, sendCodes, twice) {
+  return async (args) => {
+    calls.push(args);
+    if (args[0] === 'ls') {
+      const terminals = Object.entries(jobs).filter(([, { state }]) => state === 'live' || args.includes('--all'))
+        .flatMap(([address, { state }]) => Array.from({ length: twice.has(address) ? 2 : 1 }, () => ({ address, state })));
+      return { code: 0, stdout: JSON.stringify({ terminals }), stderr: '' };
+    }
+    if (args[0] === 'get' && jobs[args[1]]) return { code: 0, stdout: JSON.stringify({ address: args[1], ...jobs[args[1]] }), stderr: '' };
+    if (args[0] === 'send') {
+      const code = sendCodes.shift() ?? 0;
+      return { code, stdout: '', stderr: code === 9 ? 'blocked' : '' };
+    }
+    return { code: 1, stdout: '', stderr: `fake hc: unexpected ${args.join(' ')}` };
+  };
+}
+
+// One forwardNotes run for coordinator t9 in space sp1 over `jobs`. Its event stream gives Herdr's subscription snapshot
+// first, then one line per entry of `changes`, each only once the watch has printed forward-ready and after making its
+// change; then it ends, or, where `open`, waits with no further line. Without `snapshot` the stream ends before any line.
+// `twice` holds the addresses hc ls lists two times. Its exit code, the hc calls, the sends, the printed lines, and `early`:
+// each hc call (joined) and printed line made before the snapshot arrived.
+/** @param {Record<string, object>} jobs @param {(() => void)[]} changes @param {{ sendCodes?: number[], open?: boolean, snapshot?: boolean, twice?: Set<string> }} [options] */
+async function forwarded(jobs, changes, { sendCodes = [], open = false, snapshot = true, twice = new Set() } = {}) {
+  const calls = [];
+  const said = [];
+  const early = [];
+  let subscribed = false;
+  const { promise: isReady, resolve: ready } = /** @type {PromiseWithResolvers<void>} */ (Promise.withResolvers());
+  let next = 0;
+  const stream = {
+    [Symbol.asyncIterator]() { return this; },
+    async next() {
+      if (!snapshot) return { done: true, value: undefined };
+      if (!subscribed) {
+        subscribed = true;
+        return { done: false, value: SUBSCRIPTION_SNAPSHOT };
+      }
+      await isReady;
+      if (next < changes.length) {
+        changes[next++]();
+        return { done: false, value: '{"event":"terminal_status_changed"}' };
+      }
+      return open ? new Promise(() => {}) : { done: true, value: undefined };
+    },
+    async return() { return { done: true, value: undefined }; },
+  };
+  const hc = forwardHc(jobs, calls, sendCodes, twice);
+  const code = await forwardNotes({ hc: (args) => {
+    if (!subscribed) early.push(args.join(' '));
+    return hc(args);
+  }, events: () => stream, coordinator: 't9', space: 'sp1',
+  print: (line) => {
+    if (!subscribed) early.push(line);
+    said.push(line);
+    if (line.includes('forward-ready')) ready();
+  } });
+  return { code, calls, sends: calls.filter(([verb]) => verb === 'send'), said: said.join('\n'), early };
+}
+
+// new behaviour: a send the blocked coordinator refuses with exit 9 is reported and the watch forwards the next change
+test('forwardNotes goes on after a send the blocked coordinator refuses', async () => {
+  const jobs = { t5: forwardRecord('42'), t6: forwardRecord('43') };
+  const run = await forwarded(jobs, [() => { jobs.t5 = forwardRecord('42', { state: 'finished' }); },
+    () => { jobs.t6 = forwardRecord('43', { state: 'finished' }); }], { sendCodes: [9] });
+  assert.equal(run.code, 0, run.said);
+  assert.deepEqual(run.sends, [
+    ['send', 't9', "Card 42's job t5, started by an earlier coordinator, is finished. See: hc read t5"],
+    ['send', 't9', "Card 43's job t6, started by an earlier coordinator, is finished. See: hc read t6"],
+  ]);
+  assert.match(run.said, /not forwarded while the coordinator asks the owner/);
+});
+
+// new behaviour: a stream that ends while a job of an earlier coordinator still runs fails loudly, and the baseline sends nothing
+test('forwardNotes exits 1 when the event stream ends with a job still running', async () => {
+  const run = await forwarded({ t5: forwardRecord('42', { status: 'blocked' }) }, [() => {}]);
+  assert.equal(run.code, 1, run.said);
+  assert.deepEqual(run.sends, []);
+  assert.match(run.said, /hc events ended/);
+});
+
+// new behaviour: the watch ends by itself once only the coordinator's own jobs run, without waiting for the stream to end
+test('forwardNotes exits 0 once no job of an earlier coordinator is running', async () => {
+  const jobs = { t5: forwardRecord('42'), t7: forwardRecord('44', { parent: 't9' }) };
+  const run = await forwarded(jobs, [() => { jobs.t5 = forwardRecord('42', { state: 'finished' }); }], { open: true });
+  assert.equal(run.code, 0, run.said);
+  assert.deepEqual(run.sends, [['send', 't9', "Card 42's job t5, started by an earlier coordinator, is finished. See: hc read t5"]]);
+  assert.match(run.said, /forward-ready/);
+});
+
+// new behaviour: the watch makes its baseline read and shows forward-ready only once Herdr's subscription snapshot has arrived
+test('forwardNotes reads its baseline and shows forward-ready only after Herdr\'s subscription snapshot', async () => {
+  const jobs = { t5: forwardRecord('42') };
+  const run = await forwarded(jobs, [() => { jobs.t5 = forwardRecord('42', { state: 'finished' }); }]);
+  assert.equal(run.code, 0, run.said);
+  assert.deepEqual(run.early, [], 'no read and no forward-ready before the snapshot');
+  assert.match(run.said, /^forward-ready$/m);
+  assert.deepEqual(run.sends, [['send', 't9', "Card 42's job t5, started by an earlier coordinator, is finished. See: hc read t5"]]);
+});
+
+// new behaviour: the snapshot line is the subscription, not a change, so it starts no second read of the jobs
+test('forwardNotes takes the subscription snapshot as no cue to read the jobs again', async () => {
+  const run = await forwarded({ t5: forwardRecord('42', { status: 'blocked' }) }, []);
+  assert.equal(run.code, 1, run.said);
+  assert.equal(run.calls.filter(([verb]) => verb === 'ls').length, 1, 'only the baseline read lists the jobs');
+  assert.deepEqual(run.sends, []);
+});
+
+// new behaviour: a stream that ends before Herdr's snapshot fails loudly with no baseline read and no forward-ready
+test('forwardNotes exits 1 with no baseline read when the stream ends before Herdr\'s snapshot', async () => {
+  const run = await forwarded({ t5: forwardRecord('42', { status: 'blocked' }) }, [], { snapshot: false });
+  assert.equal(run.code, 1, run.said);
+  assert.deepEqual(run.calls, [], 'no hc ls, get or send');
+  assert.doesNotMatch(run.said, /forward-ready/);
+});
+
+// new behaviour: a job record whose state or parent Herdr cannot produce stops the watch, naming the job, and sends nothing
+test('forwardNotes refuses a job record whose state or parent Herdr cannot produce', async () => {
+  const blocked = forwardRecord('42', { status: 'blocked', statusMs: 200 });
+  for (const [label, record] of /** @type {[string, object][]} */ ([['state running', forwardRecord('42', { state: 'running' })],
+    ['remote parent', { ...blocked, parent: 'host:t3' }], ['null parent', { ...blocked, parent: null }],
+    ['numeric parent', { ...blocked, parent: 3 }], ['no parent', { ...blocked, parent: undefined }]])) {
+    const jobs = /** @type {Record<string, object>} */ ({ t5: forwardRecord('42') });
+    const run = await forwarded(jobs, [() => { jobs.t5 = record; }]);
+    assert.equal(run.code, 1, `${label}: ${run.said}`);
+    assert.match(run.said, /\bt5\b/, label);
+    assert.deepEqual(run.sends, [], label);
+  }
+});
+
+// new behaviour: a job listing that names one address twice stops the watch, naming the address, and sends nothing
+test('forwardNotes refuses a job listing that names the same address twice', async () => {
+  const jobs = { t5: forwardRecord('42') };
+  const twice = new Set();
+  const run = await forwarded(jobs, [() => {
+    jobs.t5 = forwardRecord('42', { state: 'finished' });
+    twice.add('t5');
+  }], { twice });
+  assert.equal(run.code, 1, run.said);
+  assert.match(run.said, /\bt5\b/);
+  assert.deepEqual(run.sends, []);
+});
+
+// The forward-watch wire listing: the project space with its Coordinator tab holding t9.
+const forwardListing = (name, folder) => ({ spaces: [{ ...space('sp1', name, [], null, folder), tabs: [{ id: 'tbc', name: 'Coordinator', terminals: [{ terminal: 't9' }] }] }] });
+
+// new behaviour: the forward-watch command reads only Herdr and types one line into the coordinator
+test('ANTI-REGRESSION: forwarding an earlier coordinator job notes makes no tracker request', (t) => {
+  const { calls, run } = wireFixture(t, { listing: forwardListing, hc: {
+    events: `${SUBSCRIPTION_SNAPSHOT}\n{"event":"terminal_status_changed"}\n`,
+    ls: [JSON.stringify({ terminals: [{ address: 't5', state: 'live' }] }), JSON.stringify({ terminals: [{ address: 't5', state: 'finished' }] })],
+    'get:t5:--json': [JSON.stringify({ address: 't5', ...forwardRecord('42') }), JSON.stringify({ address: 't5', ...forwardRecord('42', { state: 'finished' }) })],
+  } });
+  const watched = run(['forward-watch', '--coordinator', 't9', '--space', 'sp1']);
+  assert.equal(watched.status, 0, watched.stdout + watched.stderr);
+  assert.match(watched.stdout, /^forward-ready$/m);
+  assert.deepEqual(calls().filter(({ tool }) => tool === 'gh'), [], 'no gh call');
+  assert.deepEqual(calls().filter(({ tool, args }) => tool === 'git' && args[0] === 'fetch'), [], 'no fetch');
+  assert.deepEqual(calls().filter(({ tool, args }) => tool === 'hc' && args[0] === 'events').map(({ args }) => args),
+    [['events', '--label', 'fabraik.role=job', '--label', 'fabraik.space=sp1', '--json']]);
+  assert.deepEqual(calls().filter(({ tool, args }) => tool === 'hc' && args[0] === 'send').map(({ args }) => args),
+    [['send', 't9', "Card 42's job t5, started by an earlier coordinator, is finished. See: hc read t5"]]);
+});
+
+// new behaviour: forward-watch refuses a malformed operand shape with exit 2 and its usage, before any call
+test('forward-watch with malformed operands prints usage and calls nothing', (t) => {
+  const { calls, run } = wireFixture(t, { listing: forwardListing });
+  for (const operands of [[], ['--coordinator', 't9'], ['--space', 'sp1'], ['--coordinator', 'host:t9', '--space', 'sp1'],
+    ['--coordinator', 't9', '--space', 'sp1', 'extra'], ['--coordinator', 't9', '--space']]) {
+    const refused = run(['forward-watch', ...operands]);
+    assert.equal(refused.status, 2, `${operands.join(' ')}: ${refused.stdout}${refused.stderr}`);
+    assert.ok(refused.stderr.includes('forward-watch --coordinator <address> --space <space id>'), refused.stderr);
+  }
+  assert.deepEqual(calls(), []);
+});
+
+// A jobFixture for the coordinator `coordinator` (t1 unless given) of space spproject1, whose tabs are `tabs`, holding `jobs`:
+// each a job terminal of card `card`, a child of `parent`, `working` unless finished; and `forwarders`: each a note forwarder
+// terminal, a child of `parent`, live or finished with `exit`, labelled `herdr.tab=<tab>` where it names a `tab`. `ls` and `get`
+// both carry each terminal's parent and state. `forward` runs from `coordinator` unless its options say otherwise.
+/** @param {{ coordinator?: string, tabs?: [string, string][], jobs?: { address: string, card: number, parent: string, state?: string }[], forwarders?: { address: string, parent: string, state?: string, exit?: number | null, tab?: string }[] }} options */
+function forwardFixture({ coordinator = 't1', tabs = [['tb1', '1']], jobs = [], forwarders = [] }) {
+  const fixture = jobFixture({ spaces: [space('spproject1', 'fabraik', tabs, null, ROOT)], pages: READY_BOARD() });
+  const record = fixture.details.t0;
+  delete fixture.details.t0;
+  fixture.details[coordinator] = { ...record, address: coordinator };
+  fixture.coordinatorAddresses = [coordinator];
+  const forward = fixture.forward;
+  fixture.forward = (options = {}) => forward({ parent: coordinator, ...options });
+  for (const { address, card, parent, state = 'live' } of jobs) {
+    fixture.addJob(address, card, 'claude', 'working');
+    Object.assign(fixture.terminals[fixture.terminals.length - 1], { parent, state });
+    Object.assign(fixture.details[address], { parent, state, status_ms: 100 });
+    if (state !== 'live') Object.assign(fixture.details[address], { status: null, status_ms: null, exit_code: 0, reason: 'exited' });
+  }
+  for (const { address, parent, state = 'finished', exit = 0, tab } of forwarders) {
+    const finished = state === 'finished' ? { exit_code: exit, reason: 'exited' } : { exit_code: null };
+    fixture.terminals.push({ address, name: `${parent}-notes`, parent, state, ...finished });
+    fixture.details[address] = { address, name: `${parent}-notes`, state, parent, pid: 300, argv: [process.execPath], foreground: { name: 'node', pid: 300 },
+      status: null, ...finished, labels: { 'fabraik.role': 'forwarder', 'fabraik.space': 'spproject1', ...(tab ? { 'herdr.tab': tab } : {}) } };
+  }
+  return fixture;
+}
+
+// new behaviour: with only the coordinator's own jobs live, forward closes the tab of the finished forwarder it removes, and only
+// that job notes tab, and starts none
+test('forward starts nothing when no job of an earlier coordinator runs', async () => {
+  const fixture = forwardFixture({ tabs: [['tb1', '1'], ['tbnotes', 'job notes'], ['tbother', 'job notes']],
+    jobs: [{ address: 't4', card: 41, parent: 't1' }, { address: 't5', card: 42, parent: 't3', state: 'finished' }],
+    forwarders: [{ address: 't6', parent: 't1', exit: 0, tab: 'tbnotes' }] });
+  assert.equal(await fixture.forward(), 0, fixture.lines.join('\n'));
+  assert.equal(fixture.lines.at(-1), 'No job of an earlier coordinator is running.');
+  assert.deepEqual(fixture.runs(), []);
+  assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'rm'), [['rm', 't6']]);
+  assert.equal(fixture.app.filter(([, command, ...rest]) => command === 'tab.close' && rest.includes('tbnotes')).length, 1, 'the job notes tab is closed');
+  assert.ok(!fixture.app.some(([, command, ...rest]) => command === 'tab.close' && rest.includes('tbother')), 'a job notes tab no removed forwarder names stays open');
+  assert.ok(!fixture.app.some(([, command]) => command === 'tab.new'), 'no tab is opened');
+});
+
+// new behaviour: a live job of an earlier coordinator starts one notifying forwarder, the coordinator's child, in tab job notes
+test('forward starts the watch in the job notes tab as a child of the coordinator', async () => {
+  const fixture = forwardFixture({ jobs: [{ address: 't5', card: 42, parent: 't3' }] });
+  fixture.replies['read t10'] = { code: 0, stdout: 'forward-ready\n', stderr: '' };
+  assert.equal(await fixture.forward(), 0, fixture.lines.join('\n'));
+  const [created] = fixture.app.filter(([, command]) => command === 'tab.new');
+  assert.deepEqual(flagsOf(created), { space: 'spproject1', name: 'job notes', folder: ROOT, focus: 'false', mod: 'help' });
+  assert.deepEqual(fixture.runs(), [['run', '--bg', '--parent', 't1', '--name', 't1-notes', '--cwd', ROOT,
+    '--label', 'herdr.space=spproject1', '--label', 'herdr.tab=tb-job-notes', '--label', 'fabraik.role=forwarder', '--label', 'fabraik.space=spproject1',
+    '--json', '--', process.execPath, `${ROOT}/scripts/coordinator.mjs`, 'forward-watch', '--coordinator', 't1', '--space', 'spproject1']]);
+  for (const flag of ['--no-notify', '--keep', '--outlive-parent']) assert.ok(!fixture.runs()[0].includes(flag), `the run carries no ${flag}`);
+  assert.equal(fixture.helpPanes.size, 0, 'the Help pane is closed once the watch is adopted');
+  assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'read').at(-1), ['read', 't10', '--lines', '5']);
+});
+
+// new behaviour: forward refuses before any change unless HC_TERMINAL_ID is the sole running Claude or Codex Coordinator
+test('forward refuses when it is not run from the sole coordinator', async () => {
+  const other = forwardFixture({ jobs: [{ address: 't5', card: 42, parent: 't3' }] });
+  const twin = forwardFixture({ jobs: [{ address: 't5', card: 42, parent: 't3' }] });
+  twin.coordinatorAddresses = ['t1', 't8'];
+  twin.details.t8 = { ...liveRecord({ foregroundPid: 100 }), address: 't8', cwd: ROOT };
+  for (const [label, fixture, parent] of /** @type {const} */ ([['another terminal', other, 't7'], ['a second coordinator', twin, 't1'], ['no terminal', other, undefined]])) {
+    fixture.lines.length = 0;
+    assert.equal(await fixture.forward({ parent }), 1, label);
+    assert.match(fixture.lines.join('\n'), /HC_TERMINAL_ID/, label);
+    assert.deepEqual(fixture.calls.filter(([verb]) => ['run', 'rm', 'send', 'kill'].includes(verb)), [], label);
+    assert.ok(!fixture.app.some(([verb]) => verb === 'do'), `${label} changes no tab`);
+  }
+});
+
+// new behaviour: the coordinator's own forwarder that stopped with a failure is reported, kept for reading, and not replaced
+test('forward reports a stopped forwarder and starts none', async () => {
+  const fixture = forwardFixture({ tabs: [['tb1', '1'], ['tbnotes', 'job notes']], jobs: [{ address: 't5', card: 42, parent: 't3' }],
+    forwarders: [{ address: 't6', parent: 't1', exit: 1 }] });
+  const lastLine = 'Job notes stopped: hc events ended while a job of an earlier coordinator is still running.';
+  fixture.replies['read t6'] = { code: 0, stdout: `forward-ready\n${lastLine}\n`, stderr: '' };
+  assert.equal(await fixture.forward(), 1, fixture.lines.join('\n'));
+  const said = fixture.lines.join('\n');
+  assert.ok(said.includes(lastLine), said);
+  assert.match(said, /\bexit\b[^\n]*\b1\b/i, 'its exit is printed');
+  assert.deepEqual(fixture.runs(), []);
+  assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'rm' || verb === 'kill'), [], 'the stopped forwarder is kept');
+});
+
+// new behaviour: a watch that never prints forward-ready fails the start and stays visible for the coordinator to read
+test('forward fails when the watch never shows forward-ready', async () => {
+  const fixture = forwardFixture({ jobs: [{ address: 't5', card: 42, parent: 't3' }] });
+  fixture.replies['read t10'] = { code: 0, stdout: 'Job notes stopped: hc ls could not list the job terminals: exit 1\n', stderr: '' };
+  assert.equal(await fixture.forward(), 1, fixture.lines.join('\n'));
+  assert.ok(fixture.lines.length > 0, 'the failure is printed');
+  assert.equal(fixture.runs().length, 1);
+  assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'read'), Array.from({ length: 50 }, () => ['read', 't10', '--lines', '5']));
+  assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'rm' || verb === 'kill'), [], 'the watch terminal is left visible');
+});
+
+// new behaviour: a coordinator address Herdr cannot give is refused before any change, even from the sole coordinator
+test('forward refuses a coordinator address that is no local Herdr terminal', async () => {
+  const fixture = forwardFixture({ coordinator: 't0', tabs: [['tb1', '1'], ['tbnotes', 'job notes']], jobs: [{ address: 't5', card: 42, parent: 't3' }],
+    forwarders: [{ address: 't6', parent: 't3', exit: 0 }] });
+  fixture.replies['read t10'] = { code: 0, stdout: 'forward-ready\n', stderr: '' };
+  assert.equal(await fixture.forward(), 1, fixture.lines.join('\n'));
+  assert.match(fixture.lines.join('\n'), /HC_TERMINAL_ID/);
+  assert.deepEqual(fixture.calls.filter(([verb]) => ['run', 'rm', 'send', 'kill'].includes(verb)), []);
+  assert.ok(!fixture.app.some(([verb]) => verb === 'do'), 'it changes no tab');
+});
+
+// new behaviour: the forward-watch operands forward launches are accepted by the real command, so the watch starts past its usage
+test('forward launches a forward-watch the real command accepts', async (t) => {
+  const fixture = forwardFixture({ jobs: [{ address: 't5', card: 42, parent: 't3' }] });
+  fixture.replies['read t10'] = { code: 0, stdout: 'forward-ready\n', stderr: '' };
+  assert.equal(await fixture.forward(), 0, fixture.lines.join('\n'));
+  const [launched] = fixture.runs();
+  const watch = launched.slice(launched.indexOf('--') + 3);
+  assert.equal(watch[0], 'forward-watch');
+  const { run } = wireFixture(t, { listing: forwardListing, hc: { events: `${SUBSCRIPTION_SNAPSHOT}\n`, ls: JSON.stringify({ terminals: [] }) } });
+  const watched = run(watch);
+  assert.equal(watched.status, 0, watched.stdout + watched.stderr);
+  assert.ok(!watched.stderr.includes('forward-watch --coordinator <address>'), watched.stderr);
+  assert.match(watched.stdout, /^No job of an earlier coordinator is running\.$/m);
 });
 
 // Card 5's job underway: its branch job/5 exists and its card is In progress, with no comment and no draft pull request.

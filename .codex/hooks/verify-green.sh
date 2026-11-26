@@ -12,7 +12,7 @@
 #   exit 0, silent        — no pending check or applicable lint evidence;
 #                           an absent product gate changes nothing, and a passing one adds only its own output
 #   exit 0, stated reason — could not verify (no Git work tree, a root git cannot inspect, a
-#                           required tool absent, or lint unable to evaluate): the applicable
+#                           required tool absent, or lint unable to evaluate, exit 75): the applicable
 #                           observation did not complete, and stderr says so; a product gate that
 #                           could not verify states its own reason and exits 0
 #   exit 2, stated reason — verified and failed, including a product gate that exited non-zero or is
@@ -99,6 +99,7 @@ reuse_root=$root
 reuse_mode=dirty
 reuse_lint=no
 # Self-contained hooks repeat this bridge; reusableLocalChecks owns receipt policy.
+# shellcheck disable=SC2016 # The single-quoted text is a Node script; its $ and backticks are JavaScript, not shell.
 if reuse_probe=$(node --input-type=module -e '
   import { pathToFileURL } from "node:url";
   const { reusableLocalChecks } = await import(pathToFileURL(process.argv[2]).href);
@@ -136,5 +137,9 @@ fi
 out=$(npm run lint 2>&1)
 lint_status=$?
 [ "$lint_status" -eq 0 ] && exit 0
+if [ "$lint_status" -eq 75 ]; then
+  printf 'Stop gate: npm run lint could not run (exit 75), so the lint observation is unavailable.\n%s\n' "$out" >&2
+  exit 0
+fi
 printf 'Stop gate: npm run lint exited %s. Fix before finishing.\n%s\n' "$lint_status" "$out" >&2
 exit 2

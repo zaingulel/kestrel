@@ -1,4 +1,3 @@
-// @ts-nocheck
 // linear-api.mjs — the transport to Linear's GraphQL API: the key from its private file, one POST,
 // and the answer's data or one classified failure.
 //
@@ -19,6 +18,10 @@ export const LINEAR_ENDPOINT = 'https://api.linear.app/graphql';
 const RATE_LIMIT_EXIT = 3;
 const MAX_KEY_FILE_BYTES = 4096;
 
+/** @typedef {Error & { rateLimited?: boolean }} TransportError */
+/** @typedef {{ error: NodeJS.ErrnoException, status: number | null, signal: NodeJS.Signals | null, stdout?: string | null, stderr?: string | null } | { error?: undefined, status: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string }} TransportRun */
+/** @typedef {(command: string, args: string[], options: import('node:child_process').SpawnSyncOptionsWithStringEncoding) => TransportRun} TransportSpawn */
+
 export function linearKeyPath(home = homedir()) {
   return join(home, '.config', 'fabraik', 'linear-api-key');
 }
@@ -28,7 +31,8 @@ export function readLinearKey({ path, platform }) {
   let stats;
   try {
     stats = lstatSync(path);
-  } catch (error) {
+  } catch (caught) {
+    const error = /** @type {NodeJS.ErrnoException} */ (caught);
     if (error.code === 'ENOENT') throw new Error(`No Linear API key file at ${path}`);
     throw new Error(`The Linear API key file ${path} could not be read: ${error.code}`);
   }
@@ -62,6 +66,7 @@ function resetTime(headers, name) {
 }
 
 function rateLimitError(headers) {
+  /** @type {TransportError} */
   const error = new Error(
     `Linear's API rate limit stopped the request: retry after the seconds in Retry-After (${headers.get('retry-after') ?? 'not given'}); ` +
       `requests reset at ${resetTime(headers, 'x-ratelimit-requests-reset')}, ` +
@@ -69,6 +74,32 @@ function rateLimitError(headers) {
   );
   error.rateLimited = true;
   return error;
+}
+
+/** Whether a thrown value is an error from any realm or a live wrapper around one; a revoked proxy is not. */
+function isThrownError(caught) {
+  try {
+    return Error.isError(caught) || caught instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/** A thrown value read in one guarded step: a revoked proxy or a throwing getter gives a fixed message, never its text. */
+function unreachable(caught) {
+  if (!isThrownError(caught)) return 'Linear could not be reached: a non-error value was thrown';
+  try {
+    const error = /** @type {Error} */ (caught);
+    const { cause } = error;
+    const fields = /** @type {{ code?: unknown, name?: unknown }} */ ((typeof cause === 'object' || typeof cause === 'function') && cause !== null ? cause : {});
+    for (const read of [() => fields.code, () => fields.name, () => error.name]) {
+      const reason = read();
+      if (typeof reason === 'string' || typeof reason === 'number') return `Linear could not be reached: ${reason}`;
+    }
+  } catch {
+    // Fall through to the fixed message.
+  }
+  return 'Linear could not be reached: its error could not be read';
 }
 
 async function exchange(payload, { fetch, key }) {
@@ -82,8 +113,8 @@ async function exchange(payload, { fetch, key }) {
       body: JSON.stringify(payload),
     });
     text = await response.text();
-  } catch (error) {
-    throw new Error(`Linear could not be reached: ${error.cause?.code ?? error.cause?.name ?? error.name}`);
+  } catch (caught) {
+    throw new Error(unreachable(caught));
   }
   const { status } = response;
   let body;
@@ -113,16 +144,31 @@ async function exchange(payload, { fetch, key }) {
   return body.data;
 }
 
+const UNREADABLE_ERROR = 'Linear request failed: its error could not be read';
+
+/** A thrown value read in one guarded step: a revoked proxy or a throwing getter gives a fixed message, never its text. */
+function safeError(caught, key) {
+  if (!isThrownError(caught)) return new Error('Linear request failed: a non-error value was thrown');
+  try {
+    const error = /** @type {TransportError} */ (caught);
+    const text = error.message;
+    if (typeof text !== 'string') return new Error(UNREADABLE_ERROR);
+    // A fresh Error, so no stack recorded with the unredacted message survives.
+    const redacted = /** @type {TransportError} */ (new Error(text.replaceAll(key, '[key]')));
+    if (error.rateLimited === true) redacted.rateLimited = true;
+    return redacted;
+  } catch {
+    return new Error(UNREADABLE_ERROR);
+  }
+}
+
 // Returns the answer's data, or throws one classified Error with the key redacted; a rate limit
 // carries `rateLimited: true`. Sends exactly one request.
 export async function requestLinear(payload, { fetch, key }) {
   try {
     return await exchange(payload, { fetch, key });
-  } catch (error) {
-    // A fresh Error, so no stack recorded with the unredacted message survives.
-    const redacted = new Error(error.message.replaceAll(key, '[key]'));
-    if (error.rateLimited) redacted.rateLimited = true;
-    throw redacted;
+  } catch (caught) {
+    throw safeError(caught, key);
   }
 }
 
@@ -145,6 +191,11 @@ function transportArgv(raw = process.env.BOARD_TOOLKIT_LINEAR) {
 
 // `spawn` is the test seam that lets a timeout be observed without a real 60 s wait; callers pass
 // two arguments.
+/**
+ * @param {string} query
+ * @param {unknown} variables
+ * @param {{ spawn?: TransportSpawn }} [seams]
+ */
 export function linearExec(query, variables, { spawn = spawnSync } = {}) {
   const [command, ...args] = transportArgv();
   const run = spawn(command, args, {
@@ -157,6 +208,7 @@ export function linearExec(query, variables, { spawn = spawnSync } = {}) {
   if (run.error?.code === 'ETIMEDOUT') throw new Error('Linear did not answer within 60 s');
   if (run.error) throw run.error;
   if (run.status === 0) return JSON.parse(run.stdout);
+  /** @type {TransportError} */
   const error = new Error(run.stderr.trim() || `The Linear transport ended with ${run.signal ?? `exit ${run.status}`} and no message`);
   if (run.status === RATE_LIMIT_EXIT) error.rateLimited = true;
   throw error;
@@ -169,7 +221,8 @@ async function main() {
     const data = await requestLinear(payload, { fetch, key });
     // The key as it appears inside a JSON string, so an answer that echoes it is redacted too.
     process.stdout.write(JSON.stringify(data).replaceAll(JSON.stringify(key).slice(1, -1), '[key]'));
-  } catch (error) {
+  } catch (caught) {
+    const error = /** @type {TransportError} */ (caught);
     process.stderr.write(`${error.message}\n`);
     process.exitCode = error.rateLimited ? RATE_LIMIT_EXIT : 1;
   }

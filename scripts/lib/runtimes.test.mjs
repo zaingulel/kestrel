@@ -348,10 +348,10 @@ test('a path belongs to the documentation sweep only where it is one of the six 
   }
 });
 
-test('a path belongs to the docs site under its folder and its publishing workflow, a tree holds the site only where docsSite is local or online and the workflow only where it is online, and no value means off', () => {
+test('a path belongs to the docs site under its folder and its build workflow, a tree holds the site only where docsSite is local or online and the workflow only where it is online, and no value means off', () => {
   const siteOff = 'the settings file does not turn the docs site on';
   const notOnline = 'the settings file does not turn the docs site online';
-  const workflow = '.github/workflows/docs-site-deploy.yml';
+  const workflow = '.github/workflows/docs-site-build.yml';
   const siteFiles = ['docs-site/build.mjs', 'docs-site/open.mjs', 'docs-site/package-lock.json', 'docs-site/src/theme/Footer/index.js'];
   // The comparison is exact: a look-alike is not the docs site's.
   const nearMisses = [
@@ -361,7 +361,7 @@ test('a path belongs to the docs site under its folder and its publishing workfl
     'docs/site/build.mjs',
     'site/build.mjs',
     'scripts/docs-site/build.mjs',
-    '.github/workflows/docs-site-deploy.yaml',
+    '.github/workflows/docs-site-build.yaml',
     '.github/workflows/docs-deploy.yml',
     '.github/workflows/sweep-scope.yml',
   ];

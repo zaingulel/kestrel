@@ -7,6 +7,8 @@
 //   node scripts/coordinator.mjs unfinished --login <GitHub login>
 //   node scripts/coordinator.mjs start <card> --login <GitHub login>
 //   node scripts/coordinator.mjs bind-job
+//   node scripts/coordinator.mjs forward
+//   node scripts/coordinator.mjs forward-watch --coordinator <address> --space <space id>
 //   node scripts/coordinator.mjs wake
 //
 // `wake` types one fixed line into the project's live coordinator through `hc send`, with no tracker request. `open`
@@ -23,16 +25,25 @@
 // its transcript under {CLAUDE_CONFIG_DIR or ~/.claude}/projects, or prints why it cannot and starts nothing.
 // `cards`, `unfinished` and `start` read GitHub through `ghExec`; when GitHub refuses a read for quota they make no further read,
 // print `GitHub refused a coordinator tracker read for quota; repeat it after <ISO>.` and end with exit 6, without waiting or
-// repeating. `bind-job` reads back the host's binding for the current Codex Herdr job.
+// repeating. `bind-job` reads back the host's binding for the current Codex Herdr job. `forward-watch` types into coordinator
+// <address>, through `hc send`, one fixed line each time a job of space <space id> that an earlier coordinator started
+// becomes blocked, done or error, or finishes, with no tracker request; it prints `forward-ready` once watching and ends
+// once no such job is live. `forward`, run from the sole Coordinator, starts `forward-watch` for it as its child in tab
+// `job notes` while a job of an earlier coordinator is live, and otherwise closes the tabs of the finished forwarders it
+// removes and starts nothing.
 //
 // Exit 0 done; for `unfinished`, the list is complete. 1: it could not (the reason is on stdout); for `unfinished`, a read failed
-// and the unfinished jobs are unknown, with no verdict printed. 3: the Herdr add-on is off on fetched main. 4: `wake` found no
+// and the unfinished jobs are unknown, with no verdict printed; for `forward-watch`, a Herdr read, record or send failed, or
+// `hc events` ended before Herdr subscribed or while a job of an earlier coordinator was still live; for `forward`, it is not
+// run from the sole Coordinator, a Herdr read or change failed, its earlier forwarder stopped with a failure, or the watch
+// never showed `forward-ready`. 3: the Herdr add-on is off on fetched main. 4: `wake` found no
 // coordinator to wake (the reason is on stdout). 5: a Coordinator tab is already open. 6: GitHub refused a tracker read for quota
 // (`cards`, `unfinished`, `start`): the line names the reset, and nothing was listed or started. 2: any other argument shape, refused
 // before any call with the usage line on stderr.
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { createInterface } from 'node:readline';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir, hostname, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -40,15 +51,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { configuredTracker } from './lib/board-markdown.mjs';
 import { gitEnvironment, MANIFEST_PATH, readManifest } from './lib/factory-sync.mjs';
 import { readGitHubLogin, runGh } from './lib/gh-exec.mjs';
-import { codexBindingPath, herdrCommand, listCards, listUnfinished, openCoordinator, readCodexBinding, readLiveCodexBinding, requireVersionedCodex, startJob, wakeCoordinator } from './lib/coordinator.mjs';
+import { codexBindingPath, forwardNotes, herdrCommand, listCards, listUnfinished, openCoordinator, readCodexBinding, readLiveCodexBinding, requireVersionedCodex, startForwarder, startJob, wakeCoordinator } from './lib/coordinator.mjs';
 import { capLock, readCap, standingLead, standingLeadProcessCommand } from './lib/cap-lock.mjs';
 import { isCanonicalLeadFolder } from './lib/pre-approved-run.mjs';
-import { RUNTIMES } from './lib/runtimes.mjs';
+import { LOCAL_HERDR_TERMINAL, RUNTIMES } from './lib/runtimes.mjs';
 import { repositoryRoot } from './pre-approved-run.mjs';
 
-const USAGE = 'usage: node scripts/coordinator.mjs open --login <GitHub login> [--runtime <claude|codex>] | open --runtime <claude|codex> | cards --login <GitHub login> | unfinished --login <GitHub login> | start <card> --login <GitHub login> | bind-job | wake';
+const USAGE = 'usage: node scripts/coordinator.mjs open --login <GitHub login> [--runtime <claude|codex>] | open --runtime <claude|codex> | cards --login <GitHub login> | unfinished --login <GitHub login> | start <card> --login <GitHub login> | bind-job | forward | forward-watch --coordinator <address> --space <space id> | wake';
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const CARD = /^[1-9]\d*$/;
+const SPACE = /^[A-Za-z0-9_-]+$/;
 const CODEX_HOOK_CONFIG = '.codex/hooks.json';
 const CODEX_GIT_GUARD = '.codex/hooks/block-unsafe-git.mjs';
 
@@ -230,12 +242,36 @@ async function observeCodexBinding({ root, address, wait }) {
   }
 }
 
+// The stdout lines of a streaming `hc` command run with `args`, read from its start; ending the iteration stops the command.
+/** @param {string[]} args @param {(line: string) => void} print @returns {AsyncIterable<string>} */
+function herdrLines(args, print) {
+  const child = spawn('hc', args, { stdio: ['ignore', 'pipe', 'inherit'] });
+  child.once('error', (error) => print(`hc ${args[0]} could not run: ${error.message}`));
+  const reader = createInterface({ input: child.stdout });
+  // The iterator is taken at once so the lines printed before the first read are kept.
+  const lines = reader[Symbol.asyncIterator]();
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: () => lines.next(),
+      return: async () => {
+        child.kill();
+        reader.close();
+        return { done: true, value: undefined };
+      },
+    }),
+  };
+}
+
 // The command and its operands, or undefined for any other shape.
-/** @returns {{ command: 'start', card: number, login: string } | { command: 'wake' } | { command: 'bind-job' } | { command: 'open', login?: string, runtimeOverride?: string } | { command: 'cards', login: string } | { command: 'unfinished', login: string } | undefined} */
+/** @returns {{ command: 'start', card: number, login: string } | { command: 'wake' } | { command: 'bind-job' } | { command: 'forward' } | { command: 'forward-watch', coordinator: string, space: string } | { command: 'open', login?: string, runtimeOverride?: string } | { command: 'cards', login: string } | { command: 'unfinished', login: string } | undefined} */
 function parse(args) {
   const [command, ...rest] = args;
   if (command === 'wake' && rest.length === 0) return { command };
   if (command === 'bind-job' && rest.length === 0) return { command };
+  if (command === 'forward' && rest.length === 0) return { command };
+  if (command === 'forward-watch' && rest.length === 4 && rest[0] === '--coordinator' && LOCAL_HERDR_TERMINAL.test(rest[1]) && rest[2] === '--space' && SPACE.test(rest[3])) {
+    return { command, coordinator: rest[1], space: rest[3] };
+  }
   if (command === 'start' && rest.length === 3 && CARD.test(rest[0]) && Number.isSafeInteger(Number(rest[0])) && rest[1] === '--login' && LOGIN.test(rest[2])) {
     return { command, card: Number(rest[0]), login: rest[2] };
   }
@@ -282,6 +318,7 @@ async function main(args) {
       print(`Bound Codex Herdr job #${binding.card} at ${binding.terminalAddress} to thread ${binding.threadId}.`);
       return 0;
     }
+    if (options.command === 'forward-watch') return await forwardNotes({ hc: herdrCommand('hc'), events: (eventArgs) => herdrLines(eventArgs, print), coordinator: options.coordinator, space: options.space, print });
     const chooser = options.command === 'open' && options.login === undefined;
     const repository = repositoryRoot();
     const root = chooser ? realpathSync(repository) : repository;
@@ -291,6 +328,7 @@ async function main(args) {
     process.chdir(root);
     const herdrApp = herdrCommand('herdr-app');
     if (options.command === 'wake') return await wakeCoordinator({ root, herdrApp, hc: herdrCommand('hc'), print });
+    if (options.command === 'forward') return await startForwarder({ root, herdrApp, hc: herdrCommand('hc'), parent: process.env.HC_TERMINAL_ID, print });
     const git = (gitArgs) => execFileSync('git', gitArgs, { cwd: root, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
     const state = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'fabraik-lead');
     // This command uses the shared lead state folder only for the cap lock, so it makes the folder where the lock is taken.

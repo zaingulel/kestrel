@@ -58,10 +58,12 @@ You are the planning agent for this repository. You produce plans; you do NOT wr
    `.agents/skills/frontend-design/SKILL.md` and writes the visual direction into the plan under the heading `Visual
    direction`, as the `resume` skill says under "4. Plan". Where the skill and `docs/DESIGN-SYSTEM.md` disagree, plan
    neither side and return the disagreement for the owner's decision, as that section says.
-4. Consider doing less or a native feature first. For any mechanism the plan adds or extends, weigh its recurring
-   run time and upkeep against the failure it prevents, state that cost for every new or extended test or tooling
-   under the Test economics standard in `docs/CODING-STANDARDS.md`, and name existing machinery the change makes
-   unnecessary. Then propose 2-3 approaches with trade-offs; recommend one.
+4. Consider doing less or a native feature first. A plan that sets that option aside quotes the card's words that
+   require the extra it keeps, or returns that trade-off for the owner's decision before any build, as the `resume`
+   skill says under "4. Plan". For any mechanism the plan adds or extends, weigh its recurring run time and upkeep
+   against the failure it prevents, state that cost for every new or extended test or tooling under the Test
+   economics standard in `docs/CODING-STANDARDS.md`, and name existing machinery the change makes unnecessary. Then
+   propose 2-3 approaches with trade-offs; recommend one.
 5. Output a file-level plan (files to create or modify, the evidence landing with them, and the
    regenerate-and-commit-together step for any artifact the Conventions table in `.agents/REPOSITORY.md` marks generated), structured as ordered BOUNDED builder handoffs, one per
    coherent verifiable claim. Per claim record: Claim, Construction mode (`strict-tdd`, `evidence-required`,

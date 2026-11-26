@@ -1,4 +1,3 @@
-// @ts-nocheck
 // board-linear.test.mjs — tests of the Linear board reader.
 // Run: node --test scripts/lib/board-linear.test.mjs
 //
@@ -39,6 +38,7 @@ const TEAM_STATES = [
 // The default automation rules a Linear team must hold: an opened pull request starts review and a merged
 // one is done. A draft pull request moves nothing because the team holds no draft rule, which Linear's
 // settings show as "No action" (Linear refuses a default rule with no state).
+/** @param {string} event @param {string | null} stateId @param {{ branchPattern: string, isRegex: boolean } | null} [targetBranch] */
 const rule = (event, stateId, targetBranch = null) => ({ event, state: stateId && { id: stateId }, targetBranch });
 const VALID_RULES = [rule('start', 's-review'), rule('merge', 's-done')];
 
@@ -60,6 +60,7 @@ const TEAM = teamWith();
 const noMore = { hasNextPage: false };
 const list = (nodes) => ({ nodes, pageInfo: noMore });
 
+/** @param {string} identifier @param {string} title @param {object} issueState @param {{ assignee?: string | null, parent?: string | null, labels?: string[], relations?: string[][], urls?: string[][] }} [options] */
 function issue(identifier, title, issueState, { assignee = null, parent = null, labels = [], relations = [], urls = [] } = {}) {
   return {
     id: `id-${identifier}`,
@@ -234,7 +235,7 @@ test('readLinearTeam refuses a mapped state that is missing, duplicated or of th
   const without = (name) => TEAM_STATES.filter((candidate) => candidate.name !== name);
   const retyped = (name, type) => TEAM_STATES.map((candidate) => (candidate.name === name ? { ...candidate, type } : candidate));
   const more = { hasNextPage: true, endCursor: 'more' };
-  const cases = [
+  const cases = /** @satisfies {[string, object][]} */ ([
     ['a missing state', { states: without('Todo') }],
     ['a duplicated state', { states: [...TEAM_STATES, state('s-progress-2', 'In Progress', 'started')] }],
     ['Ready mapped to a started state', { states: retyped('Todo', 'started') }],
@@ -242,7 +243,7 @@ test('readLinearTeam refuses a mapped state that is missing, duplicated or of th
     ['Done mapped to a canceled state', { states: retyped('Done', 'canceled') }],
     ['states past one page', { statesPage: more }],
     ['rules past one page', { rulesPage: more }],
-  ];
+  ]);
 
   for (const [label, team] of cases) {
     refusalOf(() => readLinearTeam(() => teamWith(team)), label);
@@ -266,14 +267,14 @@ test('readLinearTeam refuses a draft rule that moves cards, a start rule not to 
   const { readLinearTeam } = await loadReader(t);
   const regexRule = { branchPattern: 'ma.*', isRegex: true };
   const [start, merge] = VALID_RULES;
-  const cases = [
+  const cases = /** @satisfies {[string, ReturnType<typeof rule>[], RegExp][]} */ ([
     ['a draft rule that moves cards', [rule('draft', 's-review'), start, merge], /draft/],
     ['a start rule not to In review', [rule('start', 's-progress'), merge], /start/],
     ['a merge rule not to Done', [start, rule('merge', 's-review')], /merge/],
     ['a missing start rule', [merge], /start/],
     ['a missing merge rule', [start], /merge/],
     ['a regex target-branch rule', [...VALID_RULES, rule('start', 's-review', regexRule)], /regex|regular expression/i],
-  ];
+  ]);
 
   for (const [label, rules, mismatch] of cases) {
     const { message } = refusalOf(() => readLinearTeam(() => teamWith({ rules })), label);
@@ -358,6 +359,7 @@ test('readLinearBoard fails whole when Linear\'s cursors return to one it gave e
   assert.ok(cycled.message.includes('Linear gave back the cursor p1 a second time, so the read cannot advance'), cycled.message);
 });
 
+/** @param {string} id @param {string[]} comments @param {string | null} [endCursor] */
 const cardPage = (id, comments, endCursor = null) => ({
   nodes: comments.map((body, index) => ({ id: `${id}-c${index}`, createdAt: `2026-01-0${index + 1}T00:00:00.000Z`, body })),
   pageInfo: endCursor === null ? noMore : { hasNextPage: true, endCursor },
@@ -454,11 +456,12 @@ test('moveLinearCards writes a target state by state id, confirms the written st
 
 // What a run throws, or null when it comes back: the writes made are asserted before the throw, so a card
 // written when it must not be fails on the write that was made.
+/** @returns {Error | null} */
 function thrownBy(run) {
   try {
     run();
   } catch (error) {
-    return error;
+    return /** @type {Error} */ (error);
   }
   return null;
 }
@@ -466,6 +469,7 @@ function thrownBy(run) {
 test('moveLinearCards never writes In review or Done: a card Linear moved there is a checked no-op, and one it has not moved after six reads fails naming the automation rule, with nothing written', async (t) => {
   const { moveLinearCards } = await loadReader(t);
   const REVIEW = TEAM_STATES.find((candidate) => candidate.id === 's-review');
+  assert.ok(REVIEW);
   const FIVE_PAUSES = [5000, 5000, 5000, 5000, 5000];
 
   // A pull request marked ready that Linear has not yet moved: the card is read six times, five pauses of

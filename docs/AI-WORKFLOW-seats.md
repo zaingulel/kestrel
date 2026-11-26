@@ -25,6 +25,7 @@ It plans the cards that need no architect, hands every other edit to a builder s
 | `builder-lite` | Builds a mechanical slice that strong checks verify and that leaves no judgment | Yes | `final on-disk state = ...` |
 | `builder` | Builds one bounded slice whose plan leaves no consequential judgment | Yes | `final on-disk state = ...` |
 | `builder-max` | The builder charter at higher capability, chosen first where uncertainty or the cost of a defect warrants it | Yes | `final on-disk state = ...` |
+| `tester` | After a slice adds or changes tests, breaks each new behaviour on purpose in a throwaway copy outside the job and reports every break its tests left green | Only its throwaway copy | No set line |
 | `reviewer` | Challenges the final diff and its evidence: correctness, honesty, dead code, grounding and conformance to the card | No | `review delivered in full` |
 | `reviewer-supplemental` | Independently applies the primary reviewer charter on the normal authorized dual-runtime route | No | `review delivered in full` |
 | `security-reviewer` | Reviews a change that widens a surface the `security review` row of the Surfaces table names | No | `security review delivered in full` |

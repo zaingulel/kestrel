@@ -149,7 +149,7 @@ After the barrier and validation, record each completed seat's verdict and findi
 prove or refute each candidate. Fix each true finding by its cheapest valid fix, take a true finding whose every fix
 costs more than it is worth to the owner, who may set it aside as deferred, and dismiss a finding with a reason only
 when it is false. A finding whose remedy rewrites the writer's design is a scope question for the owner, not a fix.
-Use `resume`'s existing repair recheck scoped to repaired hunks and what they can break, with no third full review.
+Use `resume`'s repair pass, with no third full review.
 No further pass runs when a repair adds no factual claim. The pull request template owns review counts; `resume`'s [review routes](../resume/references/review-routes.md) own declarations.
 
 ## 3. Quote the price

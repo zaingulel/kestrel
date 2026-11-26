@@ -148,7 +148,7 @@ function readRunInventory(exec, git, records = readWorktreeRecords(git), closing
     if (!match) continue;
     const card = Number(match[1]);
     const item = byCard.get(card);
-    if (!cardNumber(card) || !COMMIT.test(entry.head) || !item
+    if (!cardNumber(card) || !COMMIT.test(entry.head ?? '') || !item
       || (!closing.has(card) && (item.content.state !== 'OPEN' || boardConfig.TERMINAL_STATUSES.includes(item.status)))) {
       throw new Error(`Git job ${entry.branch} has no verifiable current open board job`);
     }

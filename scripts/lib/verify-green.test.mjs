@@ -212,16 +212,20 @@ test('Stop gate: a missing local or ancestor ESLint executable makes lint explic
   });
 });
 
-test('Stop gate: every completed nonzero lint result blocks with the actual ESLint output', () => {
+test('ANTI-REGRESSION: Stop treats lint exit 75 as could-not-verify and blocks every other failure', () => {
   withScratchRoot((scratch) => {
     const root = initRootRepo(scratch);
     makePending(root);
-    for (const status of ['1', '2']) {
-      for (const hook of HOOKS) {
-        const r = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: status } });
-        assert.equal(r.status, 2, r.stderr);
-        assert.match(r.stderr, new RegExp(`npm run lint exited ${status}\\. Fix before finishing`));
-        assert.match(r.stderr, new RegExp(`eslint-status-${status}-sentinel`));
+    for (const hook of HOOKS) {
+      const r = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: '75' } });
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, /Stop gate: npm run lint could not run \(exit 75\), so the lint observation is unavailable\.[\s\S]*eslint-status-75-sentinel/);
+      assert.doesNotMatch(r.stderr, /Fix before finishing/);
+      for (const status of ['1', '2']) {
+        const blocked = runHook(hook, root, root, { env: { FAKE_ESLINT_STATUS: status } });
+        assert.equal(blocked.status, 2, blocked.stderr);
+        assert.match(blocked.stderr, new RegExp(`npm run lint exited ${status}\\. Fix before finishing`));
+        assert.match(blocked.stderr, new RegExp(`eslint-status-${status}-sentinel`));
       }
     }
   });

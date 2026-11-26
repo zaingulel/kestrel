@@ -265,7 +265,7 @@ test('the real builder seats share one charter', { skip: without('claude') }, ()
 });
 
 // Keep the expected seat names independent of the production selector.
-const CHARTER_SEATS = ['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer'];
+const CHARTER_SEATS = ['architect', 'builder', 'builder-lite', 'builder-max', 'explorer', 'oracle', 'plan-reviewer', 'reviewer', 'security-reviewer', 'tester'];
 
 test('ANTI-REGRESSION: every first-party seat rejects a one-sided charter edit', () => {
   const root = mkdtempSync(join(tmpdir(), 'charter-parity-'));

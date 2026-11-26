@@ -52,9 +52,13 @@ inaccessible target, or conflicting authorities. Preserve pointer and authority 
 change; unresolved authority leaves that document incomplete.
 
 Explore the product code, tests, package commands, styles/components and relevant existing authorities. Use the
-installed explorer seat when discovery spans more than a couple of files. Read product sources as evidence;
-executing them merely for discovery is outside this step. Distinguish observed conventions from proposed policy.
-Finish exploration with a source-backed account of every starter section and a list of facts the owner must supply.
+installed explorer seat when discovery spans more than a couple of files. Read product sources as evidence; executing
+them merely for discovery is outside this step. Distinguish observed conventions from proposed policy. Inventory the
+code-level checks the repository runs for each of its own languages, reading package commands, checker configuration and
+continuous integration workflows: strict type checking, lint rules beyond the linter's defaults, a check for unused
+code, and import boundaries between layers where the code has layers. Record each as present, with the command or file
+that runs it and any package or folder it leaves out, or as missing. Finish exploration with a source-backed account of
+every starter section, the code-check inventory and a list of facts the owner must supply.
 
 ## 2. Propose and confirm substantive documents
 
@@ -87,6 +91,11 @@ strict test-only stage, coordinator validation and implementation sequence.
 An observed value or pattern can support a recommendation; it does not silently become customer policy. Unknown
 facts stay questions. Propose proportionate rules for confirmation rather than inventing services, deployment,
 tokens, commands or guarantees. Preserve nonstarter customer content and the inherited workflow guarantees.
+
+Beside the drafts, show the code-check inventory as a short list per language: each present check with the command or
+file that runs it, and each missing check, or package or folder a present check leaves out, as a suggestion with one
+line on what it would catch in this repository. The owner decides each suggestion; setup applies none of them and
+changes no lint, type or test configuration.
 
 Obtain explicit confirmation of each current proposal before handing its edits to a builder. Confirmed portions
 may proceed while other portions remain unfinished; retain the document's marker until every starter section is

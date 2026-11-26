@@ -1127,8 +1127,8 @@ export const isClaim = (comment) => comment.trimStart().startsWith('Claim:');
 export function newestClaim(comments) {
   const claim = comments.map((comment) => comment.trimStart()).findLast((comment) => comment.startsWith('Claim:'));
   if (claim === undefined) return {};
-  const [machine, runtime] = claim.split(/\r?\n/, 1)[0].slice('Claim:'.length).split(',').map((field) => field.trim());
-  return { machine, runtime };
+  const [machine, runtime, time] = claim.split(/\r?\n/, 1)[0].slice('Claim:'.length).split(',').map((field) => field.trim());
+  return { machine, runtime, time };
 }
 
 // The newest Claim comment among those read, which is the latest claim even when older

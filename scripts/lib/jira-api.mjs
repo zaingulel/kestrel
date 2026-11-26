@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Only the short-lived child reads Jira credentials; request data crosses stdin and JSON crosses stdout.
 import { spawnSync } from 'node:child_process';
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
@@ -10,6 +9,10 @@ import { validateJiraConfig } from './jira-config.mjs';
 
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const RATE_LIMIT_EXIT = 3;
+
+/** @typedef {Error & { rateLimited?: boolean }} TransportError */
+/** @typedef {{ error: NodeJS.ErrnoException, status: number | null, signal: NodeJS.Signals | null, stdout?: string | null, stderr?: string | null } | { error?: undefined, status: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string }} TransportRun */
+/** @typedef {(command: string, args: string[], options: import('node:child_process').SpawnSyncOptionsWithStringEncoding) => TransportRun} TransportSpawn */
 
 export function jiraCredentialsPath(home = homedir()) {
   return join(home, '.config', 'fabraik', 'jira.json');
@@ -50,7 +53,7 @@ export function readJiraCredentials({ path, platform }) {
   try {
     entry = lstatSync(path);
   } catch (error) {
-    throw new Error(`Jira credentials at ${path} could not be read: ${error.code}`);
+    throw new Error(`Jira credentials at ${path} could not be read: ${/** @type {NodeJS.ErrnoException} */ (error).code}`);
   }
   if (!entry.isFile()) throw new Error(`Jira credentials at ${path} must be a regular file, never a symlink`);
   let descriptor;
@@ -68,7 +71,8 @@ export function readJiraCredentials({ path, platform }) {
     bytes = readFileSync(descriptor);
     if (bytes.length > MAX_CREDENTIAL_BYTES) throw new Error(`over ${MAX_CREDENTIAL_BYTES} bytes`);
   } catch (error) {
-    throw new Error(`Jira credentials at ${path}: ${error.code ?? error.message}`);
+    const failure = /** @type {NodeJS.ErrnoException} */ (error);
+    throw new Error(`Jira credentials at ${path}: ${failure.code ?? failure.message}`);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
@@ -132,6 +136,46 @@ function details(body) {
   return messages.length ? `; Jira said ${messages.join('; ')}` : '';
 }
 
+/** Whether a thrown value is an error from any realm or a live wrapper around one; a revoked proxy is not. */
+function isThrownError(caught) {
+  try {
+    return Error.isError(caught) || caught instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/** A thrown value read in one guarded step: a revoked proxy or a throwing getter gives a fixed message, never its text. */
+function unreachable(caught) {
+  if (!isThrownError(caught)) return 'Jira could not be reached: a non-error value was thrown';
+  try {
+    const error = /** @type {Error} */ (caught);
+    const { cause } = error;
+    const fields = /** @type {{ code?: unknown, name?: unknown }} */ ((typeof cause === 'object' || typeof cause === 'function') && cause !== null ? cause : {});
+    for (const read of [() => fields.code, () => fields.name, () => error.name]) {
+      const reason = read();
+      if (typeof reason === 'string' || typeof reason === 'number') return `Jira could not be reached: ${reason}`;
+    }
+  } catch {
+    // Fall through to the fixed message.
+  }
+  return 'Jira could not be reached: its error could not be read';
+}
+
+/** A thrown value read in one guarded step: a revoked proxy or a throwing getter gives a fixed message, never its text. */
+function safeError(caught, redact) {
+  if (!isThrownError(caught)) return new Error('Jira request failed: a non-error value was thrown');
+  try {
+    const error = /** @type {TransportError} */ (caught);
+    // Fresh errors retain no unredacted stack or cause from provider data.
+    const safe = /** @type {TransportError} */ (new Error(redact(error.message)));
+    if (error.rateLimited === true) safe.rateLimited = true;
+    return safe;
+  } catch {
+    return new Error('Jira request failed: its error could not be read');
+  }
+}
+
 export async function requestJira(request, { fetch, credentials, site }) {
   const checked = checkedCredentials(credentials);
   const redact = redactor(checked);
@@ -150,14 +194,14 @@ export async function requestJira(request, { fetch, credentials, site }) {
       });
       text = await response.text();
     } catch (error) {
-      throw new Error(`Jira could not be reached: ${error.cause?.code ?? error.cause?.name ?? error.name}`);
+      throw new Error(unreachable(error));
     }
     const { status } = response;
     let data;
     let parsed = true;
     try { data = JSON.parse(text); } catch { parsed = false; }
     if (status === 429) {
-      const error = new Error(`Jira rate limit (HTTP 429): Retry-After ${response.headers.get('retry-after') ?? 'not given'}; nothing further was sent`);
+      const error = /** @type {TransportError} */ (new Error(`Jira rate limit (HTTP 429): Retry-After ${response.headers.get('retry-after') ?? 'not given'}; nothing further was sent`));
       error.rateLimited = true;
       throw error;
     }
@@ -171,11 +215,8 @@ export async function requestJira(request, { fetch, credentials, site }) {
     if (status === 201 && request.method === 'POST' && request.path === '/rest/api/3/issueLink' && text === '') return null;
     if (!parsed) throw new Error(`Jira answered HTTP ${status} with a body that is not JSON`);
     return privateData(data, redact);
-  } catch (error) {
-    // Fresh errors retain no unredacted stack or cause from provider data.
-    const safe = new Error(redact(error.message));
-    if (error.rateLimited) safe.rateLimited = true;
-    throw safe;
+  } catch (caught) {
+    throw safeError(caught, redact);
   }
 }
 
@@ -189,6 +230,10 @@ function transportArgv(raw = process.env.BOARD_TOOLKIT_JIRA) {
   return parsed;
 }
 
+/**
+ * @param {unknown} request
+ * @param {{ spawn?: TransportSpawn }} [seams]
+ */
 export function jiraExec(request, { spawn = spawnSync } = {}) {
   requestParts(request);
   const [command, ...args] = transportArgv();
@@ -201,7 +246,7 @@ export function jiraExec(request, { spawn = spawnSync } = {}) {
   if (run.status === 0) {
     try { return JSON.parse(run.stdout); } catch { throw new Error('Jira transport returned output that is not JSON'); }
   }
-  const error = new Error(run.stderr.trim() || `Jira transport ended with ${run.signal ?? `exit ${run.status}`} and no message`);
+  const error = /** @type {TransportError} */ (new Error(run.stderr.trim() || `Jira transport ended with ${run.signal ?? `exit ${run.status}`} and no message`));
   if (run.status === RATE_LIMIT_EXIT) error.rateLimited = true;
   throw error;
 }
@@ -211,13 +256,14 @@ async function main() {
     let request;
     try { request = JSON.parse(readFileSync(0, 'utf8')); } catch { throw new Error('Jira request on stdin is not JSON'); }
     requestParts(request);
-    const config = validateJiraConfig(boardConfig.JIRA_CONFIG, 'board-config.mjs JIRA_CONFIG');
+    const config = validateJiraConfig('JIRA_CONFIG' in boardConfig ? boardConfig.JIRA_CONFIG : undefined, 'board-config.mjs JIRA_CONFIG');
     const credentials = readJiraCredentials({ path: jiraCredentialsPath(), platform: process.platform });
     const data = await requestJira(request, { fetch, credentials, site: config.site });
     process.stdout.write(JSON.stringify(data));
   } catch (error) {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = error.rateLimited ? RATE_LIMIT_EXIT : 1;
+    const failure = /** @type {TransportError} */ (error);
+    process.stderr.write(`${failure.message}\n`);
+    process.exitCode = failure.rateLimited ? RATE_LIMIT_EXIT : 1;
   }
 }
 
