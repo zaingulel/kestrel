@@ -26,7 +26,12 @@ function job(name) {
 
 test('current Kestrel test jobs select Node 26.13.1', () => {
   for (const name of ['quality', 'hooks_windows']) {
-    assert.match(job(name), /^      - uses: actions\/setup-node@[^\n]+\n        with:\n          node-version: '26\.13\.1'$/m);
+    // Each step starts at its six-space `- ` marker; a lane must hold exactly one setup-node step.
+    const setupNode = job(name).split(/^(?=      - )/m).filter((step) => step.startsWith('      - uses: actions/setup-node@'));
+    assert.equal(setupNode.length, 1, `${name} must have exactly one actions/setup-node step`);
+    assert.match(setupNode[0], /^        with:\n/m, `${name} setup-node step must carry a with block`);
+    const pins = setupNode[0].match(/^          node-version: '([^']*)'$/gm) ?? [];
+    assert.deepEqual(pins, ["          node-version: '26.13.1'"], `${name} must pin its setup-node step to 26.13.1`);
   }
 });
 
