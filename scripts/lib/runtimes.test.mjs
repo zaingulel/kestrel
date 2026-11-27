@@ -13,6 +13,7 @@ import { EFFORT_LEVELS, installs, isGreptilePath, isHerdrPath, leftOutCause, nee
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const RECOVERY = 'if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again';
+const KEY_LIST = 'version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable';
 
 const header = (extra) => readSettingsHeader(JSON.stringify({ version: 1, ...extra }), 'settings.json');
 // Both runtimes, both add-ons and the docs site on and the sweep off: a tree with these settings leaves out the sweep's files and no other.
@@ -109,7 +110,7 @@ test('the settings file names the runtimes present: no file means both, and an u
     ['[]', 'file: must hold one JSON object; found []'],
     ['{"runtimes":["claude"]}', `version: is unsupported by this copy of the shared workflow (only 1); found undefined; ${RECOVERY}`],
     ['{"version":2,"runtimes":["claude"],"seats":{}}', `version: is unsupported by this copy of the shared workflow (only 1); found 2; ${RECOVERY}`],
-    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "extra"; ${RECOVERY}`],
+    ['{"version":1,"runtimes":["claude"],"seats":{},"extra":1}', `file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "extra"; ${RECOVERY}`],
   ];
   for (const [text, message] of refused) {
     assert.throws(() => presentRuntimes(tree(t, text)), { message: `.agents/factory-settings.json: ${message}` }, text);
@@ -125,7 +126,7 @@ test('planApproval: true or false is admitted, no key is valid, and any other va
     assert.throws(() => header({ planApproval: value }), { message: `settings.json: planApproval: must be true or false; found ${found}` });
   }
   for (const key of ['PlanApproval', 'plan_approval', 'planApprovals']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -138,7 +139,7 @@ test('greptile: true or false is admitted, no key is valid, and any other value 
     assert.throws(() => header({ greptile: value }), { message: `settings.json: greptile: must be true or false; found ${found}` });
   }
   for (const key of ['Greptile', 'greptile_review', 'greptiles']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -154,7 +155,7 @@ test('herdr: true or false is admitted, no key means off, and any other value or
     assert.throws(() => header({ herdr: value }), { message: `settings.json: herdr: must be true or false; found ${found}` });
   }
   for (const key of ['Herdr', 'herdr_setup', 'herdrs']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 
   assert.equal(treeSettings(tree(t, undefined)).herdr, false, 'no settings file');
@@ -172,7 +173,7 @@ test('docSweep: true or false is admitted, no key means on, and any other value 
     assert.throws(() => header({ docSweep: value }), { message: `settings.json: docSweep: must be true or false; found ${found}` });
   }
   for (const key of ['DocSweep', 'doc_sweep', 'docsweep', 'sweep']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -185,12 +186,11 @@ test('docsSite: off, local or online is admitted, no key means off, and any othe
     assert.throws(() => header({ docsSite: value }), { message: `settings.json: docsSite: must be off, local or online; found ${found}` });
   }
   for (const key of ['DocsSite', 'docs_site', 'docssite', 'docSite']) {
-    assert.throws(() => header({ [key]: 'local' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: 'local' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 });
 
 test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both runtimes run, and any other value, a file naming one runtime and a near spelling are still refused by name', () => {
-  const keyList = 'version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator';
   assert.equal(header({}).crossFamilyReview, false);
   assert.equal(header({ crossFamilyReview: true }).crossFamilyReview, true);
   assert.equal(header({ crossFamilyReview: true, runtimes: ['claude', 'codex'] }).crossFamilyReview, true);
@@ -201,7 +201,7 @@ test('ANTI-REGRESSION: crossFamilyReview is admitted only as true where both run
     assert.throws(() => header({ crossFamilyReview: true, runtimes }), { message: 'settings.json: crossFamilyReview: is refused where runtimes names one runtime; found true' });
   }
   for (const key of ['CrossFamilyReview', 'cross_family_review', 'crossFamilyReviews']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides ${keyList}; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides ${KEY_LIST}; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -210,7 +210,7 @@ test('ANTI-REGRESSION: a settings file that still holds productManager is told t
     assert.throws(() => header({ productManager: value }), { message: 'settings.json: productManager is retired with the product manager run: remove it; a pre-approved run builds from Ready' }, String(value));
   }
   for (const key of ['ProductManager', 'product_manager', 'productManagers', 'productmanager']) {
-    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
 });
 
@@ -229,7 +229,7 @@ test('ANTI-REGRESSION: waitForOwner is admitted as always, on-screen or when-nee
     assert.throws(() => header({ waitForOwner: value }), { message: `settings.json: waitForOwner: must be always or on-screen or when-needed; found ${found}` });
   }
   for (const key of ['WaitForOwner', 'wait_for_owner', 'waitForOwners', 'waitforowner']) {
-    assert.throws(() => header({ [key]: 'always' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "${key}"; ${RECOVERY}` });
+    assert.throws(() => header({ [key]: 'always' }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "${key}"; ${RECOVERY}` });
   }
   for (const retired of [true, false, 'always']) {
     assert.throws(() => header({ preApprovedRun: retired }), { message: 'settings.json: preApprovedRun is retired: remove it; waitForOwner sets when finished work waits for you' }, String(retired));
@@ -239,13 +239,13 @@ test('ANTI-REGRESSION: waitForOwner is admitted as always, on-screen or when-nee
 
 test('the settings keys are exactly the keys the settings reader admits', async () => {
   const { SETTINGS_KEYS } = await import('./runtimes.mjs');
-  assert.deepEqual(SETTINGS_KEYS, ['version', 'runtimes', 'seats', 'planApproval', 'greptile', 'herdr', 'docSweep', 'docsSite', 'crossFamilyReview', 'waitForOwner', 'coordinator']);
+  assert.deepEqual(SETTINGS_KEYS, ['version', 'runtimes', 'seats', 'planApproval', 'greptile', 'herdr', 'docSweep', 'docsSite', 'crossFamilyReview', 'waitForOwner', 'coordinator', 'externalReviewUnavailable']);
   assert.equal(Object.isFrozen(SETTINGS_KEYS), true);
-  const valid = { version: 1, runtimes: ['claude', 'codex'], seats: {}, planApproval: true, greptile: true, herdr: true, docSweep: true, docsSite: 'local', crossFamilyReview: true, waitForOwner: 'always', coordinator: { model: 'opus', effort: 'medium' } };
+  const valid = { version: 1, runtimes: ['claude', 'codex'], seats: {}, planApproval: true, greptile: true, herdr: true, docSweep: true, docsSite: 'local', crossFamilyReview: true, waitForOwner: 'always', coordinator: { model: 'opus', effort: 'medium' }, externalReviewUnavailable: '2026-12-01' };
   for (const key of SETTINGS_KEYS) {
     assert.doesNotThrow(() => readSettingsHeader(JSON.stringify({ version: 1, [key]: valid[key] }), 'settings.json'), key);
   }
-  assert.throws(() => header({ waitForOwners: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner and coordinator; found "waitForOwners"; ${RECOVERY}` });
+  assert.throws(() => header({ waitForOwners: true }), { message: `settings.json: file: holds a key besides version, runtimes, seats, planApproval, greptile, herdr, docSweep, docsSite, crossFamilyReview, waitForOwner, coordinator and externalReviewUnavailable; found "waitForOwners"; ${RECOVERY}` });
 });
 
 test('coordinator settings default to opus at medium and refuse any other shape', () => {
@@ -532,4 +532,17 @@ test('ANTI-REGRESSION: no shared file every install receives imports a Herdr add
     }
   }
   assert.deepEqual(violations, []);
+});
+
+test('ANTI-REGRESSION: externalReviewUnavailable admits true or a real calendar date and refuses any other value, and near-miss keys stay refused', () => {
+  assert.doesNotThrow(() => header({}));
+  for (const value of [true, '2026-12-01', '2028-02-29']) {
+    assert.doesNotThrow(() => header({ externalReviewUnavailable: value }), JSON.stringify(value));
+  }
+  for (const value of [false, 'true', '2026-13-01', '2026-00-10', '2026-02-30', '2027-02-29', '2026-12-1', '1 Dec 2026', 20261201, null, {}, []]) {
+    assert.throws(() => header({ externalReviewUnavailable: value }), { message: `settings.json: externalReviewUnavailable: must be true or a re-check date written YYYY-MM-DD; found ${JSON.stringify(value)}` });
+  }
+  for (const key of ['externalReviewunavailable', 'externalReviewUnavailableUntil']) {
+    assert.throws(() => header({ [key]: true }), { message: `settings.json: file: holds a key besides ${KEY_LIST}; found "${key}"; ${RECOVERY}` });
+  }
 });

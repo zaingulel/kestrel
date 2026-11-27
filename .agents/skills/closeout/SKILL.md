@@ -61,9 +61,9 @@ throughout this skill, including complete native-comment review before claiming.
    Before deleting any target containing a deliverable, send its verified link to the owner in chat. Retain the
    deliverable and containing target if its lasting destination cannot be verified, and report why.
    **Verification records.** Read the merged pull request body or confirmed pushed commit message for a direct
-   push, using the delivery identified in step 1. Verify it carries the run-log receipt lines the pull
-   request template's Evidence section asks for under Test receipts: this confirms the record was published and
-   does not settle the checks again; keep raw logs and private contents out of published records.
+   push, the delivery step 1 identified. Verify it carries the receipt lines the template's Test receipts ask
+   for, less those a direct push's `Pushed checks:` line replaces: this confirms the record was published and does not settle
+   the checks again; keep raw logs and private contents out of published records.
    Never create a local verification archive. Once receipts are verified, treat job-owned local worklogs, raw
    verification output and review copies that served only that completed job as scratch under the existing rules;
    a prior chat link alone does not make a verification record a deliverable. Report and retain logs when the
@@ -205,9 +205,7 @@ workflow's eligibility, ownership and evidence checks and all owner gates still 
 only, never publishing code. In a pre-approved run it also covers the `Needs owner` comment and move to `Backlog` that
 `resume` prescribes, and the same comment and move an owner's no prescribes. A session the owner starts or reopens, and
 on Claude Code the coordinator a run reports to, may rewrite that comment to `Returned:`, only on the owner's own
-message in its chat; a card session never does. A session writes an `Owner answer:` record, as `resume` prescribes, only
-from the owner's own message, and a `Fix built:` record only for a fix it built. A send from a waiting merge's answer
-box is the owner's answer for its `Owner answer:` record. A press of the queue panel controls authorises the chosen
+message in its chat; a card session never does. A send from a waiting merge's answer box reaches the coordinator's chat as the owner's answer and writes nothing to the card. A press of the queue panel controls authorises the chosen
 action to park a merge or keep or drop a suggested card.
 
 ## Update local main

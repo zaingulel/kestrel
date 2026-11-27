@@ -1817,6 +1817,35 @@ test('the real process ender leaves a recorded process whose identity changed af
   assert.equal(isAlive(child.pid), true, 'the process whose identity changed is left running');
 });
 
+// new behaviour: on Windows a coordinated watch, like the cap lock, accepts only a state folder inside the user profile.
+// The control puts the same folder inside the stubbed profile and opens the route.
+test('ANTI-REGRESSION: on Windows the coordinated merge watch refuses a state folder outside the user profile', async (t) => {
+  const profileRule = 'the merge watch state directory must be inside the user profile on Windows';
+  // os.homedir() reads HOME on Linux and macOS and USERPROFILE on Windows, so both are stubbed. os.tmpdir() reads TEMP
+  // or TMP on Windows; pointing them at the native spelling keeps the world's state folder in the form the production
+  // check compares with the profile.
+  const original = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  t.after(() => {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.TEMP = process.env.TMP = realpathSync.native(tmpdir());
+  const world = routeWorld({ platform: 'win32' });
+  world.seams.coordinated = { repo: REPO, beforeForward: async () => {} };
+  const profile = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'merge-watch-profile-')));
+  stateDirs.push(profile);
+  process.env.HOME = process.env.USERPROFILE = profile;
+  assert.equal(stopReason(await openRoute(world), 'a state folder outside the profile'), profileRule);
+  assert.deepEqual(world.spawns, [], 'no forwarder starts');
+
+  process.env.HOME = process.env.USERPROFILE = dirname(world.stateDir);
+  const inside = await openRoute(world);
+  assertOpened(inside, 'a state folder inside the profile');
+  await inside.route.close();
+});
+
 test('recovery from a record', async () => {
   for (const row of [
     {

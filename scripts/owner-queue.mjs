@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// @ts-nocheck
 // owner-queue.mjs — prints what waits on the owner in this repository as one JSON document (format 1) on stdout, or,
-// with `act`, writes one queue panel answer to a card, with `undo`, takes a put-aside, accepted or rejected card
+// with `act`, writes one queue panel answer to a card, with `relay`, sends the owner's answer to a waiting merge to the
+// project's coordinator, with `undo`, takes a put-aside, accepted or rejected card
 // back, with `move`, moves a card on the board, with `show-first`, sets or removes a card's show-me-first marker, or,
 // with `report`, prints the report of one merge commit as one JSON document. Run from the repository root.
 //
 //   node scripts/owner-queue.mjs
 //   node scripts/owner-queue.mjs act --card=<n> --action=<park|answer|keep|drop|pick> --version=<v> [--reply=<text>] [--proposal=<k>]
+//   node scripts/owner-queue.mjs relay --card=<key> --version=<v> --reply=<text>
 //   node scripts/owner-queue.mjs undo --card=<n> --action=<park|keep|drop> --record=<json>
 //   node scripts/owner-queue.mjs move --card=<n> --move=<ready|backlog|up|place> --version=<v> [--to=<k>]
 //   node scripts/owner-queue.mjs show-first --card=<n> --state=<on|off>
@@ -14,7 +15,9 @@
 //
 // Without an argument, and with `report`, it writes nothing. `act` writes only the action's route, and only where the queue read again
 // still holds card <n> at version <v> and the action answers its item, `pick` making proposal <k> of a weekly retro a card; after park, keep or drop its last stdout line is
-// `owner-queue: undo record <json>`. `undo` takes that record and writes the action's inverse only where the card is
+// `owner-queue: undo record <json>`. `relay` writes nothing to the card: where the queue read again still holds card
+// <key>, a number on GitHub and Markdown and an issue key on the other trackers, at version <v> as a complete merge, it
+// sends the queue panel answer line to the one receptive coordinator terminal with `hc send`. `undo` takes that record and writes the action's inverse only where the card is
 // still as the action left it. `move` writes the move only where the board read again still holds card <n> at the
 // version <v> the board section drew and the move fits it. `show-first` writes the marker only where the board read again
 // holds card <n> in a column it applies to and the marker is not in that state already. scripts/lib/owner-queue.mjs holds the reading and the
@@ -22,8 +25,8 @@
 // is not one login, leaves the account unknown, which the document tolerates, `act` and `undo` refuse and `move` and
 // `show-first` do not need.
 //
-// Exit 0 whenever it printed a document, wrote the answer, took it back, moved the card or set the marker. 1: it could not, or
-// `act`, `undo`, `move` or `show-first` refused (the reason is one line on stderr). 2: any other argument shape, refused before any read with
+// Exit 0 whenever it printed a document, wrote or sent the answer, took it back, moved the card or set the marker. 1: it could not, or
+// `act`, `relay`, `undo`, `move` or `show-first` refused (the reason is one line on stderr). 2: any other argument shape, refused before any read with
 // the usage line, `report`'s own for a `report` shape. The queue panel the Herdr add-on installs runs this command in
 // each repository it lists.
 
@@ -37,13 +40,17 @@ import { azureExec } from './lib/azure-api.mjs';
 import { configuredTracker } from './lib/board-markdown.mjs';
 import { ghExec, readGitHubLogin } from './lib/gh-exec.mjs';
 import { jiraExec } from './lib/jira-api.mjs';
+import { herdrCommand } from './lib/board-claim.mjs';
+import { relayToCoordinator } from './lib/coordinator.mjs';
 import { linearExec } from './lib/linear-api.mjs';
 import { readCoordinator } from './lib/merge-evidence.mjs';
-import { ACTIONS, MOVES, SHOW_FIRST_STATES, UNDOABLE, act, collect, markShowFirst, moveOnBoard, report, undo } from './lib/owner-queue.mjs';
+import { ACTIONS, MOVES, SHOW_FIRST_STATES, UNDOABLE, act, collect, markShowFirst, moveOnBoard, relayAnswer, report, undo } from './lib/owner-queue.mjs';
 import { gitExecutable } from './lib/posix-shell.mjs';
+import { JIRA_IDENTIFIER, LINEAR_IDENTIFIER, isAzureIdentifier } from './lib/tracker.mjs';
 
-const USAGE = 'usage: node scripts/owner-queue.mjs [act --card=<n> --action=<park|answer|keep|drop|pick> --version=<v> [--reply=<text>] [--proposal=<k>] | undo --card=<n> --action=<park|keep|drop> --record=<json> | move --card=<n> --move=<ready|backlog|up|place> --version=<v> [--to=<k>] | show-first --card=<n> --state=<on|off>]';
+const USAGE = 'usage: node scripts/owner-queue.mjs [act --card=<n> --action=<park|answer|keep|drop|pick> --version=<v> [--reply=<text>] [--proposal=<k>] | relay --card=<key> --version=<v> --reply=<text> | undo --card=<n> --action=<park|keep|drop> --record=<json> | move --card=<n> --move=<ready|backlog|up|place> --version=<v> [--to=<k>] | show-first --card=<n> --state=<on|off>]';
 const ACT_OPTIONS = { card: { type: 'string' }, action: { type: 'string' }, version: { type: 'string' }, reply: { type: 'string' }, proposal: { type: 'string' } };
+const RELAY_OPTIONS = { card: { type: 'string' }, version: { type: 'string' }, reply: { type: 'string' } };
 const UNDO_OPTIONS = { card: { type: 'string' }, action: { type: 'string' }, record: { type: 'string' } };
 // A refused `report` shape prints its own usage line, so USAGE keeps the form the panel's other verbs are refused with.
 const REPORT_USAGE = 'usage: node scripts/owner-queue.mjs report --sha=<40 or 64 lowercase hex>';
@@ -57,7 +64,8 @@ const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 // The values of `args` as `options` names them, or null where it holds any other option or an operand.
 function strictValues(args, options) {
   try {
-    return parseArgs({ args, options, strict: true, allowPositionals: false }).values;
+    // Every option the verbs declare is a string option.
+    return /** @type {Record<string, string | undefined>} */ (parseArgs({ args, options, strict: true, allowPositionals: false }).values);
   } catch {
     return null;
   }
@@ -69,10 +77,31 @@ function readAct(args) {
   const values = strictValues(args, ACT_OPTIONS);
   if (values === null) return null;
   const { card, action, version, reply, proposal } = values;
-  if (!CARD.test(card ?? '') || !ACTIONS.includes(action) || !DIGEST.test(version ?? '')) return null;
+  if (!CARD.test(card ?? '') || !ACTIONS.includes(action ?? '') || !DIGEST.test(version ?? '')) return null;
   if (action === 'pick' ? !CARD.test(proposal ?? '') : proposal !== undefined) return null;
   return { card: Number(card), action, version, reply, ...(proposal === undefined ? {} : { proposal: Number(proposal) }) };
 }
+
+// Whether `key` names a card on `tracker`: a positive number on GitHub and Markdown, the tracker's issue key elsewhere.
+const CARD_KEYS = { linear: (key) => LINEAR_IDENTIFIER.test(key), jira: (key) => JIRA_IDENTIFIER.test(key), azure: isAzureIdentifier };
+const isCardKey = (tracker, key) => (CARD_KEYS[tracker] ?? ((text) => CARD.test(text)))(key);
+
+// The `relay` request, or null for any other shape: a card `tracker` names, a version of 64 lowercase hex and a reply,
+// with no other option or operand. The card stays a number on GitHub and Markdown and a string elsewhere.
+function readRelay(args, tracker) {
+  const values = strictValues(args, RELAY_OPTIONS);
+  if (values === null) return null;
+  const { card, version, reply } = values;
+  if (!isCardKey(tracker, card ?? '') || !DIGEST.test(version ?? '') || reply === undefined) return null;
+  return { card: CARD_KEYS[tracker] ? card : Number(card), version, reply };
+}
+
+// The relay to the project's coordinator. Herdr names a send's sender from HC_TERMINAL_ID, so the send runs without it
+// and arrives bare, the form the coordinator takes as the panel's.
+const coordinatorRelay = (root) => (line) => {
+  delete process.env.HC_TERMINAL_ID;
+  return relayToCoordinator({ root, herdrApp: herdrCommand('herdr-app'), hc: herdrCommand('hc'), line });
+};
 
 // The `undo` request, or null for any other shape: a positive card number, an action Undo takes back and a non-empty
 // record, with no other option or operand.
@@ -80,7 +109,7 @@ function readUndo(args) {
   const values = strictValues(args, UNDO_OPTIONS);
   if (values === null) return null;
   const { card, action, record } = values;
-  if (!CARD.test(card ?? '') || !UNDOABLE.includes(action) || !record) return null;
+  if (!CARD.test(card ?? '') || !UNDOABLE.includes(action ?? '') || !record) return null;
   return { card: Number(card), action, record };
 }
 
@@ -90,7 +119,7 @@ function readMove(args) {
   const values = strictValues(args, MOVE_OPTIONS);
   if (values === null) return null;
   const { card, move, version, to } = values;
-  if (!CARD.test(card ?? '') || !MOVES.includes(move) || !DIGEST.test(version ?? '')) return null;
+  if (!CARD.test(card ?? '') || !MOVES.includes(move ?? '') || !DIGEST.test(version ?? '')) return null;
   if (move === 'place' ? !CARD.test(to ?? '') : to !== undefined) return null;
   return { card: Number(card), move, version, ...(to === undefined ? {} : { to: Number(to) }) };
 }
@@ -101,7 +130,7 @@ function readShowFirst(args) {
   const values = strictValues(args, SHOW_FIRST_OPTIONS);
   if (values === null) return null;
   const { card, state } = values;
-  if (!CARD.test(card ?? '') || !SHOW_FIRST_STATES.includes(state)) return null;
+  if (!CARD.test(card ?? '') || !SHOW_FIRST_STATES.includes(state ?? '')) return null;
   return { card: Number(card), state };
 }
 
@@ -112,12 +141,27 @@ function readReport(args) {
   return values !== null && COMMIT.test(values.sha ?? '') ? { sha: values.sha } : null;
 }
 
-// The exit code, or for `report` a promise of it, the one verb that downloads.
-export function main(args = process.argv.slice(2), output = console) {
+// The exit code, or for `report` and `relay` a promise of it, the verbs that wait on another program. `relay` sends
+// through `relay(line)`, the project's coordinator unless given.
+export function main(args = process.argv.slice(2), output = console, relay = undefined) {
   const verb = args[0];
+  const root = process.cwd();
+  const refuse = (error) => {
+    output.error(`owner-queue: ${/** @type {Error} */ (error).message.replace(/\s*[\r\n]+\s*/g, ' ')}`);
+    return 1;
+  };
+  /** @type {object | null} */
   let request = null;
   if (args.length === 0) request = {};
   else if (verb === 'act') request = readAct(args.slice(1));
+  else if (verb === 'relay') {
+    // The configured tracker decides which card keys the shape takes.
+    try {
+      request = readRelay(args.slice(1), configuredTracker());
+    } catch (error) {
+      return refuse(error);
+    }
+  }
   else if (verb === 'undo') request = readUndo(args.slice(1));
   else if (verb === 'move') request = readMove(args.slice(1));
   else if (verb === 'show-first') request = readShowFirst(args.slice(1));
@@ -126,18 +170,13 @@ export function main(args = process.argv.slice(2), output = console) {
     output.error(verb === 'report' ? REPORT_USAGE : USAGE);
     return 2;
   }
-  const root = process.cwd();
-  const refuse = (error) => {
-    output.error(`owner-queue: ${error.message.replace(/\s*[\r\n]+\s*/g, ' ')}`);
-    return 1;
-  };
   try {
     const tracker = configuredTracker();
     const git = gitExecutable();
     if (git === null) throw new Error('found no git.exe in an absolute PATH entry');
     const run = (gitArgs) => execFileSync(git, gitArgs, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     if (verb === 'report') {
-      return report({ ...request, executor: ghExec, run, fetch, tracker }).then((document) => {
+      return report({ .../** @type {NonNullable<ReturnType<typeof readReport>>} */ (request), executor: ghExec, run, fetch, tracker }).then((document) => {
         output.log(JSON.stringify(document, null, 2));
         return 0;
       }, refuse);
@@ -156,6 +195,9 @@ export function main(args = process.argv.slice(2), output = console) {
       hostname: hostname(),
       login: tracker === 'github' ? readGitHubLogin() : null,
     };
+    if (verb === 'relay') {
+      return relayAnswer({ ...readers, .../** @type {NonNullable<ReturnType<typeof readRelay>>} */ (request), relay: relay ?? coordinatorRelay(root), output }).then(() => 0, refuse);
+    }
     if (args.length === 0) {
       const document = collect(readers);
       if (tracker === 'github' && document.board !== null) {
@@ -163,14 +205,14 @@ export function main(args = process.argv.slice(2), output = console) {
           const { runtime, installed } = readCoordinator({ git: run, herdr: true, includeInstalled: true });
           document.board.coordinator = { runtime, installed };
         } catch (error) {
-          document.board.coordinator = { unread: error.message };
+          document.board.coordinator = { unread: /** @type {Error} */ (error).message };
         }
       }
       output.log(JSON.stringify(document, null, 2));
-    } else if (verb === 'act') act({ ...readers, ...request, output });
-    else if (verb === 'undo') undo({ ...readers, ...request, output });
-    else if (verb === 'show-first') markShowFirst({ ...readers, ...request, output });
-    else moveOnBoard({ ...readers, ...request, output });
+    } else if (verb === 'act') act({ ...readers, .../** @type {NonNullable<ReturnType<typeof readAct>>} */ (request), output });
+    else if (verb === 'undo') undo({ ...readers, .../** @type {NonNullable<ReturnType<typeof readUndo>>} */ (request), output });
+    else if (verb === 'show-first') markShowFirst({ ...readers, .../** @type {NonNullable<ReturnType<typeof readShowFirst>>} */ (request), output });
+    else moveOnBoard({ ...readers, .../** @type {NonNullable<ReturnType<typeof readMove>>} */ (request), output });
     return 0;
   } catch (error) {
     return refuse(error);

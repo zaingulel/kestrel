@@ -1,4 +1,3 @@
-// @ts-nocheck
 // owner-queue.test.mjs — the owner-queue collector (scripts/lib/owner-queue.mjs).
 // Run: node --test scripts/lib/owner-queue.test.mjs
 //
@@ -10,20 +9,21 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GITHUB_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
+import { GITHUB_TEST_CONFIG, LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 import { installFakeGh } from './fake-gh.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 
-// The collector entry and its run/body helpers are outside the shipped board toolkit.
-function copyOwnerQueueToolkit() {
-  const copied = copyToolkit(GITHUB_TEST_CONFIG);
-  copyFileSync(new URL('./pre-approved-run.mjs', import.meta.url), copied.script('lib/pre-approved-run.mjs'));
-  copyFileSync(new URL('./closeout-cleanup.mjs', import.meta.url), copied.script('lib/closeout-cleanup.mjs'));
-  copyFileSync(new URL('./run-folder.mjs', import.meta.url), copied.script('lib/run-folder.mjs'));
+// The collector entry, its run/body helpers and the coordinator relay it sends a merge answer through are outside the
+// shipped board toolkit.
+function copyOwnerQueueToolkit(config = GITHUB_TEST_CONFIG) {
+  const copied = copyToolkit(config);
+  for (const file of ['pre-approved-run.mjs', 'closeout-cleanup.mjs', 'run-folder.mjs', 'coordinator.mjs', 'cap-lock.mjs', 'merge-watch.mjs']) {
+    copyFileSync(new URL(`./${file}`, import.meta.url), copied.script(`lib/${file}`));
+  }
   copyFileSync(new URL('./owner-queue.mjs', import.meta.url), copied.script('lib/owner-queue.mjs'));
   copyFileSync(new URL('../owner-queue.mjs', import.meta.url), copied.script('owner-queue.mjs'));
   return copied;
@@ -31,15 +31,18 @@ function copyOwnerQueueToolkit() {
 
 const toolkit = copyOwnerQueueToolkit();
 after(() => toolkit.cleanup());
-const { act, collect, markShowFirst, moveOnBoard, report, undo } = await toolkit.load('lib/owner-queue.mjs');
+const { act, collect, markShowFirst, moveOnBoard, relayAnswer, report, undo } = await toolkit.load('lib/owner-queue.mjs');
 const { main: readerMain } = await toolkit.load('owner-queue.mjs');
-const { boardReadExec, hydratedItem, issueItemReply, issuesPage, leanBoardPage, leanNode, membership, walkedIssue } = await toolkit.load('lib/board-fixtures.mjs');
+const {
+  LINEAR_AWAITING, boardReadExec, hydratedItem, issueItemReply, issuesPage, leanBoardPage, leanNode, linearBoard, linearIssue, membership, walkedIssue,
+} = await toolkit.load('lib/board-fixtures.mjs');
 const { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_REPOSITORY, ROUTING_FIELD, ROUTING_OPTIONS, STATUS_OPTIONS } = await toolkit.load('lib/board-config.mjs');
 
 const QUEUE = fileURLToPath(new URL('../../.agents/herdr/fabraik-queue/queue.mjs', import.meta.url));
 
 const HOST = 'machine-a';
 const OWNED_HISTORY_SKIP = typeof process.getuid === 'function' ? false : 'owned private lead history requires process.getuid';
+const OFF_LINUX = process.platform === 'linux' ? false : `the coordinator relay runs on Linux only as Herdr does, not ${process.platform}`;
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'owner-queue-model-root-')));
 mkdirSync(join(ROOT, '.git'));
 after(() => rmSync(ROOT, { recursive: true, force: true }));
@@ -131,6 +134,7 @@ const notFound = () => {
   throw Object.assign(new Error('ENOENT: FETCH_HEAD'), { code: 'ENOENT' });
 };
 
+/** @param {{ page: unknown, details?: unknown, jobs: Record<string, string>, files?: Record<string, string>, dirty?: number[], digest?: string, fileTime?: (path: string) => string, issues?: unknown, items?: unknown, other?: unknown, run?: (args: string[]) => string }} options */
 const read = ({
   page, details, jobs, files = {}, dirty, digest, fileTime = notFound, issues, items,
   other = { data: { repository: details } }, run = scriptedGit(jobs, dirty, digest),
@@ -254,7 +258,6 @@ test('an awaiting card with a saved write-up becomes a merge item', () => {
       category: 'merge',
       decisionCard: 'The panel now lists what waits on you.\n\n**Risk:** Undo: revert the commit.',
       screenshots: [join(reviewFolder(7, 'aaa7'), 'screenshot-2.png'), join(reviewFolder(7, 'aaa7'), 'screenshot-10.jpg')],
-      actedOnBy: 'coordinator',
       head: 'aaa7',
       identity: ids(7, 'aaa7', ['body.md', 'screenshot-2.png', 'screenshot-10.jpg']),
     },
@@ -264,7 +267,6 @@ test('an awaiting card with a saved write-up becomes a merge item', () => {
       category: 'merge',
       decisionCard: 'The collector now reads the board once.',
       visual: 'none',
-      actedOnBy: 'coordinator',
       head: 'bbb12',
       identity: ids(12, 'bbb12', ['body.md']),
     },
@@ -386,7 +388,7 @@ test('an Evidence line that reads exactly No visual change. still counts as no v
   const { document } = read({ page, details, jobs: { 65: 'eee65' }, files });
 
   assert.deepEqual(shown(document.items), [
-    { card: 65, title: 'Exactly no visual change', category: 'merge', decisionCard: 'A card.', visual: 'none', actedOnBy: 'coordinator', head: 'eee65', identity: ids(65, 'eee65', ['body.md']) },
+    { card: 65, title: 'Exactly no visual change', category: 'merge', decisionCard: 'A card.', visual: 'none', head: 'eee65', identity: ids(65, 'eee65', ['body.md']) },
   ]);
 });
 
@@ -455,18 +457,10 @@ test('an unclaimed Ready card is never a queue item of its own', () => {
     i58: detail(58, '', ['Claim: machine-b, Codex, 2026-11-02T09:00Z']),
     i59: detail(59, '', []),
   };
-  // The reader the collector once asked about each unclaimed Ready card: no card waits for an approval any more.
-  const asked = [];
-  const approvals = (numbers) => {
-    asked.push(numbers);
-    return { lines: numbers.map((number) => `not approved ${number}: no record`), exitCode: 0 };
-  };
-
-  const { document } = read({ page, details, jobs: {}, approvals });
+  const { document } = read({ page, details, jobs: {} });
 
   assert.deepEqual(shown(document.items), [{ card: 59, title: 'Proposed: Ready and proposed', category: 'suggested' }]);
   assert.deepEqual(document.sources, [{ name: 'board', ok: true }, { name: 'details', ok: true }]);
-  assert.deepEqual(asked, [], 'no card is asked about');
 });
 
 test('the digest lists the last day\'s first-parent merges newest first', () => {
@@ -635,7 +629,7 @@ test('a merge item is missing only where its card ends with a waiting version th
     [join(reviewFolder(66, head), 'screenshot-1.png')]: '',
   };
   const complete = {
-    card: 66, title: 'A waiting card', category: 'merge', decisionCard: 'A card.', screenshots: [join(reviewFolder(66, head), 'screenshot-1.png')], actedOnBy: 'coordinator',
+    card: 66, title: 'A waiting card', category: 'merge', decisionCard: 'A card.', screenshots: [join(reviewFolder(66, head), 'screenshot-1.png')],
     head, identity: ids(66, head, names),
   };
   const missing = { card: 66, title: 'A waiting card', category: 'merge', missing: NO_WAITING_VERSION };
@@ -892,6 +886,7 @@ test('ANTI-REGRESSION: each GitHub board card carries its show-me-first marker a
 test('a card version is fixed by its number, title, column, place and body and by nothing else the board shows', () => {
   // Card `number` as a board read draws it: listed after card 9, which is in `before`, with its own title, column, open
   // blockers and body and comments, read beside the job heads `jobs`.
+  /** @param {{ number?: number, title?: string, column?: string, before?: string, blockers?: { number: number, state: string }[], body?: string, comments?: string[], jobs?: Record<string, string> }} [options] */
   const drawn = ({
     number = 11, title = 'A versioned card', column = 'Ready', before = 'In progress', blockers = [], body = 'Scope of the card.', comments = [], jobs = {},
   } = {}) => {
@@ -941,6 +936,19 @@ const comment = (number, id, body, login = 'owner') => ({
 const writeUp = (decision, evidence, proof = CLEAR_PROOF) => `## Evidence\n\n${evidence}\n\n<details>\n\n<summary>Decision card</summary>\n\n${decision}\n\n</details>\n${proof}`;
 const SCOPED = ['## Why', '', 'The panel needs it.', '', '## What to build', '', 'A Keep control.', '', '## Acceptance criteria', '', '- [ ] Keep files it.', ''].join('\n');
 
+/**
+ * @typedef {ReturnType<typeof comment> & { lastEditedAt?: string, editor?: { login: string } | null }} ModelComment
+ * @typedef {{ title: string, status: string | null, body: string, comments: ModelComment[], closed?: boolean, unlisted?: boolean,
+ *   offBoard?: boolean, labels?: string[], history?: string[], lastEditedAt?: string | null }} ModelCard
+ * @typedef {{ login: string | null | (() => string), heads: Record<number, string>, dirty: number[], files: Record<string, string>,
+ *   cards: Record<number, ModelCard>, order?: number[], filed?: Record<string, unknown[]>, issues?: unknown, items?: unknown,
+ *   positionReply?: unknown, removedColumn?: string, settingText?: string, settingOid?: string, duringAct?: (args: string[]) => void,
+ *   foreignLaterPage?: boolean }} Model
+ * @typedef {(model: Model) => void} Edit
+ * @typedef {[string, { card: number | string, action: string, reply?: string, item?: number }, (Edit | null)?, (Edit | null)?, (string | null)?, string?]} ActRow
+ */
+
+/** @returns {Model} */
 function actModel() {
   return {
     login: 'owner',
@@ -982,7 +990,7 @@ function actModel() {
   };
 }
 
-const commentId = (url) => Number(/#issuecomment-(\d+)$/.exec(url)[1]);
+const commentId = (url) => Number(/** @type {RegExpExecArray} */ (/#issuecomment-(\d+)$/.exec(url))[1]);
 
 // The executor `collect`, `act` and `undo` read and write the model through: the board read, every other read they
 // make, and each write, which changes the model as GitHub would and is recorded in order as its arguments, a body file's
@@ -1007,6 +1015,7 @@ const BOARD_SLUG = `${BOARD_OWNER}/${BOARD_REPOSITORY}`;
 // The option id the fake Status fields give the column `name`.
 const optionId = (name) => `opt-${name.toLowerCase().replaceAll(' ', '-')}`;
 
+/** @param {Model} model */
 function actExec(model) {
   const writes = [];
   const bodyFiles = [];
@@ -1066,7 +1075,7 @@ function actExec(model) {
       return { data: { [BOARD_OWNER_TYPE]: { projectV2: { id: 'PVT_act', field: { id: 'PVTSSF_status', options } } } } };
     }
     if (query.includes('projectItems(first:20)')) {
-      const number = Number(/issue\(number:(\d+)\)/.exec(query)[1]);
+      const number = Number(/** @type {RegExpExecArray} */ (/issue\(number:(\d+)\)/.exec(query))[1]);
       const entry = cardOf(number);
       return issueItemReply(entry.offBoard ? [] : [{ ...membership(`PVTI_${number}`), value: { name: entry.status } }], { issueId: `I_${number}` });
     }
@@ -1136,16 +1145,18 @@ function actExec(model) {
       const [item, after] = [field('item'), field('after') ?? null];
       assert.equal(field('project'), 'PVT_act', `unexpected project: ${call}`);
       assert.equal(query.includes('afterId: $after'), after !== null, `afterId travels exactly when an after item is sent: ${call}`);
+      const { order } = model;
+      assert.ok(order, 'a position write needs the model\'s order');
       const itemOf = (id) => {
         const number = Number(/^PVTI_(\d+)$/.exec(id)?.[1]);
-        assert.ok(model.order.includes(number), `unexpected item ${id}`);
+        assert.ok(order.includes(number), `unexpected item ${id}`);
         return number;
       };
       const [moved, anchor] = [itemOf(item), after === null ? null : itemOf(after)];
       writes.push({ position: { item, after } });
       if (model.positionReply !== undefined) return model.positionReply;
-      model.order.splice(model.order.indexOf(moved), 1);
-      model.order.splice(anchor === null ? 0 : model.order.indexOf(anchor) + 1, 0, moved);
+      order.splice(order.indexOf(moved), 1);
+      order.splice(anchor === null ? 0 : order.indexOf(anchor) + 1, 0, moved);
       return { data: { updateProjectV2ItemPosition: { clientMutationId: null } } };
     }
     const listed = /^api repos\/([^/]+\/[^/?]+)\/issues\?creator=owner&state=all&since=[^&]+&per_page=100 --paginate --slurp$/.exec(call);
@@ -1193,6 +1204,7 @@ function actExec(model) {
 
 // The readers `collect` and `act` share over the model, as the entry point passes them. Its git answers the three
 // fetched-main settings reads from `model.settingText` and `model.settingOid` as `settingsGit` does, and every other read from the jobs.
+/** @param {Model} model */
 const modelReaders = (model) => {
   const settings = settingsGit({ settingText: model.settingText, settingOid: model.settingOid });
   const jobs = scriptedGit(model.heads, model.dirty);
@@ -1200,7 +1212,7 @@ const modelReaders = (model) => {
     try {
       return settings(args);
     } catch (error) {
-      if (!error.message.startsWith('unexpected settings git read')) throw error;
+      if (!(/** @type {Error} */ (error)).message.startsWith('unexpected settings git read')) throw error;
       return jobs(args);
     }
   };
@@ -1208,6 +1220,10 @@ const modelReaders = (model) => {
 };
 
 // The model's queue as `collect` reads it for `login` on `host`, with the calls it made.
+/**
+ * @param {Model} model
+ * @param {{ login?: string | null, host?: string }} [options]
+ */
 function collectModel(model, { login = 'owner', host = HOST } = {}) {
   const { exec, calls } = actExec(model);
   return { document: collect({ ...modelReaders(model), hostname: host, tracker: 'github', executor: exec, login }), calls };
@@ -1226,7 +1242,7 @@ async function acting(model, request, { tracker = 'github' } = {}) {
     await act({ ...modelReaders(model), tracker, executor: exec, login, output: { log: (line) => logged.push(line), error: () => {} }, ...request });
     return { calls, writes, bodyFiles, logged };
   } catch (error) {
-    return { calls, writes, bodyFiles, logged, refused: error.message };
+    return { calls, writes, bodyFiles, logged, refused: /** @type {Error} */ (error).message };
   }
 }
 
@@ -1240,7 +1256,7 @@ async function undoing(model, request, { tracker = 'github' } = {}) {
     await undo({ ...modelReaders(model), tracker, executor: exec, login, output: { log: (line) => logged.push(line), error: () => {} }, ...request });
     return { calls, writes, logged };
   } catch (error) {
-    return { calls, writes, logged, refused: error.message };
+    return { calls, writes, logged, refused: /** @type {Error} */ (error).message };
   }
 }
 
@@ -1281,7 +1297,7 @@ test('ANTI-REGRESSION: a held merge names each reason its saved write-up holds, 
   };
   const mergesOf = (document) => shown(document.items).filter((item) => item.category === 'merge' && item.card >= 8);
   const held = (number, reason) => ({
-    card: number, title: `A merge ${number}`, category: 'merge', decisionCard: `Card ${number} waits.`, visual: 'none', reason, actedOnBy: 'coordinator',
+    card: number, title: `A merge ${number}`, category: 'merge', decisionCard: `Card ${number} waits.`, visual: 'none', reason,
     head: `held${number}`, identity: ids(number, `held${number}`, ['body.md']),
   });
   const proof8 = { head: H8, identity: ids(8, H8, ['body.md']) };
@@ -1293,14 +1309,14 @@ test('ANTI-REGRESSION: a held merge names each reason its saved write-up holds, 
     const { document } = collectModel(heldModel({ settingText: '{"version":1,"waitForOwner":"always"}' }));
     const items = mergesOf(document);
     const named = (number) => items.find((item) => item.card === number);
-    assert.deepEqual(named(8), { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', reason: outsideHerdr(everyCardWaits), actedOnBy: 'coordinator', ...proof8 });
+    assert.deepEqual(named(8), { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', reason: outsideHerdr(everyCardWaits), ...proof8 });
     assert.deepEqual(named(11), held(11, `check; ${outsideHerdr(everyCardWaits)}`));
     assert.deepEqual(named(13), held(13, `check; ${outsideHerdr(`beyond-card, sign-off, hard-to-undo, ${everyCardWaits}`)}`));
   });
   await t.test('at when-needed a merge holds only its write-up reasons', () => {
     const { document } = collectModel(heldModel({ settingText: '{"version":1,"waitForOwner":"when-needed"}' }));
     const items = mergesOf(document);
-    assert.deepEqual(items.find((item) => item.card === 8), { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', actedOnBy: 'coordinator', ...proof8 });
+    assert.deepEqual(items.find((item) => item.card === 8), { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', ...proof8 });
     assert.deepEqual(items.find((item) => item.card === 11), held(11, 'check'));
   });
   await t.test('a level that cannot be read is a failed source and leaves no merge clear', () => {
@@ -1316,13 +1332,13 @@ test('ANTI-REGRESSION: a held merge names each reason its saved write-up holds, 
   const named = (number) => items.find((item) => item.card === number);
 
   assert.deepEqual([named(8), named(11), named(12), named(13)], [
-    { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', actedOnBy: 'coordinator', ...proof8 },
+    { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', ...proof8 },
     held(11, 'check'),
     held(12, outsideHerdr('beyond-card, sign-off, hard-to-undo')),
     held(13, `check; ${outsideHerdr('beyond-card, sign-off, hard-to-undo')}`),
   ]);
   // A write-up the judge cannot read names what is missing and is no decision card: never a merge with no reason.
-  for (const [number, cause] of [[14, /Failed/], [15, /Undo/]]) {
+  for (const [number, cause] of /** @type {[number, RegExp][]} */ ([[14, /Failed/], [15, /Undo/]])) {
     assert.deepEqual(Object.keys(named(number)).sort(), ['card', 'category', 'missing', 'title'], `card ${number} is a missing-proof item`);
     assert.match(named(number).missing.fact, cause, `card ${number} names the line the judge could not read`);
     assert.equal(typeof named(number).missing.next, 'string');
@@ -1343,7 +1359,7 @@ test('ANTI-REGRESSION: a merge card carrying show-me-first waits naming it, and 
   // A card with no visual change still shows its decision card and says so, and the label alone holds it.
   const { document } = collectModel(model(level('when-needed'), [8]));
   assert.deepEqual(shown(document.items).find((item) => item.card === 8),
-    { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', reason: 'show-me-first', actedOnBy: 'coordinator',
+    { card: 8, title: 'A merge with no visual change', category: 'merge', decisionCard: 'Card 8 reads once.', visual: 'none', reason: 'show-me-first',
       head: H8, identity: ids(8, H8, ['body.md']) });
   assert.equal(reasonOf(document, 7), undefined, 'a card without the label is not held by it');
   assert.equal(reasonOf(collectModel(model(level('when-needed'))).document, 8), undefined);
@@ -1374,6 +1390,7 @@ test('ANTI-REGRESSION: a merge card carrying show-me-first waits naming it, and 
 test('ANTI-REGRESSION: a merge card whose labels are not text is reported unreadable on its own, and its sibling still reads', () => {
   // Card 7's board answer gives a label that is not text; card 8 is healthy and carries show-me-first.
   const model = Object.assign(actModel(), { settingText: '{"version":1,"waitForOwner":"when-needed"}' });
+  // @ts-expect-error a number among the labels, passed on purpose to prove the label read refuses it
   model.cards[7].labels = [7];
   model.cards[8].labels = ['show-me-first'];
 
@@ -1391,6 +1408,7 @@ test('every queue item carries a version bound to what the panel shows, the acco
   assert.deepEqual([...baseline.keys()], [7, 8, 9, 21, 22, 23, 54, 55]);
   for (const [number, version] of baseline) assert.match(String(version), /^[0-9a-f]{64}$/, `card ${number}'s version`);
   assert.deepEqual(versionsOf(actModel()), baseline, 'the same inputs give the same versions');
+  /** @type {[string, Edit, number[]][]} */
   const rows = [
     ['the title', (model) => { model.cards[23].title = 'A local job\'s renamed question'; }, [23]],
     ['the held comment past its first line', (model) => { model.cards[21].comments[2].body = 'Needs owner: Which colour? Job: job/21 on machine-a.\nRed or green.'; }, [21]],
@@ -1455,165 +1473,93 @@ test('ANTI-REGRESSION: a question names the computer its hold\'s Job sentence na
   }
 });
 
-test('ANTI-REGRESSION: a waiting merge says who acts on an answer and shows the answer its card records, and one whose comments cannot be read names the failed read and guesses neither', () => {
+// new behaviour: a merge answer goes to the coordinator chat, so no card comment shapes the merge item.
+test('ANTI-REGRESSION: a waiting merge item carries no answer read from its card comments', () => {
   const answerLine = (head, names, words) => `Owner answer: job/7 at ${head} ${ids(7, head, names)}: ${words}`;
   const answer = answerLine(H7, ['body.md', 'screenshot-1.png'], 'yes');
-  const modelWith = ({ body = answer, login = 'owner' } = {}) => {
+  // The editor-aware card read of card 7, by which an answer was once read.
+  const cardRead = (args) => args.some((arg) => arg.startsWith('query=') && arg.includes('comments(first: 100)')) && args.includes('number=7');
+  // Card 7's item with its version left out, since the version binds every comment.
+  const unversioned = (document) => Object.fromEntries(Object.entries(document.items.find((item) => item.card === 7)).filter(([key]) => key !== 'version'));
+  const expected = unversioned(collectModel(actModel()).document);
+  // Each row: card 7 with one more comment, by `login`, and an executor that fails the card read where `failing`.
+  /** @type {[string, string, string, boolean?][]} */
+  const rows = [
+    ['an answer for the displayed version', answer, 'owner'],
+    ['an answer by another account', answer, 'someone'],
+    ['an answer quoted after other text', `Quote: ${answer}`, 'owner'],
+    ['an answer whose card read fails', answer, 'owner', true],
+  ];
+  const observed = rows.map(([row, body, login, failing]) => {
     const model = actModel();
     model.cards[7].comments.push(comment(7, 3100, body, login));
-    return model;
-  };
-  const itemOf = (document, card) => document.items.find((item) => item.card === card);
-  // The editor-aware card read of card 7, by which the queue reads its answer.
-  const cardRead = (args) => args.some((arg) => arg.startsWith('query=') && arg.includes('comments(first: 100)')) && args.includes('number=7');
-
-  // The failed read: the one comment read for card 7 throws, and the queue lists it and guesses nothing.
-  const failing = modelWith();
-  const { exec } = actExec(failing);
-  const unreadable = (args) => {
-    if (cardRead(args)) throw new Error('gh: comments unreadable');
-    return exec(args);
-  };
-  const failed = collect({ ...modelReaders(failing), hostname: HOST, tracker: 'github', executor: unreadable, login: 'owner' });
-  const unread = itemOf(failed, 7);
-  assert.deepEqual(
-    { source: failed.sources.find((source) => source.name === 'card 7 comments'), actedOnBy: unread.actedOnBy, answered: Object.hasOwn(unread, 'answered') },
-    { source: { name: 'card 7 comments', ok: false, error: 'gh: comments unreadable' }, actedOnBy: 'unread', answered: false },
-    'a failed comment read lists its source and guesses neither who acts nor an answer',
-  );
-
-  // A reply whose list holds an element that is no comment record is as unreadable as a failed read, and reads no further.
-  const malformed = (args) => {
-    if (!cardRead(args)) return exec(args);
-    const reply = JSON.parse(exec(args));
-    reply.data.repository.issue.comments.nodes.push(null);
-    return JSON.stringify(reply);
-  };
-  const broken = collect({ ...modelReaders(failing), hostname: HOST, tracker: 'github', executor: malformed, login: 'owner' });
-  const lost = itemOf(broken, 7);
-  assert.deepEqual(
-    { source: broken.sources.find((source) => source.name === 'card 7 comments')?.ok, actedOnBy: lost.actedOnBy, answered: Object.hasOwn(lost, 'answered') },
-    { source: false, actedOnBy: 'unread', answered: false },
-    'a comment list holding a malformed record lists its source as failed and guesses neither who acts nor an answer',
-  );
-  assert.deepEqual(broken.items.map((item) => item.card), failed.items.map((item) => item.card), 'every other card is still returned');
-
-  // Each row: card 7 read from the model, and what it says of who acts and of the answer it records.
-  const quoted = `Quote: ${answer}`;
-  const superseded = modelWith();
-  superseded.cards[7].comments.push(comment(7, 3101, `Owner answer: job/7 at ${H7} ${ids(7, H7, ['body.md', 'screenshot-1.png'])}:\nhold it`));
-  const foreignEdited = modelWith();
-  foreignEdited.cards[7].comments.at(-1).editor = { login: 'someone' };
-  const rows = [
-    ['an answer for the displayed version', modelWith(), { actedOnBy: 'coordinator', answered: 'yes' }],
-    ['an answer by another account', modelWith({ login: 'someone' }), { actedOnBy: 'coordinator' }],
-    ['an answer for another head', modelWith({ body: answerLine(H8, ['body.md', 'screenshot-1.png'], 'yes') }), { actedOnBy: 'coordinator' }],
-    ['an answer with another identity', modelWith({ body: answerLine(H7, ['body.md'], 'yes') }), { actedOnBy: 'coordinator' }],
-    ['an answer quoted after other text', modelWith({ body: quoted }), { actedOnBy: 'coordinator' }],
-    ['an answer, then a newer one with its words on the second line', superseded, { actedOnBy: 'coordinator' }],
-    ['an answer another account last edited', foreignEdited, { actedOnBy: 'coordinator' }],
-  ];
-  const observed = rows.map(([row, model]) => {
-    const item = itemOf(collectModel(model).document, 7);
-    return { row, actedOnBy: item.actedOnBy, ...Object.hasOwn(item, 'answered') && { answered: item.answered } };
+    const { exec } = actExec(model);
+    const executor = (args) => {
+      if (failing && cardRead(args)) throw new Error('gh: comments unreadable');
+      return exec(args);
+    };
+    const document = collect({ ...modelReaders(model), hostname: HOST, tracker: 'github', executor, login: 'owner' });
+    return { row, item: unversioned(document), commentSource: document.sources.some((source) => source.name === 'card 7 comments') };
   });
-  assert.deepEqual(observed, rows.map(([row, , expected]) => ({ row, ...expected })));
-
-  // A card with no answer makes no read for merge routing.
-  const quiet = collectModel(actModel());
-  assert.deepEqual(
-    { actedOnBy: itemOf(quiet.document, 8).actedOnBy, reads: quiet.calls.filter((args) => args[0] === 'issue' && args[2] === '8') },
-    { actedOnBy: 'coordinator', reads: [] },
-  );
+  assert.deepEqual(observed, rows.map(([row]) => ({ row, item: expected, commentSource: false })));
+  assert.equal(Object.hasOwn(expected, 'actedOnBy') || Object.hasOwn(expected, 'answered'), false, 'the item names no one who acts and no answer');
 });
 
-test('ANTI-REGRESSION: a board card carries answered only where its waiting version\'s newest owner answer names that version, never where the answer is unread', () => {
-  const answerLine = (head, names, words) => `Owner answer: job/7 at ${head} ${ids(7, head, names)}: ${words}`;
-  const modelWith = ({ body = answerLine(H7, ['body.md', 'screenshot-1.png'], 'yes'), login = 'owner' } = {}) => {
+// new behaviour: a merge answer goes to the coordinator chat, so no card comment marks a board card answered, whether
+// its merge item is complete or misses a fact.
+test('ANTI-REGRESSION: a board card never carries answered whatever its card comments record', () => {
+  const names = ['body.md', 'screenshot-1.png'];
+  const answerLine = (head, words, identity = names) => `Owner answer: job/7 at ${head} ${ids(7, head, identity)}: ${words}`;
+  /** @param {{ body?: string | null, login?: string }} [options] */
+  const modelWith = ({ body = answerLine(H7, 'yes'), login = 'owner' } = {}) => {
     const model = actModel();
     if (body !== null) model.cards[7].comments.push(comment(7, 3100, body, login));
     return model;
   };
-  const boardCard7 = (document) => document.board.cards.find((entry) => entry.card === 7);
-  const cardRead = (args) => args.some((arg) => arg.startsWith('query=') && arg.includes('comments(first: 100)')) && args.includes('number=7');
-
-  // The card 7 comment read throws, as the failed read of the merge-route test does.
-  const failing = modelWith();
-  const { exec } = actExec(failing);
-  const unreadable = (args) => {
-    if (cardRead(args)) throw new Error('gh: comments unreadable');
-    return exec(args);
-  };
-  const unread = collect({ ...modelReaders(failing), hostname: HOST, tracker: 'github', executor: unreadable, login: 'owner' });
-
-  const rows = [
-    ['an answer for the shown head and identity by the owner', boardCard7(collectModel(modelWith()).document)],
-    ['no answer', boardCard7(collectModel(modelWith({ body: null })).document)],
-    ['an answer for another head', boardCard7(collectModel(modelWith({ body: answerLine(H8, ['body.md', 'screenshot-1.png'], 'yes') })).document)],
-    ['an answer with another identity', boardCard7(collectModel(modelWith({ body: answerLine(H7, ['body.md'], 'yes') })).document)],
-    ['an answer by another account', boardCard7(collectModel(modelWith({ login: 'someone' })).document)],
-    ['a comment read that fails', boardCard7(unread)],
-  ];
-  assert.deepEqual(
-    rows.map(([row, card]) => ({ row, waitsOn: card.waitsOn, answered: Object.hasOwn(card, 'answered') ? card.answered : 'absent' })),
-    [
-      { row: 'an answer for the shown head and identity by the owner', waitsOn: 'merge', answered: true },
-      { row: 'no answer', waitsOn: 'merge', answered: 'absent' },
-      { row: 'an answer for another head', waitsOn: 'merge', answered: 'absent' },
-      { row: 'an answer with another identity', waitsOn: 'merge', answered: 'absent' },
-      { row: 'an answer by another account', waitsOn: 'merge', answered: 'absent' },
-      { row: 'a comment read that fails', waitsOn: 'merge', answered: 'absent' },
-    ],
-  );
-});
-
-test('ANTI-REGRESSION: a card being rebuilt after the owner answered its recorded waiting version stays answered, and only that version counts', () => {
-  const names = ['body.md', 'screenshot-1.png'];
-  const answerLine = (head, words) => `Owner answer: job/7 at ${head} ${ids(7, head, names)}: ${words}`;
   // Card 7's worktree is being rebuilt: dirty at its head, or moved to a head with no saved write-up. Its body still
   // records the waiting version of H7 unless `body` says otherwise.
+  /** @param {{ reply?: string, login?: string, dirty?: boolean, moved?: boolean, body?: string }} [options] */
   const rebuilding = ({ reply = answerLine(H7, 'fix it'), login = 'owner', dirty = true, moved = false, body } = {}) => {
-    const model = actModel();
+    const model = modelWith({ body: reply, login });
     if (dirty) model.dirty.push(7);
     if (moved) model.heads[7] = H8;
     if (body !== undefined) model.cards[7].body = body;
-    model.cards[7].comments.push(comment(7, 3100, reply, login));
     return model;
   };
   const boardCard7 = (document) => document.board.cards.find((entry) => entry.card === 7);
   const cardRead = (args) => args.some((arg) => arg.startsWith('query=') && arg.includes('comments(first: 100)')) && args.includes('number=7');
-  const observe = (row, document) => {
-    const card = boardCard7(document);
-    return { row, waitsOn: card.waitsOn, answered: Object.hasOwn(card, 'answered') ? card.answered : 'absent' };
+  // The model's documents with the card 7 comment read throwing, as the failed read of the merge-route test does.
+  const unreadable = (model) => {
+    const { exec } = actExec(model);
+    const executor = (args) => {
+      if (cardRead(args)) throw new Error('gh: comments unreadable');
+      return exec(args);
+    };
+    return collect({ ...modelReaders(model), hostname: HOST, tracker: 'github', executor, login: 'owner' });
   };
+  const of = (model) => collectModel(model).document;
 
-  // The card 7 comment read throws, as the failed read of the merge-route test does.
-  const failing = rebuilding();
-  const { exec } = actExec(failing);
-  const unreadable = (args) => {
-    if (cardRead(args)) throw new Error('gh: comments unreadable');
-    return exec(args);
-  };
-  const unread = collect({ ...modelReaders(failing), hostname: HOST, tracker: 'github', executor: unreadable, login: 'owner' });
-
-  const dirtyAnswered = collectModel(rebuilding()).document;
+  const dirtyAnswered = of(rebuilding());
+  const rows = [
+    ['an answer for the shown head and identity by the owner', of(modelWith())],
+    ['no answer', of(modelWith({ body: null }))],
+    ['an answer for another head', of(modelWith({ body: answerLine(H8, 'yes') }))],
+    ['an answer with another identity', of(modelWith({ body: answerLine(H7, 'yes', ['body.md']) }))],
+    ['an answer by another account', of(modelWith({ login: 'someone' }))],
+    ['a comment read that fails', unreadable(modelWith())],
+    ['a dirty worktree, its recorded waiting version answered by the owner', dirtyAnswered],
+    ['a moved head with no saved write-up, the recorded waiting version answered by the owner', of(rebuilding({ dirty: false, moved: true }))],
+    ['a dirty worktree, an answer for another head', of(rebuilding({ reply: answerLine(H8, 'fix it') }))],
+    ['a dirty worktree, an answer by another account', of(rebuilding({ login: 'someone' }))],
+    ['a dirty worktree, a card body with no waiting version', of(rebuilding({ body: 'Scope of card 7.' }))],
+    ['a dirty worktree, a comment read that fails', unreadable(rebuilding())],
+  ];
   assert.deepEqual(
-    [
-      observe('a dirty worktree, its recorded waiting version answered by the owner', dirtyAnswered),
-      observe('a moved head with no saved write-up, the recorded waiting version answered by the owner', collectModel(rebuilding({ dirty: false, moved: true })).document),
-      observe('a dirty worktree, an answer for another head', collectModel(rebuilding({ reply: answerLine(H8, 'fix it') })).document),
-      observe('a dirty worktree, an answer by another account', collectModel(rebuilding({ login: 'someone' })).document),
-      observe('a dirty worktree, a card body with no waiting version', collectModel(rebuilding({ body: 'Scope of card 7.' })).document),
-      observe('a dirty worktree, a comment read that fails', unread),
-    ],
-    [
-      { row: 'a dirty worktree, its recorded waiting version answered by the owner', waitsOn: 'merge', answered: true },
-      { row: 'a moved head with no saved write-up, the recorded waiting version answered by the owner', waitsOn: 'merge', answered: true },
-      { row: 'a dirty worktree, an answer for another head', waitsOn: 'merge', answered: 'absent' },
-      { row: 'a dirty worktree, an answer by another account', waitsOn: 'merge', answered: 'absent' },
-      { row: 'a dirty worktree, a card body with no waiting version', waitsOn: 'merge', answered: 'absent' },
-      { row: 'a dirty worktree, a comment read that fails', waitsOn: 'merge', answered: 'absent' },
-    ],
+    rows.map(([row, document]) => {
+      const card = boardCard7(document);
+      return { row, waitsOn: card.waitsOn, answered: Object.hasOwn(card, 'answered') ? card.answered : 'absent' };
+    }),
+    rows.map(([row]) => ({ row, waitsOn: 'merge', answered: 'absent' })),
   );
   // The Decisions view and the panel's list are unchanged: the card is still a merge item with its missing fact.
   assert.equal(dirtyAnswered.items.find((item) => item.card === 7).missing.fact, 'its job worktree has uncommitted changes');
@@ -1628,6 +1574,7 @@ test('ANTI-REGRESSION: a panel answer on a changed, foreign or impersonated item
   // Each row: the request (`item` names the card whose version it carries, where that is not its own), a change made
   // before the panel draws the item, a change made after, the line it must refuse with where that line is fixed, and
   // the tracker.
+  /** @type {ActRow[]} */
   const rows = [
     ['a new comment', answer, null, (model) => { model.cards[7].comments.push(comment(7, 3024, 'A later note.')); }],
     ['a status move', { card: 54, action: 'keep' }, null, (model) => { model.cards[54].status = 'Ready'; }],
@@ -1646,7 +1593,8 @@ test('ANTI-REGRESSION: a panel answer on a changed, foreign or impersonated item
     ['an empty reply', { ...answer, reply: '' }],
     ['a reply of 501 characters', { ...answer, reply: 'x'.repeat(501) }],
     ['a non-GitHub tracker', answer, null, null, null, 'markdown'],
-    ...[0, -21, 21.5, '21'].map((number) => [`card ${JSON.stringify(number)}`, { ...answer, card: number, item: 21 }]),
+    ['an answer to the current merge', answer, null, null, 'a merge answer goes to the coordinator: refresh the panel'],
+    ...[0, -21, 21.5, '21'].map((number) => /** @type {ActRow} */ ([`card ${JSON.stringify(number)}`, { ...answer, card: number, item: 21 }])),
   ];
   // A refusal is one line naming no fixture failure and no credential; a fixed line is matched within it.
   const refusal = (message, fixed) => {
@@ -1654,10 +1602,10 @@ test('ANTI-REGRESSION: a panel answer on a changed, foreign or impersonated item
     if (!fixed) return 'one line';
     return message.includes(fixed) ? fixed : message;
   };
-  // The positive control: the unchanged merge uses the ordinary tracker answer route.
+  // The positive control: the unchanged merge is put aside by its ordinary tracker route.
   const control = actModel();
-  const controlled = await acting(control, { ...answer, version: versionsOf(control).get(answer.card) });
-  const observed = [{ row: 'the current answer', writes: controlled.writes.length, refused: controlled.refused }];
+  const controlled = await acting(control, { card: 7, action: 'park', version: versionsOf(control).get(7) });
+  const observed = [{ row: 'the current put-aside', writes: controlled.writes.length, refused: controlled.refused }];
   for (const [row, { item, ...request }, before, after, fixed, tracker] of rows) {
     const model = actModel();
     before?.(model);
@@ -1667,7 +1615,7 @@ test('ANTI-REGRESSION: a panel answer on a changed, foreign or impersonated item
     observed.push({ row, writes: writes.length, refused: refusal(refused, fixed) });
   }
   assert.deepEqual(observed, [
-    { row: 'the current answer', writes: 1, refused: undefined },
+    { row: 'the current put-aside', writes: 3, refused: undefined },
     ...rows.map(([row, , , , fixed]) => ({ row, writes: 0, refused: fixed ?? 'one line' })),
   ]);
 });
@@ -1679,6 +1627,7 @@ test('each panel action writes exactly its existing route', async () => {
       text: `Needs owner: Parked from the queue panel: what should change? Job: job/${number} on ${HOST}.` },
     { args: ['project', 'item-edit', '--id', `PVTI_${number}`, '--project-id', 'PVT_act', '--field-id', 'PVTSSF_status', '--single-select-option-id', 'opt-backlog'] },
   ];
+  /** @type {[string, { card: number, action: string }, { args?: string[], text?: string }[]][]} */
   const rows = [
     ['park a complete merge', { card: 7, action: 'park' }, parked(7, 'Scope of card 7.')],
     ['park a missing merge', { card: 9, action: 'park' }, parked(9, 'Scope of card 9.')],
@@ -1703,30 +1652,171 @@ test('each panel action writes exactly its existing route', async () => {
   assert.deepEqual(placeholders, [], 'no call leaves the repository to gh\'s placeholders');
 });
 
-test('ANTI-REGRESSION: a queue panel answer to a waiting merge records the owner answer for that card at its shown head and identity, and nothing else', async () => {
-  const recorded = (number, head, names, words) => [{ args: ['issue', 'comment', String(number), '--repo', BOARD_SLUG, '--body-file', '<file>'],
-    text: `Owner answer: job/${number} at ${head} ${ids(number, head, names)}: ${words}` }];
+// A relay as the coordinator relay answers: `code` and `message`, the line it was handed recorded as sent only where
+// `code` is 0.
+const relayer = (code = 0, message = '') => {
+  const sends = [];
+  return { sends, relay: async (line) => {
+    if (code === 0) sends.push(line);
+    return { code, message };
+  } };
+};
+const QUIET = { log: () => {}, error: () => {} };
+const panelLine = (ref, key, head, identity, words) => `Queue panel answer for card ${ref}: job/${key} at ${head} ${identity}: ${words}`;
+// Card 7 as a Markdown repository of its own, started clean whatever an earlier test left: `main` holds it Ready and the
+// local job/7 branch holds it Done, so its merge is Awaiting push and claimed by `branch job/7 (local)`.
+function markdownCardRepository(t) {
+  const origin = mkdtempSync(join(tmpdir(), 'owner-queue-origin-'));
+  t.after(() => rmSync(origin, { recursive: true, force: true }));
+  const clean = () => {
+    rmSync(join(toolkit.root, '.git'), { recursive: true, force: true });
+    rmSync(join(toolkit.root, '.agents', 'cards'), { recursive: true, force: true });
+  };
+  clean();
+  t.after(clean);
+  const cardText = (status) => ['# Card 7', '', `Status: ${status}`, 'Kind: task', 'Workstream: Product', '', 'Scope of card 7.', ''].join('\n');
+  const cardFile = join(toolkit.root, '.agents', 'cards', '7.md');
+  realGit(origin, 'init', '--bare', '-b', 'main');
+  realGit(toolkit.root, 'init', '-b', 'main');
+  mkdirSync(dirname(cardFile), { recursive: true });
+  writeFileSync(cardFile, cardText('Ready'));
+  realGit(toolkit.root, 'add', '.agents/cards');
+  realGit(toolkit.root, 'commit', '-m', 'file the card');
+  realGit(toolkit.root, 'remote', 'add', 'origin', origin);
+  realGit(toolkit.root, 'push', 'origin', 'main');
+  realGit(toolkit.root, 'checkout', '-b', 'job/7');
+  writeFileSync(cardFile, cardText('Done'));
+  realGit(toolkit.root, 'commit', '-am', 'card 7 done');
+  realGit(toolkit.root, 'checkout', 'main');
+  const readers = (executor) => ({
+    root: ROOT, tracker: 'markdown', executor, run: scriptedGit({ 7: H7 }),
+    hostname: HOST, login: null, fileTime: notFound, ...folder({ [join(reviewFolder(7, H7), 'body.md')]: writeUp('Card 7 ships the panel.', 'No visual change.') }),
+  });
+  return { cardFile, readers };
+}
+
+test('ANTI-REGRESSION: a merge answer relays the panel line on GitHub, Linear and Markdown and writes nothing to the card', async (t) => {
   const reply = 'shorten the title, then merge it';
-  // Each row: the request, the tracker, the writes it makes, and the line it refuses with: `fixed` where that line is
-  // fixed, otherwise any one line naming no fixture failure.
+  const observed = [];
+
+  // GitHub: card 7 of the act model, with its screenshot.
+  const model = actModel();
+  const version = versionsOf(model).get(7);
+  const github = actExec(model);
+  const toGitHub = relayer();
+  await relayAnswer({ ...modelReaders(model), tracker: 'github', executor: github.exec, login: 'owner', card: 7, version, reply, relay: toGitHub.relay, output: QUIET });
+  observed.push({ row: 'GitHub', sends: toGitHub.sends, writes: github.writes.length });
+
+  // Linear: ENG-7 Awaiting Push, claimed for this machine, in a copy wired to LINEAR_TEST_CONFIG.
+  const linearCopy = copyOwnerQueueToolkit(LINEAR_TEST_CONFIG);
+  t.after(() => linearCopy.cleanup());
+  const linearQueue = await linearCopy.load('lib/owner-queue.mjs');
+  const LINEAR_HEAD = 'e'.repeat(40);
+  const linearReaders = (description = 'Scope of ENG-7.') => {
+    const board = linearBoard({ issues: [linearIssue('ENG-7', 'A Linear merge', LINEAR_AWAITING)], cards: { 'ENG-7': { description,
+      comments: [{ id: 'c1', createdAt: '2026-11-02T09:00:00.000Z', body: 'Claim: machine-a, Claude Code, 2026-11-02T09:00Z' }] } } });
+    const readers = {
+      root: ROOT, tracker: 'linear', linear: board.exec, executor: () => { throw new Error('unexpected gh on a Linear board'); }, run: scriptedGit({ 'ENG-7': LINEAR_HEAD }),
+      hostname: HOST, login: null, fileTime: notFound, ...folder({ [join(reviewFolder('ENG-7', LINEAR_HEAD), 'body.md')]: writeUp('ENG-7 ships the panel.', 'No visual change.') }),
+    };
+    return { readers, calls: board.calls };
+  };
+  const linearVersion = linearQueue.collect(linearReaders().readers).items.find((item) => item.card === 'ENG-7').version;
+  const linear = linearReaders();
+  const toLinear = relayer();
+  await linearQueue.relayAnswer({ ...linear.readers, card: 'ENG-7', version: linearVersion, reply: 'yes', relay: toLinear.relay, output: QUIET });
+  observed.push({ row: 'Linear', sends: toLinear.sends, writes: linear.calls.filter(({ query }) => /^\s*mutation\b/.test(query)).length });
+
+  // Linear with a waiting line on the card body: the line naming ENG-7 relays like the plain row; a line naming a longer
+  // key (ENG-70) or the same key in another case (eng-7) is not this card's waiting version, so the answer is missing.
+  const linearIdentity = ids('ENG-7', LINEAR_HEAD, ['body.md']);
+  const waitingLine = (key) => `Scope of ENG-7.\n\nWaiting version: job/${key} ${LINEAR_HEAD} ${linearIdentity} run r1`;
+  for (const [row, key] of [['Linear waiting line', 'ENG-7'], ['Linear waiting line of a longer key', 'ENG-70'], ['Linear waiting line in another case', 'eng-7']]) {
+    const waiting = linearReaders(waitingLine(key));
+    const shown = linearQueue.collect(waiting.readers).items.find((item) => item.card === 'ENG-7')?.version;
+    const toWaiting = relayer();
+    try {
+      await linearQueue.relayAnswer({ ...waiting.readers, card: 'ENG-7', version: shown, reply: 'yes', relay: toWaiting.relay, output: QUIET });
+    } catch { /* a missing merge refuses; the sends and writes below are what is observed */ }
+    observed.push({ row, sends: toWaiting.sends, writes: waiting.calls.filter(({ query }) => /^\s*mutation\b/.test(query)).length });
+  }
+
+  const markdown = markdownCardRepository(t);
+  const markdownGh = [];
+  const markdownReaders = markdown.readers((args) => { markdownGh.push(args); throw new Error('unexpected gh on a Markdown board'); });
+  const markdownState = () => [realGit(toolkit.root, 'for-each-ref'), realGit(toolkit.root, 'status', '--porcelain'), readFileSync(markdown.cardFile, 'utf8')];
+  const markdownVersion = collect(markdownReaders).items.find((item) => item.card === 7)?.version;
+  const before = markdownState();
+  const toMarkdown = relayer();
+  await relayAnswer({ ...markdownReaders, card: 7, version: markdownVersion, reply: 'yes', relay: toMarkdown.relay, output: QUIET });
+  const markdownChanged = JSON.stringify(markdownState()) === JSON.stringify(before) ? 0 : 1;
+  observed.push({ row: 'Markdown', sends: toMarkdown.sends, writes: markdownGh.length + markdownChanged });
+
+  // Each refusal, on the GitHub act model: the request, a change made after the panel drew the item, the relay, and the
+  // line it refuses with where that line is fixed, otherwise any one line naming no fixture failure.
+  const NOT_RECEIVED = 'no coordinator terminal can take the answer';
+  /** @type {[string, { card: number, reply: string }, (Edit | null)?, ReturnType<typeof relayer>?, string?][]} */
   const rows = [
-    ['a complete merge with a screenshot', { card: 7, action: 'answer', reply }, 'github', recorded(7, H7, ['body.md', 'screenshot-1.png'], reply)],
-    ['a complete merge with no visual change', { card: 8, action: 'answer', reply: 'yes' }, 'github', recorded(8, H8, ['body.md'], 'yes')],
-    ['a missing merge', { card: 9, action: 'answer', reply }, 'github', [], 'one line'],
-    ['a reply holding a token', { card: 7, action: 'answer', reply: `Merge it with ${TOKEN}.` }, 'github', [], CREDENTIAL_REPLY],
-    ['a non-GitHub tracker', { card: 7, action: 'answer', reply }, 'linear', [], 'one line'],
+    ['a missing merge', { card: 9, reply }],
+    ['a question item', { card: 21, reply: 'Blue.' }],
+    ['a reply holding a token', { card: 7, reply: `Merge it with ${TOKEN}.` }, null, relayer(), CREDENTIAL_REPLY],
+    ['a changed version', { card: 7, reply }, (changed) => { changed.cards[7].comments.push(comment(7, 3024, 'A later note.')); }],
+    ['a relay that sends nothing', { card: 7, reply }, null, relayer(4, NOT_RECEIVED), NOT_RECEIVED],
   ];
   const refusal = (message, fixed) => {
     if (typeof message !== 'string' || message === '' || /[\r\n]/.test(message) || /^unexpected (?:gh|git) /.test(message) || message.includes(TOKEN)) return message;
-    return fixed === 'one line' || message === fixed ? fixed : message;
+    if (!fixed) return 'one line';
+    return message.includes(fixed) ? fixed : message;
   };
-  const observed = [];
-  for (const [row, request, tracker, , fixed] of rows) {
-    const model = actModel();
-    const { writes, refused } = await acting(model, { ...request, version: versionsOf(model).get(request.card) }, { tracker });
-    observed.push({ row, writes, refused: refusal(refused, fixed) });
+  for (const [row, request, after, sent = relayer(), fixed] of rows) {
+    const refusing = actModel();
+    const shownVersion = versionsOf(refusing).get(request.card);
+    after?.(refusing);
+    const { exec, writes } = actExec(refusing);
+    let refused;
+    try {
+      await relayAnswer({ ...modelReaders(refusing), tracker: 'github', executor: exec, login: 'owner', ...request, version: shownVersion, relay: sent.relay, output: QUIET });
+    } catch (error) {
+      refused = /** @type {Error} */ (error).message;
+    }
+    observed.push({ row, sends: sent.sends, writes: writes.length, refused: refusal(refused, fixed) });
   }
-  assert.deepEqual(observed, rows.map(([row, , , writes, fixed]) => ({ row, writes, refused: fixed })));
+
+  assert.deepEqual(observed, [
+    { row: 'GitHub', sends: [panelLine('#7', 7, H7, ids(7, H7, ['body.md', 'screenshot-1.png']), reply)], writes: 0 },
+    { row: 'Linear', sends: [panelLine('ENG-7', 'ENG-7', LINEAR_HEAD, ids('ENG-7', LINEAR_HEAD, ['body.md']), 'yes')], writes: 0 },
+    { row: 'Linear waiting line', sends: [panelLine('ENG-7', 'ENG-7', LINEAR_HEAD, linearIdentity, 'yes')], writes: 0 },
+    { row: 'Linear waiting line of a longer key', sends: [], writes: 0 },
+    { row: 'Linear waiting line in another case', sends: [], writes: 0 },
+    { row: 'Markdown', sends: [panelLine('#7', 7, H7, ids(7, H7, ['body.md']), 'yes')], writes: 0 },
+    ...rows.map(([row, , , , fixed]) => ({ row, sends: [], writes: 0, refused: fixed ?? 'one line' })),
+  ]);
+});
+
+test('a Markdown merge is relayable only on the claim branch job/<card> (local), not once it is also on origin', async (t) => {
+  const repository = markdownCardRepository(t);
+  // A branch origin lists is asked for its pull requests, of which this repository has none.
+  const executor = (args) => {
+    if (args[0] === 'pr' && args[1] === 'list') return '[]';
+    throw new Error('unexpected gh on a Markdown board');
+  };
+  const readers = repository.readers(executor);
+  const observe = async () => {
+    const item = collect(readers).items.find((found) => found.card === 7);
+    const sent = relayer();
+    let refused;
+    try {
+      await relayAnswer({ ...readers, card: 7, version: item.version, reply: 'yes', relay: sent.relay, output: QUIET });
+    } catch (error) {
+      refused = /** @type {Error} */ (error).message;
+    }
+    return { fact: item.missing?.fact, sends: sent.sends.length, refused: typeof refused };
+  };
+  const incomplete = { fact: 'its claim is not branch job/7 (local)', sends: 0, refused: 'string' };
+
+  assert.deepEqual(await observe(), { fact: undefined, sends: 1, refused: 'undefined' }, 'local only');
+  realGit(toolkit.root, 'push', 'origin', 'job/7');
+  assert.deepEqual(await observe(), incomplete, 'local and origin');
 });
 
 test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as the action left it, and names what moved', async () => {
@@ -1736,8 +1826,18 @@ test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as 
   const holdRemoved = (id) => moved(['api', '-X', 'DELETE', `repos/${BOARD_SLUG}/issues/comments/${id}`]);
   const titleTo = (title) => moved(['issue', 'edit', '54', '--repo', BOARD_SLUG, '--title', title]);
   const reopened = moved(['issue', 'reopen', '55', '--repo', BOARD_SLUG]);
+  /**
+   * @param {number} number
+   * @param {Partial<ModelCard>} fields
+   * @returns {Edit}
+   */
   const set = (number, fields) => (model) => { Object.assign(model.cards[number], fields); };
   // A hook that edits the card once, on the action's first write of the `issue` verb the row names.
+  /**
+   * @param {string} verb
+   * @param {Edit} change
+   * @returns {Edit}
+   */
   const during = (verb, change) => (model) => {
     model.duringAct = (args) => {
       if (args[0] !== 'issue' || args[1] !== verb) return;
@@ -1746,10 +1846,13 @@ test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as 
     };
   };
   // Ninety-nine comments before card 7's claim, so park's hold is its 101st and Undo reads it on a second page.
+  /** @type {Edit} */
   const pastOnePage = (model) => { model.cards[7].comments.unshift(...Array.from({ length: 99 }, (_, at) => comment(7, 2000 + at, `Earlier comment ${at + 1}.`))); };
   const PARKED_BODY = 'Scope of card 7.\nParked: from the queue panel';
   // Each row: the card and action, a change made before the action, an edit made after it, and either the writes Undo
   // makes or the line it refuses with.
+  /** @typedef {[string, number, string, Edit | null, Edit | null, { args: string[], text?: string }[] | string]} UndoRow */
+  /** @type {UndoRow[]} */
   const controls = [
     ['C1 park', 7, 'park', null, null, [statusTo(7, 'opt-awaiting-push'), bodyTo(`Scope of card 7.\n${waitingLine(7, H7, ['body.md', 'screenshot-1.png'])}`), holdRemoved(5001)]],
     ['C2 park a body with no state line', 7, 'park', set(7, { body: 'Scope of card 7.' }), null, [statusTo(7, 'opt-awaiting-push'), bodyTo('Scope of card 7.'), holdRemoved(5001)]],
@@ -1763,6 +1866,7 @@ test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as 
       [statusTo(7, 'opt-awaiting-push'), bodyTo(`Scope of card 7.\n${waitingLine(7, H7, ['body.md', 'screenshot-1.png'])}`), holdRemoved(5001)]],
   ];
   const commentMoved = 'a comment was added, edited or removed';
+  /** @type {UndoRow[]} */
   const movedRows = [
     ['M1 park, then Ready', 7, 'park', null, set(7, { status: 'Ready' }), 'card 7 moved since it was put aside: it is now in Ready'],
     ['M2 park, then off the board', 7, 'park', null, set(7, { offBoard: true }), 'card 7 moved since it was put aside: it is no longer on the board'],
@@ -1776,20 +1880,24 @@ test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as 
     ['M8 park, a comment posted during the action', 7, 'park', during('comment', (model) => { model.cards[7].comments.push(comment(7, 5100, 'Me too.', 'someone')); }), null,
       `card 7 moved since it was put aside: ${commentMoved}`],
     ['M9 keep, then the body edited', 54, 'keep', null, set(54, { body: `${SCOPED}Edited after the answer.` }), 'card 54 moved since it was accepted: its text was edited'],
-    ['M10 park, then the replaced revision edited', 7, 'park', null, (model) => { model.cards[7].history[1] = 'Something else.'; },
+    ['M10 park, then the replaced revision edited', 7, 'park', null, (model) => { /** @type {string[]} */ (model.cards[7].history)[1] = 'Something else.'; },
       'card 7 moved since it was put aside: its text was edited'],
     ['M11 drop from Ready, then Ready removed from the board', 55, 'drop', set(55, { status: 'Ready' }), (model) => { model.removedColumn = 'Ready'; },
       `unknown Status "Ready" — valid options: ${STATUS_OPTIONS.filter((name) => name !== 'Ready').join(', ')}`],
     ['M12 park, then the hold reposted word for word by another account', 7, 'park', null,
       (model) => { const [hold] = model.cards[7].comments.splice(-1); model.cards[7].comments.push(comment(7, 5101, hold.body, 'someone')); },
       `card 7 moved since it was put aside: ${commentMoved}`],
-    ['M13 park, then the hold edited', 7, 'park', null, (model) => { model.cards[7].comments.at(-1).lastEditedAt = '2026-11-09T10:00:00Z'; },
+    ['M13 park, then the hold edited', 7, 'park', null, (model) => { /** @type {ModelComment} */ (model.cards[7].comments.at(-1)).lastEditedAt = '2026-11-09T10:00:00Z'; },
       `card 7 moved since it was put aside: ${commentMoved}`],
-    ['M14 park past one page, then an unreadable hold address', 7, 'park', pastOnePage, (model) => { model.cards[7].comments.at(-1).url = null; },
+    ['M14 park past one page, then an unreadable hold address', 7, 'park', pastOnePage, (model) => {
+      // @ts-expect-error a null hold address, set on purpose to prove the card read refuses it
+      /** @type {ModelComment} */ (model.cards[7].comments.at(-1)).url = null;
+    },
       `unreadable card read for card 7 in ${BOARD_SLUG}`],
     ['M15 park past one page, then a later page answered for another repository', 7, 'park', pastOnePage, (model) => { model.foreignLaterPage = true; },
       `the card read answered for repository "R_other", not origin's ${BOARD_SLUG}`],
   ];
+  /** @param {ModelCard} card */
   const cardState = ({ status, closed, title, body, comments }) => structuredClone({ status, closed, title, body, comments });
   const observed = [];
   const expected = [];
@@ -1813,7 +1921,7 @@ test('ANTI-REGRESSION: Undo takes back park, keep and drop while the card is as 
 });
 
 // What the entry prints for any argument shape it refuses.
-const READER_USAGE = 'usage: node scripts/owner-queue.mjs [act --card=<n> --action=<park|answer|keep|drop|pick> --version=<v> [--reply=<text>] [--proposal=<k>] | undo --card=<n> --action=<park|keep|drop> --record=<json> | move --card=<n> --move=<ready|backlog|up|place> --version=<v> [--to=<k>] | show-first --card=<n> --state=<on|off>]';
+const READER_USAGE = 'usage: node scripts/owner-queue.mjs [act --card=<n> --action=<park|answer|keep|drop|pick> --version=<v> [--reply=<text>] [--proposal=<k>] | relay --card=<key> --version=<v> --reply=<text> | undo --card=<n> --action=<park|keep|drop> --record=<json> | move --card=<n> --move=<ready|backlog|up|place> --version=<v> [--to=<k>] | show-first --card=<n> --state=<on|off>]';
 
 test('ANTI-REGRESSION: Undo refuses a record the panel did not write and any other request shape, before any read', async () => {
   const hex = (digit) => digit.repeat(64);
@@ -1824,6 +1932,7 @@ test('ANTI-REGRESSION: Undo refuses a record the panel did not write and any oth
   delete noComments.comments;
   const notWritten = 'the undo record is not one the queue panel wrote';
   // Each row: the request, the tracker, a change to the model, and the line Undo refuses with.
+  /** @type {[string, { card: number | string, action: string, record: string }, string, (Edit | null)?, (string | undefined)?][]} */
   const rows = [
     ['record {', { card: 7, action: 'park', record: '{' }, 'github', null, notWritten],
     ['record []', { card: 7, action: 'park', record: '[]' }, 'github', null, notWritten],
@@ -1920,6 +2029,11 @@ const positionWrite = (number, after) => ({ position: { item: `PVTI_${number}`, 
 // the request names one, and `change` made to the model after that read: its writes, the lines it logged, and the line
 // it refused with where it refused. A TypeError is a defect of the code under test, never a refusal, so it fails the
 // test as itself.
+/**
+ * @param {Model} model
+ * @param {{ card: number | string, move: string, version?: string, to?: number }} request
+ * @param {{ tracker?: string, change?: Edit }} [options]
+ */
 async function moving(model, request, { tracker = 'github', change } = {}) {
   const version = 'version' in request ? request.version : boardCard(model, request.card)?.version;
   change?.(model);
@@ -1930,7 +2044,7 @@ async function moving(model, request, { tracker = 'github', change } = {}) {
     return { writes, logged };
   } catch (error) {
     if (error instanceof TypeError) throw error;
-    return { writes, logged, refused: error.message };
+    return { writes, logged, refused: /** @type {Error} */ (error).message };
   }
 }
 
@@ -1968,6 +2082,7 @@ test('Back to Backlog writes Backlog and makes no position write', async () => {
 
 test('Move up places the card after the card two ranks above it, and first from rank 2', async () => {
   // Each row: the card moved up, the card it is placed after (null for first) and the Ready column read back.
+  /** @type {[number, number | null, number[]][]} */
   const rows = [[35, 32, [32, 35, 33, 34]], [34, null, [34, 32, 33, 35]]];
   const observed = [];
   for (const [number] of rows) {
@@ -1982,6 +2097,7 @@ test('Move up places the card after the card two ranks above it, and first from 
 
 test('a place move puts a Ready card at the place it names in the build order, place 1 first', async () => {
   // Each row: the card, the place it takes, the card it is placed after (null for first) and the Ready column read back.
+  /** @type {[number, number, number | null, number[]][]} */
   const rows = [[32, 3, 35, [33, 34, 35, 32]], [35, 1, null, [35, 32, 33, 34]], [32, 2, 34, [33, 34, 32, 35]], [35, 2, 32, [32, 35, 33, 34]]];
   const observed = [];
   for (const [number, to] of rows) {
@@ -1998,12 +2114,13 @@ test('the build order ranks only cards whose titles are not proposals', async ()
   // Ready lists the suggestion 33, then 32 and 34, then the suggestion 39: the build order is 32, then 34.
   const ranked = () => {
     const model = moveModel();
-    delete model.cards[35];
-    model.cards[39] = { title: 'Proposed: A late suggestion', status: 'Ready', body: 'Scope: A late suggestion.', comments: [] };
-    model.order = [31, 33, 32, 34, 39, 36, 37, 38];
-    return model;
+    /** @type {Record<number, ModelCard>} */
+    const cards = Object.fromEntries(Object.entries(model.cards).filter(([number]) => number !== '35'));
+    cards[39] = { title: 'Proposed: A late suggestion', status: 'Ready', body: 'Scope: A late suggestion.', comments: [] };
+    return { ...model, cards, order: [31, 33, 32, 34, 39, 36, 37, 38] };
   };
   // Each row: the request, its writes, and the words its refusal holds where it refuses.
+  /** @type {[string, { card: number, move: string }, object[], string?][]} */
   const rows = [
     ['up from rank 1 behind a suggestion', { card: 32, move: 'up' }, [], 'first in the build order already'],
     ['up from rank 2', { card: 34, move: 'up' }, [positionWrite(34, null)]],
@@ -2116,6 +2233,11 @@ const labelWrite = (number, flag) => ({ args: ['issue', 'edit', String(number), 
 // `markShowFirst` over the model as `moving` runs `moveOnBoard`, with `change` made to the model first and, where
 // `failing` is given, every label write failing with that text: its writes, the lines it logged and the line it refused
 // with where it refused. A TypeError is a defect of the code under test, never a refusal, so it fails the test as itself.
+/**
+ * @param {Model} model
+ * @param {{ card: number | string, state: string }} request
+ * @param {{ tracker?: string, change?: Edit, failing?: string }} [options]
+ */
 function marking(model, request, { tracker = 'github', change, failing } = {}) {
   change?.(model);
   const { exec, writes } = actExec(model);
@@ -2129,7 +2251,7 @@ function marking(model, request, { tracker = 'github', change, failing } = {}) {
     return { writes, logged };
   } catch (error) {
     if (error instanceof TypeError) throw error;
-    return { writes, logged, refused: error.message };
+    return { writes, logged, refused: /** @type {Error} */ (error).message };
   }
 }
 
@@ -2219,6 +2341,10 @@ test('the show-first command refuses any other argument shape with exit 2 before
     ['show-first', '--card=32', '--state=on', `--version=${'c'.repeat(64)}`],
     ['show-first', '--card=32', '--state=on', '--reply=yes'],
     ['show-first', '--card=32', '--state=on', 'extra'],
+    ['relay', `--version=${'c'.repeat(64)}`, '--reply=yes'],
+    ['relay', '--card=ENG-7', `--version=${'c'.repeat(64)}`, '--reply=yes'],
+    ['relay', '--card=32', '--reply=yes'],
+    ['relay', '--card=32', `--version=${'c'.repeat(64)}`, '--reply=yes', 'extra'],
   ];
   const entered = shapes.map((args) => {
     const logged = [];
@@ -2272,10 +2398,13 @@ if (reply === undefined) {
 // for card 27 as a scoped suggestion in Backlog whose only comment
 // is the claim, `ranked(title)` writes them for card 27 in Backlog with no comment, listed after card 28, the one card in
 // Ready, `building(labels)` writes them for card 27 in In progress holding `labels`, `merged(pulls, issue)` writes the
-// replies a merge's report reads, the pull requests associated with its commit and the read of its card, `queue(...args)` runs a queue command on the Herdr home, `reader(...args)` runs the toolkit copy's
+// replies a merge's report reads, the pull requests associated with its commit and the read of its card, `waiting()` sets
+// up the merge scene: card 27 in Awaiting push claimed for this machine, a real `job/27` worktree off the toolkit root
+// with a saved write-up at its head and fetched main's settings, and returns the panel line an answer of `words` relays,
+// `queue(...args)` runs a queue command on the Herdr home with `extraEnv` added, `reader(...args)` runs the toolkit copy's
 // `scripts/owner-queue.mjs` from its root, `writes()` lists the recorded writes with each body file's path written
 // `<file>`, and `cached()` reads the card's cached item.
-function wireRepository(t, copied = toolkit) {
+function wireRepository(t, copied = toolkit, extraEnv = {}) {
   const { root } = copied;
   if (!existsSync(join(root, '.git'))) realGit(root, 'init', '-q', '-b', 'main');
   const host = hostname();
@@ -2347,15 +2476,111 @@ function wireRepository(t, copied = toolkit) {
     details: { data: { repository: { [`i${number}`]: detail(number, `Scope of card ${number}.`, [claim.body]) } } },
   }));
   const merged = (pulls, issue) => writeFileSync(replies, JSON.stringify({ card: number, pulls, issue }));
-  const env = fake.env({ WIRE_REPLIES: replies, WIRE_CALLS: calls, XDG_STATE_HOME: xdgState });
+  const waiting = () => {
+    const seeded = ['.gitignore', '.agents/factory-settings.json'];
+    mkdirSync(join(root, '.agents'), { recursive: true });
+    writeFileSync(join(root, '.gitignore'), '.claude/worklog/\n');
+    writeFileSync(join(root, '.agents', 'factory-settings.json'), '{"version":1,"waitForOwner":"when-needed"}');
+    realGit(root, 'add', '--', ...seeded);
+    realGit(root, 'commit', '-qm', 'Seed main');
+    realGit(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    const worktree = join(scratch, `job-${number}`);
+    realGit(root, 'worktree', 'add', '-q', '-b', `job/${number}`, worktree);
+    const head = realGit(worktree, 'rev-parse', 'HEAD');
+    const review = `.claude/worklog/job_${number}-review-${head}`;
+    mkdirSync(join(worktree, review), { recursive: true });
+    writeFileSync(join(worktree, review, 'body.md'), writeUp('Card 27 ships the wire.', 'No visual change.'));
+    const identity = realGit(worktree, 'hash-object', '--no-filters', '--', `${review}/body.md`);
+    const title = 'A wire merge';
+    writeFileSync(replies, JSON.stringify({
+      card: number,
+      board: [leanBoardPage([card(number, title, 'Awaiting push')])],
+      issues: [issuesPage([])],
+      details: { data: { repository: { [`i${number}`]: detail(number, `Scope of card ${number}.`, [claim.body]) } } },
+      comments: { comments: [claim] },
+      issue: { data: { viewer: { login: 'owner' }, repository: { id: 'R_wire', issue: {
+        state: 'OPEN', title, body: `Scope of card ${number}.`, lastEditedAt: null,
+        comments: { pageInfo: { hasNextPage: false }, nodes: [{ lastEditedAt: null, ...claim }] },
+      } } } },
+    }));
+    return (words) => `Queue panel answer for card #${number}: job/${number} at ${head} ${identity}: ${words}`;
+  };
+  const env = fake.env({ WIRE_REPLIES: replies, WIRE_CALLS: calls, XDG_STATE_HOME: xdgState, ...extraEnv });
   const queue = (...args) => spawnSync(process.execPath, [QUEUE, ...args, '--home', home], { encoding: 'utf8', timeout: 30_000, env });
   const reader = (...args) => spawnSync(process.execPath, [copied.script('owner-queue.mjs'), ...args], { cwd: root, encoding: 'utf8', timeout: 30_000, env });
   const writes = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [])
     .filter(({ kind }) => kind === 'write')
     .map(({ args, text }) => ({ args: args.map((arg) => (arg.startsWith('body=@') ? 'body=@<file>' : arg)), text }));
   const cached = () => JSON.parse(readFileSync(join(home, 'fabraik-queue', 'queue.json'), 'utf8')).items.find((item) => item.key === `${root}#${number}`);
-  return { host, number, selection, answer, suggest, ranked, building, merged, queue, reader, writes, cached };
+  return { host, number, selection, answer, suggest, ranked, building, merged, waiting, queue, reader, writes, cached };
 }
+
+// A bin folder of a fake `hc` and `herdr-app` for the search path, as the coordinator wire cases put them there, in the
+// listing and record shapes of the coordinator tests: `herdr-app ls` lists the project space of `folder` with one
+// Coordinator tab holding terminal t9, `hc get t9 --json` answers that it is an idle Claude Code terminal, `hc send t9
+// <line>` succeeds, and any other call fails. `env` puts the folder first on the search path and `sends()` lists each
+// send's address and line.
+function fakeHerdr(t, folder) {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'owner-queue-herdr-')));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  const calls = join(bin, 'calls.jsonl');
+  const senders = join(bin, 'senders.jsonl');
+  const listing = { spaces: [{ id: 'spproject1', name: 'fabraik', folder, machine: null, active: false,
+    tabs: [{ id: 'tb1', name: '1', terminals: [] }, { id: 'tbc', name: 'Coordinator', terminals: [{ terminal: 't9' }] }] }] };
+  const idle = { state: 'live', pid: 100, argv: ['/usr/bin/env', 'claude'], foreground: { name: 'claude', pid: 101 }, status: { state: 'idle' } };
+  const fake = (name, answers, succeeds) => {
+    writeFileSync(join(bin, name), [`#!${process.execPath}`, 'const args = process.argv.slice(2);',
+      `require('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify([${JSON.stringify(name)}, ...args]) + '\\n');`,
+      `require('node:fs').appendFileSync(${JSON.stringify(senders)}, JSON.stringify(process.env.HC_TERMINAL_ID ?? null) + '\\n');`,
+      `const reply = ${JSON.stringify(answers)}[args.join(' ')];`,
+      'if (reply !== undefined) process.stdout.write(reply);',
+      `else if (!(${succeeds})) { process.stderr.write('fake ${name}: unexpected call ' + args.join(' ')); process.exitCode = 1; }`, ''].join('\n'));
+    chmodSync(join(bin, name), 0o755);
+  };
+  fake('herdr-app', { ls: JSON.stringify(listing) }, 'false');
+  fake('hc', { 'get t9 --json': JSON.stringify(idle) }, "args.length === 3 && args[0] === 'send' && args[1] === 't9'");
+  const sends = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [])
+    .filter(([name, verb]) => name === 'hc' && verb === 'send').map(([, , ...rest]) => rest);
+  // The HC_TERMINAL_ID each `hc send` ran with, null where it had none.
+  const senderOfSends = () => {
+    const lines = (file) => (existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []);
+    const senderOf = lines(senders);
+    return lines(calls).flatMap(([name, verb], at) => (name === 'hc' && verb === 'send' ? [senderOf[at]] : []));
+  };
+  return { env: { PATH: `${bin}${delimiter}${process.env.PATH}` }, sends, senderOfSends };
+}
+
+test('ANTI-REGRESSION: the real panel command relays a merge answer to the coordinator and writes nothing', { skip: OFF_LINUX }, (t) => {
+  const copied = copyOwnerQueueToolkit();
+  t.after(() => copied.cleanup());
+  const herdr = fakeHerdr(t, realpathSync(copied.root));
+  const wire = wireRepository(t, copied, herdr.env);
+  const panelLine = wire.waiting();
+  const refreshed = wire.queue('refresh');
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const item = wire.cached();
+  assert.deepEqual({ category: item?.category, missing: item?.missing }, { category: 'merge', missing: undefined }, JSON.stringify(item));
+
+  const acted = wire.queue('act', item.key, 'answer', item.version, 'yes');
+
+  assert.deepEqual({ status: acted.status, sends: herdr.sends(), writes: wire.writes() },
+    { status: 0, sends: [['t9', panelLine('yes')]], writes: [] }, acted.stderr);
+});
+
+test('the real panel command relays with no HC_TERMINAL_ID even when the caller has one', { skip: OFF_LINUX }, (t) => {
+  const copied = copyOwnerQueueToolkit();
+  t.after(() => copied.cleanup());
+  const herdr = fakeHerdr(t, realpathSync(copied.root));
+  const wire = wireRepository(t, copied, { ...herdr.env, HC_TERMINAL_ID: 't-caller' });
+  wire.waiting();
+  const refreshed = wire.queue('refresh');
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+  const item = wire.cached();
+
+  const acted = wire.queue('act', item.key, 'answer', item.version, 'yes');
+
+  assert.deepEqual({ status: acted.status, senders: herdr.senderOfSends() }, { status: 0, senders: [null] }, acted.stderr);
+});
 
 test('929 reads the saved coordinator choice from fetched main', (t) => {
   const copied = copyOwnerQueueToolkit();
@@ -2438,7 +2663,7 @@ test('the real undo command takes back an accepted card and refuses one whose ti
 
   const acted = wire.reader('act', '--card=27', '--action=keep', `--version=${item.version}`);
   assert.equal(acted.status, 0, acted.stderr);
-  const recorded = acted.stdout.trimEnd().split('\n').at(-1);
+  const recorded = /** @type {string} */ (acted.stdout.trimEnd().split('\n').at(-1));
   assert.ok(recorded.startsWith(RECORD_PREFIX), `the act's last line holds no undo record: ${acted.stdout}`);
   const undoArgs = ['undo', '--card=27', '--action=keep', `--record=${recorded.slice(RECORD_PREFIX.length)}`];
   const titled = (title) => ({ args: ['issue', 'edit', '27', '--repo', BOARD_SLUG, '--title', title], text: undefined });
@@ -2599,6 +2824,7 @@ test('ANTI-REGRESSION: picking a retro proposal posts only its stored draft to t
 
   // Each row: the model, the proposal picked, and a change made after the panel drew the item.
   const edited = (change) => RETRO_DRAFTS.map((draft) => ({ ...draft, ...change(draft) }));
+  /** @type {[string, Model, number, (Edit | null)?, string?][]} */
   const rows = [
     ['a proposal with no draft', retroModel(), 3],
     ['a proposal already picked', (() => { const model = retroModel(); model.cards[RETRO].comments.push(comment(RETRO, 3601, `Picked: proposal 1 became card 77 in ${OTHER_SLUG}.`)); return model; })(), 1],
@@ -2699,7 +2925,7 @@ test('a pick finishes a card an earlier pick created and closes a racing twin', 
   const racing = retroModel();
   racing.duringAct = (args) => {
     if (args[1] !== 'create') return;
-    racing.filed[BOARD_SLUG].unshift(twin);
+    /** @type {Record<string, unknown[]>} */ (racing.filed)[BOARD_SLUG].unshift(twin);
     racing.cards[31] = standing({ status: null, offBoard: true, unlisted: true });
   };
   const raced = await pick(racing);
@@ -2735,7 +2961,7 @@ test('picking a retro proposal works on a board with no routing field', async (t
       await reader.act({ ...readers, executor: exec, output: { log: () => {}, error: () => {} }, card: RETRO, action: 'pick', proposal: 2, version });
       return { writes };
     } catch (error) {
-      return { writes, refused: error.message };
+      return { writes, refused: /** @type {Error} */ (error).message };
     }
   };
   assert.deepEqual(await pick(plain), { writes: [
@@ -2887,6 +3113,7 @@ const CARD_FAILURE = 'gh: HTTP 504 Gateway Timeout on the card read';
 // The gh `report` reads through, each call recorded: the board repository as configuredRepository reads it, the pull
 // requests associated with a commit, card MERGED_CARD's read and its label history, which holds `events`. `fail` names
 // the read that fails with gh's text.
+/** @param {{ nodes?: unknown[], comments?: unknown[], labels?: unknown[], events?: unknown[], fail?: string }} options */
 function reportExec({ nodes, comments, labels, events = [], fail }) {
   const calls = [];
   const exec = (args) => {
@@ -2938,6 +3165,12 @@ const WHEN_NEEDED_AT_PARENT = mergeGit({ parentText: levelText('when-needed'), f
 // made with.
 // `alter` is `[query, change]`: the reply to each gh call whose query holds `query` is parsed and its repository edited by
 // `change` before the report reads it.
+/**
+ * @typedef {[string, (repository: Record<string, any>) => void]} Alter
+ * @typedef {{ nodes: unknown[], comments?: unknown[], labels?: unknown[], events?: unknown[], fail?: string, shots?: Record<string, () => unknown>,
+ *   tracker?: string, git?: (args: string[]) => string, alter?: Alter }} ReportOptions
+ * @param {ReportOptions} options
+ */
 async function reporting({ nodes, comments = [CLAIM], labels = [], events, fail, shots = {}, tracker = 'github', git = WHEN_NEEDED_AT_PARENT, alter }) {
   const { exec: read, calls } = reportExec({ nodes, comments, labels, events, fail });
   const exec = alter === undefined ? read : (args) => {
@@ -2999,6 +3232,7 @@ test('the report names why a merge waited, or that its record does not add up', 
   // outcome fields its report carries. A waiting record counts only from the card's newest claim before the merge (or from
   // the pull request opening where the card has no claim) up to the merge, and the newest one's first line is quoted; the
   // level is read at the merge's first parent.
+  /** @type {[string, Partial<ReportOptions>, Record<string, unknown>][]} */
   const rows = [
     ['waited', {
       comments: [
@@ -3081,8 +3315,8 @@ test('a report it cannot read says why, and a screenshot it cannot fetch names i
     throw new Error('unexpected download');
   };
   await assert.rejects(report({ sha: MERGE, executor: exec, run: WHEN_NEEDED_AT_PARENT, fetch: noDownload, tracker: 'github' }), (error) => {
-    printed.push(error.message);
-    return error.message.includes(PULL_FAILURE);
+    printed.push(/** @type {Error} */ (error).message);
+    return /** @type {Error} */ (error).message.includes(PULL_FAILURE);
   });
 
   // A card read that fails, a write-up the judge refuses and a tracker that is not GitHub each leave the outcome unread;
@@ -3188,6 +3422,7 @@ test('the report reads what changed and its checks from each decision card shape
   const noCard = { unread: `pull request #${PULL} has no decision card` };
   const noSummary = { unread: `pull request #${PULL}'s decision card opens with no summary` };
   // Each row: the Decision card (null for none), and what the report reads from it.
+  /** @type {[string, string | null, { changed: unknown, checks: unknown }][]} */
   const rows = [
     ['labelled', labelledCard('no visual change'), { changed: LABELLED_CHANGED, checks: CHECK_LINES }],
     ['heading paragraphs', headingCard(), { changed: HEADING_CHANGED, checks: CHECK_LINES }],
@@ -3376,15 +3611,19 @@ test('a screenshot that times out, answers an error, or streams or declares past
 });
 
 test('a report names why it cannot read its card, or refuses a pull request another repository answered', async () => {
+  /** @type {(change: Alter[1]) => Alter} */
   const alter = (change) => ['associatedPullRequests', change];
+  /** @type {(numbers: number[]) => Alter} */
   const closing = (numbers) => alter((repository) => {
     repository.object.associatedPullRequests.nodes.at(-1).closingIssuesReferences.nodes = numbers.map((number) => ({ number }));
   });
+  /** @type {(change: (issue: Record<string, any>) => void) => Alter} */
   const labelsOf = (change) => ['comments(first: 100)', (repository) => change(repository.issue)];
   const nodes = associated(ON_SCREEN_BODY, ON_SCREEN_HTML);
   const cardReads = (calls) => calls.some((args) => args.some((arg) => arg.includes('comments(first: 100)')));
   const printed = [];
   // Each row: what the gh replies change, the card the report names, and its outcome fields.
+  /** @type {[string, Alter, { unread: string } | { number: number, title: string }, Record<string, unknown>, boolean][]} */
   const rows = [
     ['closes no card', closing([]), { unread: `pull request #${PULL} closes no card` },
       { outcome: 'unread', cause: `pull request #${PULL} closes no card`, lasting: true }, false],
@@ -3407,8 +3646,8 @@ test('a report names why it cannot read its card, or refuses a pull request anot
 
   // A reply for another repository's id is refused, however well formed its pull request is.
   await assert.rejects(reporting({ nodes, shots: ON_SCREEN_SHOTS, alter: alter((repository) => { repository.id = 'R_other'; }) }), (error) => {
-    printed.push(error.message);
-    return error.message === `the pull requests of commit ${MERGE} in ${BOARD_SLUG} could not be read`;
+    printed.push(/** @type {Error} */ (error).message);
+    return /** @type {Error} */ (error).message === `the pull requests of commit ${MERGE} in ${BOARD_SLUG} could not be read`;
   });
   assertNoAddress(printed, [shotSrc(1), shotSrc(2), REPEAT_SRC]);
 });
@@ -3421,11 +3660,13 @@ const LATER_AFTER_MERGE = '2026-11-14T14:00:00Z';
 const labelEvent = (typename, createdAt) => ({ __typename: typename, createdAt, label: { name: 'show-me-first' } });
 const added = (createdAt) => labelEvent('LabeledEvent', createdAt);
 const removed = (createdAt) => labelEvent('UnlabeledEvent', createdAt);
+/** @type {(change: Alter[1]) => Alter} */
 const timeline = (change) => ['timelineItems', change];
 const earlierPages = timeline((repository) => { repository.issue.timelineItems.pageInfo.hasPreviousPage = true; });
 const MARKED_AT_MERGE = { outcome: 'disagrees', level: 'when-needed', holds: ['show-me-first'] };
 const UNMARKED_AT_MERGE = { outcome: 'nothing', level: 'when-needed' };
 // Each row's name and outcome fields, the row's `given` changing the merge of the first report test.
+/** @param {[string, Partial<ReportOptions>, Record<string, unknown>][]} rows */
 const labelOutcomes = async (rows) => {
   const observed = [];
   for (const [row, given] of rows) {
@@ -3436,11 +3677,13 @@ const labelOutcomes = async (rows) => {
 };
 
 test('a show-me-first label added after the merge does not make a merge that needed nothing disagree', async () => {
+  /** @type {[string, Partial<ReportOptions>, Record<string, unknown>][]} */
   const rows = [['added after the merge', { labels: ['show-me-first'], events: [added(AFTER_MERGE)] }, UNMARKED_AT_MERGE]];
   assert.deepEqual(await labelOutcomes(rows), rows.map(([row, , fields]) => ({ row, ...fields })));
 });
 
 test('a show-me-first label removed after the merge disagrees as a card still marked does', async () => {
+  /** @type {[string, Partial<ReportOptions>, Record<string, unknown>][]} */
   const rows = [
     ['still marked', { labels: ['show-me-first'] }, MARKED_AT_MERGE],
     ['removed after the merge', { labels: [], events: [added(BEFORE_MERGE), removed(AFTER_MERGE)] }, MARKED_AT_MERGE],
@@ -3451,6 +3694,7 @@ test('a show-me-first label removed after the merge disagrees as a card still ma
 });
 
 test('a label event at or before the merge counts as it stands', async () => {
+  /** @type {[string, Partial<ReportOptions>, Record<string, unknown>][]} */
   const rows = [
     ['added before the merge', { labels: ['show-me-first'], events: [added(BEFORE_MERGE)] }, MARKED_AT_MERGE],
     ['added at the merge', { labels: ['show-me-first'], events: [added(MERGED_AT)] }, MARKED_AT_MERGE],
@@ -3463,6 +3707,7 @@ test('a label event at or before the merge counts as it stands', async () => {
 
 test('a label history since the merge that cannot all be read leaves the outcome unread, guessing no label', async () => {
   const unread = { outcome: 'unread', cause: `card ${MERGED_CARD}'s label history since the merge cannot all be read` };
+  /** @type {(change: (event: Record<string, any>) => void) => Alter} */
   const lastEvent = (change) => timeline((repository) => change(repository.issue.timelineItems.nodes.at(-1)));
   const rows = [
     ['another repository\'s id', { alter: timeline((repository) => { repository.id = 'R_other'; }) }],
@@ -3474,7 +3719,7 @@ test('a label history since the merge that cannot all be read leaves the outcome
     ['page information that is not a yes or no',
       { alter: timeline((repository) => { repository.issue.timelineItems.pageInfo.hasPreviousPage = null; }) }],
     ['a reply that is not JSON', { fail: 'history' }],
-  ].map(([row, extra]) => [row, { labels: ['show-me-first'], events: [added(AFTER_MERGE)], ...extra }, unread]);
+  ].map(([row, extra]) => /** @type {[string, Partial<ReportOptions>, Record<string, unknown>]} */ ([row, { labels: ['show-me-first'], events: [added(AFTER_MERGE)], ...(/** @type {Partial<ReportOptions>} */ (extra)) }, unread]));
   assert.deepEqual(await labelOutcomes(rows), rows.map(([row, , fields]) => ({ row, ...fields })));
 });
 
@@ -3489,37 +3734,68 @@ test('only a merge no waiting record answers reads the card\'s label history, on
     [['api', 'graphql', '-f', 'query=<label history>', '-f', `owner=${BOARD_OWNER}`, '-f', `name=${BOARD_REPOSITORY}`, '-F', `number=${MERGED_CARD}`]]);
 });
 
-// Existing card models supply editor-aware GitHub reads for in-process notification attribution.
+// Existing card models supply editor-aware GitHub reads for in-process notification attribution. Card 7 alone, a merge
+// whose saved proof holds it for the owner's review.
+const heldReview = () => {
+  const model = actModel();
+  model.cards = { 7: model.cards[7] };
+  model.files[join(reviewFolder(7, H7), 'body.md')] = writeUp('A private review decision.', 'Before and after.', proofOf({ failed: 'one required check' }));
+  return model;
+};
+const reviewAnswer = (head = H7, names = ['body.md', 'screenshot-1.png']) => `Owner answer: job/7 at ${head} ${ids(7, head, names)}: yes`;
+/**
+ * @param {Model} model
+ * @param {{ login?: string | null, tracker?: string, change?: (reply: Record<string, any>, args: string[]) => void, fail?: (args: string[]) => boolean }} [options]
+ */
+const readNotifications = (model, { login = 'owner', tracker = 'github', change, fail } = {}) => {
+  const { exec } = actExec(model);
+  const executor = (args) => {
+    if (fail?.(args)) throw new Error('PRIVATE_SOURCE_ERROR_583');
+    const reply = exec(args);
+    if (!change) return reply;
+    const parsed = JSON.parse(reply);
+    change(parsed, args);
+    return JSON.stringify(parsed);
+  };
+  return collect({ ...modelReaders(model), tracker, login, hostname: HOST, executor });
+};
+
+// new behaviour: a merge answer goes to the coordinator chat, so no card comment stops a held merge waiting on the phone.
+test('phone notifications count a waiting merge as unanswered whatever its card comments record', () => {
+  /** @type {[string, string | null, string?][]} */
+  const rows = [
+    ['no answer', null],
+    ['an answer for the shown head and identity', reviewAnswer()],
+    ['an answer for another head', reviewAnswer(H8)],
+    ['an answer with another identity', reviewAnswer(H7, ['body.md'])],
+    ['an answer by another account', reviewAnswer(), 'someone'],
+    ['an answer quoted after other text', `Quoted: ${reviewAnswer()}`],
+  ];
+  const observed = rows.map(([row, body, login = 'owner']) => {
+    const model = heldReview();
+    if (body !== null) model.cards[7].comments.push(comment(7, 3100, body, login));
+    return { row, notifications: readNotifications(model).notifications };
+  });
+  assert.deepEqual(observed, rows.map(([row]) => ({ row, notifications: { login: 'owner', waits: [{ card: 7, kind: 'review' }], unavailable: null } })));
+});
+
 test('phone notifications classify only unanswered owner waits', async (t) => {
+  /** @param {number} [number] */
   const question = (number = 23) => {
     const model = actModel();
     model.cards = { [number]: model.cards[number] };
     return model;
   };
-  const review = () => {
-    const model = actModel();
-    model.cards = { 7: model.cards[7] };
-    model.files[join(reviewFolder(7, H7), 'body.md')] = writeUp('A private review decision.', 'Before and after.', proofOf({ failed: 'one required check' }));
-    return model;
-  };
-  const answer = (head = H7, names = ['body.md', 'screenshot-1.png']) => `Owner answer: job/7 at ${head} ${ids(7, head, names)}: yes`;
+  /**
+   * @param {unknown[]} waits
+   * @param {string | null} [unavailable]
+   * @param {string | null} [login]
+   */
   const expected = (waits, unavailable = null, login = 'owner') => ({ login, waits, unavailable });
   const q = (card = 23) => [{ card, kind: 'question' }];
   const r = [{ card: 7, kind: 'review' }];
-  const readNotifications = (model, { login = 'owner', tracker = 'github', change, fail } = {}) => {
-    const { exec } = actExec(model);
-    const executor = (args) => {
-      if (fail?.(args)) throw new Error('PRIVATE_SOURCE_ERROR_583');
-      const reply = exec(args);
-      if (!change) return reply;
-      const parsed = JSON.parse(reply);
-      change(parsed, args);
-      return JSON.stringify(parsed);
-    };
-    return collect({ ...modelReaders(model), tracker, login, hostname: HOST, executor });
-  };
   const cardQuery = (args) => args.some((arg) => arg.startsWith('query=') && arg.includes('comments(first: 100)'));
-  for (const [name, number] of [['question after a return', 21], ['local job question', 23]]) {
+  for (const [name, number] of /** @type {[string, number][]} */ ([['question after a return', 21], ['local job question', 23]])) {
     await t.test(name, () => {
       const document = readNotifications(question(number));
       assert.deepEqual(document.notifications, expected(q(number)));
@@ -3529,19 +3805,15 @@ test('phone notifications classify only unanswered owner waits', async (t) => {
     });
   }
   await t.test('held review', () => {
-    const document = readNotifications(review());
+    const document = readNotifications(heldReview());
     assert.deepEqual(document.notifications, expected(r));
     assert.equal(document.items.find((item) => item.card === 7).category, 'merge');
     assert.ok(document.items.find((item) => item.card === 7).reason.trim(), 'the saved proof actually holds for owner review');
   });
+  /** @type {[string, () => Model, unknown[], string?][]} */
   const cases = [
-    ['clear merge does not wait', () => { const model = review(); model.files[join(reviewFolder(7, H7), 'body.md')] = writeUp('Clear.', 'Before and after.'); return model; }, []],
-    ['incomplete merge does not wait', () => { const model = review(); delete model.files[join(reviewFolder(7, H7), 'body.md')]; return model; }, []],
-    ['matching version is answered', () => { const model = review(); model.cards[7].comments.push(comment(7, 3100, answer())); return model; }, []],
-    ['other head is unanswered', () => { const model = review(); model.cards[7].comments.push(comment(7, 3100, answer(H8))); return model; }, r],
-    ['other identity is unanswered', () => { const model = review(); model.cards[7].comments.push(comment(7, 3100, answer(H7, ['body.md']))); return model; }, r],
-    ['foreign answer is unanswered', () => { const model = review(); model.cards[7].comments.push(comment(7, 3100, answer(), 'someone')); return model; }, r],
-    ['quoted answer is unanswered', () => { const model = review(); model.cards[7].comments.push(comment(7, 3100, `Quoted: ${answer()}`)); return model; }, r],
+    ['clear merge does not wait', () => { const model = heldReview(); model.files[join(reviewFolder(7, H7), 'body.md')] = writeUp('Clear.', 'Before and after.'); return model; }, []],
+    ['incomplete merge does not wait', () => { const model = heldReview(); delete model.files[join(reviewFolder(7, H7), 'body.md')]; return model; }, []],
     ['Returned hold is resolved', () => { const model = question(); model.cards[23].comments[1].body = 'Returned: Use blue. Job: job/23 on machine-a.'; return model; }, []],
     ['hold before current claim is excluded', () => { const model = question(); model.cards[23].comments.reverse(); return model; }, []],
     ['two own unresolved holds are unavailable', () => { const model = question(); model.cards[23].comments.push(comment(23, 3233, 'Needs owner: Which colour? Job: job/23 on machine-a.')); return model; }, [], 'ownership-unavailable'],
@@ -3556,7 +3828,7 @@ test('phone notifications classify only unanswered owner waits', async (t) => {
     ['foreign editor of own claim is unavailable', () => { const model = question(); model.cards[23].comments[0].editor = { login: 'someone' }; return model; }, [], 'ownership-unavailable'],
     ['unknown editor of own hold is unavailable', () => { const model = question(); Object.assign(model.cards[23].comments[1], { lastEditedAt: '2026-11-08T20:00:00Z', editor: null }); return model; }, [], 'ownership-unavailable'],
     ['foreign editor of own hold is unavailable', () => { const model = question(); model.cards[23].comments[1].editor = { login: 'someone' }; return model; }, [], 'ownership-unavailable'],
-    ['foreign editor of own answer is unavailable', () => { const model = review(); model.cards[7].comments.push({ ...comment(7, 3100, answer()), editor: { login: 'someone' } }); return model; }, [], 'ownership-unavailable'],
+    ['foreign editor of own answer is unavailable', () => { const model = heldReview(); model.cards[7].comments.push({ ...comment(7, 3100, reviewAnswer()), editor: { login: 'someone' } }); return model; }, [], 'ownership-unavailable'],
     ['work without an owner wait is excluded', () => { const model = actModel(); model.cards = { 41: model.cards[41] }; return model; }, []],
     ['suggestions are excluded', () => { const model = actModel(); model.cards = { 54: model.cards[54] }; return model; }, []],
     ['a weekly retro is excluded', () => { const model = retroModel(); model.cards = { [RETRO]: model.cards[RETRO] }; return model; }, []],
@@ -3569,6 +3841,7 @@ test('phone notifications classify only unanswered owner waits', async (t) => {
       assert.equal(JSON.stringify(document.notifications).includes('PRIVATE'), false, 'metadata contains only its fixed safe schema');
     });
   }
+  /** @type {[string, NonNullable<Parameters<typeof readNotifications>[1]>, string, (string | null)?][]} */
   const unavailable = [
     ['missing input login', { login: null }, 'login-unavailable', null],
     ['malformed input login', { login: 'bad login' }, 'login-unavailable', 'bad login'],

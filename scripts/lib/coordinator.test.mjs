@@ -7,7 +7,7 @@
 // read, so the settings come through the real readCoordinator, and the job branch and worktree reads. The tracker cases hand
 // listCards, listUnfinished and startJob a fake raw `gh` behind the real tracker gate, so they reach no GitHub. The
 // coordinator wire cases run scripts/coordinator.mjs with command doubles on PATH, from a fixture repository root.
-// Delivery cases run the installed merge-watch entry with real flock, isolated state and controlled provider and native
+// Delivery cases run the installed merge-watch entry with the real lane lock, isolated state and controlled provider and native
 // replies. Their subprocess admission checks use a temporary Git tree and block native calls before dispatch.
 
 import test from 'node:test';
@@ -17,18 +17,21 @@ import { EventEmitter, once } from 'node:events';
 import { chmodSync, cpSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync,
   rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { basename, dirname, join, relative, sep } from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { basename, delimiter, dirname, join, relative, sep, win32 } from 'node:path';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { main as mergeWatch } from '../merge-watch.mjs';
 import { BOARD_OWNER, BOARD_OWNER_TYPE, BOARD_REPOSITORY, KIND_LABELS } from './board-config.mjs';
 import { KIND_TYPES } from './board.mjs';
 import { boardReadExec, boardRequestKind, issueItemReply, issuesPage, leanBoardPage, leanNode, membership, onePageAtATime } from './board-fixtures.mjs';
 import { wakeCoordinator as wakeAfterMove } from './board-move.mjs';
-import { forwardedNotes, forwardNotes, jobPrompt, listCards, listUnfinished, openCoordinator, startForwarder, startJob, wakeCoordinator } from './coordinator.mjs';
+import { coordinatorTerminals, forwardedNotes, forwardNotes, jobPrompt, launchCoordinator, listCards, listUnfinished, openCoordinator, sameLaunchFolder, startForwarder, startJob, wakeCoordinator } from './coordinator.mjs';
+// relayToCoordinator through the namespace, so the file still loads where the export is missing.
+import * as coordinator from './coordinator.mjs';
 import { installFakeGh } from './fake-gh.mjs';
 import { runGh } from './gh-exec.mjs';
-import { capLock, readCap, standingLead, standingLeadProcessCommand } from './cap-lock.mjs';
+import { aclGrantsOthers, capLock, lockLeadFile, readCap } from './cap-lock.mjs';
 import { openEventRoute } from './merge-watch.mjs';
 import { isHerdrPath } from './runtimes.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
@@ -36,8 +39,11 @@ import { repairWorkflowSnapshot, verifyWorkflowSnapshot } from './workflow-pin.m
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..');
 const COMMAND = join(SCRIPTS, 'coordinator.mjs');
-// Why a case that locks with /usr/bin/flock skips here, or undefined on Linux.
-const OFF_LINUX = process.platform === 'linux' ? undefined : `the coordinator runs on Linux only as the lead does (card #617), not ${process.platform}`;
+// Why a case that starts or delivers a job skips here, or undefined on Linux. The "cap lock: " cases run on every platform except
+// the symbolic-link test where file symlinks cannot be made, the folder-mode and file-mode tests on Windows, the profile test off
+// Windows, and the two tests that rename a held file on Windows.
+const OFF_LINUX = process.platform === 'linux' ? undefined : `the coordinator starts and delivers jobs on Linux only, not ${process.platform}`;
+const NO_EXTENSIONLESS_FAKES = process.platform === 'win32' && 'the fixture\'s fake git and hc are extensionless #! scripts on a colon-separated PATH, which Windows cannot run';
 
 const prompt = (login) => `Coordinate this project from its Herdr space: read .agents/skills/resume/references/herdr-lead.md whole and follow its "Coordinator" section.\n{"login":"${login}"}`;
 const argvFor = (model, effort, login) => ['/usr/bin/env', `ANTHROPIC_MODEL=${model}`, `CLAUDE_CODE_EFFORT_LEVEL=${effort}`, 'claude',
@@ -109,14 +115,17 @@ function hcFor(records, calls) {
   };
 }
 
-// One open of the coordinator over `listing`, the `hc get` records `records` and a settings file of `text`: its exit code and what it did.
-async function opened({ listing, records = {}, text = settingsText(), root = ROOT, login = 'owner' }) {
+// One open of the coordinator over `listing`, the `hc get` records `records` and a settings file of `text`, on `platform` (Linux
+// unless given) with `node` as the Node executable: its exit code and what it did.
+/** @param {{ listing: any, records?: Record<string, unknown>, text?: string, root?: string, login?: string, platform?: string, node?: string }} options */
+async function opened({ listing, records = {}, text = settingsText(), root = ROOT, login = 'owner', platform = 'linux', node }) {
   const git = [];
   const app = [];
   const hcCalls = [];
   const lines = [];
-  const code = await openCoordinator({ root, login, git: gitFor(text, git), herdrApp: herdrAppFor(listing, app), hc: hcFor(records, hcCalls), capLock: (work) => work(),
-    print: (line) => lines.push(line) });
+  const options = { root, login, git: gitFor(text, git), herdrApp: herdrAppFor(listing, app), hc: hcFor(records, hcCalls), capLock: (work) => work(),
+    platform, node, print: (line) => lines.push(line) };
+  const code = await openCoordinator(options);
   return { code, git, app, hcCalls, said: lines.join('\n') };
 }
 
@@ -441,6 +450,7 @@ function jobFixture({ root = ROOT, spaces, pages, refuseDetails, refuseOlder, de
   };
   const git = gitFor(settingsText({ coordinator: { model: 'sonnet', effort: 'high' } }), [], { root, branches, worktrees });
   // The options a coordinator wires beyond the tracker tools are typed loosely so the fake hands startJob what the command does.
+  fixture.hc = hc;
   fixture.start = (card, options = {}) => startJob(/** @type {any} */ ({ root, login: 'owner', card, herdrApp, hc, parent: 't0', ...tracker.options, now: () => Date.parse(RUN_AT),
     newSessionId: () => SESSION, hostname: 'here', transcript: () => undefined, cap: () => 10, capLock: (work) => work(), git,
     ...options, print: (line) => fixture.lines.push(line) }));
@@ -2151,6 +2161,49 @@ test('coordinator wake exits 1 and sends nothing where the Coordinator tab lists
   assert.match(woken.said, /terminals this command does not read/);
 });
 
+// One relay of the panel line over `listing` and the `hc get` records `records` by address: its result and the sends.
+// The namespace is read through the relay's own shape, so the file type-checks where the export is missing.
+/** @typedef {{ relayToCoordinator: (options: { root: string, herdrApp: Function, hc: Function, line: string, platform?: NodeJS.Platform }) => Promise<{ code: number, message: string }> }} Relay */
+/** @param {{ listing: any, records?: Record<string, any> }} scene */
+async function relayed({ listing, records = {} }) {
+  const hcCalls = [];
+  const result = await /** @type {Relay} */ (/** @type {unknown} */ (coordinator)).relayToCoordinator({ root: ROOT, herdrApp: herdrAppFor(listing, []), hc: hcFor(records, hcCalls), line: PANEL_LINE });
+  return { ...result, sends: hcCalls.filter(([kind]) => kind === 'send') };
+}
+const PANEL_LINE = `Queue panel answer for card #27: job/27 at ${'a'.repeat(40)} ${'b'.repeat(40)}: yes`;
+
+test('relay sends the panel line only to the one receptive coordinator terminal and sends nothing to a blocked, starting, missing or doubled coordinator', async () => {
+  const codex = (state) => liveRecord({ foreground: 'codex', argv: ['/usr/bin/env', 'codex', '--no-daemon'], foregroundPid: 100, status: state === null ? null : { state } });
+  const starting = liveRecord({ foreground: 'env', status: null, foregroundPid: 100 });
+  const shell = liveRecord({ foreground: 'bash', argv: ['/usr/bin/bash'], status: null, foregroundPid: 100 });
+  const one = (record) => ({ listing: coordinatorListing(listed('t9')), records: { t9: record } });
+  const two = (first, second) => ({ listing: coordinatorListing(listed('t9', 't8')), records: { t9: first, t8: second } });
+  for (const [why, scene] of /** @type {[string, { listing: any, records?: Record<string, any> }][]} */ ([
+    ['an idle Claude Code coordinator', one(liveRecord())],
+    ['an idle Codex coordinator', one(codex('idle'))],
+    ['a Codex coordinator that is done', one(codex('done'))],
+  ])) {
+    const result = await relayed(scene);
+    assert.equal(result.code, 0, `${why}: ${result.message}`);
+    assert.deepEqual(result.sends, [['send', 't9', PANEL_LINE]], `${why}: the one line is sent to it`);
+  }
+  for (const [why, scene] of /** @type {[string, { listing: any, records?: Record<string, any> }][]} */ ([
+    ['a Claude Code coordinator asking the owner', one(liveRecord({ status: { state: 'blocked' } }))],
+    ['a working Codex coordinator', one(codex('working'))],
+    ['a Codex coordinator still starting', one(codex(null))],
+    ['a coordinator still starting', one(starting)],
+    ['a Coordinator tab holding only a shell', one(shell)],
+    ['a project with no Coordinator tab', { listing: { spaces: [space('spproject1', 'fabraik', [['tb1', '1']], null, ROOT)] } }],
+    ['two idle Claude Code coordinators', two(liveRecord(), liveRecord())],
+    ['an idle Codex and an idle Claude Code coordinator', two(codex('idle'), liveRecord())],
+  ])) {
+    const result = await relayed(scene);
+    assert.equal(result.code, 4, `${why}: ${result.message}`);
+    assert.deepEqual(result.sends, [], `${why}: nothing is sent`);
+    assert.match(result.message, /^[^\n]+$/, `${why}: one line says why`);
+  }
+});
+
 const closes = (app) => app.filter(([kind, command]) => kind === 'do' && command === 'tab.close');
 const newTabs = (app) => app.filter(([kind, command]) => kind === 'do' && command === 'tab.new');
 
@@ -2191,7 +2244,7 @@ test('929 reopens a sole stopped Coordinator tab in its existing space', async (
       listing.tabs = listing.tabs.filter(({ id }) => id !== flagsOf(args).id);
       return { code: 0, stdout: '{}', stderr: '' };
     };
-    const code = await openCoordinator({ root: ROOT, login: 'owner', runtimeOverride: 'codex',
+    const code = await openCoordinator({ root: ROOT, login: 'owner', runtimeOverride: 'codex', platform: 'linux',
       git: gitFor(settingsText({ runtimes: ['claude', 'codex'], coordinator: { runtime: 'claude' } }), []),
       herdrApp, hc: hcFor(records, []), capLock: (work) => work(), print: (line) => lines.push(line) });
 
@@ -2246,6 +2299,351 @@ test('929 recognizes the stopped native Herdr Coordinator shell', async () => {
   }
 });
 
+// The project folder and Node executable of the Windows cases; a project space at `folder` with no Coordinator tab; and a project
+// space at the Windows folder whose Coordinator tab holds `terminals`.
+const WINDOWS_ROOT = 'C:\\r';
+const WINDOWS_NODE = 'C:\\Program Files\\nodejs\\node.exe';
+const windowsSpace = (folder = WINDOWS_ROOT) => ({ spaces: [space('spproject1', 'r', [['tb1', '1']], null, folder)] });
+const windowsListing = (terminals) => {
+  const listing = coordinatorListing(terminals);
+  listing.spaces[0].folder = WINDOWS_ROOT;
+  return listing;
+};
+// `hc get --json` records recorded on Windows, labelled with this fixture's space and tab: a coordinator running through Herdr's
+// PowerShell wrapper, the same wrapper after its program exited to the `-NoExit` shell, and a Coordinator tab Herdr restored after a restart.
+const WINDOWS_RUNNING = JSON.parse(String.raw`{"address":"t5","argv":["powershell.exe","-NoExit","-Command","& 'node' 'C:\\r\\scripts\\coordinator.mjs' 'launch' '--runtime' 'claude' '--login' 'owner' '--model' 'opus' '--effort' 'medium'"],"cols":120,"created_ms":1795726188608,"cwd":"C:\\Users\\tester","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["C:\\Program Files\\nodejs\\node.exe","C:\\r\\scripts\\coordinator.mjs","launch","--runtime","claude","--login","owner","--model","opus","--effort","medium"],"cwd":"C:\\Users\\tester","name":"node.exe","pid":6080},"identity":"ghostty","keep":true,"labels":{"herdr.seen":"0","herdr.space":"spproject1","herdr.tab":"tbc","where":"~ / probe-claude"},"name":null,"notify":true,"parent":null,"pid":5180,"reason":null,"reported":false,"rm":false,"rows":33,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"claude","turn":0}`);
+const WINDOWS_EXITED = JSON.parse(String.raw`{"address":"t6","argv":["powershell.exe","-NoExit","-Command","& 'node' 'C:\\r\\scripts\\coordinator.mjs' 'launch' '--runtime' 'claude' '--login' 'owner'"],"cols":120,"created_ms":1795726203733,"cwd":"C:\\Users\\tester","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","-NoExit","-Command","& 'node' 'C:\\r\\scripts\\coordinator.mjs' 'launch' '--runtime' 'claude' '--login' 'owner'"],"cwd":"C:\\Users\\tester","name":"powershell.exe","pid":3220},"identity":"ghostty","keep":true,"labels":{"herdr.seen":"0","herdr.space":"spproject1","herdr.tab":"tbc","where":"~ / probe-exited"},"name":null,"notify":true,"parent":null,"pid":3220,"reason":null,"reported":false,"rm":false,"rows":33,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"Administrator: C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","turn":0}`);
+const WINDOWS_RESTORED = JSON.parse(String.raw`{"address":"t1","argv":["powershell.exe","-NoExit","-Command","$global:__hc_prompt = $function:prompt; function global:prompt { $p = & $global:__hc_prompt; $l = $ExecutionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') { try { [Environment]::CurrentDirectory = $l.ProviderPath } catch {} }; $p }"],"cols":120,"created_ms":1795725665994,"cwd":"C:\\Users\\tester","die_with_parent":false,"exit_code":null,"finished_ms":null,"foreground":{"argv":["C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","-NoExit","-Command","$global:__hc_prompt = $function:prompt; function global:prompt { $p = & $global:__hc_prompt; $l = $ExecutionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') { try { [Environment]::CurrentDirectory = $l.ProviderPath } catch {} }; $p }"],"cwd":"C:\\Users\\tester","name":"powershell.exe","pid":5124},"identity":"ghostty","keep":true,"labels":{"herdr.seen":"0","herdr.space":"spproject1","herdr.tab":"tbc","where":"~ / 1"},"name":null,"notify":true,"parent":null,"pid":5124,"reason":null,"reported":false,"rm":false,"rows":33,"screen":"exact","signal":null,"state":"live","status":null,"status_ms":null,"template":null,"title":"Administrator: C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","turn":0}`);
+
+// new behaviour: on Windows the Coordinator tab runs this Node through the coordinator command's launch, with no prompt in its argv
+test('on Windows the coordinator opens a tab that runs the launch command with the settings model and effort', async () => {
+  const listing = windowsSpace();
+  const claude = await opened({ listing, root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE,
+    text: settingsText({ coordinator: { model: 'sonnet', effort: 'high' } }) });
+  assert.equal(claude.code, 0, claude.said);
+  assert.deepEqual(newTabs(claude.app).map(flagsOf), [{ space: 'spproject1', name: 'Coordinator', folder: 'C:\\r',
+    argv: ['C:\\Program Files\\nodejs\\node.exe', 'C:\\r\\scripts\\coordinator.mjs', 'launch', '--runtime', 'claude', '--login', 'owner',
+      '--model', 'sonnet', '--effort', 'high'] }]);
+
+  const codex = await opened({ listing, root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE,
+    text: settingsText({ runtimes: ['codex'], coordinator: { runtime: 'codex' } }) });
+  assert.equal(codex.code, 0, codex.said);
+  assert.deepEqual(newTabs(codex.app).map((args) => flagsOf(args).argv),
+    [['C:\\Program Files\\nodejs\\node.exe', 'C:\\r\\scripts\\coordinator.mjs', 'launch', '--runtime', 'codex', '--login', 'owner']]);
+});
+
+// new behaviour: Herdr lists a Windows space's folder with forward slashes, which is still the project's folder
+test("on Windows the coordinator opens its tab in the project's space where Herdr lists that space's folder with forward slashes", async () => {
+  const opens = await opened({ listing: windowsSpace('C:/r'), root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(opens.code, 0, opens.said);
+  assert.deepEqual(opens.app.filter(([kind]) => kind === 'do').map((args) => args.slice(0, 2)), [['do', 'tab.new']]);
+  assert.equal(flagsOf(newTabs(opens.app)[0]).space, 'spproject1');
+});
+
+test("on Windows the coordinator reads the Coordinator tab of the project's space that Herdr lists with forward slashes", async () => {
+  const listing = withCoordinator(space('spproject1', 'r', [['tb1', '1']], null, 'C:/r'), ['t5']);
+  const read = await coordinatorTerminals({ root: WINDOWS_ROOT, platform: 'win32', herdrApp: herdrAppFor({ spaces: [listing] }, []),
+    hc: hcFor({ t5: WINDOWS_RUNNING }, []) });
+  assert.equal(read.space?.id, 'spproject1');
+  assert.deepEqual(read.terminals.map(({ address, running }) => ({ address, running })), [{ address: 't5', running: true }]);
+});
+
+// A Windows project whose git prints its worktrees with forward slashes: the main worktree and the detached job worktrees at `paths`.
+const forwardSlashJobs = (paths, cards) => {
+  const windowsRoot = 'C:\\ft\\repo';
+  const job = jobFixture({ root: windowsRoot, spaces: [space('spproject1', 'repo', [['tb1', '1']], null, windowsRoot)],
+    pages: [leanBoardPage(cards.map((card) => issue(card, { status: 'In progress' })))] });
+  const git = gitFor(settingsText(), [], { root: 'C:/ft/repo', registered: paths.map((path) => ({ path })) });
+  return { job, unfinished: () => job.unfinished({ root: windowsRoot, platform: 'win32', git }) };
+};
+
+test("on Windows the unfinished jobs check reads git's forward-slash worktree paths in both job layouts", async (t) => {
+  if (OFF_LINUX) return t.skip(OFF_LINUX);
+  const { job, unfinished } = forwardSlashJobs(['C:/ft/repo/.claude/worktrees/job-7', 'C:/ft/jobs/8'], [7, 8]);
+  assert.equal(await unfinished(), 0, job.lines.join('\n'));
+  assert.equal(job.lines.length, 2, job.lines.join('\n'));
+  assert.match(job.lines[0], /^#7 continue: /);
+  assert.match(job.lines[1], /^#8 continue: /);
+});
+
+test('on Windows a job terminal whose Herdr folder uses forward slashes is matched to its backslash worktree', async (t) => {
+  if (OFF_LINUX) return t.skip(OFF_LINUX);
+  const { job, unfinished } = forwardSlashJobs(['C:/ft/jobs/8'], [8]);
+  job.addJob('t8', 8, 'claude', 'working');
+  job.terminals[0].cwd = 'C:/FT/jobs/8/src';
+  job.details.t8.cwd = 'C:/FT/jobs/8/src';
+  job.details.t8.labels = {};
+  assert.equal(await unfinished(), 0, job.lines.join('\n'));
+  assert.equal(job.lines.length, 1, job.lines.join('\n'));
+  assert.match(job.lines[0], /^#8 running: terminal t8$/);
+});
+
+test("on Windows the unfinished-jobs list reads job tabs of the project's space that Herdr lists with forward slashes", async (t) => {
+  if (OFF_LINUX) return t.skip(OFF_LINUX);
+  const job = jobFixture({ spaces: [space('spproject1', 'r', [['tb1', '1']], null, 'C:/r')], pages: [leanBoardPage([issue(6, { status: 'In progress' })])], branches: [6] });
+  job.addJob('t6', 6, 'claude', 'working');
+  assert.equal(await job.unfinished({ root: WINDOWS_ROOT, platform: 'win32' }), 0, job.lines.join('\n'));
+  assert.equal(job.lines.length, 1, job.lines.join('\n'));
+  assert.match(job.lines[0], /^#6 running: terminal t6$/);
+});
+
+// new behaviour: an empty or relative folder is resolved against no directory, so it is no project's root, however the command's
+// working directory sits against the root
+test('on Windows the coordinator matches no space whose listed folder is empty, relative or the current directory', async () => {
+  const here = process.cwd();
+  for (const [folder, root] of [['', here], ['.', here], ['sub', `${here}/sub`], ['..\\r', `${here}/../r`]]) {
+    const listing = withCoordinator(space('spproject1', 'r', [['tb1', '1']], null, folder), ['t5']);
+    const read = await coordinatorTerminals({ root, platform: 'win32', herdrApp: herdrAppFor({ spaces: [listing] }, []), hc: hcFor({ t5: WINDOWS_RUNNING }, []) });
+    assert.equal(read.space, undefined, `${JSON.stringify(folder)} against ${root}`);
+    assert.deepEqual(read.terminals, [], JSON.stringify(folder));
+  }
+});
+
+test('on Linux the coordinator matches a project space only by its exact folder', async () => {
+  const listing = space('spproject1', 'r', [['tb1', '1']], null, '/srv//r');
+  const read = await coordinatorTerminals({ root: '/srv/r', platform: 'linux', herdrApp: herdrAppFor({ spaces: [withCoordinator(listing, ['t5'])] }, []), hc: hcFor({ t5: liveRecord() }, []) });
+  assert.equal(read.space, undefined);
+  assert.deepEqual(read.terminals, []);
+});
+
+// new behaviour: Herdr wraps a Windows tab's argv in single-quoted PowerShell, so a path holding a single quote is refused before any tab
+test('on Windows the coordinator refuses a Node or project path holding a single quote before opening any tab', async () => {
+  const quotedRoot = "C:\\o'r";
+  const byRoot = await opened({ listing: windowsSpace(quotedRoot), root: quotedRoot, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(byRoot.code, 1, byRoot.said);
+  assert.equal(byRoot.said, "Coordinator not opened: C:\\o'r holds a single quote, which a Windows Herdr tab cannot pass.");
+  assert.deepEqual(byRoot.app.filter(([kind]) => kind === 'do'), []);
+
+  const quotedNode = "C:\\it's\\node.exe";
+  const byNode = await opened({ listing: windowsSpace(), root: WINDOWS_ROOT, platform: 'win32', node: quotedNode });
+  assert.equal(byNode.code, 1, byNode.said);
+  assert.equal(byNode.said, "Coordinator not opened: C:\\it's\\node.exe holds a single quote, which a Windows Herdr tab cannot pass.");
+  assert.deepEqual(byNode.app.filter(([kind]) => kind === 'do'), []);
+});
+
+// new behaviour: a coordinator running through Herdr's PowerShell wrapper is kept
+test('on Windows a Coordinator tab whose wrapper runs the coordinator is kept', async () => {
+  const kept = await opened({ listing: windowsListing(listed('t5')), records: { t5: WINDOWS_RUNNING }, root: WINDOWS_ROOT, platform: 'win32',
+    node: WINDOWS_NODE });
+  assert.equal(kept.code, 5, kept.said);
+  assert.equal(kept.said, 'The Coordinator tab tbc is already open in space spproject1; use it.');
+  assert.deepEqual(kept.app, [['ls']]);
+});
+
+// new behaviour: the wrapper's -NoExit shell left after the coordinator exits, and a tab Herdr restored after a restart, are stopped
+test('on Windows a Coordinator tab left at its PowerShell prompt or restored after a restart is replaced', async () => {
+  for (const [address, record] of [['t6', WINDOWS_EXITED], ['t1', WINDOWS_RESTORED]]) {
+    const replaced = await opened({ listing: windowsListing(listed(address)), records: { [address]: record }, root: WINDOWS_ROOT, platform: 'win32',
+      node: WINDOWS_NODE });
+    assert.equal(replaced.code, 0, `${address}: ${replaced.said}`);
+    assert.deepEqual(replaced.app.filter(([kind]) => kind === 'do').map((args) => args.slice(0, 2)), [['do', 'tab.close'], ['do', 'tab.new']], address);
+    assert.deepEqual(flagsOf(closes(replaced.app)[0]), { id: 'tbc' }, address);
+    assert.equal(replaced.said, 'Replaced the Coordinator tab tbc, in which nothing ran.\nCoordinator opened in space spproject1.', address);
+  }
+});
+
+test('on Windows a Coordinator tab whose PowerShell wrapper lacks -NoExit is not read as a stopped coordinator', async () => {
+  const [program, , ...command] = WINDOWS_EXITED.argv;
+  const unread = await opened({ listing: windowsListing(listed('t6')), records: { t6: { ...WINDOWS_EXITED, argv: [program, '-NoLogo', ...command] } },
+    root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(unread.code, 1, unread.said);
+  assert.deepEqual(unread.app, [['ls']]);
+  assert.match(unread.said, /hc get t6/);
+});
+
+// new behaviour: a program the wrapper's shell started that is not Node is no coordinator, whatever its process id
+test('on Windows a Coordinator tab whose foreground is another program than node.exe is not read as a coordinator or as a stopped one', async () => {
+  for (const [name, argv, pid] of /** @type {[string, string[], number][]} */ ([['ping.exe', ['C:\\WINDOWS\\System32\\PING.EXE', 'localhost'], 4242],
+    ['powershell.exe', ['C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-NoProfile'], 4243]])) {
+    const record = { ...WINDOWS_EXITED, foreground: { ...WINDOWS_EXITED.foreground, name, argv, pid } };
+    const unread = await opened({ listing: windowsListing(listed('t6')), records: { t6: record }, root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+    assert.equal(unread.code, 1, `${name}: ${unread.said}`);
+    assert.deepEqual(unread.app, [['ls']], name);
+    assert.match(unread.said, /hc get t6/, name);
+  }
+});
+
+// new behaviour: only a node.exe running this project's launch command is a coordinator; another Node program is neither it nor a stopped tab
+const WINDOWS_LAUNCHER = [WINDOWS_NODE, 'C:\\r\\scripts\\coordinator.mjs', 'launch', '--runtime', 'claude', '--login', 'owner', '--model', 'opus', '--effort', 'medium'];
+const withNodeForeground = (argv) => ({ ...WINDOWS_RUNNING, foreground: { ...WINDOWS_RUNNING.foreground, name: 'node.exe', argv } });
+
+test('on Windows a Coordinator tab whose foreground node.exe runs the coordinator launch command is kept', async () => {
+  const kept = await opened({ listing: windowsListing(listed('t5')), records: { t5: withNodeForeground(WINDOWS_LAUNCHER) }, root: WINDOWS_ROOT,
+    platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(kept.code, 5, kept.said);
+  assert.deepEqual(kept.app, [['ls']]);
+});
+
+// new behaviour: on Windows the relay and the wake reach a coordinator running under the launcher once Herdr reports its status, by the Linux rules
+test('on Windows the relay and the wake reach a launcher coordinator by its status', async () => {
+  const listing = windowsListing(listed('t5'));
+  const scene = async (status) => {
+    const records = { t5: { ...withNodeForeground(WINDOWS_LAUNCHER), status } };
+    const relayCalls = [];
+    const relay = await /** @type {Relay} */ (/** @type {unknown} */ (coordinator)).relayToCoordinator({ root: WINDOWS_ROOT, platform: 'win32', herdrApp: herdrAppFor(listing, []), hc: hcFor(records, relayCalls), line: PANEL_LINE });
+    const wakeCalls = [];
+    const wakeLines = [];
+    const wakeCode = await wakeCoordinator({ root: WINDOWS_ROOT, platform: 'win32', herdrApp: herdrAppFor(listing, []), hc: hcFor(records, wakeCalls), print: (line) => wakeLines.push(line) });
+    return { relay, relaySends: relayCalls.filter(([kind]) => kind === 'send'), wakeCode, wakeSends: wakeCalls.filter(([kind]) => kind === 'send'), said: wakeLines.join('\n') };
+  };
+
+  const done = await scene({ app: 'claude-code', state: 'done' });
+  assert.equal(done.relay.code, 0, done.relay.message);
+  assert.deepEqual(done.relaySends, [['send', 't5', PANEL_LINE]]);
+  assert.equal(done.wakeCode, 0, done.said);
+  assert.deepEqual(done.wakeSends, [['send', 't5', 'A card moved to Ready.']]);
+
+  const blocked = await scene({ app: 'claude-code', state: 'blocked' });
+  assert.equal(blocked.relay.code, 4, blocked.relay.message);
+  assert.deepEqual(blocked.relaySends, []);
+  assert.equal(blocked.wakeCode, 4, blocked.said);
+  assert.deepEqual(blocked.wakeSends, []);
+  assert.match(blocked.said, /is asking the owner/);
+});
+
+test('on Linux the relay and the wake never call a running Coordinator terminal whose foreground is named node.exe the Windows launcher', async () => {
+  const listing = coordinatorListing(listed('t9'));
+  const records = { t9: liveRecord({ foreground: 'node.exe', status: null, foregroundPid: 100 }) };
+
+  const relayCalls = [];
+  const relay = await /** @type {Relay} */ (/** @type {unknown} */ (coordinator)).relayToCoordinator({ root: ROOT, platform: 'linux', herdrApp: herdrAppFor(listing, []), hc: hcFor(records, relayCalls), line: PANEL_LINE });
+  assert.equal(relay.code, 4, relay.message);
+  assert.deepEqual(relayCalls.filter(([kind]) => kind === 'send'), []);
+  assert.doesNotMatch(relay.message, /Windows launcher/);
+
+  const wakeCalls = [];
+  const wakeLines = [];
+  const wakeCode = await wakeCoordinator({ root: ROOT, platform: 'linux', herdrApp: herdrAppFor(listing, []), hc: hcFor(records, wakeCalls), print: (line) => wakeLines.push(line) });
+  const said = wakeLines.join('\n');
+  assert.equal(wakeCode, 4, said);
+  assert.deepEqual(wakeCalls.filter(([kind]) => kind === 'send'), []);
+  assert.doesNotMatch(said, /Windows launcher/);
+});
+
+test('on Windows a Coordinator tab whose foreground node.exe runs another program is not read as a coordinator or as a stopped one', async () => {
+  for (const [kind, argv] of /** @type {[string, string[]][]} */ ([['another script', [WINDOWS_NODE, 'C:\\tools\\build.mjs']],
+    ['the Node interactive shell', [WINDOWS_NODE]], ['launch of another script', [WINDOWS_NODE, 'C:\\tools\\other.mjs', 'launch']]])) {
+    const unread = await opened({ listing: windowsListing(listed('t5')), records: { t5: withNodeForeground(argv) }, root: WINDOWS_ROOT, platform: 'win32',
+      node: WINDOWS_NODE });
+    assert.equal(unread.code, 1, `${kind}: ${unread.said}`);
+    assert.deepEqual(unread.app, [['ls']], kind);
+    assert.match(unread.said, /hc get t5/, kind);
+  }
+});
+
+test('on Windows a Coordinator tab whose foreground node.exe runs coordinator.mjs with another command than launch is not read as a coordinator or as a stopped one', async () => {
+  const unread = await opened({ listing: windowsListing(listed('t5')), records: { t5: withNodeForeground([WINDOWS_NODE, 'C:\\r\\scripts\\coordinator.mjs', 'status']) },
+    root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(unread.code, 1, unread.said);
+  assert.deepEqual(unread.app, [['ls']]);
+  assert.match(unread.said, /hc get t5/);
+});
+
+test('on Windows a Coordinator tab whose foreground node.exe runs another script given the coordinator launch as arguments is not read as a coordinator or as a stopped one', async () => {
+  const unread = await opened({ listing: windowsListing(listed('t5')),
+    records: { t5: withNodeForeground([WINDOWS_NODE, 'C:\\tools\\watch.mjs', 'C:\\r\\scripts\\coordinator.mjs', 'launch', '--runtime', 'claude', '--login', 'owner']) },
+    root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(unread.code, 1, unread.said);
+  assert.deepEqual(unread.app, [['ls']]);
+  assert.match(unread.said, /hc get t5/);
+});
+
+test('on Windows a Coordinator tab whose foreground node.exe takes a Node option naming coordinator.mjs is not read as a coordinator or as a stopped one', async () => {
+  const unread = await opened({ listing: windowsListing(listed('t5')),
+    records: { t5: withNodeForeground([WINDOWS_NODE, '--import=file:///C:/tools/coordinator.mjs', 'launch']) },
+    root: WINDOWS_ROOT, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(unread.code, 1, unread.said);
+  assert.deepEqual(unread.app, [['ls']]);
+  assert.match(unread.said, /hc get t5/);
+});
+
+// new behaviour: Herdr's spelling of a Windows folder may differ from the project's in the drive letter's case, a trailing separator or case
+test("on Windows the coordinator reads the Coordinator tab of the project's space that Herdr lists with another drive letter case or a trailing separator", async () => {
+  for (const [folder, root] of [['c:/r', WINDOWS_ROOT], ['C:/r/', WINDOWS_ROOT], ['c:/R/', WINDOWS_ROOT], ['C:/r', 'C:\\r\\']]) {
+    const listing = withCoordinator(space('spproject1', 'r', [['tb1', '1']], null, folder), ['t5']);
+    const read = await coordinatorTerminals({ root, platform: 'win32', herdrApp: herdrAppFor({ spaces: [listing] }, []), hc: hcFor({ t5: WINDOWS_RUNNING }, []) });
+    assert.equal(read.space?.id, 'spproject1', `${folder} against ${root}`);
+  }
+});
+
+test('on Windows the coordinator opens a new space named for the last folder of the project path', async () => {
+  const root = 'C:\\work\\proj';
+  const opens = await opened({ listing: windowsSpace(), root, platform: 'win32', node: WINDOWS_NODE });
+  assert.equal(opens.code, 0, opens.said);
+  assert.deepEqual(opens.app.map((args) => args.slice(0, 2)), [['ls'], ['do', 'space.new']]);
+  assert.equal(flagsOf(opens.app[1]).name, 'proj');
+  assert.equal(flagsOf(opens.app[1]).folder, root);
+});
+
+test('on Windows the sole stopped Coordinator tab is closed only after its replacement is verified against the Windows terminal record', async () => {
+  const listing = withCoordinator(space('spproject1', 'r', [], null, WINDOWS_ROOT), ['t6']);
+  const app = [];
+  const herdrApp = async (args) => {
+    app.push(args);
+    if (args[0] === 'ls') return { code: 0, stdout: JSON.stringify({ spaces: [listing] }), stderr: '' };
+    if (args[1] === 'tab.new') {
+      listing.tabs.push({ id: 'tbnew', name: 'Coordinator', terminals: listed('tnew') });
+      return { code: 0, stdout: '{"space":"spproject1","tab":"tbnew","terminal":"tnew"}', stderr: '' };
+    }
+    listing.tabs = listing.tabs.filter(({ id }) => id !== flagsOf(args).id);
+    return { code: 0, stdout: '{}', stderr: '' };
+  };
+  const lines = [];
+  const code = await openCoordinator({ root: WINDOWS_ROOT, login: 'owner', git: gitFor(settingsText(), []), herdrApp, hc: hcFor({ t6: WINDOWS_EXITED }, []),
+    capLock: (work) => work(), platform: 'win32', node: WINDOWS_NODE, print: (line) => lines.push(line) });
+  assert.equal(code, 0, lines.join('\n'));
+  assert.deepEqual(app.filter(([kind]) => kind === 'do').map(([, command]) => command), ['tab.new', 'tab.close']);
+  assert.deepEqual(listing.tabs.map(({ id }) => id), ['tbnew']);
+});
+
+// new behaviour: only Windows takes the launch form; macOS opens the same tab argv as Linux
+test('on macOS the coordinator opens the same tab argv as on Linux', async () => {
+  const listing = { spaces: [space('spproject1', 'fabraik', [['tb1', '1']], null, ROOT)] };
+  const mac = await opened({ listing, platform: 'darwin', node: '/usr/local/bin/node' });
+  assert.equal(mac.code, 0, mac.said);
+  assert.deepEqual(newTabs(mac.app).map((args) => flagsOf(args).argv), [argvFor('opus', 'medium', 'owner')]);
+});
+
+// One launch with a recording `spawn` answering `reply`: its exit code, the spawn calls and what it printed.
+/** @param {Record<string, string>} options @param {{ status: number | null, signal: string | null, error?: Error }} [reply] */
+async function launched(options, reply = { status: 0, signal: null }) {
+  const calls = [];
+  const lines = [];
+  const code = await launchCoordinator({ ...options, env: { PATH: 'C:\\bin' }, print: (line) => lines.push(line),
+    spawn: (program, args, spawnOptions) => {
+      calls.push({ program, args, stdio: spawnOptions.stdio, env: spawnOptions.env });
+      return reply;
+    } });
+  return { code, calls, said: lines.join('\n') };
+}
+
+// new behaviour: the launch passes the prompt as one argument, so its double quotes reach the runtime intact
+test('the coordinator launch starts Claude with the prompt intact and the model and effort in its environment, and Codex with neither', async () => {
+  const coordinatorPromptText = 'Coordinate this project from its Herdr space: read .agents/skills/resume/references/herdr-lead.md whole and follow its "Coordinator" section.\n{"login":"owner"}';
+  const claude = await launched({ runtime: 'claude', login: 'owner', model: 'sonnet', effort: 'high' });
+  assert.equal(claude.code, 0, claude.said);
+  assert.deepEqual(claude.calls, [{ program: 'claude', args: ['--permission-mode', 'auto', '--', coordinatorPromptText], stdio: 'inherit',
+    env: { PATH: 'C:\\bin', ANTHROPIC_MODEL: 'sonnet', CLAUDE_CODE_EFFORT_LEVEL: 'high' } }]);
+
+  const codex = await launched({ runtime: 'codex', login: 'owner' }, { status: 3, signal: null });
+  assert.equal(codex.code, 3, codex.said);
+  assert.deepEqual(codex.calls, [{ program: 'codex', args: ['--no-daemon', '--enable', 'default_mode_request_user_input', '--', coordinatorPromptText],
+    stdio: 'inherit', env: { PATH: 'C:\\bin' } }]);
+});
+
+// new behaviour: a runtime that cannot be started is named with its cause
+test('the coordinator launch prints why the runtime did not run and exits 1', async () => {
+  const failed = await launched({ runtime: 'claude', login: 'owner', model: 'opus', effort: 'medium' },
+    { error: new Error('spawnSync claude ENOENT'), status: null, signal: null });
+  assert.equal(failed.code, 1);
+  assert.equal(failed.said, 'Coordinator not started: claude did not run: spawnSync claude ENOENT');
+});
+
+test('the coordinator launch exits 1 where a signal ended the runtime', async () => {
+  const ended = await launched({ runtime: 'claude', login: 'owner', model: 'opus', effort: 'medium' }, { status: null, signal: 'SIGTERM', error: undefined });
+  assert.equal(ended.code, 1, ended.said);
+});
+
 test('the coordinator cap reader defaults to 4 and accepts only whole numbers from 1 to 16', (t) => {
   const state = mkdtempSync(join(tmpdir(), 'coordinator-cap-'));
   t.after(() => rmSync(state, { recursive: true, force: true }));
@@ -2283,6 +2681,362 @@ test('two coordinator opens racing leave one Coordinator tab, and the second clo
   assert.deepEqual([...codes].sort(), [0, 5]);
   assert.equal(newTabs(app).length, 1, 'one Coordinator tab is made');
   assert.deepEqual(closes(app), [], 'the starting coordinator is not closed');
+});
+
+// Whether this machine lets an unprivileged process create a file symlink. Copied from factory-sync.test.mjs, which no test file imports from.
+function fileSymlinksAvailable() {
+  const dir = mkdtempSync(join(tmpdir(), 'coordinator-symlink-probe-'));
+  try {
+    writeFileSync(join(dir, 'target'), '');
+    symlinkSync('target', join(dir, 'link'), 'file');
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && /** @type {NodeJS.ErrnoException} */ (error).code === 'EPERM') return false;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const FILE_SYMLINKS = fileSymlinksAvailable();
+const NEEDS_FILE_SYMLINK = { skip: !FILE_SYMLINKS && 'creating a file symlink on Windows needs Developer Mode or administrator rights' };
+const CAP_LOCK_URL = new URL('./cap-lock.mjs', import.meta.url).href;
+
+// What a child process's exclusive `lockLeadFile(path, { waitMs: 0 })` finds: `busy` or `free`.
+function externalLockProbe(path) {
+  const code = `import { lockLeadFile } from ${JSON.stringify(CAP_LOCK_URL)};
+    const lock = await lockLeadFile(${JSON.stringify(path)}, { waitMs: 0 });
+    lock?.release();
+    console.log(lock === undefined ? 'busy' : 'free');`;
+  const probe = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8' });
+  assert.equal(probe.status, 0, probe.stderr);
+  return probe.stdout.trim();
+}
+
+// A child process that holds `lockLeadFile(path)` exclusively, or `capLock` over `path`'s folder when `viaCap`, prints `held`
+// and stays alive until `stop` kills it.
+async function lockHolder(path, viaCap = false) {
+  const code = `import { capLock, lockLeadFile } from ${JSON.stringify(CAP_LOCK_URL)};
+    const hold = () => { console.log('held'); return new Promise(() => setInterval(() => {}, 1e6)); };
+    ${viaCap ? `await capLock(${JSON.stringify(dirname(path))}, hold);` : `await lockLeadFile(${JSON.stringify(path)}); await hold();`}`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const closed = once(child, 'close');
+  const first = await Promise.race([once(child.stdout, 'data').then(([chunk]) => String(chunk).trim()), closed.then(([code, signal]) => `exited with ${code ?? signal} before holding the lock`)]);
+  assert.equal(first, 'held');
+  return { running: () => child.exitCode === null, stop: async () => { child.kill('SIGKILL'); await closed; } };
+}
+
+// existing behaviour: the cap lock makes the count and the launch one step across coordinators
+test('cap lock: two coordinator starts at a cap of one launch one job and refuse the other', async (t) => {
+  const state = lockFolder(t);
+  const cardOf = (fixture) => fixture.runs().at(-1).find((arg, index, args) => args[index - 1] === '--label' && arg.startsWith('fabraik.card=')).slice('fabraik.card='.length);
+  const rootA = workflowRepository(t);
+  const first = jobFixture({ root: rootA, spaces: [space('spproject1', 'fabraik', [['tb1', '1']], null, rootA)], pages: READY_BOARD(),
+    onLaunch: () => first.addJob('t10', cardOf(first), 'env', null) });
+  const rootB = workflowRepository(t);
+  const second = jobFixture({ root: rootB, spaces: [space('spproject2', 'fabraik2', [['tb1', '1']], null, rootB)], pages: READY_BOARD(),
+    onLaunch: () => second.addJob('t20', cardOf(second), 'env', null, { 'fabraik.space': 'spproject2' }) });
+  second.coordinatorAddresses = ['t1'];
+  second.details.t1 = { ...liveRecord({ foregroundPid: 101 }), address: 't1', cwd: rootB };
+  delete second.details.t0;
+  second.launch = { code: 0, stdout: JSON.stringify({ address: 't20' }), stderr: '' };
+
+  // Each contender lists the jobs of both fixtures, waiting up to 1 s for the other to reach its own listing first.
+  const listed = [];
+  const arrived = Promise.withResolvers();
+  let arrivals = 0;
+  const machine = (own, other) => async (args) => {
+    if (args.join(' ') === 'ls --label fabraik.role=job --json') {
+      if (++arrivals === 2) arrived.resolve(undefined);
+      const timer = setTimeout(() => arrived.resolve(undefined), 1000);
+      await arrived.promise;
+      clearTimeout(timer);
+      const terminals = (await Promise.all([own.hc(args), other.hc(args)])).flatMap((reply) => JSON.parse(reply.stdout).terminals);
+      listed.push(terminals.length);
+      return { code: 0, stdout: JSON.stringify({ hidden_finished: 0, machines: [], terminals }), stderr: '' };
+    }
+    const reply = await own.hc(args);
+    return args[0] === 'get' && reply.code !== 0 ? other.hc(args) : reply;
+  };
+  const options = (own, other) => ({ cap: () => 1, capLock: (work) => capLock(state, work), hc: machine(own, other) });
+  const codes = await Promise.all([first.start(5, { ...options(first, second), parent: 't0' }), second.start(6, { ...options(second, first), parent: 't1' })]);
+  assert.deepEqual([...codes].sort(), [0, 1]);
+  assert.equal(first.runs().length + second.runs().length, 1);
+  assert.deepEqual(listed, [0, 1], 'the second count saw the first launch');
+  const [[winner], [loser, refused]] = codes[0] === 0 ? [[5, first], [6, second]] : [[6, second], [5, first]];
+  assert.deepEqual(refused.lines, [`Card ${loser} not started: 1 of 1 running places are taken (cards ${winner}); a job waiting on the owner takes none.`]);
+});
+
+// existing behaviour: a lock lives as long as its holding process and no longer
+test('cap lock: a live holder in another process keeps the lock and a dead one frees it', async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const holder = await lockHolder(path, true);
+  try {
+    assert.equal(await lockLeadFile(path, { waitMs: 0 }), undefined, 'a live holder keeps the lock');
+    assert.equal(holder.running(), true, 'the holder is still alive after the busy check');
+  } finally {
+    await holder.stop();
+  }
+  assert.equal(await capLock(state, () => 'worked'), 'worked', 'a killed holder frees the lock');
+});
+
+// the wait budget runs on the monotonic clock: a wall clock that stands still must not keep a waiter waiting
+test('cap lock: the wait budget ignores a wall clock that stands still', { timeout: 5000 }, async (t) => {
+  const path = join(lockFolder(t), 'cap.lock');
+  const holder = await lockHolder(path);
+  try {
+    t.mock.timers.enable({ apis: ['Date'] });
+    assert.equal(await lockLeadFile(path, { waitMs: 200 }), undefined, 'the waiter gave up on a stopped wall clock');
+  } finally {
+    t.mock.timers.reset();
+    await holder.stop();
+  }
+});
+
+// existing behaviour: shared probes wait for no one but an exclusive holder
+test('cap lock: shared probes see an exclusive holder and do not block each other', async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const holder = await lockHolder(path);
+  try {
+    assert.equal(await lockLeadFile(path, { shared: true, waitMs: 0, create: false }), undefined, 'an exclusive holder is seen');
+  } finally {
+    await holder.stop();
+  }
+  const one = await lockLeadFile(path, { shared: true, waitMs: 0, create: false });
+  const two = await lockLeadFile(path, { shared: true, waitMs: 0, create: false });
+  try {
+    assert.notEqual(one, undefined);
+    assert.notEqual(two, undefined, 'a second shared probe is not blocked');
+    assert.equal(await lockLeadFile(path, { waitMs: 0 }), undefined, 'shared holders keep an exclusive lock out');
+  } finally {
+    for (const lock of [one, two]) lock?.release();
+  }
+  const gone = join(state, 'gone.lock');
+  await assert.rejects(lockLeadFile(gone, { create: false, shared: true, waitMs: 0 }));
+  assert.equal(existsSync(gone), false, 'a read-only probe creates no file');
+});
+
+// existing behaviour: a symbolic link is never opened as a lock file
+test('cap lock: a symbolic link in place of a lock file is refused', NEEDS_FILE_SYMLINK, async (t) => {
+  const state = lockFolder(t);
+  writeFileSync(join(state, 'target.lock'), '', { mode: 0o600 });
+  symlinkSync('target.lock', join(state, 'cap.lock'), 'file');
+  await assert.rejects(lockLeadFile(join(state, 'cap.lock')), (/** @type {Error} */ error) => /symbolic link/.test(error.message) && !/while it was being locked/.test(error.message));
+});
+
+// A physical lock folder of mode 0700, as the lock requires of its folder off Windows.
+function lockFolder(t) {
+  const state = realpathSync(mkdtempSync(join(tmpdir(), 'coordinator-cap-lock-')));
+  t.after(() => rmSync(state, { recursive: true, force: true }));
+  return state;
+}
+
+// The error a lock refuses with, after checking that the work it guards never ran; `take` locks and runs the work it is given.
+async function refusal(take) {
+  let ran = false;
+  const error = await take(() => { ran = true; }).then(() => undefined, (/** @type {Error} */ failure) => failure);
+  assert.equal(ran, false, 'the work never runs');
+  assert.ok(error instanceof Error, 'the lock is refused');
+  return error;
+}
+
+// Runs work under an exclusive `lockLeadFile(path, options)` as `capLock` runs its work, releasing the lock after.
+const underLock = (path, options) => async (work) => {
+  const lock = await lockLeadFile(path, options);
+  assert.ok(lock, 'the lock is acquired');
+  try {
+    return work();
+  } finally {
+    lock.release();
+  }
+};
+
+// The lock's own way of opening a file, which an injected `open` calls once it has changed the file.
+const openDefault = (path, options) => new DatabaseSync(path, options);
+
+// new behaviour: a lock file holding data is not a lock file
+test('cap lock: a lock file holding data is refused', async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  writeFileSync(path, 'not a lock', { mode: 0o600 });
+  assert.match((await refusal((work) => capLock(state, work))).message, /is not a lock file/);
+  await assert.rejects(lockLeadFile(path, { shared: true, waitMs: 0 }), /is not a lock file/);
+});
+
+// new behaviour: a lock file is refused while a SQLite journal sits beside it
+test('cap lock: a lock file with a SQLite journal beside it is refused', async (t) => {
+  const state = lockFolder(t);
+  writeFileSync(join(state, 'cap.lock'), '', { mode: 0o600 });
+  writeFileSync(join(state, 'cap.lock-journal'), '', { mode: 0o600 });
+  assert.match((await refusal((work) => capLock(state, work))).message, /a SQLite journal is beside it/);
+});
+
+// new behaviour: a lock folder others can read is refused, naming the folder, and a private one is used
+test('cap lock: a lock folder not private to this account is refused', { skip: process.platform === 'win32' && 'Windows has no folder modes' }, async (t) => {
+  const state = lockFolder(t);
+  chmodSync(state, 0o755);
+  const { message } = await refusal((work) => capLock(state, work));
+  assert.ok(message.startsWith(`${state} must be `), message);
+  chmodSync(state, 0o700);
+  assert.equal(await capLock(state, () => 'worked'), 'worked');
+
+  // A private folder under a parent another account can change is refused too.
+  const parent = lockFolder(t);
+  const folder = join(parent, 'state');
+  mkdirSync(folder, { mode: 0o700 });
+  chmodSync(parent, 0o770);
+  const ancestor = await refusal((work) => capLock(folder, work));
+  assert.equal(ancestor.message, `${folder} has an ancestor ${parent} that another account can change`);
+  chmodSync(parent, 0o700);
+  assert.equal(await capLock(folder, () => 'worked'), 'worked');
+
+  // On macOS an access control list lets another account change a 0700 parent's entries.
+  if (process.platform === 'darwin') {
+    execFileSync('/bin/chmod', ['+a', 'group:everyone allow add_subdirectory,delete_child', parent]);
+    const listed = await refusal((work) => capLock(folder, work));
+    assert.equal(listed.message, `${folder} has an ancestor ${parent} that another account can change`);
+    execFileSync('/bin/chmod', ['-N', parent]);
+    assert.equal(await capLock(folder, () => 'worked'), 'worked');
+
+    // An inherit-only entry on the lock folder reaches the lock files it holds.
+    execFileSync('/bin/chmod', ['+a', 'group:everyone allow add_file,file_inherit,only_inherit', folder]);
+    const own = await refusal((work) => capLock(folder, work));
+    assert.equal(own.message, `${folder} has an access control list that lets another account change it`);
+    execFileSync('/bin/chmod', ['-N', folder]);
+    assert.equal(await capLock(folder, () => 'worked'), 'worked');
+  }
+});
+
+// new behaviour: a macOS access control list entry that lets another account change entries is a grant
+test('cap lock: an access control list that lets another account change entries is a grant', () => {
+  const head = 'drwx------+ 3 me  staff  96 Nov 26 10:00 /tmp/x';
+  const listing = (...entries) => [head, ...entries].join('\n');
+  const owner = ' 0: user:me allow add_subdirectory,delete_child';
+  const denied = ' 0: group:everyone deny delete';
+  const staff = ' 0: group:staff inherited allow list,add_subdirectory';
+  const root = ' 0: user:root allow delete_child';
+  const other = ' 1: user:other allow writesecurity';
+  const spaced = ' 0: group:Domain Users allow add_subdirectory,delete_child';
+  const inheritOnly = ' 0: group:staff allow delete,file_inherit,only_inherit';
+  assert.equal(aclGrantsOthers(listing(owner), 'me'), undefined);
+  assert.equal(aclGrantsOthers(listing(denied), 'me'), undefined);
+  assert.equal(aclGrantsOthers(listing(staff), 'me'), staff);
+  assert.equal(aclGrantsOthers(listing(root), 'me'), undefined);
+  assert.equal(aclGrantsOthers(head, 'me'), undefined);
+  assert.equal(aclGrantsOthers(listing(owner, other), 'me'), other);
+  assert.equal(aclGrantsOthers(listing(spaced), 'me'), spaced);
+  assert.equal(aclGrantsOthers(listing(inheritOnly), 'me'), undefined);
+  assert.equal(aclGrantsOthers(listing(inheritOnly), 'me', true), inheritOnly);
+});
+
+// new behaviour: on Windows the lock refuses a folder outside the user profile, whose default permissions it relies on
+test('cap lock: on Windows a lock folder outside the user profile is refused', { skip: process.platform !== 'win32' && 'the user profile boundary applies on Windows only' }, async (t) => {
+  const state = lockFolder(t);
+  const elsewhere = lockFolder(t);
+  const code = `import { capLock } from ${JSON.stringify(CAP_LOCK_URL)};
+    console.log(await capLock(${JSON.stringify(state)}, () => 'worked'));`;
+  const run = (profile) => spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env: { ...process.env, USERPROFILE: profile } });
+  const outside = run(elsewhere);
+  assert.notEqual(outside.status, 0, outside.stdout);
+  assert.match(outside.stderr, /must be inside the user profile/);
+  const inside = run(dirname(state));
+  assert.equal(inside.status, 0, inside.stderr);
+  assert.equal(inside.stdout.trim(), 'worked');
+});
+
+// new behaviour: a held lock whose file another takes the place of fails its check
+test('cap lock: a held lock whose file is replaced fails its check', { skip: process.platform === 'win32' && 'a held file cannot be renamed on Windows' }, async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const lock = await lockLeadFile(path);
+  assert.ok(lock, 'the lock is acquired');
+  t.after(() => lock.release());
+  writeFileSync(join(state, 'fresh.lock'), '', { mode: 0o600 });
+  renameSync(join(state, 'fresh.lock'), path);
+  assert.throws(() => lock.check(), /changed while locked: another file took its place/);
+});
+
+// new behaviour: a lock file swapped for another between its admission and its lock is refused
+test('cap lock: a lock file replaced before it is locked is refused', async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const fresh = join(state, 'fresh.lock');
+  const open = (file, options) => {
+    writeFileSync(fresh, '', { mode: 0o600 });
+    renameSync(fresh, file);
+    return openDefault(file, options);
+  };
+  const { message } = await refusal(underLock(path, { open }));
+  assert.match(message, /changed while it was being locked: another file took its place/);
+});
+
+// new behaviour: a busy answer from a file swapped in before the lock is refused rather than reported as busy
+test('cap lock: a busy lock file replaced before it is locked is refused', { skip: process.platform === 'win32' && 'a held file cannot be renamed on Windows' }, async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const other = join(state, 'other.lock');
+  const holder = await lockHolder(other);
+  try {
+    const open = (file, options) => {
+      renameSync(other, file);
+      return openDefault(file, options);
+    };
+    await assert.rejects(lockLeadFile(path, { waitMs: 0, open }), /changed while it was being locked: another file took its place/);
+  } finally {
+    await holder.stop();
+  }
+});
+
+// new behaviour: a probe never creates the lock file it reads, even when the file vanishes after admission
+test('cap lock: a probe whose lock file vanishes before it opens creates no file', async (t) => {
+  const state = lockFolder(t);
+  const gone = join(state, 'gone.lock');
+  writeFileSync(gone, '', { mode: 0o600 });
+  const open = (file, options) => {
+    unlinkSync(file);
+    return openDefault(file, options);
+  };
+  await assert.rejects(lockLeadFile(gone, { shared: true, waitMs: 0, create: false, open }));
+  assert.equal(existsSync(gone), false, 'the probe creates no file');
+});
+
+// new behaviour: a lock file whose properties stop qualifying while it is locked is refused
+test('cap lock: a lock file that stops qualifying while it is being locked is refused', { skip: process.platform === 'win32' && 'Windows has no file modes' }, async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const open = (file, options) => {
+    chmodSync(file, 0o644);
+    return openDefault(file, options);
+  };
+  const { message } = await refusal(underLock(path, { open }));
+  assert.match(message, /changed while it was being locked: .*mode 0644/);
+});
+
+// new behaviour: a SQLite database swapped in at the lock path keeps its journal mode, because the lock refuses a file with pages before its pragma
+test('cap lock: a SQLite database swapped in before it is locked keeps its journal mode', async (t) => {
+  const state = lockFolder(t);
+  const path = join(state, 'cap.lock');
+  const staged = join(state, 'staged.db');
+  const database = new DatabaseSync(staged);
+  database.exec("PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); INSERT INTO kept VALUES ('row')");
+  database.close();
+  const journalMode = (file) => [...readFileSync(file).subarray(18, 20)];
+  assert.deepEqual(journalMode(staged), [2, 2]);
+  const open = (file, options) => {
+    renameSync(staged, file);
+    return openDefault(file, options);
+  };
+  const { message } = await refusal(underLock(path, { open }));
+  assert.deepEqual(journalMode(path), [2, 2]);
+  const swapped = new DatabaseSync(path);
+  try {
+    assert.equal(swapped.prepare('SELECT value FROM kept').get()?.value, 'row');
+  } finally {
+    swapped.close();
+  }
+  assert.equal(message, `${path} is not a lock file: is not empty`);
 });
 
 test('ANTI-REGRESSION: coordinator open closes nothing it cannot prove stopped', async () => {
@@ -2324,9 +3078,9 @@ test('coordinator open refuses a space holding more than one Coordinator tab', a
 // comments from `tracker.comments` (none where it names none), the open draft pull requests `tracker.drafts`, and a
 // `rate_limit` probe with an allowance left; any other call fails. When enabled, the fake Codex records the app-server
 // working directory and the incoming messages in the same log as Herdr.
-/** @param {import('node:test').TestContext} t @param {{ listing: any, hc?: Record<string, string | string[]> | ((main: string) => Record<string, string | string[]>), text?: string, login?: string | null, inventoryUnread?: boolean, codexHooks?: (root: string) => unknown, repository?: { branches: number[], worktrees: number[] }, tracker?: { nodes: any[], comments: Record<number, string[]>, drafts: { number: number, headRefName: string }[] } }} options */
+/** @param {import('node:test').TestContext} t @param {{ listing: any, hc?: Record<string, string | string[]> | ((main: string) => Record<string, string | string[]>), text?: string, login?: string | null, codexHooks?: (root: string) => unknown, repository?: { branches: number[], worktrees: number[] }, tracker?: { nodes: any[], comments: Record<number, string[]>, drafts: { number: number, headRefName: string }[] } }} options */
 function wireFixture(t, { listing, hc = {}, text = settingsText({ coordinator: { model: 'sonnet', effort: 'high' } }),
-  login = 'octocat\n', inventoryUnread = false, codexHooks, repository = { branches: [], worktrees: [] },
+  login = 'octocat\n', codexHooks, repository = { branches: [], worktrees: [] },
   tracker = { nodes: [], comments: {}, drafts: [] } }) {
   const root = join(realpathSync(mkdtempSync(join(tmpdir(), 'coordinator-wire-'))), 'Wire Project');
   const main = pinGit(committedRoot(root), 'rev-parse', 'refs/heads/main');
@@ -2397,7 +3151,6 @@ lines.on('line', (line) => {
     process.exit(1);
   }
 });`);
-  if (inventoryUnread) fake('pgrep', 'process.stderr.write("cannot read process inventory"); process.exit(2);');
   const details = Object.fromEntries(tracker.nodes.map(({ content }) => [content.number, cardDetail(content.number, tracker.comments[content.number] ?? [])]));
   const replies = { board: leanBoardPage(tracker.nodes), issues: issuesPage([]), details, drafts: tracker.drafts };
   fake('gh', `const replies = ${JSON.stringify(replies)};
@@ -2428,7 +3181,7 @@ const DELIVERY_REPO = 'example/one';
 const DELIVERY_ID = 'R_kgDO/fabraik-947';
 const DELIVERY_ORIGIN = 'https://github.com/example/one.git';
 const DELIVERY_LOCK_LEAF = '683c0e8bf0d96e4a52ac6df91d99f17cc0e0cc5a233dc106aad1d1685513f8b0';
-const DELIVERY_LINUX_ONLY = process.platform === 'linux' ? undefined : 'requires Linux flock and native Herdr process identity';
+const DELIVERY_LINUX_ONLY = process.platform === 'linux' ? undefined : 'requires Linux /proc process identity';
 
 // The shared launcher is exercised from its own temporary installation, with no attached Herdr terminal.
 function deliveryWire(t) {
@@ -2784,52 +3537,140 @@ test('Herdr delivery queues jobs on the same repository and isolates other repos
   const a = world.job(17);
   const b = world.job(18);
   const c = world.job(19, { repo: 'example/two' });
-  const first = await heldDelivery(world, a);
-  assert.deepEqual(readdirSync(world.lockRoot), [DELIVERY_LOCK_LEAF]);
-  assert.equal(existsSync(join(world.lockRoot, 'R_kgDO')), false);
-  const leaf = join(world.lockRoot, DELIVERY_LOCK_LEAF);
-  const heldFiles = readdirSync(leaf).filter((name) =>
-    spawnSync('/usr/bin/flock', ['-n', '-x', '-E', '75', join(leaf, name), '/usr/bin/true']).status === 75);
-  assert.deepEqual(heldFiles.sort(), ['delivery.lock', 'ready.json'], 'the first job holds both delivery locks');
-  const stableLock = join(leaf, 'delivery.lock');
-  const inode = lstatSync(stableLock).ino;
-  const competing = b.go(HOLD);
-  await b.waitLabel(CONTENTION_WAIT);
-  assert.equal(b.history().at(-1)?.phase, 'waiting');
-  assert.equal(competing.done, false);
-  const independent = await heldDelivery(world, c);
-  assert.equal(first.done, false);
-  assert.equal(competing.done, false);
-  assert.equal(await a.run(READY), 0);
-  await stopDelivery(a, first);
-  await heldDelivery(world, b, competing);
-  assert.equal(lstatSync(stableLock).ino, inode);
-  assert.equal(spawnSync('/usr/bin/flock', ['-n', '-x', '-E', '75', stableLock, '/usr/bin/true']).status, 75);
-  await stopDelivery(b, competing);
-  await stopDelivery(c, independent);
-
-  for (const loss of ['holder process', 'terminal']) {
-    const next = deliveryWorld(t);
-    const runtime = await nodeProcessFixture(t, { root: next.scratch }, 'scripts/merge-watch.mjs', '--hold-delivery');
-    const former = next.job(17, { pid: runtime.pid });
-    const later = next.job(18);
-    const holding = await heldDelivery(next, former);
-    const contender = later.go(HOLD);
-    await later.waitLabel(CONTENTION_WAIT);
-    if (loss === 'holder process') {
-      const exited = once(runtime.child, 'exit');
-      runtime.child.kill('SIGTERM');
-      await exited;
-    } else {
-      next.terminals.delete(former.address);
+  /** @type {[any, { result: Promise<number> }][]} */
+  const holds = [];
+  try {
+    const first = a.go(HOLD);
+    holds.push([a, first]);
+    await heldDelivery(world, a, first);
+    assert.deepEqual(readdirSync(world.lockRoot), [DELIVERY_LOCK_LEAF]);
+    assert.equal(existsSync(join(world.lockRoot, 'R_kgDO')), false);
+    const leaf = join(world.lockRoot, DELIVERY_LOCK_LEAF);
+    const record = lstatSync(join(leaf, 'ready.json'), { bigint: true });
+    const results = [];
+    for (const path of [join(leaf, 'delivery.lock'), join(leaf, `ready-${record.dev}-${record.ino}.lock`)]) {
+      const probe = await lockLeadFile(path, { shared: true, waitMs: 0, create: false });
+      probe?.release();
+      results.push(probe);
     }
-    next.tick(5_000);
-    assert.equal(await holding.result, 1);
-    assert.match(former.output.join('\n'), /delivery stopped/i);
-    if (loss === 'holder process') assert.equal(former.history().at(-1)?.phase, 'stopped');
-    else assert.deepEqual(former.history().filter(({ phase }) => phase === 'stopped'), []);
-    await heldDelivery(next, later, contender);
-    await stopDelivery(later, contender);
+    assert.deepEqual(results, [undefined, undefined], 'the first job holds both delivery locks');
+    const stableLock = join(leaf, 'delivery.lock');
+    const inode = lstatSync(stableLock).ino;
+    // The record lock's first attempt reports one used-up wait; the holder retries instead of stopping.
+    const recordCalls = [];
+    const lockRecord = (path, options) => {
+      recordCalls.push(path);
+      return recordCalls.length === 1 ? undefined : lockLeadFile(path, options);
+    };
+    const competing = b.go(HOLD, { lockRecord });
+    holds.push([b, competing]);
+    await b.waitLabel(CONTENTION_WAIT);
+    assert.equal(b.history().at(-1)?.phase, 'waiting');
+    assert.equal(competing.done, false);
+    const independent = c.go(HOLD);
+    holds.push([c, independent]);
+    await heldDelivery(world, c, independent);
+    assert.equal(first.done, false);
+    assert.equal(competing.done, false);
+    assert.equal(await a.run(READY), 0);
+    await stopDelivery(a, first);
+    await heldDelivery(world, b, competing);
+    assert.doesNotMatch(b.output.join('\n'), /could not be locked/);
+    assert.equal(lstatSync(stableLock).ino, inode);
+    assert.equal(externalLockProbe(stableLock), 'busy');
+    await stopDelivery(b, competing);
+    await stopDelivery(c, independent);
+
+    // A job whose terminal vanishes while its record lock is busy stops on the liveness check, not after another wait.
+    const gone = world.job(20);
+    const vanishCalls = [];
+    const vanish = (path, options) => {
+      vanishCalls.push(path);
+      if (vanishCalls.length > 1) return lockLeadFile(path, options);
+      world.terminals.delete(gone.address);
+      return undefined;
+    };
+    const vanished = gone.go(HOLD, { lockRecord: vanish });
+    holds.push([gone, vanished]);
+    await world.observed(() => vanished.done || world.sleeping(gone));
+    assert.deepEqual([recordCalls.length, vanishCalls.length], [2, 1]);
+    assert.equal(recordCalls[1], recordCalls[0]);
+    assert.match(recordCalls[0], /ready-\d+-\d+\.lock$/);
+    assert.equal(vanished.done, true);
+    assert.equal(await vanished.result, 1);
+    assert.match(gone.output.join('\n'), /could not verify the delivery job: no such terminal/);
+    const free = await lockLeadFile(stableLock, { waitMs: 0 });
+    assert.ok(free, 'the lane is free');
+    free.release();
+
+    for (const loss of ['holder process', 'terminal']) {
+      const next = deliveryWorld(t);
+      const runtime = await nodeProcessFixture(t, { root: next.scratch }, 'scripts/merge-watch.mjs', '--hold-delivery');
+      const former = next.job(17, { pid: runtime.pid });
+      const later = next.job(18);
+      const holding = await heldDelivery(next, former);
+      const contender = later.go(HOLD);
+      await later.waitLabel(CONTENTION_WAIT);
+      if (loss === 'holder process') {
+        const exited = once(runtime.child, 'exit');
+        runtime.child.kill('SIGTERM');
+        await exited;
+      } else {
+        next.terminals.delete(former.address);
+      }
+      next.tick(5_000);
+      assert.equal(await holding.result, 1);
+      assert.match(former.output.join('\n'), /delivery stopped/i);
+      if (loss === 'holder process') assert.equal(former.history().at(-1)?.phase, 'stopped');
+      else assert.deepEqual(former.history().filter(({ phase }) => phase === 'stopped'), []);
+      await heldDelivery(next, later, contender);
+      await stopDelivery(later, contender);
+    }
+  } finally {
+    for (const [job] of holds) job.stop();
+    for (const [, hold] of holds) await hold.result;
+  }
+});
+
+// new behaviour: a held delivery whose record lock file is replaced ends, and no later hold removes the replacement
+test('ANTI-REGRESSION: a Herdr delivery holder stops when its record lock is replaced', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job17 = world.job(17);
+  const job18 = world.job(18);
+  const hold = job17.go(HOLD);
+  let next;
+  try {
+    await heldDelivery(world, job17, hold);
+    const lane = join(world.lockRoot, DELIVERY_LOCK_LEAF);
+    const sidecars = readdirSync(lane).filter((name) => /^ready-.*\.lock$/.test(name));
+    assert.equal(sidecars.length, 1, `the lane holds one record lock: ${readdirSync(lane).join(', ')}`);
+    const sidecar = join(lane, sidecars[0]);
+    const replacement = join(lane, 'replacement.lock');
+    writeFileSync(replacement, 'recovery', { flag: 'wx', mode: 0o600 });
+    const replacedInode = lstatSync(replacement).ino;
+    renameSync(replacement, sidecar);
+
+    const sleeps = world.sleepCount(job17);
+    world.tick(5_000);
+    await world.observed(() => hold.done || world.sleepCount(job17) > sleeps);
+    assert.equal(hold.done, true, 'the holder stops instead of sleeping again');
+    assert.equal(await hold.result, 1);
+    assert.match(job17.output.join('\n'), /changed while locked/);
+
+    // Whether this hold succeeds depends on whether its record reuses the inode; either way the replacement stays.
+    const later = job18.go(HOLD);
+    next = later;
+    await world.observed(() => later.done || world.sleeping(job18));
+    assert.equal(lstatSync(sidecar).ino, replacedInode);
+    assert.equal(readFileSync(sidecar, 'utf8'), 'recovery');
+  } finally {
+    job17.stop();
+    await hold.result;
+    if (next) {
+      job18.stop();
+      await next.result;
+    }
   }
 });
 
@@ -2859,6 +3700,251 @@ test('ANTI-REGRESSION: Herdr delivery holds and readies a pull request whose set
     await stopDelivery(job, hold);
   }
   assert.equal(job.output.some((line) => /holds a key besides/.test(line)), false, job.output.join('\n'));
+});
+
+// The Windows process chain a job's delivery runs in: the delivery under claude.exe, which the job terminal's foreground (pid 4100) started.
+const windowsProcessTable = () => [
+    { pid: process.pid, ppid: 4300, name: 'node.exe', started: '20261126210300.000000+000', args: '"C:\\Program Files\\nodejs\\node.exe" C:\\r\\scripts\\merge-watch.mjs --hold-delivery' },
+    { pid: 4300, ppid: 4100, name: 'claude.exe', started: '20261126210200.000000+000', args: 'C:\\Users\\a\\.local\\bin\\claude.exe' },
+];
+
+// new behaviour: on Windows the delivery lane, like the cap lock, accepts only a folder inside the user profile.
+test('ANTI-REGRESSION: on Windows the delivery lane refuses a lane folder outside the user profile', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(world.scratch, 'outside-lanes');
+  mkdirSync(lockRoot, { mode: 0o700 });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const table = windowsProcessTable();
+  const overrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the delivery lane directory must be inside the user profile on Windows.']);
+  assert.deepEqual(readdirSync(lockRoot), [], 'no reservation is left in the lane folder');
+  assert.notEqual(job.history().at(-1)?.phase, 'waiting', 'the job holds no waiting reservation');
+});
+
+// new behaviour: on Windows the merge-watch state folder, like the lane, accepts only a folder inside the user profile.
+// The state folder is checked before the lane, so a lane the profile rule would refuse never masks it. The existing lane
+// test is the control: with the default state folder inside the profile, the refusal moves on to the lane.
+test('ANTI-REGRESSION: on Windows the delivery state folder is refused outside the user profile', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const outsideState = join(world.scratch, 'outside-state');
+  mkdirSync(outsideState, { mode: 0o700 });
+  const job = world.job(17, { watchDir: outsideState });
+  const accountHome = join(world.scratch, 'account');
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const table = windowsProcessTable();
+  const overrides = { platform: 'win32', accountHome, lockRoot: world.lockRoot, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the merge-watch state directory must be inside the user profile on Windows.']);
+});
+
+// new behaviour: on Windows the job proof walks the delivery's parent processes to the first claude.exe, whose parent must
+// be the job terminal's foreground. The foreground passes the Linux name and folder check, so only the chain can refuse it.
+test('ANTI-REGRESSION: on Windows delivery refuses a process chain with no claude.exe under the job terminal', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const table = [
+    { pid: process.pid, ppid: 4200, started: '20261126210300.000000+000', args: '"C:\\Program Files\\nodejs\\node.exe" C:\\r\\scripts\\merge-watch.mjs --hold-delivery' },
+    { pid: 4200, ppid: 4100, started: '20261126210200.000000+000', args: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile' },
+    { pid: 4100, ppid: 4000, started: '20261126210100.000000+000', args: '"C:\\Program Files\\nodejs\\node.exe" C:\\r\\scripts\\coordinator.mjs launch-job' },
+    { pid: 4000, ppid: 1, started: '20261126210000.000000+000', args: 'powershell.exe -NoExit' },
+  ];
+  const overrides = { platform: 'win32', accountHome: join(world.scratch, 'account'), readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the native job does not match its registered physical worktree.']);
+  assert.deepEqual(readdirSync(world.lockRoot), [], 'no reservation is left in the lane folder');
+  assert.notEqual(job.history().at(-1)?.phase, 'waiting', 'the job holds no waiting reservation');
+});
+
+// new behaviour: on Windows the job proof walks past the delivery's intermediate parents to the nearest claude.exe.
+test('on Windows delivery passes the job proof through an intermediate parent below claude.exe', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(accountHome, 'lanes');
+  mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const table = [
+    { pid: process.pid, ppid: 4200, name: 'node.exe', started: '20261126210300.000000+000', args: '"C:\\Program Files\\nodejs\\node.exe" C:\\r\\scripts\\merge-watch.mjs --hold-delivery' },
+    { pid: 4200, ppid: 4300, name: 'powershell.exe', started: '20261126210250.000000+000', args: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile' },
+    { pid: 4300, ppid: 4100, name: 'claude.exe', started: '20261126210200.000000+000', args: 'C:\\Users\\a\\.local\\bin\\claude.exe' },
+  ];
+  const overrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  // This host is not Windows, so the lane folder's own check is the next to refuse; reaching it shows the proof passed.
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the delivery lane path must be physical and absolute.']);
+});
+
+// Simulates on Linux a path the host normalize rewrites: git for Windows and Herdr print one the host form differs from.
+const unnormalized = (path) => path.replace(/\/([^/]+)$/, '//$1');
+
+// new behaviour: on Windows delivery compares the paths git and Herdr print after normalizing them, not in their own form.
+test("on Windows delivery compares git's and Herdr's paths in their normalized form", async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(accountHome, 'lanes');
+  mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100, cwd: unnormalized(job.worktree) });
+  job.terminal.cwd = unnormalized(job.root);
+  const listed = gitFor(settingsText(), [], { root: unnormalized(job.root), registered: [{ path: unnormalized(job.worktree), branch: 'refs/heads/job/17' }] });
+  const gitExec = (args) => {
+    if (args[0] === 'remote' && args[1] === 'get-url' && args.at(-1) === 'origin') return DELIVERY_ORIGIN + '\n';
+    if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) return unnormalized(job.worktree) + '\n';
+    return listed(args);
+  };
+  const table = windowsProcessTable();
+  const overrides = { platform: 'win32', accountHome, lockRoot, gitExec, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  // This host is not Windows, so the lane folder's own check is the next to refuse; reaching it shows the worktree check passed.
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the delivery lane path must be physical and absolute.']);
+});
+
+// new behaviour: Windows paths are case-insensitive, so Herdr's launch folder in another letter case is the same folder.
+test("on Windows delivery reads git's and Herdr's paths as the same folder whatever their letter case", async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(accountHome, 'lanes');
+  mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  job.terminal.cwd = job.root.toUpperCase();
+  assert.notEqual(job.terminal.cwd, job.root);
+  const table = windowsProcessTable();
+  const overrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  // This host is not Windows, so the lane folder's own check is the next to refuse; reaching it shows the worktree check passed.
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the delivery lane path must be physical and absolute.']);
+
+  // A launch from the worktree in another letter case is the same folder too.
+  const worktreeJob = world.job(18);
+  assert.ok(worktreeJob.terminal.foreground);
+  Object.assign(worktreeJob.terminal.foreground, { pid: 4100 });
+  worktreeJob.terminal.cwd = worktreeJob.worktree.toUpperCase();
+  assert.notEqual(worktreeJob.terminal.cwd, worktreeJob.worktree);
+  const worktreeOverrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: windowsProcessTable, readProcessStart: () => '638680000000000000' };
+  assert.equal(await worktreeJob.run(HOLD, worktreeOverrides), 1, worktreeJob.output.join('\n'));
+  assert.deepEqual(worktreeJob.output, ['Delivery stopped: the delivery lane path must be physical and absolute.']);
+});
+
+// new behaviour: the state folder exclusion compares case-insensitively on Windows. The registered worktree is real on disk,
+// and only git's listing spells it in another letter case, so only the exclusion can refuse the state folder inside it.
+test('ANTI-REGRESSION: on Windows the delivery state folder is refused inside a job worktree spelled with another letter case', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const accountHome = join(world.scratch, 'account');
+  const other = join(accountHome, 'other-worktree');
+  const insideOther = join(other, 'state');
+  mkdirSync(insideOther, { recursive: true, mode: 0o700 });
+  const job = world.job(17, { watchDir: insideOther });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const listed = gitFor(settingsText(), [], { root: job.root, registered: [
+    { path: job.worktree, branch: 'refs/heads/job/17' }, { path: other.toUpperCase(), branch: 'refs/heads/job/18' }] });
+  const gitExec = (args) => {
+    if (args[0] === 'remote' && args[1] === 'get-url' && args.at(-1) === 'origin') return DELIVERY_ORIGIN + '\n';
+    if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) return job.worktree + '\n';
+    return listed(args);
+  };
+  const table = windowsProcessTable();
+  const overrides = { platform: 'win32', accountHome, lockRoot: world.lockRoot, gitExec, readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the merge-watch state path is within a writable job or temporary directory.']);
+});
+
+// new behaviour: on Windows delivery refuses a job whose Herdr launch folder is missing, as the exact comparison did.
+test('ANTI-REGRESSION: on Windows delivery refuses a job whose Herdr launch folder is missing', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(accountHome, 'lanes');
+  mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  Object.assign(job.terminal, { cwd: null });
+  const overrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: windowsProcessTable, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the native job does not match its registered physical worktree.']);
+});
+
+// new behaviour: on Windows delivery refuses a launch folder that names another folder, as the exact comparison did.
+test('ANTI-REGRESSION: on Windows delivery refuses a job whose Herdr launch folder names another folder', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const accountHome = join(world.scratch, 'account');
+  const lockRoot = join(accountHome, 'lanes');
+  mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  const overrides = { platform: 'win32', accountHome, lockRoot, readProcessTable: windowsProcessTable, readProcessStart: () => '638680000000000000' };
+  const job = world.job(17);
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  Object.assign(job.terminal, { cwd: world.job(37, { repo: 'example/two' }).root });
+  assert.equal(await job.run(HOLD, overrides), 1, `another folder: ${job.output.join('\n')}`);
+  assert.deepEqual(job.output, ['Delivery stopped: the native job does not match its registered physical worktree.'], 'another folder');
+});
+
+// new behaviour: the comparison resolves nothing, so a launch folder without a drive is never the current drive's folder.
+test('ANTI-REGRESSION: on Windows a launch folder that names no drive is not the drive\'s folder', () => {
+  for (const folder of ['\\r', 'C:r', null]) assert.equal(sameLaunchFolder(folder, 'C:\\r', 'win32'), false, String(folder));
+  assert.equal(sameLaunchFolder('c:\\R', 'C:\\r', 'win32'), true);
+  assert.equal(sameLaunchFolder('/r', '/r', 'linux'), true);
+  assert.equal(sameLaunchFolder('/R', '/r', 'linux'), false);
+});
+
+// new behaviour: on Windows the nearest claude.exe must be a child of the job terminal's foreground, however it is named.
+test('on Windows delivery refuses a nearest claude.exe that the job terminal did not start', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17);
+  assert.ok(job.terminal.foreground);
+  Object.assign(job.terminal.foreground, { pid: 4100 });
+  const table = [
+    { pid: process.pid, ppid: 4300, name: 'node.exe', started: '20261126210300.000000+000', args: '"C:\\Program Files\\nodejs\\node.exe" C:\\r\\scripts\\merge-watch.mjs --hold-delivery' },
+    { pid: 4300, ppid: 4000, name: 'claude.exe', started: '20261126210200.000000+000', args: 'C:\\Users\\a\\.local\\bin\\claude.exe' },
+    { pid: 4000, ppid: 4100, name: 'powershell.exe', started: '20261126210100.000000+000', args: 'powershell.exe -NoExit' },
+  ];
+  const overrides = { platform: 'win32', accountHome: join(world.scratch, 'account'), readProcessTable: () => table, readProcessStart: () => '638680000000000000' };
+  assert.equal(await job.run(HOLD, overrides), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: the native job does not match its registered physical worktree.']);
+});
+
+// new behaviour: Windows has no /proc, so the delivery reads its own start time from Get-Process.
+// The namespace is read through the reader's own shape, so the file type-checks where the export is missing.
+/** @typedef {{ deliveryProcessStart: (pid: number, platform: string, exec: Function) => string }} StartReader */
+test('on Windows the delivery process start time is read through PowerShell', () => {
+  const calls = [];
+  const exec = (file, args, options) => {
+    calls.push({ file, args, pid: options.env.FABRAIK_DELIVERY_PID });
+    return '638680000000000000\r\n';
+  };
+  const start = /** @type {StartReader} */ (/** @type {unknown} */ (coordinator)).deliveryProcessStart(4242, 'win32', exec);
+  assert.equal(start, '638680000000000000');
+  assert.deepEqual(calls, [{ file: 'powershell.exe', pid: '4242',
+    args: ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id $env:FABRAIK_DELIVERY_PID).StartTime.ToUniversalTime().Ticks'] }]);
+});
+
+// existing behaviour: coordinated delivery runs on Linux and Windows only.
+test('delivery on macOS is still refused', { timeout: 30_000 }, async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const job = deliveryWorld(t).job(17);
+  assert.equal(await job.run(HOLD, { platform: 'darwin' }), 1, job.output.join('\n'));
+  assert.deepEqual(job.output, ['Delivery stopped: coordinated delivery requires Linux.']);
 });
 
 test('ANTI-REGRESSION: Herdr readiness waits for the new attempt after a stopped delivery', async (t) => {
@@ -2988,6 +4074,7 @@ test('ANTI-REGRESSION: Herdr readiness ignores malformed records for unrelated r
   }
 });
 
+// existing behaviour: a held delivery whose readiness record was replaced ends instead of sleeping again
 test('ANTI-REGRESSION: Herdr readiness requires the original locked record', async (t) => {
   if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
   const world = deliveryWorld(t);
@@ -3003,15 +4090,42 @@ test('ANTI-REGRESSION: Herdr readiness requires the original locked record', asy
     renameSync(replacement, ready);
     assert.notEqual(lstatSync(ready).ino, originalInode);
     assert.deepEqual(readFileSync(ready), record);
-    const probe = spawnSync('/usr/bin/flock', ['-n', '-x', '-E', '75', join(lane, 'delivery.lock'), '/usr/bin/true']);
-    assert.equal(probe.status, 75, 'the same-repository lock remains held');
+    assert.equal(externalLockProbe(join(lane, 'delivery.lock')), 'busy', 'the same-repository lock remains held');
 
     assert.equal(await job.run(READY), 1, 'the unlocked replacement cannot confirm readiness');
     assert.match(job.output.at(-1) ?? '', /reservation/i);
+
+    const sleeps = world.sleepCount(job);
+    world.tick(5_000);
+    await world.observed(() => holder.done || world.sleepCount(job) > sleeps);
+    assert.equal(holder.done, true, 'the holder stops instead of sleeping again');
+    assert.equal(await holder.result, 1);
+    assert.match(job.output.join('\n'), /ready\.json has more than one link/);
   } finally {
-    await stopDelivery(job, holder);
+    job.stop();
+    await holder.result;
   }
   assert.deepEqual(readFileSync(ready), record, 'the prior holder leaves the replacement alone');
+});
+
+// existing behaviour: a held delivery whose readiness record stops being a private file ends
+test('ANTI-REGRESSION: a Herdr delivery holder stops when its readiness record stops being private', async (t) => {
+  if (DELIVERY_LINUX_ONLY) return t.skip(DELIVERY_LINUX_ONLY);
+  const world = deliveryWorld(t);
+  const job = world.job(17, { codex: true });
+  const holder = await heldDelivery(world, job);
+  try {
+    chmodSync(join(world.lockRoot, DELIVERY_LOCK_LEAF, 'ready.json'), 0o644);
+    const sleeps = world.sleepCount(job);
+    world.tick(5_000);
+    await world.observed(() => holder.done || world.sleepCount(job) > sleeps);
+    assert.equal(holder.done, true, 'the holder stops instead of sleeping again');
+    assert.equal(await holder.result, 1);
+    assert.match(job.output.join('\n'), /not an owned private file/);
+  } finally {
+    job.stop();
+    await holder.result;
+  }
 });
 
 // existing behaviour: a Codex job's launch cwd must be the repository root
@@ -4003,6 +5117,31 @@ test('coordinator command refuses unknown arguments with exit 2', (t) => {
   assert.deepEqual(calls(), [], 'a refused command reaches neither git, herdr-app nor hc');
 });
 
+// new behaviour: the launch command refuses a malformed model, an unknown effort and a missing login before any call
+test('coordinator launch refuses a malformed model, an unknown effort or a missing login with its usage and exit 2', (t) => {
+  const { calls, run } = wireFixture(t, { listing: (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] }) });
+  for (const args of [['launch', '--runtime', 'claude', '--login', 'owner', '--model', 'a b', '--effort', 'medium'],
+    ['launch', '--runtime', 'claude', '--login', 'owner', '--model', 'opus', '--effort', 'huge'],
+    ['launch', '--runtime', 'claude', '--model', 'opus', '--effort', 'medium']]) {
+    const refused = run(args);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.match(refused.stderr, /^usage: node scripts\/coordinator\.mjs .*\blaunch --runtime\b/, args.join(' '));
+    assert.equal(refused.stdout, '');
+  }
+  assert.deepEqual(calls(), [], 'a refused launch reaches neither git, herdr-app nor hc');
+});
+
+test('coordinator launch refuses a login that is not a GitHub login with its usage and exit 2', (t) => {
+  const { calls, run } = wireFixture(t, { listing: (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] }) });
+  for (const login of ['bad login', 'bad/name', 'owner-']) {
+    const refused = run(['launch', '--runtime', 'codex', '--login', login]);
+    assert.equal(refused.status, 2, login);
+    assert.match(refused.stderr, /^usage: node scripts\/coordinator\.mjs .*\blaunch --runtime\b/, login);
+    assert.equal(refused.stdout, '');
+  }
+  assert.deepEqual(calls(), [], 'a refused launch reaches neither git, herdr-app nor hc');
+});
+
 test('coordinator command lists unfinished jobs through the tools on PATH', (t) => {
   if (OFF_LINUX) return t.skip(OFF_LINUX);
   // Card 5's branch is underway, card 7's asks the owner, and card 9's draft is newest claimed by this machine.
@@ -4093,11 +5232,11 @@ test('929 opens the selected installed coordinator runtime', (t) => {
   assert.deepEqual(claudeOnly.calls().filter(({ tool }) => tool === 'herdr-app' || tool === 'hc'), []);
 });
 
-async function nodeProcessFixture(t, { root, nodeArgs = ['--no-warnings'] }, scriptArg, ...args) {
+async function nodeProcessFixture(t, { root }, scriptArg, ...args) {
   const scriptPath = join(root, scriptArg);
   mkdirSync(dirname(scriptPath));
   writeFileSync(scriptPath, 'setInterval(() => {}, 1000);\nprocess.send("ready");\n');
-  const child = spawn(process.execPath, [...nodeArgs, scriptArg, ...args],
+  const child = spawn(process.execPath, ['--no-warnings', scriptArg, ...args],
     { cwd: root, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
   t.after(() => { child.kill('SIGKILL'); });
 
@@ -4121,19 +5260,7 @@ async function nodeProcessFixture(t, { root, nodeArgs = ['--no-warnings'] }, scr
 
   const pid = child.pid;
   assert.ok(pid, `the ready Node fixture ${scriptArg} has a PID`);
-  const assertRunning = () => {
-    assert.doesNotThrow(() => process.kill(pid, 0), `Node fixture process ${pid} is alive`);
-    const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
-    assert.deepEqual(argv.slice(1, nodeArgs.length + 2), [...nodeArgs, scriptArg],
-      `Node fixture process ${pid} still names its options and script`);
-    return argv;
-  };
-  assertRunning();
-  return { pid, scriptPath, assertRunning, child };
-}
-
-function legacyLeadFixture(t, fixture, ...args) {
-  return nodeProcessFixture(t, fixture, 'scripts/lead.mjs', '--login', 'octocat', ...args);
+  return { pid, child };
 }
 
 const chooserHerdrCalls = (fixture) => fixture.calls().filter(({ tool }) => tool === 'herdr-app' || tool === 'hc');
@@ -4173,21 +5300,6 @@ test('929 resolves the session chooser login at the project root', async (t) => 
   assertRefusal(offRoot, offRoot.run(open, {}, nested), /root/i);
   assert.deepEqual(gh(offRoot), [], 'a different working folder is refused before the login read');
 
-  const withLead = fixture();
-  const lead = await legacyLeadFixture(t, withLead);
-  assertRefusal(withLead, withLead.run(open), new RegExp(`standing lead.*${lead.pid}`, 'i'));
-  lead.assertRunning();
-
-  const unread = fixture({ inventoryUnread: true });
-  assertRefusal(unread, unread.run(open), /cannot read process inventory/);
-
-  const withDriver = fixture();
-  const driver = await legacyLeadFixture(t, withDriver, '--space', 'spproject1');
-  const besideDriver = withDriver.run(open);
-  assert.equal(besideDriver.status, 0, besideDriver.stdout + besideDriver.stderr);
-  assert.equal(newTabs(chooserHerdrCalls(withDriver).map(({ args }) => args)).length, 1);
-  driver.assertRunning();
-
   const coordinator = (id, terminals) => ({ id, name: 'Coordinator', terminals });
   for (const { cause, tabs, hc, noCoordinatorReads } of [
     { cause: /tab|duplicate/i, tabs: [coordinator('tbc', listed('t1')), coordinator('tbc', listed('t2'))] },
@@ -4206,150 +5318,6 @@ test('929 resolves the session chooser login at the project root', async (t) => 
     assert.deepEqual(chooserHerdrCalls(changed).filter(({ tool, args }) => tool === 'herdr-app' && args[0] === 'do'), [],
       'the locked opener changes no tab when the layout became ambiguous');
   }
-});
-
-test('ANTI-REGRESSION: the coordinator chooser refuses a live standing lead after its script was removed', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  const open = ['open', '--runtime', 'codex'];
-  const text = settingsText({ runtimes: ['claude', 'codex'], coordinator: { runtime: 'claude' } });
-  const listing = (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] });
-  const withLead = wireFixture(t, { listing, text });
-  const lead = await legacyLeadFixture(t, withLead);
-  unlinkSync(lead.scriptPath);
-  lead.assertRunning();
-
-  const otherProject = wireFixture(t, { listing, text });
-  assert.notEqual(realpathSync(otherProject.root), realpathSync(withLead.root));
-  const opened = otherProject.run(open);
-  lead.assertRunning();
-  assert.equal(opened.status, 0, opened.stdout + opened.stderr);
-  assert.equal(newTabs(chooserHerdrCalls(otherProject).map(({ args }) => args)).length, 1);
-
-  const refused = withLead.run(open);
-  lead.assertRunning();
-  const herdrCalls = chooserHerdrCalls(withLead);
-  const tabCount = newTabs(herdrCalls.map(({ args }) => args)).length;
-  assert.equal(refused.status, 1, `Same-root chooser created ${tabCount} tab(s): ${refused.stdout}${refused.stderr}`);
-  assert.match(refused.stdout + refused.stderr, new RegExp(`standing lead.*\\b${lead.pid}\\b`, 'i'));
-  assert.deepEqual(herdrCalls, [], 'a refusal before launch reaches no Herdr command');
-});
-
-test('ANTI-REGRESSION: the coordinator chooser accepts a live Node script with the retired lead path as input', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  const text = settingsText({ runtimes: ['claude', 'codex'], coordinator: { runtime: 'claude' } });
-  const listing = (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] });
-  const fixture = wireFixture(t, { listing, text });
-  const scriptArg = 'scripts/worker.mjs';
-  const inputArg = 'scripts/lead.mjs';
-  const worker = await nodeProcessFixture(t, fixture, scriptArg, inputArg);
-  assert.equal(existsSync(join(fixture.root, inputArg)), false, 'the retired lead script entry is absent');
-  const argv = worker.assertRunning();
-  assert.deepEqual(argv.slice(2, -1), [scriptArg, inputArg]);
-
-  const opened = fixture.run(['open', '--runtime', 'codex']);
-  assert.deepEqual(worker.assertRunning(), argv);
-  const tabCount = newTabs(fixture.calls().filter(({ tool }) => tool === 'herdr-app').map(({ args }) => args)).length;
-  assert.equal(opened.status, 0, `Chooser created ${tabCount} tab(s) beside live Node fixture PID ${worker.pid}: ${opened.stdout}${opened.stderr}`);
-  assert.equal(tabCount, 1);
-});
-
-test('ANTI-REGRESSION: the chooser identifies the retired lead with Node options before its entrypoint', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  const open = ['open', '--runtime', 'codex'];
-  const text = settingsText({ runtimes: ['claude', 'codex'], coordinator: { runtime: 'claude' } });
-  const listing = (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] });
-
-  for (const option of ['--enable-source-maps', '--require']) {
-    await t.test(option, async (t) => {
-      const fixture = wireFixture(t, { listing, text });
-      const nodeArgs = ['--no-warnings', option];
-      if (option === '--require') {
-        const preload = join(fixture.root, 'preload.cjs');
-        writeFileSync(preload, 'module.exports = {};\n');
-        nodeArgs.push(preload);
-      }
-
-      const scriptArg = 'scripts/lead.mjs';
-      const leadArgs = ['--login', 'octocat'];
-      const lead = await nodeProcessFixture(t, { root: fixture.root, nodeArgs }, scriptArg, ...leadArgs);
-      const argv = [process.execPath, ...nodeArgs, scriptArg, ...leadArgs, ''];
-      const assertRefusal = (entryState) => {
-        assert.deepEqual(lead.assertRunning(), argv);
-        const refused = fixture.run(open);
-        assert.deepEqual(lead.assertRunning(), argv);
-        const herdrCalls = chooserHerdrCalls(fixture);
-        const tabCount = newTabs(herdrCalls.map(({ args }) => args)).length;
-        assert.equal(refused.status, 1, `Chooser ${entryState} created ${tabCount} tab(s) beside live Node fixture PID ${lead.pid}: ${refused.stdout}${refused.stderr}`);
-        assert.match(refused.stdout + refused.stderr, new RegExp(`standing lead.*\\b${lead.pid}\\b`, 'i'));
-        assert.deepEqual(herdrCalls, [], 'a refusal before launch reaches no Herdr command');
-      };
-
-      assert.equal(existsSync(lead.scriptPath), true);
-      assertRefusal('with the script present');
-      unlinkSync(lead.scriptPath);
-      assert.equal(existsSync(lead.scriptPath), false);
-      assertRefusal('after script removal');
-    });
-  }
-});
-
-test('ANTI-REGRESSION: the chooser holds an ambiguous live Node lead without a stop instruction', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  const text = settingsText({ runtimes: ['claude', 'codex'], coordinator: { runtime: 'claude' } });
-  const listing = (name, root) => ({ spaces: [space('spproject1', name, [], null, root)] });
-  const fixture = wireFixture(t, { listing, text });
-  const nodeArgs = ['--icu-data-dir', fixture.root];
-  const lead = await legacyLeadFixture(t, { root: fixture.root, nodeArgs });
-  const scriptPath = realpathSync(lead.scriptPath);
-  const argv = [process.execPath, ...nodeArgs, 'scripts/lead.mjs', '--login', 'octocat', ''];
-  assert.deepEqual(lead.assertRunning(), argv);
-
-  const refused = fixture.run(['open', '--runtime', 'codex']);
-  assert.deepEqual(lead.assertRunning(), argv);
-  const output = refused.stdout + refused.stderr;
-  const tabCount = newTabs(chooserHerdrCalls(fixture).map(({ args }) => args)).length;
-  assert.equal(refused.status, 1, `Chooser created ${tabCount} tab(s) beside live Node fixture PID ${lead.pid}: ${output}`);
-  assert.equal(tabCount, 0);
-  const diagnostic = `Node options make it unclear whether process ${lead.pid} runs ${scriptPath}. Inspect its invocation`;
-  assert.ok(output.includes(diagnostic), output);
-  assert.doesNotMatch(output.replace(diagnostic, ''), /\bstop\b|\bstanding lead\b/i);
-});
-
-/** The standing-lead check's machine inventory, reporting `pid` as the one live process. */
-const standingLeadMachine = (pid) => ({
-  platform: 'linux',
-  account: { uid: /** @type {() => number} */ (process.getuid)() },
-  run: () => ({ status: 0, stdout: `${pid}\n`, stderr: '' }),
-  processCommand: standingLeadProcessCommand,
-});
-
-test('ANTI-REGRESSION: the standing-lead check still refuses a process whose command line it cannot read', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  // One Node process holds the oversized argument itself, so killing it leaves nothing behind.
-  const lead = spawn(process.execPath, ['-e', "console.log('ready'); setInterval(() => {}, 1e6)", 'a'.repeat(70 * 1024)], { stdio: ['ignore', 'pipe', 'ignore'] });
-  t.after(() => lead.kill());
-  await once(lead.stdout, 'data');
-  const pid = lead.pid;
-  assert.deepEqual(standingLead({ root: join(SCRIPTS, '..'), env: {}, command: 'coordinator.mjs open', machine: standingLeadMachine(pid) }), {
-    cause: `process ${pid}'s command line is unavailable`,
-    fix: 'run coordinator.mjs open on the Linux machine that runs Herdr',
-  });
-});
-
-test('ANTI-REGRESSION: the standing-lead check skips a zombie process as gone', async (t) => {
-  if (OFF_LINUX) return t.skip(OFF_LINUX);
-  // The child exits only once its parent has exec'd into `sleep`, which never reaps it, so it stays a zombie.
-  const holder = spawn('sh', ['-c', 'sh -c \'until read c < /proc/$PPID/comm && [ "$c" = sleep ]; do :; done\' & echo $!; exec sleep 30 >/dev/null'], { stdio: ['ignore', 'pipe', 'ignore'] });
-  t.after(() => holder.kill());
-  const [first] = await once(holder.stdout, 'data');
-  const zombie = Number(String(first).split('\n')[0]);
-  const state = () => readFileSync(`/proc/${zombie}/stat`, 'utf8').split(') ').at(-1)?.[0];
-  for (let waited = 0; state() !== 'Z'; waited += 20) {
-    assert.ok(waited < 5000, `process ${zombie} never became a zombie`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  assert.equal(readFileSync(`/proc/${zombie}/cmdline`).length, 0, `zombie ${zombie} has a command line`);
-  assert.deepEqual(standingLead({ root: join(SCRIPTS, '..'), env: {}, command: 'coordinator.mjs open', machine: standingLeadMachine(zombie) }), {});
 });
 
 test('coordinator command opens a missing coordinator with only PATH and HOME set', (t) => {
@@ -4371,6 +5339,7 @@ test('coordinator wake command refuses an extra argument with exit 2', (t) => {
 });
 
 test('ANTI-REGRESSION: waking the coordinator makes no tracker request', (t) => {
+  if (NO_EXTENSIONLESS_FAKES) return t.skip(NO_EXTENSIONLESS_FAKES);
   const { calls, run } = wireFixture(t, { listing: (name, root) => ({ spaces: [{ ...space('spproject1', name, [], null, root), tabs: [{ id: 'tbc', name: 'Coordinator', terminals: [{ terminal: 't9' }] }] }] }),
     hc: { get: JSON.stringify(liveRecord()) } });
   const woken = run(['wake']);
@@ -4387,6 +5356,7 @@ function wakeAfterMoveIn(root, command = COMMAND) {
 }
 
 test('board wake sends one hc send through the real command and returns undefined', (t) => {
+  if (NO_EXTENSIONLESS_FAKES) return t.skip(NO_EXTENSIONLESS_FAKES);
   const { root, calls } = wireFixture(t, { listing: (name, folder) => ({ spaces: [{ ...space('spproject1', name, [], null, folder), tabs: [{ id: 'tbc', name: 'Coordinator', terminals: [{ terminal: 't9' }] }] }] }),
     hc: { get: JSON.stringify(liveRecord()) } });
   assert.equal(wakeAfterMoveIn(root), undefined);
@@ -4605,6 +5575,7 @@ const forwardListing = (name, folder) => ({ spaces: [{ ...space('sp1', name, [],
 
 // new behaviour: the forward-watch command reads only Herdr and types one line into the coordinator
 test('ANTI-REGRESSION: forwarding an earlier coordinator job notes makes no tracker request', (t) => {
+  if (NO_EXTENSIONLESS_FAKES) return t.skip(NO_EXTENSIONLESS_FAKES);
   const { calls, run } = wireFixture(t, { listing: forwardListing, hc: {
     events: `${SUBSCRIPTION_SNAPSHOT}\n{"event":"terminal_status_changed"}\n`,
     ls: [JSON.stringify({ terminals: [{ address: 't5', state: 'live' }] }), JSON.stringify({ terminals: [{ address: 't5', state: 'finished' }] })],
@@ -4685,7 +5656,7 @@ test('forward starts the watch in the job notes tab as a child of the coordinato
   assert.deepEqual(flagsOf(created), { space: 'spproject1', name: 'job notes', folder: ROOT, focus: 'false', mod: 'help' });
   assert.deepEqual(fixture.runs(), [['run', '--bg', '--parent', 't1', '--name', 't1-notes', '--cwd', ROOT,
     '--label', 'herdr.space=spproject1', '--label', 'herdr.tab=tb-job-notes', '--label', 'fabraik.role=forwarder', '--label', 'fabraik.space=spproject1',
-    '--json', '--', process.execPath, `${ROOT}/scripts/coordinator.mjs`, 'forward-watch', '--coordinator', 't1', '--space', 'spproject1']]);
+    '--json', '--', process.execPath, join(ROOT, 'scripts', 'coordinator.mjs'), 'forward-watch', '--coordinator', 't1', '--space', 'spproject1']]);
   for (const flag of ['--no-notify', '--keep', '--outlive-parent']) assert.ok(!fixture.runs()[0].includes(flag), `the run carries no ${flag}`);
   assert.equal(fixture.helpPanes.size, 0, 'the Help pane is closed once the watch is adopted');
   assert.deepEqual(fixture.calls.filter(([verb]) => verb === 'read').at(-1), ['read', 't10', '--lines', '5']);
@@ -4750,6 +5721,7 @@ test('forward launches a forward-watch the real command accepts', async (t) => {
   const [launched] = fixture.runs();
   const watch = launched.slice(launched.indexOf('--') + 3);
   assert.equal(watch[0], 'forward-watch');
+  if (NO_EXTENSIONLESS_FAKES) return t.skip(NO_EXTENSIONLESS_FAKES);
   const { run } = wireFixture(t, { listing: forwardListing, hc: { events: `${SUBSCRIPTION_SNAPSHOT}\n`, ls: JSON.stringify({ terminals: [] }) } });
   const watched = run(watch);
   assert.equal(watched.status, 0, watched.stdout + watched.stderr);
@@ -5012,4 +5984,30 @@ test('coordinator command resumes a session whose transcript is a regular file a
 test('the resume skill names the job prompt the coordinator sends', () => {
   const skill = readFileSync(join(SCRIPTS, '..', '.agents', 'skills', 'resume', 'SKILL.md'), 'utf8');
   assert.ok(skill.includes(`\`${jobPrompt('<N>')}\``), `SKILL.md names the job prompt ${jobPrompt('<N>')} in backticks`);
+});
+
+// new behaviour: Windows has no /usr/bin/env, so the job tab runs the coordinator command's launch-job with the same marks and claude arguments
+test('on Windows a job starts in a tab that runs the launch-job command with the job marks', async (t) => {
+  const root = fabraikRepository(t);
+  const project = withCoordinator(space('spproject1', 'fabraik', [['tb1', '1']], null, `${root.toUpperCase()}/`));
+  const job = jobFixture({ root, spaces: [project], pages: READY_BOARD() });
+  job.details.t0 = { ...WINDOWS_RUNNING, address: 't0' };
+  assert.equal(await job.start(5, { platform: 'win32' }), 0, job.lines.join('\n'));
+  // Git prints the profile's long name where the temporary folder may hold its 8.3 short one, and the pinned root is built from git's.
+  const common = pinGit(root, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  const linux = jobRunArgs('fabraik-job-5', 5, 'tb-job-5', root).map((word) => word.startsWith('FABRAIK_WORKFLOW_ROOT=')
+    ? `FABRAIK_WORKFLOW_ROOT=${join(common, 'fabraik-workflow', pinGit(root, 'rev-parse', 'refs/heads/main'))}` : word);
+  const env = linux.indexOf('/usr/bin/env');
+  assert.deepEqual(job.runs(), [[...linux.slice(0, env), process.execPath, win32.join(root, 'scripts', 'coordinator.mjs'), 'launch-job', ...linux.slice(env + 1)]]);
+  assert.equal(job.helpPanes.size, 0);
+});
+
+test('the launch-job command starts claude with the job marks in its environment', { skip: process.platform === 'win32' && 'the fake claude is a POSIX shell script' }, (t) => {
+  const bin = mkdtempSync(join(tmpdir(), 'launch-job-'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "A=$A B=$B"\necho "args=$*"\nexit 7\n');
+  chmodSync(join(bin, 'claude'), 0o755);
+  const run = spawnSync(process.execPath, [COMMAND, 'launch-job', 'A=1', 'B=2', 'claude', '--x', 'y'], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` } });
+  assert.equal(run.stdout, 'A=1 B=2\nargs=--x y\n', run.stderr);
+  assert.equal(run.status, 7);
 });

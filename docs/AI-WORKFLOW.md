@@ -80,7 +80,7 @@ card there unasked. The owner can also name a card or pick from the agents' tabl
 directly. That pick is work-pick, the first decision. The agents plan, build in bounded slices, verify, review and write
 the pull request body. The owner reads a short decision card taken from that body, with a screenshot when the change is
 visible. The owner may ask to see the whole body. Where the work waits, the owner reads the card before delivery, and
-the owner's yes is push authorisation, the second decision. The card records that yes as the owner's answer for the
+the owner's yes is push authorisation, the second decision. That yes holds in the session it reaches, for the
 version shown. Where the work merges on its evidence, the agents deliver first and the owner reads the card after the
 merge. The owner's yes does not accept a material limit the card leaves out. The agents then deliver and close out
 without asking again.

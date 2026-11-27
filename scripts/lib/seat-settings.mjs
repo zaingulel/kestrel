@@ -14,7 +14,7 @@
 //   if a newer copy of the shared workflow admits this, undo the edit, apply the release update that installs that copy, then make the edit again
 //
 //  1. The file is a regular file reached through no symlinked directory, read without following a symlink,
-//     holding one JSON object with the keys `version` and `seats` and, optionally, `runtimes`, `planApproval`, `greptile`, `herdr`, `docSweep`, `docsSite`, `crossFamilyReview`, `waitForOwner` and `coordinator`.
+//     holding one JSON object with the keys `version` and `seats` and, optionally, the other keys `SETTINGS_KEYS` (runtimes.mjs) names, each held to `readSettingsHeader`'s rules there.
 //     `version` is exactly 1; any other version is refused as unsupported by this copy, with the recovery. Another
 //     key is refused with the recovery.
 //  2. `seats` is an object whose only keys are `claude` and `codex`, each an object from seat name to an object of
@@ -60,7 +60,7 @@
 // 15. `productManager` is retired with the product manager run: a file that holds it is refused by name and told to
 //     remove it.
 // 16. `waitForOwner`, when present, is `always`, `on-screen` or `when-needed`; with no key, or no file, it is
-//     `always`. Anything else is refused, and so is the retired key `preApprovedRun`. The launcher, the Herdr lead and
+//     `always`. Anything else is refused, and so is the retired key `preApprovedRun`. The launcher, the Herdr coordinator and
 //     the publication guard read it on the fetched `main`, as the `resume` skill says under "2. Work-pick"; updates
 //     leave the value untouched.
 //

@@ -30,11 +30,13 @@ pull request route below. Otherwise run `scripts/gates/pre-push-main <origin-mai
 change qualifies for the direct route, any other exit means the pull request route below. A change section 6 places
 above the `document` tier takes the pull request route whatever the gate's exit, and so do a run session other than a
 job a Herdr coordinator started, whose mark refuses a push to `main`, and a coordinator delivering a job whose named
-session still runs, whose yes covers only that job's branch and pull request. On the direct route: settle the
-convergence checks exactly as step 1 names on `<head>`, so their receipts carry `head=<head>` except a receipt the
-Receipt reuse rule below carries from a commit added on top, always from the head that receipt ran on, and those
-receipts replace any the approved body quoted for an earlier head; fill that body's `Carried from:`, `Changed paths:`
-and `Carried receipts:` lines as that rule says, and nothing else in that body changes. Then squash the job with `git
+session still runs, whose yes covers only that job's branch and pull request. On the direct route: settle on `<head>`
+the convergence checks step 1 names that the repository's `docs/TESTING-STRATEGY.md` does not leave to the pre-push
+hook, so their receipts carry `head=<head>` except a receipt the Receipt reuse rule below carries from a commit added on
+top, always from the head that receipt ran on, and those receipts replace any the approved body quoted for an earlier
+head; fill that body's `Carried from:`, `Changed paths:` and `Carried receipts:` lines as that rule says, and nothing
+else in that body changes but that the strategy's `Pushed checks:` line replaces the receipts of the checks it leaves
+to the hook. Then squash the job with `git
 reset --soft <origin-main>` and `git commit` into one commit whose message is the pull-request title, a blank line, the
 same approved body with its review line and receipts so replaced, a blank line, `Closes #<issue>`, and the attribution
 lines. Before pushing, confirm `git rev-parse HEAD^{tree}` equals `git rev-parse <head>^{tree}`, so the pushed commit
@@ -59,10 +61,10 @@ uncommitted change and the session user may execute its `pre-push`, so the pre-p
 remote `main`'s, and no ref named `ORIG_HEAD` exists; and only where the card carries no `show-me-first` marker and
 the saved write-up at `<head>` holds no `check` or `screenshot` reason, the only holds a Herdr job has.
 
-**Receipt reuse.** After the rebase in step 1, settle each convergence check the testing strategy names on the current
-head, `git rev-parse HEAD`. A receipt here is the check's latest worklog receipt for the same command, and it counts
-only while `git status --porcelain --untracked-files=normal` prints nothing. Which checks run again follows
-**Find out first** under "6. Verify and review": here the heavier course that rule names is running every check
+**Receipt reuse.** After the rebase in step 1, settle each convergence check the testing strategy names, less those it
+leaves to the pre-push hook on the direct route, on the current head, `git rev-parse HEAD`. A receipt here is the
+check's latest worklog receipt for the same command, and it counts only while
+`git status --porcelain --untracked-files=normal` prints nothing. Which checks run again follows **Find out first** under "6. Verify and review": here the heavier course that rule names is running every check
 again. A check runs again unless one of the three cases below keeps its receipt, and no case keeps a receipt whose
 run or inputs the session knows were invalidated after it was written, such as an upgraded tool or dependencies
 installed again: that check runs again.

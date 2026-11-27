@@ -26,6 +26,7 @@ import { pathToFileURL } from 'node:url';
 import { installFakeGh, installFakeTransport } from './fake-gh.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { CARDS_DIR } from './board-markdown.mjs';
+import { readDetails } from './board-read.mjs';
 // Request routing and the empty issue walk only, which read no board configuration.
 import { boardRequestKind, issuesPage } from './board-fixtures.mjs';
 import { CONFIG_TAIL, GITHUB_KIND_TYPES_TEST_CONFIG, GITHUB_TEST_CONFIG as USER_CONFIG, LINEAR_TEST_CONFIG, MARKDOWN_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
@@ -666,7 +667,7 @@ if (args[0] === 'pr' && args[1] === 'list') {
 after(() => markdownGh.cleanup());
 
 function git(cwd, ...args) {
-  const run = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', ...args], {
+  const run = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...args], {
     cwd,
     encoding: 'utf8',
     env: gitEnvironment(),
@@ -927,6 +928,13 @@ test('markdown board: ANTI-REGRESSION: a card file that is a link is refused on 
   assert.ok(write.stderr.includes(`${CARDS_DIR}/1.md: only regular files named <N>.md`), write.stderr);
   assert.ok(write.stderr.endsWith('found a symlink\n'), write.stderr);
   assert.deepEqual(readFileSync(outsideCard), before);
+});
+
+test('readDetails refuses a markdown details read with no board snapshot', () => {
+  assert.throws(
+    () => readDetails('markdown', { executor: () => { throw new Error('no executor call expected'); } }, [7]),
+    { name: 'Error', message: 'readDetails: a markdown details read needs the board snapshot readBoard returned' },
+  );
 });
 
 // The markdown lifecycle, every step through the spawned CLIs: a bare origin, an integration clone A

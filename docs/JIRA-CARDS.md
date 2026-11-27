@@ -246,8 +246,6 @@ remain in their authoritative skills. This table also replaces Linear-specific a
 | Free-card and claim reads | `jira-card.mjs view {{KEY}}` and `view {{KEY}} --board`, with the completeness and identity checks of [Claims and withdrawal](#claims-and-withdrawal) |
 | Assign, claim or withdraw | The account-ID operations in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs {{KEY}} "Awaiting push"` before requesting push authorization |
-| Owner answer (`resume`, "7. Push authorisation") | Post the record's one line with `jira-card.mjs comment {{KEY}} --body-file {{FILE}}`, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives, from the account the session publishes as. The queue panel writes none on this tracker, so the session in whose chat the owner answered writes it before it acts |
-| Fix built (`resume`, "7. Push authorisation") | Post the fix line the same way, once the fix is built and before its push |
 | Closing line and branch | Standalone `Closes {{KEY}}` and `job/{{KEY}}`; always the pull request route |
 | Draft opened | Leave the card at its explicit current column; opening a draft does not move it to In review |
 | Pull request marked ready | When the pull request is marked ready, explicitly run `board-move.mjs {{KEY}} "In review"`, not on draft opening |

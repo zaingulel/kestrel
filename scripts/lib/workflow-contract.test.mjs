@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -240,6 +239,10 @@ function guardFixture(t, runtime, branch) {
 // request 12 of job/7, ready from `head` into main at `base` with no merge queue or auto-merge, as the plain view and as
 // the exact publication path's pinned read beside the card, and of main's one required check, `test`, passed; and
 // `comments` follow the claim on the card.
+/**
+ * @param {string} dir
+ * @param {{ pull?: { head: string, base: string, body: string }, comments?: string[], labels?: string[] }} [options]
+ */
 function standInGh(dir, { pull, comments = [], labels = [] } = {}) {
   const bin = join(dir, 'bin');
   const log = join(dir, 'gh-calls.log');
@@ -635,7 +638,7 @@ test('929 refuses unverifiable Codex Herdr bind callbacks', { skip: without('cod
   assert.equal(harmless.status, 0, harmless.stderr);
   for (const wrapped of [`env ${command}`, `${command} --extra`, `${command} && echo done`]) {
     const result = run({ ...payload, tool_input: { command: wrapped, workdir: root } });
-    assert.ok([0, 2].includes(result.status), result.stderr);
+    assert.ok(result.status === 0 || result.status === 2, result.stderr);
   }
 });
 
@@ -744,11 +747,11 @@ function coordinatedJobFixture(t, settingsText) {
 
 // The expected outcomes come from card #967's rule that a Herdr job reads no note, receipt, menu answer or comment as
 // approval: only its card's show-me-first marker holds it, and the guard learns the job is coordinated from
-// FABRAIK_COORDINATED_JOB=1 in its environment. The same marked card and owner answer comment admit an uncoordinated
-// session's merge, so only the mark tells the two apart.
+// FABRAIK_COORDINATED_JOB=1 in its environment. Only a coordinated job takes the pinned merge form; the same pinned
+// command without the mark is refused for its form.
 // Recurring cost: one disposable Git fixture and two hook starts, no network.
-test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from its environment, so a comment never admits a coordinated job\'s merge', { skip: without('claude') || withoutStandInGh }, (t) => {
-  const { dir, git, hook, head, pinned } = coordinatedJobFixture(t, '{"version":1,"waitForOwner":"when-needed","herdr":true}');
+test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from its environment so only a coordinated job takes the pinned merge form', { skip: without('claude') || withoutStandInGh }, (t) => {
+  const { dir, hook, head, pinned } = coordinatedJobFixture(t, '{"version":1,"waitForOwner":"when-needed","herdr":true}');
   const writeUp = [
     '## Not done', '', 'Nothing', '',
     '## Merge Danger', '', 'Undo: easy, a later commit reverts it.', 'Reach: narrow, one file.', '',
@@ -759,20 +762,17 @@ test('ANTI-REGRESSION: the git guard process reads the coordinated-job mark from
   const folder = join(dir, 'repo/.claude/worklog', `job_7-review-${head}`);
   mkdirSync(folder, { recursive: true });
   writeFileSync(join(folder, 'body.md'), writeUp);
-  const identity = git('hash-object', '--no-filters', '--', join(folder, 'body.md'));
-  const answer = `Owner answer: job/7 at ${head} ${identity}: yes`;
-  const gh = standInGh(dir, { pull: { head, base: head, body: writeUp }, comments: [answer], labels: ['show-me-first'] });
-  const merge = (command, marks) => hook(command, { PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START, ...marks });
+  const gh = standInGh(dir, { pull: { head, base: head, body: writeUp }, labels: ['show-me-first'] });
+  const merge = (marks) => hook(`gh pr merge --squash --delete-branch --match-head-commit ${head} 12`, {
+    PATH: `${gh.bin}${delimiter}${process.env.PATH}`, PRE_APPROVED_RUN_SESSION: RUN_START, ...pinned, ...marks,
+  });
 
-  // A coordinated job merges only through the exact publication path's pinned merge, held by the marker alone whatever
-  // the card's comments say; other sessions keep --auto and the owner answer comment.
-  const coordinated = merge(`gh pr merge --squash --delete-branch --match-head-commit ${head} 12`, { FABRAIK_COORDINATED_JOB: '1', ...pinned });
+  const coordinated = merge({ FABRAIK_COORDINATED_JOB: '1' });
   assert.equal(coordinated.status, 2, coordinated.stderr);
   assert.ok(coordinated.stderr.includes('a pre-approved run session merges nothing while a wait reason holds for HEAD: show-me-first'), coordinated.stderr);
-  assert.doesNotMatch(coordinated.stderr, /owner answer|owner-answer/, coordinated.stderr);
-  const uncoordinated = merge('gh pr merge --auto --squash --delete-branch 12', { FABRAIK_COORDINATED_JOB: undefined });
-  assert.equal(uncoordinated.status, 0, uncoordinated.stderr);
-  assert.equal(uncoordinated.stderr, '');
+  const uncoordinated = merge({ FABRAIK_COORDINATED_JOB: undefined });
+  assert.equal(uncoordinated.status, 2, uncoordinated.stderr);
+  assert.ok(uncoordinated.stderr.includes('merges only with `gh pr merge --auto --squash --delete-branch <number>`'), uncoordinated.stderr);
 });
 
 // new behaviour: a coordinated job's Herdr policy follows the true fetched main, never a local replacement object that
@@ -801,7 +801,7 @@ test('ANTI-REGRESSION: the real Codex hook admits a marked delivery push for its
   assertAdmitsMarkedDeliveryPush(t, 'codex');
 });
 
-// A lead's continue session carries the card its phase names beside the run start, and publishes only that card.
+// The coordinator's continue session carries the card its phase names beside the run start, and publishes only that card.
 function assertRefusesOtherCardOfContinueSession(t, runtime) {
   const { gh, push } = markedDeliveryFixture(t, runtime);
 
@@ -881,8 +881,11 @@ function nativeRunFixture(dir, git, hookRaw) {
   const bindingPath = join(privateGitDir, 'fabraik-app-run.json');
   const sessionId = '123e4567-e89b-42d3-a456-426614174000';
   const record = { sessionId, kind: 'pre-approved', runStart: RUN_START, card: 7 };
+  /** @param {{ designation?: string | null, binding?: string | null }} [pair] */
   const setPair = ({ designation = `${sessionId}\n`, binding = JSON.stringify(record) } = {}) => {
-    for (const [path, content] of [[designationPath, designation], [bindingPath, binding]]) {
+    /** @type {[string, string | null][]} */
+    const records = [[designationPath, designation], [bindingPath, binding]];
+    for (const [path, content] of records) {
       if (content === null) rmSync(path, { force: true });
       else writeFileSync(path, content);
     }
@@ -923,7 +926,8 @@ test('ANTI-REGRESSION: a native run keeps publication restrictions when its conn
   });
 
   const corrupt = 'NATIVE-CONNECTION-CORRUPT-SENTINEL';
-  for (const [name, pair, input = push, reason = NATIVE_UNAVAILABLE] of [
+  /** @type {[string, { designation?: string | null, binding?: string | null }, Record<string, unknown>?, RegExp?][]} */
+  const refusals = [
     ['designation only', { binding: null }],
     ['binding only', { designation: null }],
     ['invalid binding JSON', { binding: corrupt }],
@@ -934,7 +938,8 @@ test('ANTI-REGRESSION: a native run keeps publication restrictions when its conn
     ['missing command', {}, { ...push, tool_input: { workdir: push.tool_input.workdir } },
       /^Blocked: a native app run session is refused a call whose hook payload holds no string command/m],
     ['mismatched payload session cwd', {}, { ...push, cwd: join(dir, 'repo') }],
-  ]) await t.test(name, () => {
+  ];
+  for (const [name, pair, input = push, reason = NATIVE_UNAVAILABLE] of refusals) await t.test(name, () => {
     setPair(pair);
     const result = run(input);
     assert.ok(!result.stderr.includes(corrupt), 'the corrupt binding value reached stderr');
@@ -1212,6 +1217,7 @@ for (const [skill, readingSeats] of Object.entries(SKILL_READING_SEATS)) {
 
 test('the resume deliver step carries exactly the merge-watch command', () => {
   const rawStep = readFileSync(resolve(ROOT, '.agents/skills/resume/references/deliver.md'), 'utf8').match(/^4\. Watch it land[\s\S]*?(?=^## |(?![\s\S]))/m);
+  assert.ok(rawStep, 'the resume deliver reference must carry the watch step');
   assert.deepEqual(
     shellBlocks(rawStep[0]).map((block) => block.body),
     ['node scripts/merge-watch.mjs <pr>'],
@@ -1435,6 +1441,7 @@ test('ANTI-REGRESSION: the strict chronology audit sends only a test-order gap n
 });
 
 test('the refused-shape check catches each refused shape and passes quoted jq text', () => {
+  /** @type {[string, string[]][]} */
   const cases = [
     ['echo "$(git branch --show-current)"', ['command substitution']],
     ['echo `date`', ['command substitution']],
@@ -1522,7 +1529,7 @@ test('AGENTS.md carries one shared workflow region followed by the product headi
 
   const product = manual.slice(endAt);
   const shapeFault = productTailShapeProblem(product);
-  assert.equal(shapeFault, undefined, shapeFault);
+  assert.equal(shapeFault, undefined, shapeFault ?? '');
 
   const surfaces = product.slice(product.search(/^## Surfaces$/m)).split('\n');
   assert.ok(
@@ -1530,6 +1537,7 @@ test('AGENTS.md carries one shared workflow region followed by the product headi
     'the standing security guarantees must start with a numbered item 1.',
   );
   const securityRow = surfaces.find((line) => line.startsWith('|') && line.split('|')[1].trim() === 'security review');
+  assert.ok(securityRow, 'the Surfaces table must carry a security review row');
   const targets = [...securityRow.split('|')[2].matchAll(/\]\(([^)#\s]+)[^)]*\)/g)].map((match) => match[1]);
   assert.ok(targets.length > 0, 'the security review row must link the privacy documents');
   for (const target of targets) {
@@ -1542,7 +1550,7 @@ test('AGENTS.md carries one shared workflow region followed by the product headi
 test('the profile file carries its four headings and the Conventions table', () => {
   const profile = readFileSync(resolve(ROOT, '.agents/REPOSITORY.md'), 'utf8');
   const shapeFault = profileShapeProblem(profile);
-  assert.equal(shapeFault, undefined, shapeFault);
+  assert.equal(shapeFault, undefined, shapeFault ?? '');
 });
 
 const FIXED_PRODUCT_DOCUMENTS = [
@@ -1672,6 +1680,7 @@ test('the review line has two specified forms, and the template and skills point
     /^Review: tier=(document|code|sign-off) rounds=([1-9]\d*) raised=(0|[1-9]\d*) fixed=(0|[1-9]\d*) dismissed=(0|[1-9]\d*) deferred=(0|[1-9]\d*)\s*$/;
   const ADD_ON_LINE =
     /^Review: tier=(document|code|sign-off) rounds=([1-9]\d*) raised=(0|[1-9]\d*) fixed=(0|[1-9]\d*) dismissed=(0|[1-9]\d*) deferred=(0|[1-9]\d*) greptile_rounds=(0|[1-9]\d*) greptile_raised=(0|[1-9]\d*) greptile_true=(0|[1-9]\d*)\s*$/;
+  /** @param {string | undefined} line @param {string} where */
   const assertValidLine = (line, where) => {
     const m = BASE_LINE.exec(line ?? '') ?? ADD_ON_LINE.exec(line ?? '');
     assert.ok(m, `${where}: example review line ${JSON.stringify(line)} no longer matches either approved form`);
@@ -1711,7 +1720,8 @@ test('the review line has two specified forms, and the template and skills point
     assert.ok(!BASE_LINE.test(between) && !ADD_ON_LINE.test(between), `${between} matches a specified form`);
     assert.throws(() => assertValidLine(between, 'fixture'), /matches either approved form/, `${between} was accepted`);
   }
-  for (const [broken, message] of [
+  /** @type {[string, RegExp][]} */
+  const brokenLines = [
     [`${PREFIX} greptile_rounds=8 greptile_raised=1 greptile_true=1`, /greptile_rounds greater than rounds/],
     [`${PREFIX} greptile_rounds=2 greptile_raised=17 greptile_true=1`, /greptile_raised greater than raised/],
     [`${PREFIX} greptile_rounds=2 greptile_raised=1 greptile_true=2`, /greptile_true greater than greptile_raised/],
@@ -1724,7 +1734,8 @@ test('the review line has two specified forms, and the template and skills point
       'Review: tier=sign-off rounds=2 raised=1 fixed=1 dismissed=0 deferred=0 greptile_rounds=1 greptile_raised=1 greptile_true=0',
       /more false Greptile findings than dismissed/,
     ],
-  ]) {
+  ];
+  for (const [broken, message] of brokenLines) {
     assert.throws(() => assertValidLine(broken, 'fixture'), message, `${broken} was accepted`);
   }
 
@@ -1746,7 +1757,7 @@ test('the review line has two specified forms, and the template and skills point
   assertValidLine(addOn, '.github/pull_request_template.md add-on example');
   assert.ok(ADD_ON_LINE.test(addOn), 'the second fenced example in .github/pull_request_template.md is not the add-on form');
 
-  const example = /for example `([^`]*)`/.exec(template)?.[1];
+  const example = /for example `([^`]*)`/.exec(template)?.[1] ?? '';
   assertValidLine(example, '.github/pull_request_template.md');
   assert.ok(BASE_LINE.test(example), 'the pull request template example is not the base form');
   assert.deepEqual(
@@ -1985,7 +1996,7 @@ const VENDORED_SKILLS = new Set(
   indexEntries('.agents/upstream').flatMap(({ path }) => /^\.agents\/upstream\/[^/]+\/([^/]+)\/SKILL\.md$/.exec(path)?.slice(1) ?? []),
 );
 const vendoredCopy = (path) =>
-  path.startsWith('.agents/upstream/') || VENDORED_SKILLS.has(/^\.(?:agents|claude)\/skills\/([^/]+)\//.exec(path)?.[1]);
+  path.startsWith('.agents/upstream/') || VENDORED_SKILLS.has(/^\.(?:agents|claude)\/skills\/([^/]+)\//.exec(path)?.[1] ?? '');
 // The entries the path scan reads: those a tree with these settings installs. Vendored skills and their copies are
 // replaced whole and never edited in place, so the scan skips them.
 const scannedEntries = (settings, entries) => entries.filter(({ path }) => !vendoredCopy(path) && leftOutCause(settings, path) === null);

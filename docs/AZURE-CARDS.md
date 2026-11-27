@@ -279,8 +279,6 @@ publication and cleanup gate.
 | Claim command (`resume`, "3. Start the job") | `node scripts/board-claim.mjs` serves only the GitHub Projects tracker and refuses an Azure install with exit 1. This tracker claims by hand as [the claim reads](../.agents/skills/resume/references/claim-reads.md) say, with the rows of this table |
 | Free-card, assignment, claim or withdrawal | The complete reads and native-UUID protocol in [Claims and withdrawal](#claims-and-withdrawal) |
 | Awaiting push | `board-move.mjs {{AB_ID}} "Awaiting push"` before requesting push authorization |
-| Owner answer (`resume`, "7. Push authorisation") | Post the record's one line with `azure-card.mjs comment {{AB_ID}} --body-file {{FILE}}`, as [the owner answer reference](../.agents/skills/resume/references/owner-answer.md) gives, from the account the session publishes as. The queue panel writes none on this tracker, so the session in whose chat the owner answered writes it before it acts |
-| Fix built (`resume`, "7. Push authorisation") | Post the fix line the same way, once the fix is built and before its push |
 | Closing line and branch | `job/{{AB_ID}}` and both standalone body lines that follow this table; always the pull request route |
 | Draft opened | Keep the card's current explicit column; draft creation does not move it to In review |
 | Pull request marked ready | When the pull request is marked ready, explicitly run `board-move.mjs {{AB_ID}} "In review"` |

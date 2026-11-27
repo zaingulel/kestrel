@@ -185,13 +185,17 @@ const listSnapshot = (dir, prefix = '') => readdirSync(join(dir, prefix), { with
 });
 
 /**
- * Returns the git mode a snapshot entry's lstat implies, or undefined for a kind a tree cannot hold.
+ * Returns the git mode a snapshot entry's lstat implies, or undefined for a kind a tree cannot hold. Windows keeps no
+ * execute bit, so there a regular file stands for whichever file mode the tree names, `expected`.
  * @param {import('node:fs').Stats} stat
+ * @param {string} expected
+ * @param {NodeJS.Platform} platform
  * @returns {string | undefined}
  */
-const snapshotMode = (stat) => {
+const snapshotMode = (stat, expected, platform) => {
   if (stat.isSymbolicLink()) return SYMLINK_MODE;
   if (!stat.isFile()) return undefined;
+  if (platform === 'win32' && FILE_MODES.has(expected)) return expected;
   return (stat.mode & 0o100) === 0 ? '100644' : '100755';
 };
 
@@ -206,9 +210,9 @@ const blobId = (format, bytes) => createHash(format).update(`blob ${bytes.length
 /**
  * Throws when `dir` holds a path the commit's tree lacks or lacks one it holds, or when a path's mode or content
  * differs from the tree's.
- * @param {{ cwd: string, commit: string, dir: string }} options
+ * @param {{ cwd: string, commit: string, dir: string, platform?: NodeJS.Platform }} options
  */
-export function verifyWorkflowSnapshot({ cwd, commit, dir }) {
+export function verifyWorkflowSnapshot({ cwd, commit, dir, platform = process.platform }) {
   const tree = listTree(cwd, commit);
   const expected = new Set(tree.map((entry) => entry.path));
   const actual = new Set(listSnapshot(dir));
@@ -221,7 +225,7 @@ export function verifyWorkflowSnapshot({ cwd, commit, dir }) {
   const format = gitBytes(cwd, ['rev-parse', '--show-object-format']).toString('utf8').trim();
   for (const { mode, object, path } of tree) {
     const target = join(dir, path);
-    const found = snapshotMode(lstatSync(target));
+    const found = snapshotMode(lstatSync(target), mode, platform);
     if (found !== mode) throw new Error(`${target}: mode ${found ?? 'of an unsupported kind'} differs from ${mode} in ${commit}`);
     const bytes = mode === SYMLINK_MODE ? readlinkSync(target, { encoding: 'buffer' }) : readFileSync(target);
     const id = blobId(format, bytes);

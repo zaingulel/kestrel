@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   extractPathRefs,
   checkPathRefs,
@@ -17,6 +16,10 @@ import {
   checkHeadingCitations,
 } from './doc-lint-citations.mjs';
 import { leftOutCause, needNotResolveCause } from './runtimes.mjs';
+
+// An adopter's doc-lint.mjs may take the source path as a second argument; Fabraik's takes only the text.
+/** @type {(text: string, rel: string) => { path: string, line: number }[]} */
+const extractRefs = extractPathRefs;
 
 export function docLintVerdict({ files, read, settings, resolutionFiles = files, vendoredFiles = files, allowEmpty = false }) {
   const trackedSet = buildTrackedSet(resolutionFiles);
@@ -64,7 +67,7 @@ export function docLintVerdict({ files, read, settings, resolutionFiles = files,
   // --- Dangling path refs, dead links, citations — the full scan set ---------
   for (const rel of pathRefScanFiles) {
     const text = read(rel);
-    const refs = extractPathRefs(text, rel);
+    const refs = extractRefs(text, rel);
     const dangling = checkPathRefs(refs, exists);
     for (const d of dangling) {
       errors.push(`${rel}:${d.line} — dangling path ref: \`${d.path}\` does not exist`);

@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { main as runLog } from '../run-log.mjs';
 import { fixtureShell } from './posix-shell.mjs';
@@ -40,6 +40,16 @@ const NO_SHELL = 'a POSIX shell is required: install Git for Windows';
 
 const SHELL = fixtureShell();
 const HAS_GIT_LFS = Boolean(SHELL) && spawnSync(/** @type {string} */ (SHELL), ['-c', 'command -v git-lfs']).status === 0;
+
+// Git Bash spells the variable PATH, so on Windows the host's real npm.cmd would meet the stand-in process runner;
+// the shared environment drops those folders.
+function withoutHostNpm(env) {
+  if (process.platform !== 'win32') return env;
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH');
+  if (key === undefined) return env;
+  const kept = env[key].split(delimiter).filter((dir) => !['npm.cmd', 'npx.cmd'].some((name) => existsSync(join(dir.replace(/^"(.*)"$/, '$1'), name))));
+  return { ...env, [key]: kept.join(delimiter) };
+}
 
 function executable(path, source) {
   writeFileSync(path, source);
@@ -331,7 +341,7 @@ esac
     const leftovers = () => readdirSync(temporary);
     const record = (command, status = 0) => {
       const result = runLog(['synthetic command outcome', '--', ...command], {
-        cwd: repo, env: { ...process.env, ...isolation }, output: { log() {}, error() {} },
+        cwd: repo, env: { ...withoutHostNpm(process.env), ...isolation }, output: { log() {}, error() {} },
         spawnSync: (file, args, options) => file === 'git' ? spawnSync(file, args, options) : { status },
       });
       assert.equal(result.exitCode, status);

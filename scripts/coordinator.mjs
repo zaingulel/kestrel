@@ -9,17 +9,20 @@
 //   node scripts/coordinator.mjs bind-job
 //   node scripts/coordinator.mjs forward
 //   node scripts/coordinator.mjs forward-watch --coordinator <address> --space <space id>
+//   node scripts/coordinator.mjs launch --runtime claude --login <GitHub login> --model <model> --effort <effort>
+//   node scripts/coordinator.mjs launch --runtime codex --login <GitHub login>
+//   node scripts/coordinator.mjs launch-job [NAME=value...] <program> [argument...]
 //   node scripts/coordinator.mjs wake
 //
 // `wake` types one fixed line into the project's live coordinator through `hc send`, with no tracker request. `open`
 // opens the coordinator as a Coordinator tab in the project's Herdr space. The Herdr chooser's login-less route uses the
-// signed-in GitHub login and excludes a standing lead. `cards` prints the startable Ready cards in build order.
+// signed-in GitHub login. `cards` prints the startable Ready cards in build order.
 // `unfinished` prints each job whose card has a local branch job/N, a job worktree or an open draft pull request,
 // one `#N <verdict>: <detail>` line in card order: running, held, elsewhere, stopped or continue. `start` starts card <card>'s job as a
 // kept runtime session running the resume skill, in its own tab `job <card>`, as an hc child of the terminal it runs in.
 // Claude uses the model and effort of fetched main's coordinator setting. Codex requires verified native hooks and a versioned mise install.
 // `start` refuses a card whose job session
-// still runs, an unfinished job whose verdict is not continue or stopped, and one that would take more running places than the lead's
+// still runs, an unfinished job whose verdict is not continue or stopped, and one that would take more running places than the
 // cap allows: a job waiting on the owner takes none.
 // Where the card's job terminal is kept but its Claude is gone, as after a restart, `start` resumes the recorded session from
 // its transcript under {CLAUDE_CONFIG_DIR or ~/.claude}/projects, or prints why it cannot and starts nothing.
@@ -30,7 +33,9 @@
 // becomes blocked, done or error, or finishes, with no tracker request; it prints `forward-ready` once watching and ends
 // once no such job is live. `forward`, run from the sole Coordinator, starts `forward-watch` for it as its child in tab
 // `job notes` while a job of an earlier coordinator is live, and otherwise closes the tabs of the finished forwarders it
-// removes and starts nothing.
+// removes and starts nothing. `launch` runs the coordinator in this terminal, the program a Windows Coordinator tab runs, and
+// ends with the runtime's exit status, or 1 where the runtime did not run or a signal ended it. `launch-job` runs <program> in this
+// terminal with the leading NAME=value words set in its environment, the command a Windows job tab runs, and ends the same way.
 //
 // Exit 0 done; for `unfinished`, the list is complete. 1: it could not (the reason is on stdout); for `unfinished`, a read failed
 // and the unfinished jobs are unknown, with no verdict printed; for `forward-watch`, a Herdr read, record or send failed, or
@@ -45,19 +50,19 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { homedir, hostname, userInfo } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configuredTracker } from './lib/board-markdown.mjs';
 import { gitEnvironment, MANIFEST_PATH, readManifest } from './lib/factory-sync.mjs';
-import { readGitHubLogin, runGh } from './lib/gh-exec.mjs';
-import { codexBindingPath, forwardNotes, herdrCommand, listCards, listUnfinished, openCoordinator, readCodexBinding, readLiveCodexBinding, requireVersionedCodex, startForwarder, startJob, wakeCoordinator } from './lib/coordinator.mjs';
-import { capLock, readCap, standingLead, standingLeadProcessCommand } from './lib/cap-lock.mjs';
+import { isGitHubLogin, readGitHubLogin, runGh } from './lib/gh-exec.mjs';
+import { codexBindingPath, ENVIRONMENT_WORD, forwardNotes, herdrCommand, launchCoordinator, launchJob, listCards, listUnfinished, openCoordinator, readCodexBinding, readLiveCodexBinding, requireVersionedCodex, startForwarder, startJob, wakeCoordinator } from './lib/coordinator.mjs';
+import { capLock, readCap } from './lib/cap-lock.mjs';
 import { isCanonicalLeadFolder } from './lib/pre-approved-run.mjs';
-import { LOCAL_HERDR_TERMINAL, RUNTIMES } from './lib/runtimes.mjs';
+import { EFFORT_LEVELS, LOCAL_HERDR_TERMINAL, MODEL_NAME, RUNTIMES } from './lib/runtimes.mjs';
 import { repositoryRoot } from './pre-approved-run.mjs';
 
-const USAGE = 'usage: node scripts/coordinator.mjs open --login <GitHub login> [--runtime <claude|codex>] | open --runtime <claude|codex> | cards --login <GitHub login> | unfinished --login <GitHub login> | start <card> --login <GitHub login> | bind-job | forward | forward-watch --coordinator <address> --space <space id> | wake';
+const USAGE = 'usage: node scripts/coordinator.mjs open --login <GitHub login> [--runtime <claude|codex>] | open --runtime <claude|codex> | cards --login <GitHub login> | unfinished --login <GitHub login> | start <card> --login <GitHub login> | bind-job | forward | forward-watch --coordinator <address> --space <space id> | launch --runtime claude --login <GitHub login> --model <model> --effort <effort> | launch --runtime codex --login <GitHub login> | launch-job [NAME=value...] <program> [argument...] | wake';
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const CARD = /^[1-9]\d*$/;
 const SPACE = /^[A-Za-z0-9_-]+$/;
@@ -263,7 +268,7 @@ function herdrLines(args, print) {
 }
 
 // The command and its operands, or undefined for any other shape.
-/** @returns {{ command: 'start', card: number, login: string } | { command: 'wake' } | { command: 'bind-job' } | { command: 'forward' } | { command: 'forward-watch', coordinator: string, space: string } | { command: 'open', login?: string, runtimeOverride?: string } | { command: 'cards', login: string } | { command: 'unfinished', login: string } | undefined} */
+/** @returns {{ command: 'start', card: number, login: string } | { command: 'launch-job', words: string[] } | { command: 'wake' } | { command: 'bind-job' } | { command: 'forward' } | { command: 'forward-watch', coordinator: string, space: string } | { command: 'launch', runtime: string, login: string, model?: string, effort?: string } | { command: 'open', login?: string, runtimeOverride?: string } | { command: 'cards', login: string } | { command: 'unfinished', login: string } | undefined} */
 function parse(args) {
   const [command, ...rest] = args;
   if (command === 'wake' && rest.length === 0) return { command };
@@ -271,6 +276,14 @@ function parse(args) {
   if (command === 'forward' && rest.length === 0) return { command };
   if (command === 'forward-watch' && rest.length === 4 && rest[0] === '--coordinator' && LOCAL_HERDR_TERMINAL.test(rest[1]) && rest[2] === '--space' && SPACE.test(rest[3])) {
     return { command, coordinator: rest[1], space: rest[3] };
+  }
+  if (command === 'launch-job' && rest.some((word) => !ENVIRONMENT_WORD.test(word))) return { command, words: rest };
+  if (command === 'launch' && rest[0] === '--runtime' && rest[2] === '--login' && isGitHubLogin(rest[3])) {
+    if (rest[1] === 'codex' && rest.length === 4) return { command, runtime: rest[1], login: rest[3] };
+    if (rest[1] === 'claude' && rest.length === 8 && rest[4] === '--model' && MODEL_NAME.test(rest[5]) && rest[6] === '--effort'
+      && EFFORT_LEVELS.includes(rest[7])) {
+      return { command, runtime: rest[1], login: rest[3], model: rest[5], effort: rest[7] };
+    }
   }
   if (command === 'start' && rest.length === 3 && CARD.test(rest[0]) && Number.isSafeInteger(Number(rest[0])) && rest[1] === '--login' && LOGIN.test(rest[2])) {
     return { command, card: Number(rest[0]), login: rest[2] };
@@ -285,20 +298,6 @@ function parse(args) {
     return { command, runtimeOverride: rest[1] };
   }
   return undefined;
-}
-
-function checkStandingLead(root) {
-  const account = userInfo();
-  const machine = {
-    account,
-    platform: process.platform,
-    processCommand: standingLeadProcessCommand,
-    run: (command, args, { env }) => spawnSync(command, args, { env, encoding: 'utf8', timeout: 30_000 }),
-  };
-  const env = { PATH: process.env.PATH, XDG_RUNTIME_DIR: `/run/user/${account.uid}` };
-  const lead = standingLead({ root, machine, env, command: 'coordinator.mjs open' });
-  if (lead.cause) throw new Error(lead.cause);
-  if (lead.pid) throw new Error(`a standing lead runs this project as process ${lead.pid}; it is left as it is`);
 }
 
 async function main(args) {
@@ -318,6 +317,8 @@ async function main(args) {
       print(`Bound Codex Herdr job #${binding.card} at ${binding.terminalAddress} to thread ${binding.threadId}.`);
       return 0;
     }
+    if (options.command === 'launch') return launchCoordinator({ ...options, env: process.env, spawn: spawnSync, print });
+    if (options.command === 'launch-job') return launchJob({ command: options.words, env: process.env, spawn: spawnSync, print });
     if (options.command === 'forward-watch') return await forwardNotes({ hc: herdrCommand('hc'), events: (eventArgs) => herdrLines(eventArgs, print), coordinator: options.coordinator, space: options.space, print });
     const chooser = options.command === 'open' && options.login === undefined;
     const repository = repositoryRoot();
@@ -331,7 +332,7 @@ async function main(args) {
     if (options.command === 'forward') return await startForwarder({ root, herdrApp, hc: herdrCommand('hc'), parent: process.env.HC_TERMINAL_ID, print });
     const git = (gitArgs) => execFileSync('git', gitArgs, { cwd: root, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
     const state = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'fabraik-lead');
-    // This command uses the shared lead state folder only for the cap lock, so it makes the folder where the lock is taken.
+    // This command uses the shared fabraik-lead state folder only for the cap lock, so it makes the folder where the lock is taken.
     const lockCap = async (work) => {
       mkdirSync(state, { recursive: true, mode: 0o700 });
       return await capLock(state, work);
@@ -341,7 +342,7 @@ async function main(args) {
       const login = options.login ?? readGitHubLogin(runGh);
       if (login === null) throw new Error('gh gave no GitHub login');
       return await openCoordinator({ root, login, runtimeOverride: options.runtimeOverride, git, herdrApp, hc: herdrCommand('hc'),
-        capLock: lockCap, checkStandingLead: chooser ? () => checkStandingLead(root) : undefined, print });
+        capLock: lockCap, print });
     }
     const tracker = { rawGh: runGh, print };
     if (options.command === 'cards') return await listCards(tracker);

@@ -118,12 +118,12 @@ Every rule this file does not hold in full has one home:
    started, on either runtime, ignores `waitForOwner` and every other wait reason: only a failed or missing required
    check, a missing screenshot and the card's `show-me-first` marker hold it, it merges the exact head its review named
    or, recorded on a `Review carried from:` line, the head a clean final rebase carried that review to,
-   and the owner removing that marker, himself or by his own message telling the Herdr coordinator to, is its only
+   and the owner removing that marker, himself or by his own message to the Herdr coordinator, is its only
    yes, which no note, comment or menu answer replaces. Work that waits
-   names the reason that held it and waits for one yes to its decision card and screenshot; any owner instruction to push is that yes, and it covers
-   the whole deliver sequence with no fresh yes inside it. A material limit missing from the card has not been
-   accepted. The yes also holds in any session where the card records it as the answer the owner gave to the version it
-   names, as `resume` says under "7. Push authorisation". `closeout` follows the merge unasked.
+   names its reason and waits for one yes to its decision card and screenshot; any owner instruction to push is that yes, and it covers
+   the whole deliver sequence with no fresh yes. A material limit missing from the card has not been
+   accepted. The yes also holds in the session it reaches as the queue panel answer the coordinator
+   receives, for the version that answer names, as `resume` says under "7. Push authorisation". `closeout` follows the merge unasked.
 3. **Plan approval** is optional and off unless the repository's settings file holds `"planApproval": true`. Where it
    is on, it is one yes to the completed plan as presented, given before anything is built, and any owner instruction
    to build that plan is that yes; silence and elapsed time never are. A change the owner asks for is made and the plan
@@ -157,7 +157,8 @@ filed, without asking, only for work that genuinely cannot.
 
 An approval covers only the question it answered. After a context compaction, reread the owner's latest messages
 before acting on one; an approval whose question is no longer in view is asked again. A memory, summary or earlier
-session never grants approval, except the recorded owner answer gate two names.
+session never grants approval, except the queue panel
+answer gate two names, while the version it names is still the one waiting.
 
 ## Compact instructions
 

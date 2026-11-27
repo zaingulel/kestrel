@@ -56,8 +56,8 @@ including after a repair. Only `check` (a failed or missing required check), `sc
 `waitForOwner`, the review tier (`sign-off` included), `hard-to-undo`, `beyond-card` and `on-screen` hold nothing.
 `node scripts/board.mjs --waits <card> --herdr` prints that verdict, and the guard reads the same three at the job's
 ready and at its pinned merge. The marker waits for one yes, which is the owner removing the label, himself or
-through the Herdr coordinator on his own message, and that yes carries through every later repair; no note, comment,
-menu answer or fix record is an approval, as [A Herdr job](owner-answer.md#a-herdr-job) says. The route is
+through the Herdr coordinator on his own message, and that yes carries through every later repair; no note, comment or
+menu answer is an approval, as [A Herdr job](owner-answer.md#a-herdr-job) says. The route is
 [the merge route](herdr-job.md#the-merge-route). The
 merge report and the queue say where only a merge's route decides: a Herdr job merges past `sign-off`, `hard-to-undo`,
 `beyond-card`, `on-screen` and the every-card level, and every other route waits for them.
@@ -86,12 +86,9 @@ write-up or board it cannot read, or a card the board does not hold, naming it o
 the guard also makes of the pull request's published body, refusing while either holds a reason, while the pull
 request's head is not `HEAD` or while its body lacks a screenshot's image. The guard reads the marker from the card's
 labels at each of them and refuses when it cannot read all of them; at `on-screen` it refuses work on screen when
-either the write-up or the published body does not say "no visual change". A held reason stops the session only
-until the card records the owner's answer for the version at the pull request head, or a fix built from an answered
-head that the fix path admits, as **Owner answer** in [owner-answer.md](owner-answer.md) gives; the guard reads
-the newest such record by the account the session publishes as. Where that record is not whole, or another account last
-edited a comment by that account, no answer holds, and an answer for the head itself admits no reason the saved card at
-that head lacks. The guard also refuses a pre-approved run session's push while its pull request is ready or has a merge
+either the write-up or the published body does not say "no visual change". A held reason stops a pre-approved run's card session for good: the guard admits no merge
+on any card record, so the owner answers in the run session, which shows and delivers the work as **Batch review** under
+"7. Push authorisation" says. The guard also refuses a pre-approved run session's push while its pull request is ready or has a merge
 queued, and publishes a run's card only when the card's newest claim was made during that run by the GitHub account the
 session publishes as.
 
@@ -124,6 +121,4 @@ not read, so the owner stops that merge with the Disable auto-merge button on th
 no visual change shows `no visual change` in place of a screenshot, as its decision card already does.
 
 **What the guard checks.** For a run session the evidence is a write-up the session declares itself: the guard checks
-that it holds no wait reason, or that the card records the owner's answer for it, and only the fresh review and the
-published body show that the write-up is true. The record proves an answer exists for the version, not that its words
-are a yes.
+that it holds no wait reason, and only the fresh review and the published body show that the write-up is true.

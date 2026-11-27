@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runDelivery } from './coordinator.mjs';
@@ -78,7 +78,7 @@ function laneJob(t) {
 }
 
 test('the delivery lane derives its lock, reservation, receipt and watch-record paths from the repository identity', async (t) => {
-  if (process.platform !== 'linux') return t.skip('requires Linux flock and native Herdr process identity');
+  if (process.platform !== 'linux') return t.skip('requires Linux /proc process identity');
   const job = laneJob(t);
   const lane = join(job.lockRoot, LANE_KEY);
   const lock = join(lane, 'delivery.lock');
@@ -89,7 +89,7 @@ test('the delivery lane derives its lock, reservation, receipt and watch-record 
   const holder = job.hold();
   await Promise.race([holder.held, holder.result]);
   assert.deepEqual(readdirSync(job.lockRoot), [LANE_KEY], holder.output.join('\n'));
-  assert.deepEqual(readdirSync(lane).sort(), ['delivery.lock', 'ready.json']);
+  assert.deepEqual(readdirSync(lane).sort(), ['delivery.lock', `ready-${lstatSync(ready, { bigint: true }).dev}-${lstatSync(ready, { bigint: true }).ino}.lock`, 'ready.json']);
   assert.equal(JSON.parse(readFileSync(ready, 'utf8')).repositoryId, REPOSITORY_ID);
   holder.release();
   assert.equal(await holder.result, 0, holder.output.join('\n'));
