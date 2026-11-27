@@ -1,6 +1,6 @@
-// @ts-nocheck
 // owner-queue.mjs — what waits on the owner in one repository, read once and printed as one JSON document by
-// scripts/owner-queue.mjs, the one route by which a queue panel answer writes to a card, the one by which its Undo
+// scripts/owner-queue.mjs, the one route by which a queue panel answer writes to a card, the one by which a merge answer
+// reaches the coordinator (`relayAnswer`), the one by which its Undo
 // takes a put-aside, accepted or rejected card back, the one by which its board moves a card, the one by which it sets
 // or removes a card's show-me-first marker, and `report`, the read of one merge's report, which the function's own
 // comment describes. `collect` writes nothing. The board reads through board-read.mjs, waiting through `pause` (a real
@@ -11,7 +11,8 @@
 // built-ins, the board toolkit's own modules, the run's card read and state-line writer and the settings validator.
 //
 // A merge item is an `Awaiting push` card the owner can be shown now, under the facts of the `resume` skill's batch
-// review (section 7, "Batch review", step 1): its newest claim names this machine and not `Claude Code cloud`, its
+// review (section 7, "Batch review", step 1): its newest claim names this machine and not `Claude Code cloud`, on a
+// Markdown board the intake's claim reads `branch job/<card> (local)` instead, its
 // `job/<card>` worktree is here and clean, `.claude/worklog/job_<card>-review-<head>/body.md` exists there for that
 // head, a body whose Evidence has no line reading "no visual change" has a screenshot beside it, and, where the card
 // body's last line is a `Waiting version:` line, that line names that head and the saved files' identities. A card
@@ -40,16 +41,14 @@
 //
 // The document's `board` lists every open card of the board, a Done card left out, in the order the board read gave
 // them: `card`, `title`, `column` (its Status, or null), `blockers` (the open ones), `claim` (the newest claim's
-// `machine` and `runtime`, or null) and `waitsOn` (the category of the card's first queue item, or null), `answered`
-// (true where that item is a merge whose waiting version, the version the worktree shows or, where that is not
-// complete, the version the card records, the owner's newest answer names; absent otherwise), its
+// `machine` and `runtime`, or null) and `waitsOn` (the category of the card's first queue item, or null), its
 // `outcome` (the first paragraph of its What to build section as `text`, with `more` true where lines follow it; null
 // where the section is empty, `{ unread }` where it could not be read), its `worktree` (the path the worktree list
 // gives for the card's `job/<card>` branch, or null; absent where the worktree list could not be read), on a GitHub
 // board its `showFirst` (whether the card carries the show-me-first marker, or `{ unread }` with the cause where its
 // labels are not text, so an unread marker is never shown off; present where the details were not read), and its
 // `order`, 1-based within its column, only from a GitHub read that left no card out. A card whose details were not read
-// has `unread`, the cause, in place of `claim`, `waitsOn`, `answered` and `outcome`. Without an `order` the board says
+// has `unread`, the cause, in place of `claim`, `waitsOn` and `outcome`. Without an `order` the board says
 // why in `orderUnread`, and `waitsOnUnread` names the unread worktree list, so a
 // card's wait is never shown where its source failed. A board that cannot be read is null, never an empty list; its
 // cause is in `sources`. The board's `moves` and `places` are true only on a GitHub tracker, the only one
@@ -65,7 +64,7 @@
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { main as moveCard } from '../board-move.mjs';
-import { cardRecord, COMMIT_TEXT, HERDR_HOLDS, HTML_COMMENT, newestOwnerAnswer, ownerAnswerLine, readable, readCard, readWaitLevel, REPLY_MAX, redact, saysNoVisualChange, SCREENSHOT, SHOW_FIRST, showFirstAmong, waitReasons, withBodyFile, withHolds } from './merge-evidence.mjs';
+import { COMMIT_TEXT, HERDR_HOLDS, HTML_COMMENT, readable, readCard, readWaitLevel, REPLY_MAX, redact, saysNoVisualChange, SCREENSHOT, SHOW_FIRST, showFirstAmong, waitReasons, withBodyFile, withHolds } from './merge-evidence.mjs';
 import { addIssueToBoard } from './board-add.mjs';
 import * as boardConfig from './board-config.mjs';
 import { lookupIssueBoardItem, moveCards, optionIdFor, parseSingleSelectField, placeCardAfter, singleSelectFieldQuery } from './board-move.mjs';
@@ -75,7 +74,7 @@ import { detailUnread } from './board-rules.mjs';
 import { failureReport, isGitHubLogin } from './gh-exec.mjs';
 import { bodyRevisions, configuredRepository, lastStateLine, readWholeCard, withLine, writeStateLine } from './pre-approved-run.mjs';
 import { readSettingsHeader, SETTINGS_PATH } from './runtimes.mjs';
-import { kindTypesOf } from './tracker.mjs';
+import { cardRef, kindTypesOf } from './tracker.mjs';
 
 const { KIND_LABELS, ROUTING_FIELD, ROUTING_OPTIONS, TERMINAL_STATUSES } = boardConfig;
 
@@ -110,6 +109,7 @@ const NO_LOGIN = `${UNREAD_LOGIN}: sign in with gh auth login, then refresh the 
 const NOT_WRITTEN = 'the undo record is not one the queue panel wrote';
 const RECORD_KEYS = 'body,column,comments,open,title';
 const DIGEST = /^[0-9a-f]{64}$/;
+const MERGE_ANSWER = 'a merge answer goes to the coordinator: refresh the panel';
 const CREDENTIAL_REPLY = 'it looks like it holds a credential: answer in chat and describe it instead';
 const NO_ORDER = 'this tracker\'s board carries no owner-set order';
 
@@ -118,7 +118,7 @@ function readIfPresent(read, path) {
   try {
     return read(path);
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -172,7 +172,7 @@ const lastLine = (body) => body.trimEnd().split(/\r?\n/).at(-1);
 
 // The head and saved files' identities the card body's last line records as card `number`'s waiting version, or
 // undefined where that line is not a whole `Waiting version:` line for that card.
-const WAITING_LINE = /^Waiting version: job\/(\d+) (\S+) (\S+) run \S+$/;
+const WAITING_LINE = /^Waiting version: job\/([^\s/]+) (\S+) (\S+) run \S+$/;
 function recordedVersion(number, cardBody) {
   const [, card, head, identity] = (typeof cardBody === 'string' ? WAITING_LINE.exec(lastLine(cardBody)) : null) ?? [];
   return card === String(number) ? { head, identity } : undefined;
@@ -182,13 +182,18 @@ function recordedVersion(number, cardBody) {
 // proof it was judged on: the job worktree's head and, once the saved write-up passed, the `git hash-object
 // --no-filters` identities of its body.md and then each screenshot in numeric order, comma-separated as a waiting line
 // names them. A complete item carries that proof as its `head` and `identity`.
-function mergeItem({ number, title, labels }, comments, cardBody, { worktrees, run, readFile, listFolder, hostname, waitLevel }) {
+function mergeItem({ number, title, labels }, { comments, body: cardBody, claim }, { tracker, worktrees, run, readFile, listFolder, hostname, waitLevel }) {
   const item = { card: number, title, category: 'merge' };
   const proof = {};
   const missing = (fact, next) => ({ item: { ...item, missing: { fact, next } }, proof });
-  const { machine, runtime } = newestClaim(comments);
-  if (runtime === CLOUD_RUNTIME) return missing('it is claimed for a cloud build', 'Open its pull request.');
-  if (machine !== hostname) return missing('its newest claim does not name this machine', 'Review it on the machine that built it.');
+  if (tracker === 'markdown') {
+    // A Markdown claim names no machine: a waiting job's branch is unpushed, and one also on origin may be newer here.
+    if (claim !== `branch job/${number} (local)`) return missing(`its claim is not branch job/${number} (local)`, 'Review it on the machine that built it.');
+  } else {
+    const { machine, runtime } = newestClaim(comments);
+    if (runtime === CLOUD_RUNTIME) return missing('it is claimed for a cloud build', 'Open its pull request.');
+    if (machine !== hostname) return missing('its newest claim does not name this machine', 'Review it on the machine that built it.');
+  }
   const worktree = worktrees.get(`job/${number}`);
   if (worktree === undefined) return missing('no job worktree for it on this machine', REOPEN);
   const head = run(['-C', worktree, 'rev-parse', 'HEAD']).trim();
@@ -234,7 +239,7 @@ function mergeItem({ number, title, labels }, comments, cardBody, { worktrees, r
   // The head is compared as text: the line the run wrote names the head git printed.
   const waiting = typeof cardBody === 'string' && lastLine(cardBody).startsWith('Waiting version: ');
   const recorded = recordedVersion(number, cardBody);
-  if (waiting && (recorded?.head !== head || recorded.identity !== identity)) return missing(NO_WAITING_VERSION, FINISH_OR_REOPEN);
+  if (waiting && (recorded?.head !== head || recorded?.identity !== identity)) return missing(NO_WAITING_VERSION, FINISH_OR_REOPEN);
   return { item: { ...complete, head, identity }, proof };
 }
 
@@ -323,31 +328,6 @@ const canonicalJson = (value) => JSON.stringify(value, (key, entry) => (entry !=
 export const itemVersion = (item, { status, body, comments, head, identity, login }) => createHash('sha256')
   .update(canonicalJson({ item, status, body, comments, head, identity, login })).digest('hex');
 
-// A complete GitHub merge goes to its coordinator. Read an existing answer with authors and editors to check its
-// author, head and identity. Where that read fails, report the unread route.
-function mergeRoute(number, comments, { head, identity }, { executor, repository, login, sources }) {
-  if (!comments.some((body) => cardRecord(body, number)?.kind === 'answer')) return { actedOnBy: 'coordinator' };
-  const read = attempt(sources, `card ${number} comments`, () => readCard(number, { exec: executor, repository: repository() }).issue.comments.nodes);
-  if (read === undefined) return { actedOnBy: 'unread' };
-  const newest = newestOwnerAnswer(number, read, login)?.answer;
-  return {
-    actedOnBy: 'coordinator',
-    ...(newest?.head === head && newest.identity === identity ? { answered: newest.words.trim() } : {}),
-  };
-}
-
-// Whether the owner's newest answer, read with authors as mergeRoute reads it, names the waiting version the body of
-// card `number` records, for a merge item that cannot show a version of its own. The read happens only for a card
-// whose comments already hold an Owner answer line; a failed read is a failed source and leaves the card unanswered.
-function answeredRecorded(number, body, comments, context) {
-  const recorded = recordedVersion(number, body);
-  if (recorded === undefined || !comments.some((text) => cardRecord(text, number)?.kind === 'answer')) return false;
-  const { executor, repository, login, sources } = context;
-  const read = attempt(sources, `card ${number} comments`, () => readCard(number, { exec: executor, repository: repository() }).issue.comments.nodes);
-  const newest = read === undefined ? undefined : newestOwnerAnswer(number, read, login)?.answer;
-  return newest?.head === recorded.head && newest.identity === recorded.identity;
-}
-
 // Whether card `number` carries the show-me-first marker among its `labels`, or `{ unread }` with the cause where they
 // are not text, so an unread marker is never read as off.
 function showFirstOf({ number, labels }) {
@@ -361,9 +341,8 @@ function showFirstOf({ number, labels }) {
 // The document's board: each open card with its column, place, open blockers, claim and the category of its first queue
 // item and its outcome, or null where the board could not be read. `details` is undefined where the details read failed
 // whole, `worktrees` where the worktree list could not be read, and `omission` is what a GitHub read that recovered
-// omitted cards said. `answeredCards` holds the numbers of the merge cards, missing a fact, whose recorded waiting
-// version the owner answered.
-function boardSection({ tracker, cards, details, unread, items, answeredCards, worktrees, sources, omission }) {
+// omitted cards said.
+function boardSection({ tracker, cards, details, unread, items, worktrees, sources, omission }) {
   const detailsError = sources.find((source) => source.name === 'details' && !source.ok)?.error;
   const ordered = tracker === 'github' && omission === undefined;
   const placed = new Map();
@@ -382,7 +361,6 @@ function boardSection({ tracker, cards, details, unread, items, answeredCards, w
       const { body } = details.get(card.number);
       const first = items.find((item) => item.card === card.number);
       return { ...entry, claim: machine === undefined ? null : { machine, runtime }, waitsOn: first?.category ?? null,
-        ...(first?.category === 'merge' && (typeof first.answered === 'string' || answeredCards.has(card.number)) ? { answered: true } : {}),
         outcome: outcomeOf(details.get(card.number)),
         ...(tracker === 'github' ? { version: sha256(canonicalJson({ card: card.number, title: card.title, column: card.status, order: entry.order, body })) } : {}) };
     }),
@@ -442,9 +420,7 @@ function notificationEvidence({ tracker, login, hostname, items, shown, executor
           waits.push({ card: item.card, kind: 'question' });
         }
       } else if (typeof item.reason === 'string' && item.reason.trim()) {
-        const answer = newestOwnerAnswer(item.card, comments, login)?.answer;
-        const proof = shown.get(item.card);
-        if (!answer || answer.head !== proof.head || answer.identity !== proof.identity) waits.push({ card: item.card, kind: 'review' });
+        waits.push({ card: item.card, kind: 'review' });
       }
     }
   }
@@ -452,8 +428,21 @@ function notificationEvidence({ tracker, login, hostname, items, shown, executor
   return { login, waits: code === null ? waits : [], unavailable: code };
 }
 
+/**
+ * @typedef {{
+ *   root: string, tracker: keyof import('./board-read.mjs').IdentifierByTracker, executor: import('./board-read.mjs').GhExecutor,
+ *   linear?: import('./board-read.mjs').LinearExecutor, jira?: import('./board-read.mjs').RequestExecutor,
+ *   azure?: import('./board-read.mjs').RequestExecutor, pause?: (ms: number) => void,
+ *   run: (args: string[]) => string, readFile: (path: string) => string, listFolder: (path: string) => string[],
+ *   fileTime: (path: string) => string, hostname: string, login: string | null,
+ * }} QueueReaders
+ */
+
+/** @typedef {{ log: (line: string) => void, error: (line: string) => void }} QueueOutput where board-move and the action report */
+
 // The queue document, each complete merge item's worktree head and saved-file identities, and the card facts
 // each item was drawn from, including its title and whether it is open.
+/** @param {QueueReaders} readers */
 function readQueue({ root, tracker, executor, linear, jira, azure, pause, run, readFile, listFolder, fileTime, hostname, login }) {
   const sources = [];
   let omission;
@@ -483,15 +472,13 @@ function readQueue({ root, tracker, executor, linear, jira, azure, pause, run, r
     }
     return level;
   };
-  const context = { worktrees, run, readFile, listFolder, hostname, waitLevel };
+  const context = { tracker, worktrees, run, readFile, listFolder, hostname, waitLevel };
   const githubWithLogin = tracker === 'github' && login !== null;
   let repository;
   const repositoryOf = () => (repository ??= configuredRepository(executor));
-  const mergeContext = { executor, repository: repositoryOf, login, sources };
   const items = [];
   const facts = new Map();
   const shown = new Map();
-  const answeredCards = new Set();
   for (const card of readableCards) {
     const { body, comments } = details.get(card.number);
     facts.set(card.number, { status: card.status, body, comments, title: card.title, open: card.state === 'OPEN' });
@@ -503,12 +490,11 @@ function readQueue({ root, tracker, executor, linear, jira, azure, pause, run, r
       items.push({ ...item, category: 'question', question, ...(heldOn === undefined ? {} : { heldOn }) });
     } else if (card.status === AWAITING_PUSH) {
       if (worktrees !== undefined) {
-        const merge = mergeItem(card, comments, body, context);
+        const merge = mergeItem(card, details.get(card.number), context);
         Object.assign(facts.get(card.number), merge.proof);
         const complete = merge.item.missing === undefined;
         if (complete) shown.set(card.number, merge.proof);
-        items.push(complete && githubWithLogin ? { ...merge.item, ...mergeRoute(card.number, comments, merge.proof, mergeContext) } : merge.item);
-        if (!complete && githubWithLogin && answeredRecorded(card.number, body, comments, mergeContext)) answeredCards.add(card.number);
+        items.push(merge.item);
       }
     } else if (proposed) {
       const retro = githubWithLogin ? retroFields(body, comments, details.get(card.number).commentSources, login) : null;
@@ -528,7 +514,7 @@ function readQueue({ root, tracker, executor, linear, jira, azure, pause, run, r
     fetchedAt: merges?.fetchedAt ?? null,
     sources,
     items: items.map((item) => ({ ...item, version: itemVersion(item, { ...facts.get(item.card), login }) })),
-    board: board === undefined || problem !== null ? null : boardSection({ tracker, cards, details, unread, items, answeredCards, worktrees, sources, omission }),
+    board: board === undefined || problem !== null ? null : boardSection({ tracker, cards, details, unread, items, worktrees, sources, omission }),
     digest: merges?.digest ?? null,
     notifications: notificationEvidence({ tracker, login, hostname, items, shown, executor,
       repository: repositoryOf, sources }),
@@ -552,12 +538,10 @@ function replyWords(reply) {
   return words;
 }
 
-// Whether `action` answers `item` from the panel: park a merge item, complete or missing; answer a complete merge item
-// keep a suggestion whose scope the panel showed; drop a suggestion; pick a weekly retro proposal with an unfiled
+// Whether `action` answers `item` from the panel: park a merge item, complete or missing; keep a suggestion whose scope the panel showed; drop a suggestion; pick a weekly retro proposal with an unfiled
 // card draft.
 const ROUTES = {
   park: (item) => item.category === 'merge',
-  answer: (item) => item.category === 'merge' && item.missing === undefined,
   keep: (item) => item.category === 'suggested' && typeof item.scope === 'string',
   drop: (item) => item.category === 'suggested',
   pick: (item, proposal) => item.category === 'suggested' && item.proposals?.some(({ n, card }) => n === proposal && card === undefined) === true,
@@ -602,11 +586,21 @@ function readRecord(text, action) {
   return record;
 }
 
+// The queue read again with `readers` and card `card`'s item in it, refused where the card is not in the queue now or
+// its item is no longer at `version`, the version the panel drew.
+function drawnItem(card, version, readers) {
+  const read = readQueue(readers);
+  const item = read.document.items.find((entry) => entry.card === card);
+  if (item === undefined) throw new Error(`card ${card} is not in the queue now: refresh the queue`);
+  if (item.version !== version) throw new Error(`card ${card} changed since the panel drew it: refresh the queue`);
+  return { ...read, item };
+}
+
 /**
  * Writes one queue panel answer, `action` on card `card`, only where the queue read again with `login` holds that card
  * at `version` and the action answers its item. `park` writes the card's `Parked:` state line, posts the panel's hold
- * and moves the card to Backlog; `answer` posts `ownerAnswerLine` for a merge item, at the head and identities the queue
- * read drew it from. Questions go to chat. Keep removes the title's Proposed prefix and drop closes the card as
+ * and moves the card to Backlog. An answer is refused: a merge answer goes to the coordinator through `relayAnswer`,
+ * and questions go to chat. Keep removes the title's Proposed prefix and drop closes the card as
  * not planned and moves it to Done.
  * `pick` makes proposal `proposal` of a weekly retro a card, as `fileDraft` says, and takes that number, which every
  * other action refuses. Comment text goes through a file in a fresh temporary folder. Takes the readers `collect` takes and `output`, which
@@ -614,21 +608,20 @@ function readRecord(text, action) {
  * takes, built from that version-checked read and never from one after the writes. Throws one line, writing nothing,
  * for any other tracker, card, action, login, reply, version, item or unreadable board repository; a write that fails
  * throws its cause, the earlier writes of the action standing.
+ * @param {{ card: number, action: string | undefined, version: string | undefined, reply?: string, proposal?: number, output: QueueOutput } & QueueReaders} request
  */
 export function act({ card, action, version, reply, proposal, output, ...readers }) {
   if (readers.tracker !== 'github') throw new Error(GITHUB_ONLY);
   if (!Number.isSafeInteger(card) || card <= 0) throw new Error(`${JSON.stringify(card)} is not a card number`);
-  if (!ACTIONS.includes(action)) throw new Error(`${JSON.stringify(action)} is not a queue panel action: answer in chat`);
+  if (action === undefined || !ACTIONS.includes(action)) throw new Error(`${JSON.stringify(action)} is not a queue panel action: answer in chat`);
   if (typeof readers.login !== 'string') throw new Error(NO_LOGIN);
-  const words = action === 'answer' ? replyWords(reply) : undefined;
-  if (action !== 'answer' && reply !== undefined) throw new Error(`${action} takes no reply`);
-  if (action === 'pick' && !(Number.isSafeInteger(proposal) && proposal > 0)) throw new Error('a pick names its proposal by a positive whole number');
+  if (action === 'answer') replyWords(reply);
+  else if (reply !== undefined) throw new Error(`${action} takes no reply`);
+  if (action === 'pick' && !(typeof proposal === 'number' && Number.isSafeInteger(proposal) && proposal > 0)) throw new Error('a pick names its proposal by a positive whole number');
   if (action !== 'pick' && proposal !== undefined) throw new Error(`${action} takes no proposal`);
-  const { document, shown, facts } = readQueue(readers);
-  const item = document.items.find((entry) => entry.card === card);
-  if (item === undefined) throw new Error(`card ${card} is not in the queue now: refresh the queue`);
-  if (item.version !== version) throw new Error(`card ${card} changed since the panel drew it: refresh the queue`);
-  if (!ROUTES[action](item, proposal)) throw new Error(`${action} does not answer card ${card}'s ${item.category} item: answer in chat`);
+  const { facts, item } = drawnItem(card, version, readers);
+  if (action === 'answer' && item.category === 'merge') throw new Error(MERGE_ANSWER);
+  if (!ROUTES[action]?.(item, proposal)) throw new Error(`${action} does not answer card ${card}'s ${item.category} item: answer in chat`);
   const { executor, hostname } = readers;
   const repository = configuredRepository(executor);
   const { nameWithOwner } = repository;
@@ -636,9 +629,6 @@ export function act({ card, action, version, reply, proposal, output, ...readers
     writeStateLine(card, PARKED_LINE, { exec: executor });
     withBodyFile(parkHold(card, hostname), (file) => executor(['issue', 'comment', String(card), '--repo', nameWithOwner, '--body-file', file]));
     moveTo(card, 'Backlog', executor, output);
-  } else if (action === 'answer') {
-    const { head, identity } = shown.get(card);
-    withBodyFile(ownerAnswerLine(card, head, identity, words), (file) => executor(['issue', 'comment', String(card), '--repo', nameWithOwner, '--body-file', file]));
   } else if (action === 'keep') executor(['issue', 'edit', String(card), '--repo', nameWithOwner, '--title', item.title.slice(PROPOSED.length)]);
   else if (action === 'pick') fileDraft({ card, proposal, body: facts.get(card).body, login: readers.login, nameWithOwner }, executor);
   else {
@@ -647,6 +637,29 @@ export function act({ card, action, version, reply, proposal, output, ...readers
   }
   output.log(`owner-queue: card ${card}: ${action} written`);
   if (UNDOABLE.includes(action)) output.log(`owner-queue: undo record ${JSON.stringify(undoRecord(facts.get(card)))}`);
+}
+
+// The line the coordinator takes as the owner's queue panel answer `words` to card `card`'s merge at `head` and the
+// saved files' `identity`.
+const panelAnswerLine = (card, head, identity, words) => `Queue panel answer for card ${cardRef(card)}: job/${card} at ${head} ${identity}: ${words}`;
+
+/**
+ * Sends the owner's `reply` to card `card`'s waiting merge to the coordinator as `panelAnswerLine`, at the head and
+ * identity the queue read again with the readers `collect` takes drew it from, only where that read holds the card at
+ * `version` as a complete merge item, on any tracker and with or without a login. `relay(line)` resolves the relay's
+ * `{ code, message }`. Writes nothing to the card, logs `owner-queue: card <ref>: answer sent to the coordinator` to
+ * `output`, and throws one line, sending nothing, for any other card, reply, version or item, and the relay's message
+ * where it sent nothing.
+ */
+export async function relayAnswer({ card, version, reply, relay, output, ...readers }) {
+  const words = replyWords(reply);
+  const { item, shown } = drawnItem(card, version, readers);
+  if (item.category !== 'merge') throw new Error(`card ${card}'s ${item.category} item takes no coordinator answer: answer in chat`);
+  const proof = shown.get(card);
+  if (proof === undefined) throw new Error(`card ${card}'s merge shows no waiting version: answer in your coordinator chat`);
+  const { code, message } = await relay(panelAnswerLine(card, proof.head, proof.identity, words));
+  if (code !== 0) throw new Error(message);
+  output.log(`owner-queue: card ${cardRef(card)}: answer sent to the coordinator`);
 }
 
 /**
@@ -708,7 +721,7 @@ export function undo({ card, action, record, output, tracker, executor, hostname
   if (action === 'park') {
     moveTo(card, AWAITING_PUSH, executor, output);
     if (replaced !== undefined) writeStateLine(card, lastStateLine(replaced), { exec: executor });
-    executor(['api', '-X', 'DELETE', `repos/${nameWithOwner}/issues/comments/${COMMENT_ID.exec(hold.url)[1]}`]);
+    executor(['api', '-X', 'DELETE', `repos/${nameWithOwner}/issues/comments/${/** @type {RegExpExecArray} */ (COMMENT_ID.exec(hold.url))[1]}`]);
   } else if (action === 'keep') executor(['issue', 'edit', String(card), '--repo', nameWithOwner, '--title', `${PROPOSED}${issue.title}`]);
   else {
     // The Status to go back to, resolved before any write, so a column the board no longer offers writes nothing.
@@ -734,12 +747,14 @@ export function undo({ card, action, record, output, tracker, executor, hostname
  * other tracker, card, move, place or version, a board or card whose details were not read, a column the move does not
  * start from, a suggestion for `ready`, `up` or `place`, an unread build order, `up` from rank 1, or `place` at the
  * card's own place or past the last; a Status or position write that fails throws its cause.
+ * @param {{ card: number, move: string | undefined, version: string | undefined, to?: number, output: QueueOutput } & QueueReaders} request
  */
 export function moveOnBoard({ card, move, version, to, output, ...readers }) {
   if (readers.tracker !== 'github') throw new Error(MOVES_GITHUB_ONLY);
   if (!Number.isSafeInteger(card) || card <= 0) throw new Error(`${JSON.stringify(card)} is not a card number`);
-  if (!MOVES.includes(move)) throw new Error(`${JSON.stringify(move)} is not a board move`);
-  if (move === 'place' && !(Number.isSafeInteger(to) && to > 0)) throw new Error(`${JSON.stringify(to)} is not a place in the build order`);
+  if (!MOVES.includes(move ?? '')) throw new Error(`${JSON.stringify(move)} is not a board move`);
+  const target = typeof to === 'number' && Number.isSafeInteger(to) && to > 0 ? to : 0;
+  if (move === 'place' && target === 0) throw new Error(`${JSON.stringify(to)} is not a place in the build order`);
   const { document } = readQueue(readers);
   const { board } = document;
   if (board === null) throw new Error(`the board was not read: ${document.sources.find((source) => source.name === 'board' && !source.ok).error}`);
@@ -759,8 +774,8 @@ export function moveOnBoard({ card, move, version, to, output, ...readers }) {
   else if (move !== 'backlog' && proposed) throw new Error(`card ${card} is a suggestion, so it has no place in the build order`);
   if (move !== 'backlog' && board.orderUnread !== undefined) throw new Error(`the build order was not read: ${board.orderUnread}`);
   if (move === 'up' && rank === 0) throw new Error(`card ${card} is first in the build order already`);
-  if (move === 'place' && to > ranked.length) throw new Error(`card ${card} cannot take place ${to}: the build order ends at place ${ranked.length}`);
-  if (move === 'place' && to === rank + 1) throw new Error(`card ${card} is at place ${to} already`);
+  if (move === 'place' && target > ranked.length) throw new Error(`card ${card} cannot take place ${target}: the build order ends at place ${ranked.length}`);
+  if (move === 'place' && target === rank + 1) throw new Error(`card ${card} is at place ${target} already`);
   const { executor } = readers;
   if (move === 'ready') {
     if (ranked.length > 0) {
@@ -773,7 +788,7 @@ export function moveOnBoard({ card, move, version, to, output, ...readers }) {
     moveTo(card, 'Ready', executor, output);
   } else if (move === 'backlog') moveTo(card, 'Backlog', executor, output);
   else {
-    const place = move === 'up' ? rank : to;
+    const place = move === 'up' ? rank : target;
     const others = ranked.filter((each) => each.card !== card);
     placeCardAfter(card, place >= 2 ? others[place - 2].card : null, executor);
   }
@@ -788,11 +803,12 @@ export function moveOnBoard({ card, move, version, to, output, ...readers }) {
  * and logs `owner-queue: card <n>: show-me-first <state> written`, or `already <state>` where it wrote nothing. Throws one
  * line, writing nothing, for any other tracker, card or state, a board that was not read, a card that is not on it, a
  * suggestion, any other column, or labels that were not read; a write that fails throws its cause.
+ * @param {{ card: number, state: string | undefined, output: QueueOutput } & QueueReaders} request
  */
 export function markShowFirst({ card, state, output, ...readers }) {
   if (readers.tracker !== 'github') throw new Error(SHOW_FIRST_GITHUB_ONLY);
   if (!Number.isSafeInteger(card) || card <= 0) throw new Error(`${JSON.stringify(card)} is not a card number`);
-  if (!SHOW_FIRST_STATES.includes(state)) throw new Error(`${JSON.stringify(state)} is not a Show me first state`);
+  if (!SHOW_FIRST_STATES.includes(state ?? '')) throw new Error(`${JSON.stringify(state)} is not a Show me first state`);
   const { document } = readQueue(readers);
   const { board } = document;
   if (board === null) throw new Error(`the board was not read: ${document.sources.find((source) => source.name === 'board' && !source.ok).error}`);
@@ -1095,7 +1111,7 @@ async function screenshotOf(alt, src, fetch) {
   try {
     return { alt, ...(await downloadShot(src, fetch)) };
   } catch (error) {
-    return { alt, unread: error?.name === 'TimeoutError' ? `its download took over ${SHOT_TIMEOUT_MS / 1000} s` : 'its download failed' };
+    return { alt, unread: /** @type {Error | undefined} */ (error)?.name === 'TimeoutError' ? `its download took over ${SHOT_TIMEOUT_MS / 1000} s` : 'its download failed' };
   }
 }
 
@@ -1318,7 +1334,7 @@ const draftCard = ({ problem, build, criteria, workstream }, week, own) => ['## 
  * draft is the card an earlier pick created, which is completed and never rewritten.
  */
 function fileDraft({ card, proposal, body, login, nameWithOwner }, exec) {
-  const { week, proposals } = retroDrafts(body);
+  const { week, proposals } = /** @type {NonNullable<ReturnType<typeof retroDrafts>>} */ (retroDrafts(body));
   const draft = proposals.find(({ n }) => n === proposal);
   const own = draft.repository.toLowerCase() === nameWithOwner.toLowerCase();
   const kind = draft.label === undefined ? ['--type', draft.type] : ['--label', draft.label];

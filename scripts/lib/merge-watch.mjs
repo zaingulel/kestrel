@@ -21,14 +21,14 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ghArgvPrefix } from './gh-exec.mjs';
 import { parseRequiredReports, readRequiredSet, requiredCheckArgs } from './merge-evidence.mjs';
-import { isCanonicalLeadFolder, readManagedRecord } from './pre-approved-run.mjs';
+import { insideWindowsProfile, isCanonicalLeadFolder, readManagedRecord } from './pre-approved-run.mjs';
 
 export const WATCH_INTERVAL_MS = 30_000;
 
@@ -382,7 +382,7 @@ const GH_MISSING = 'the GitHub CLI `gh` is not installed or not on PATH; install
 // `lstart` is fixed-width to the second on procps and BSD `ps`; the C locale and UTC keep it the same in every reader.
 const PS_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s?(.*)$/;
 // A fixed command with no interpolated input.
-const WINDOWS_PROCESS_TABLE = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine | ConvertTo-Json -Compress';
+const WINDOWS_PROCESS_TABLE = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | ConvertTo-Json -Compress';
 
 const messageOf = (err) => String(err instanceof Error ? err.message : err).replace(/\s*\n\s*/g, ' ').trim();
 const identityOf = ({ pid, started }) => ({ pid, started });
@@ -414,13 +414,18 @@ function readWindowsTable() {
     // A process with no creation date, such as the idle process, can match no recorded identity.
     if (created === null) continue;
     const started = typeof created === 'object' ? created?.value : created;
-    if (!Number.isInteger(item?.ProcessId) || !Number.isInteger(item.ParentProcessId) || typeof started !== 'string'
+    if (!Number.isInteger(item?.ProcessId) || !Number.isInteger(item.ParentProcessId) || typeof item.Name !== 'string' || typeof started !== 'string'
       || !(item.CommandLine === null || typeof item.CommandLine === 'string')) {
       throw new Error('unreadable process table: a Win32_Process row did not parse');
     }
-    rows.push({ pid: item.ProcessId, ppid: item.ParentProcessId, started, args: item.CommandLine ?? '' });
+    rows.push({ pid: item.ProcessId, ppid: item.ParentProcessId, name: item.Name, started, args: item.CommandLine ?? '' });
   }
   return rows;
+}
+
+// Windows rows also carry the process `name`.
+export function platformProcessTable(platform = process.platform) {
+  return platform === 'win32' ? readWindowsTable() : readPosixTable();
 }
 
 // True when a table row's arguments are those of the role: a merge watch, the gh `webhook forward` launcher or the
@@ -531,10 +536,10 @@ export function isRelevantEvent(payload, { pr, base, head }) {
 
 const watchRecordPath = (stateDir, repo) => join(stateDir, `${createHash('sha256').update(repo).digest('hex').slice(0, 16)}.json`);
 
-function readWatchRecord(recordPath, full, coordinated) {
+function readWatchRecord(recordPath, full, coordinated, platform) {
   let record;
   try {
-    record = coordinated ? readManagedRecord(recordPath) : JSON.parse(readFileSync(recordPath, 'utf8'));
+    record = coordinated ? readManagedRecord(recordPath, { platform }) : JSON.parse(readFileSync(recordPath, 'utf8'));
   } catch (error) {
     if (coordinated && /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return undefined;
   }
@@ -550,8 +555,8 @@ const runningAs = (role, identity, rows, full) =>
   rows.find((row) => row.pid === identity.pid && row.started === identity.started && argsFit(role, row.args, full));
 
 // Undefined proves absence. False identifies a retained record whose original watcher has already ended.
-export function coordinatedWatchIsLive(stateDir, repo, readTable = readPosixTable) {
-  const record = readWatchRecord(watchRecordPath(stateDir, repo), repo, true);
+export function coordinatedWatchIsLive(stateDir, repo, readTable = readPosixTable, platform = process.platform) {
+  const record = readWatchRecord(watchRecordPath(stateDir, repo), repo, true, platform);
   return record === undefined ? undefined : Boolean(runningAs('watch', record.watch, readTable(), repo));
 }
 
@@ -561,7 +566,7 @@ export function coordinatedWatchIsLive(stateDir, repo, readTable = readPosixTabl
 // clears a retained record. Reads the repository's name unless `coordinated` names it.
 function watchRecovery({
   ghExec, stateDir = defaultStateDir(), sleep = delay, platform = process.platform,
-  readProcessTable: readTable = () => (platform === 'win32' ? readWindowsTable() : readPosixTable()),
+  readProcessTable: readTable = () => platformProcessTable(platform),
   endProcess: end = (target) => endMatching(target, platform, readTable, sleep),
   coordinated = /** @type {CoordinatedWatch | undefined} */ (undefined),
 }) {
@@ -631,7 +636,10 @@ function watchRecovery({
   };
 
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  if (coordinated && !isCanonicalLeadFolder(stateDir)) throw new Error('the merge watch state directory is not owned and private');
+  if (coordinated && !isCanonicalLeadFolder(stateDir, platform)) throw new Error('the merge watch state directory is not owned and private');
+  if (coordinated && platform === 'win32' && !insideWindowsProfile(realpathSync.native(homedir()), stateDir)) {
+    throw new Error('the merge watch state directory must be inside the user profile on Windows');
+  }
   const recordPath = watchRecordPath(stateDir, full);
   const removeRecord = () => rmSync(recordPath, { force: true });
   // An existing record: a live watch stops this start; a dead one's processes are ended by identity, each matched on
@@ -694,7 +702,7 @@ export async function openEventRoute(options) {
     try {
       await coordinated.beforeForward();
     } catch (error) {
-      const record = readWatchRecord(recordPath, full, true);
+      const record = readWatchRecord(recordPath, full, true, platform);
       const entry = lstatSync(recordPath, { throwIfNoEntry: false });
       if (entry?.dev === claim.dev && entry.ino === claim.ino
         && record?.watch.pid === watch.pid && record.watch.started === watch.started

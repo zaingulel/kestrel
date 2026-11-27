@@ -11,6 +11,21 @@ import { jiraCardDetails, readJiraBoard } from './board-jira.mjs';
 import { azureCardDetails, readAzureBoard } from './board-azure.mjs';
 import { markdownCardDetails, readMarkdownBoard } from './board-markdown.mjs';
 
+/** @typedef {NonNullable<Parameters<typeof fetchBoard>[1]>} FetchOptions */
+/** @typedef {import('./board.mjs').GhExecutor} GhExecutor */
+/** @typedef {{ github: number, markdown: number, linear: string, jira: string, azure: string }} IdentifierByTracker what each tracker's card identifier is */
+/** @typedef {(query: string, variables: unknown) => unknown} LinearExecutor */
+/** @typedef {(request: unknown) => unknown} RequestExecutor the Jira and Azure transport: one request in, the parsed reply out */
+/** @typedef {Array<(() => string) | undefined>} StartedDetails each a started batch read, in `cardDetailRequests` order */
+/**
+ * @template T
+ * @typedef {T extends keyof IdentifierByTracker ? Array<IdentifierByTracker[T]> : never} IdentifiersFor one identifier list per tracker, distributed over a union T
+ */
+
+/**
+ * @param {string} tracker
+ * @param {{ executor: GhExecutor, linear?: LinearExecutor, jira?: RequestExecutor, azure?: RequestExecutor, onOmission?: (advisory: string) => void, opening?: FetchOptions['opening'], pause?: FetchOptions['pause'], budget?: FetchOptions['budget'] }} readers
+ */
 export function readBoard(tracker, { executor, linear, jira, azure, onOmission, opening, pause, budget }) {
   /** @type {ReturnType<typeof readMarkdownBoard> | null} */
   let markdown = null;
@@ -30,9 +45,18 @@ export function readBoard(tracker, { executor, linear, jira, azure, onOmission, 
   return { items, markdown };
 }
 
+/**
+ * @template {keyof IdentifierByTracker} T
+ * @param {T} tracker
+ * @param {{ executor: GhExecutor, linear?: LinearExecutor, jira?: RequestExecutor, azure?: RequestExecutor, markdown?: ReturnType<typeof readMarkdownBoard> | null, started?: StartedDetails }} readers
+ * @param {IdentifiersFor<T>} numbers
+ */
 export function readDetails(tracker, { executor, linear, jira, azure, markdown, started }, numbers) {
   return {
-    markdown: () => markdownCardDetails(markdown.cards, numbers, markdown.refs),
+    markdown: () => {
+      if (markdown == null) throw new Error('readDetails: a markdown details read needs the board snapshot readBoard returned');
+      return markdownCardDetails(markdown.cards, numbers, markdown.refs);
+    },
     linear: () => linearCardDetails(linear, numbers),
     jira: () => jiraCardDetails(jira, numbers),
     azure: () => azureCardDetails(azure, numbers),

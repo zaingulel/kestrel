@@ -14,7 +14,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ownerAnswerLine, requireMergeOnEvidence } from './merge-evidence.mjs';
+import { requireMergeOnEvidence } from './merge-evidence.mjs';
 import { posixShell } from './posix-shell.mjs';
 import { presentRuntimes } from './runtimes.mjs';
 import { blockReason, cleanupPermission } from './unsafe-git.mjs';
@@ -1961,7 +1961,7 @@ test('ANTI-REGRESSION: a pre-approved run session publishes only a card whose ne
   }
 });
 
-test("ANTI-REGRESSION: a lead's continue, bound to its card under an earlier run's start, publishes only that card", () => {
+test("ANTI-REGRESSION: a resumed job session, bound to its card under an earlier run's start, publishes only that card", () => {
   // A continue runs under the start of the run that claimed its card, 2026-11-01, and the fixture's claim is at 11-04.
   // The binding is the card the continue's phase names; every read in the fixture names card 7, the card of job/7.
   const start = '2026-11-01T09:00:00Z';
@@ -2430,133 +2430,48 @@ test('ANTI-REGRESSION: a run session marks ready and merges nothing while its ca
 });
 
 // ── owner answers ───────────────────────────────────────────────────────────
-// The expected outcomes come from card #758's records and fix path, which the owner signed off: a held card's ready or
-// merge is admitted on the newest owner answer by the acting account for the saved card at the pull request head, or
-// on an answer to an earlier head that a fix line by that account built on, within the fix path's bounds. Every
-// identity is blobHash's, and every refusal is the held refusal, followed, where an answer holds, after `, and ` by why
-// it does not admit the head.
+// The expected outcomes come from card #1086's criteria and the owner's answer that a single card's chat can no longer
+// merge held work in a pre-approved run: no card record admits a held ready or merge, neither an owner answer at the pull
+// request head nor an answer to an earlier head with a fix line built on it, and every such refusal is the held refusal
+// alone. Every identity is blobHash's, so each record below is one the old fix path admitted.
 
 const SIGN_OFF = edit(CLEAR, 'tier=code', 'tier=sign-off');
 // The identity of a saved card: the blob hash of its body.md, then of each screenshot in numeric order, comma-joined.
 const identityOf = (...texts) => texts.map(blobHash).join(',');
 const ownerAnswer = (head, identity, words) => `Owner answer: job/7 at ${head} ${identity}: ${words}`;
 const fixBuilt = (from, words) => `Fix built: job/7 at ${HEAD_COMMIT} from ${from}: ${words}`;
-// The held refusal of `command` naming `reasons`, then, where the fix path gives one, its reason `tail`.
-const heldRefusal = (command, reasons, tail) => `${PRE_APPROVED}${command === READY ? 'marks ready' : 'merges'} nothing while a wait reason holds for HEAD: ${reasons.join(', ')}${tail === undefined ? '' : `, and ${tail}`}`;
-// Each row, as [label, fixture, held reasons or undefined where it is admitted, the fix path's reason], judged for
-// READY and MERGE, against its expected reason.
-const ownerAnswerOutcomes = (rows) => {
-  const outcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => rows.map((row) => [`${row[0]}: ${command}`, pick(command, row)])));
-  return {
-    actual: outcomes((command, [, fixture]) => judged(command, fixture).reason),
-    expected: outcomes((command, [, , reasons, tail]) => (reasons === undefined ? '' : heldRefusal(command, reasons, tail))),
-  };
-};
+// The held refusal of `command` naming `reasons`.
+const heldRefusal = (command, reasons) => `${PRE_APPROVED}${command === READY ? 'marks ready' : 'merges'} nothing while a wait reason holds for HEAD: ${reasons.join(', ')}`;
 
-test('ANTI-REGRESSION: a pre-approved run session marks ready or merges a held card only where the card records an owner answer by its own account for the version at the pull request head', (t) => {
+test('ANTI-REGRESSION: a pre-approved run session marks ready or merges nothing while a wait reason holds whatever its card records', (t) => {
   assert.equal(blobHash(SHOT_1), SHOT_1_HASH, "blobHash gives Git's own blob hash");
   const cleanup = (remove) => t.after(remove);
-  const held = { cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup), pullBody: SIGN_OFF };
-  const atHead = ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), 'yes');
-  const answered = (login, body) => [OWN_CLAIM, cardComment(login, '2026-11-04T12:30:00Z', body)];
-  const marked = { issue: { labels: labelsOf('show-me-first') } };
-  // A matching record, then a newer comment by owner whose first line begins as a record for job/7 and does not parse.
-  const superseded = (body) => ({ ...held, comments: [...answered('owner', atHead), cardComment('owner', '2026-11-04T12:40:00Z', body)] });
-  const editedByBob = (comment) => ({ ...comment, editor: { login: 'bob' }, lastEditedAt: '2026-11-04T12:50:00Z' });
-  const { actual, expected } = ownerAnswerOutcomes([
-    ['no record', held, ['sign-off']],
-    ['a record by owner at HEAD with its identity', { ...held, comments: answered('owner', atHead) }],
-    ['a record by another account', { ...held, comments: answered('bob', atHead) }, ['sign-off']],
-    ['a record by a deleted account', { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), author: null }] }, ['sign-off']],
-    ['a record for job/8', { ...held, comments: answered('owner', atHead.replace('job/7', 'job/8')) }, ['sign-off']],
-    ['a record with blank words', { ...held, comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), '  ')) }, ['sign-off']],
-    ['a record quoted after other text on its first line', { ...held, comments: answered('owner', `The owner wrote ${atHead}`) }, ['sign-off']],
-    [
-      'a record with one identity hash changed',
-      { ...held, comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(CLEAR), 'yes')) },
-      ['sign-off'],
-      `the newest owner answer on card 7 does not name the saved card at ${HEAD_COMMIT}`,
+  const answer = (head, body, words) => cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(head, identityOf(body), words));
+  // A whole valid record by the session's own account for the saved card at HEAD.
+  const atHead = { cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup), pullBody: SIGN_OFF, comments: [OWN_CLAIM, answer(HEAD_COMMIT, SIGN_OFF, 'yes')] };
+  // The H1-to-H2 example: the owner answered at ANSWERED_COMMIT asking for a fix, a fix line by the same account built
+  // HEAD_COMMIT from it, and ANSWERED_COMMIT is an ancestor of HEAD_COMMIT.
+  const fixed = {
+    cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup, { 'body.md': SIGN_OFF }),
+    pullBody: SIGN_OFF,
+    comments: [
+      OWN_CLAIM,
+      answer(ANSWERED_COMMIT, SIGN_OFF, 'shorten the title and merge it'),
+      cardComment('owner', '2026-11-04T12:45:00Z', fixBuilt(ANSWERED_COMMIT, 'shortened the title')),
     ],
-    [
-      'a matching record, then a newer one naming ANSWERED_COMMIT and no fix line',
-      {
-        cwd: sessionDirectory({ 'body.md': SIGN_OFF }, cleanup, { 'body.md': SIGN_OFF }),
-        pullBody: SIGN_OFF,
-        comments: [
-          OWN_CLAIM,
-          cardComment('owner', '2026-11-04T12:30:00Z', atHead),
-          cardComment('owner', '2026-11-04T12:40:00Z', ownerAnswer(ANSWERED_COMMIT, identityOf(SIGN_OFF), 'shorten the title and merge it')),
-        ],
-      },
-      ['sign-off'],
-      `the newest owner answer on card 7 names ${ANSWERED_COMMIT}, and no fix built from it by owner names ${HEAD_COMMIT}`,
-    ],
-    [
-      'a matching record, then a newer one by owner with its words on the second line',
-      superseded(`Owner answer: job/7 at ${HEAD_COMMIT} ${identityOf(SIGN_OFF)}:\nhold it`),
-      ['sign-off'],
-    ],
-    ['a matching record, then a newer one by owner naming a truncated head', superseded(ownerAnswer(HEAD_COMMIT.slice(0, 12), identityOf(SIGN_OFF), 'hold it')), ['sign-off']],
-    [
-      'a matching record that another account last edited',
-      { ...held, comments: [OWN_CLAIM, editedByBob(cardComment('owner', '2026-11-04T12:30:00Z', atHead))] },
-      ['sign-off'],
-    ],
-    [
-      'a matching record that owner last edited',
-      { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), editor: { login: 'owner' }, lastEditedAt: '2026-11-04T12:50:00Z' }] },
-    ],
-    [
-      'a matching record that an account GitHub no longer names last edited',
-      { ...held, comments: [OWN_CLAIM, { ...cardComment('owner', '2026-11-04T12:30:00Z', atHead), lastEditedAt: '2026-11-04T12:50:00Z' }] },
-      ['sign-off'],
-    ],
-    [
-      'a matching record, and an earlier comment by owner that another account last edited',
-      { ...held, comments: [OWN_CLAIM, editedByBob(cardComment('owner', '2026-11-04T12:20:00Z', 'Verdict: the review found nothing.')), cardComment('owner', '2026-11-04T12:30:00Z', atHead)] },
-      ['sign-off'],
-    ],
-    ['a show-me-first card with the record', { ...held, ...marked, comments: answered('owner', atHead) }],
-    ['a show-me-first card without the record', { ...held, ...marked }, ['sign-off', 'show-me-first']],
-    [
-      'on-screen, the work on screen with its screenshot attached, with the record',
-      {
-        settingText: '{"version":1,"waitForOwner":"on-screen"}',
-        cwd: sessionDirectory({ 'body.md': ON_SCREEN, 'screenshot-1.png': SHOT_1 }, cleanup),
-        pullBody: ATTACHED_BODY,
-        comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(ON_SCREEN, SHOT_1), 'yes')),
-      },
-    ],
-  ]);
-  // A matching record never admits a reason held at HEAD that the saved card it names does not hold, which only the
-  // published body adds. Each row, as [label, fixture, held reasons], is refused naming those reasons; what follows
-  // them is the guard's own wording, so only the reasons are compared.
-  const shownOnScreen = edit(ON_SCREEN, 'tier=code', 'tier=sign-off');
-  const unseen = [
-    [
-      'a matching record and a published body adding hard-to-undo',
-      { ...held, pullBody: edit(SIGN_OFF, UNDO_EASY, UNDO_HARD), comments: answered('owner', atHead) },
-      ['sign-off', 'hard-to-undo'],
-    ],
-    [
-      'a matching record and a saved screenshot the published body does not attach',
-      {
-        cwd: sessionDirectory({ 'body.md': shownOnScreen, 'screenshot-1.png': SHOT_1 }, cleanup),
-        pullBody: shownOnScreen,
-        comments: answered('owner', ownerAnswer(HEAD_COMMIT, identityOf(shownOnScreen, SHOT_1), 'yes')),
-      },
-      ['screenshot', 'sign-off'],
-    ],
+    answeredAncestor: true,
+  };
+  // The nearest authorised case: the same session and record with no wait reason.
+  const clear = { cwd: sessionDirectory({ 'body.md': CLEAR }, cleanup), pullBody: CLEAR, comments: [OWN_CLAIM, answer(HEAD_COMMIT, CLEAR, 'yes')] };
+  const rows = [
+    ...[READY, MERGE].flatMap((command) => [
+      [`an owner answer at HEAD: ${command}`, command, atHead, heldRefusal(command, ['sign-off'])],
+      [`an owner answer to an ancestor and a fix built from it at HEAD: ${command}`, command, fixed, heldRefusal(command, ['sign-off'])],
+    ]),
+    [`no wait reason, with an owner answer at HEAD: ${READY}`, READY, clear, ''],
   ];
-  const heldNaming = (reasons) => `held: ${reasons.join(', ')}`;
-  const unseenOutcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => unseen.map((row) => [`${row[0]}: ${command}`, pick(command, row)])));
-  assert.deepEqual(
-    { ...actual, ...unseenOutcomes((command, [, fixture, reasons]) => {
-      const { reason } = judged(command, fixture);
-      return reason.startsWith(heldRefusal(command, reasons)) ? heldNaming(reasons) : reason;
-    }) },
-    { ...expected, ...unseenOutcomes((command, [, , reasons]) => heldNaming(reasons)) },
-  );
+  const outcomes = (pick) => Object.fromEntries(rows.map((row) => [row[0], pick(row)]));
+  assert.deepEqual(outcomes(([, command, fixture]) => judged(command, fixture).reason), outcomes((row) => row[3]));
 });
 
 // new behaviour: the Herdr mark counts only where fetched main turns the Herdr add-on on. Where it does not, a marked
@@ -2627,62 +2542,6 @@ test('1057 a Herdr mark is inert where fetched main leaves the Herdr add-on off'
     blockReason('git push origin HEAD:main', { ...inJob, cwd: run.cwd }, { preApproved: { ...run.preApproved, coordinated: true, git } }),
     `${PRE_APPROVED}pushes main only while the reviewed base matches the fetched main used for delivery policy`,
   );
-  assert.deepEqual(actual, expected);
-});
-
-test('ANTI-REGRESSION: an owner answer asking for a fix admits the fixed head only from a fix built on the answered head by the same account holding no new wait reason', (t) => {
-  assert.equal(blobHash(SHOT_1), SHOT_1_HASH, "blobHash gives Git's own blob hash");
-  const cleanup = (remove) => t.after(remove);
-  const failed = edit(SIGN_OFF, 'Failed: none', 'Failed: lint, cause unknown');
-  const answerTo = (body) => cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(ANSWERED_COMMIT, identityOf(body), 'shorten the title and merge it'));
-  const fixBy = (login, createdAt, from = ANSWERED_COMMIT) => cardComment(login, createdAt, fixBuilt(from, 'shortened the title'));
-  const FIX = fixBy('owner', '2026-11-04T12:45:00Z');
-  // The H1-to-H2 example: the owner answered at ANSWERED_COMMIT, whose saved write-up is `answered` (null for no
-  // folder there), a fix line names HEAD_COMMIT, whose saved write-up is `at`, and the ancestor read is true.
-  /** @param {PreApprovedFixture & { at?: string, answered?: string | null }} [options] */
-  const fixed = ({ at = SIGN_OFF, answered = SIGN_OFF, comments = [OWN_CLAIM, answerTo(answered ?? SIGN_OFF), FIX], ...rest } = {}) => ({
-    cwd: sessionDirectory({ 'body.md': at }, cleanup, answered === null ? undefined : { 'body.md': answered }),
-    pullBody: at,
-    comments,
-    answeredAncestor: true,
-    ...rest,
-  });
-  const NO_FIX = `the newest owner answer on card 7 names ${ANSWERED_COMMIT}, and no fix built from it by owner names ${HEAD_COMMIT}`;
-  const { actual, expected } = ownerAnswerOutcomes([
-    ['as described', fixed()],
-    ['no fix line', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF)] }), ['sign-off'], NO_FIX],
-    ['a fix line by another account', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), fixBy('bob', '2026-11-04T12:45:00Z')] }), ['sign-off'], NO_FIX],
-    ['a fix line older than the answer', fixed({ comments: [OWN_CLAIM, fixBy('owner', '2026-11-04T12:20:00Z'), answerTo(SIGN_OFF)] }), ['sign-off'], NO_FIX],
-    ['a fix line from another head', fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), fixBy('owner', '2026-11-04T12:45:00Z', 'feedface'.repeat(5))] }), ['sign-off'], NO_FIX],
-    [
-      'a fix line from ANSWERED_COMMIT naming another head',
-      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', edit(fixBuilt(ANSWERED_COMMIT, 'shortened the title'), HEAD_COMMIT, 'feedface'.repeat(5)))] }),
-      ['sign-off'],
-      NO_FIX,
-    ],
-    [
-      'a fix line for job/8 by owner, another card',
-      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', edit(fixBuilt(ANSWERED_COMMIT, 'shortened the title'), 'job/7', 'job/8'))] }),
-      ['sign-off'],
-      NO_FIX,
-    ],
-    [
-      'a fix line after other text on its first line',
-      fixed({ comments: [OWN_CLAIM, answerTo(SIGN_OFF), cardComment('owner', '2026-11-04T12:45:00Z', `Example: ${fixBuilt(ANSWERED_COMMIT, 'shortened the title')}`)] }),
-      ['sign-off'],
-      NO_FIX,
-    ],
-    ['an answered head that is not an ancestor', fixed({ answeredAncestor: false }), ['sign-off'], `${ANSWERED_COMMIT}, which the newest owner answer on card 7 names, is not an ancestor of ${HEAD_COMMIT}`],
-    ['HEAD_COMMIT also holding hard-to-undo', fixed({ at: edit(SIGN_OFF, UNDO_EASY, UNDO_HARD) }), ['sign-off', 'hard-to-undo'], `the fix at ${HEAD_COMMIT} holds a wait reason that did not hold at ${ANSWERED_COMMIT}`],
-    ['both heads holding check', fixed({ at: failed, answered: failed }), ['check', 'sign-off'], `the fix at ${HEAD_COMMIT} has failed, untested or unsettled evidence`],
-    ['no folder at ANSWERED_COMMIT', fixed({ answered: null }), ['sign-off'], `the newest owner answer on card 7 does not name the saved card at ${ANSWERED_COMMIT}`],
-    [
-      'as described, the card now carrying show-me-first, added after the answer',
-      fixed({ issue: { labels: labelsOf('show-me-first') } }),
-      ['sign-off', 'show-me-first'],
-      `card 7 asks to see every version first, so the fix at ${HEAD_COMMIT} needs an owner answer of its own`,
-    ],
-  ]);
   assert.deepEqual(actual, expected);
 });
 
@@ -2832,7 +2691,7 @@ function heldPinnedVersions(t, body) {
   const identity = identityOf(body);
   const cwd = sessionDirectory({ 'body.md': body }, (remove) => t.after(remove));
   const withNote = sessionDirectory({ 'body.md': body }, (remove) => t.after(remove));
-  writeFileSync(join(withNote, '.claude/worklog/job_7-owner-answer.md'), `${ownerAnswerLine(7, HEAD_COMMIT, identity, 'yes')}\n`);
+  writeFileSync(join(withNote, '.claude/worklog/job_7-owner-answer.md'), `${ownerAnswer(HEAD_COMMIT, identity, 'yes')}\n`);
   const issue = { labels: labelsOf('show-me-first') };
   return [
     { label: 'the verified binding alone', fixture: { cwd, issue } },
@@ -3199,13 +3058,13 @@ test('967 a Herdr job never clears the show-me-first marker', (t) => {
 // marker holds its finished work. A marked card refuses, naming the marker alone, at ready, at the pinned merge and at a
 // coordinated job's direct push, whatever local owner-answer note, owner answer comment or fix record it holds, a note
 // the guard once refused as unreadable included; once the owner removes the marker the next repaired head is admitted.
-// A session no coordinator started never reads the note and still reads an owner answer comment.
+// A session no coordinator started never reads the note, and no owner answer comment admits its held work either.
 test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) => {
   const cleanup = (remove) => t.after(remove);
   const DIRECT = 'git push origin HEAD:main';
   const identity = identityOf(CLEAR);
   const marked = { issue: { labels: labelsOf('show-me-first') } };
-  const noteAt = (card, head, words = 'yes', named = identity) => `${ownerAnswerLine(card, head, named, words)}\n`;
+  const noteAt = (card, head, words = 'yes', named = identity) => `Owner answer: job/${card} at ${head} ${named}: ${words}\n`;
   const answerAt = (head) => cardComment('owner', '2026-11-04T12:30:00Z', ownerAnswer(head, identity, 'yes'));
   const FIX = cardComment('owner', '2026-11-04T12:45:00Z', fixBuilt(ANSWERED_COMMIT, 'shortened the title'));
   // A session whose saved write-up is CLEAR at HEAD and at ANSWERED_COMMIT, holding `note` as its local owner-answer
@@ -3253,9 +3112,9 @@ test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) =>
     outcomes((command, fixture, options) => pinnedDelivery(command, fixture, options).reason),
     outcomes((command, fixture, options, admitted) => (admitted ? '' : markerHold(command))),
   );
-  // A session no coordinator started reads card comments as before and never the note: the note alone is the held
-  // refusal with nothing after it, and an owner answer comment admits.
-  const atHead = ownerAnswerLine(7, HEAD_COMMIT, identityOf(SIGN_OFF), 'yes');
+  // A session no coordinator started never reads the note, and an owner answer comment admits nothing: each is the held
+  // refusal with nothing after it.
+  const atHead = ownerAnswer(HEAD_COMMIT, identityOf(SIGN_OFF), 'yes');
   const signedOff = (note, rest = {}) => {
     const cwd = sessionDirectory({ 'body.md': SIGN_OFF }, cleanup);
     if (note !== undefined) writeFileSync(join(cwd, '.claude/worklog/job_7-owner-answer.md'), note);
@@ -3268,7 +3127,7 @@ test('967 a Herdr job reads no note, receipt or menu answer as approval', (t) =>
   const uncoordinatedOutcomes = (pick) => Object.fromEntries([READY, MERGE].flatMap((command) => uncoordinated.map(([label, fixture]) => [`${label}: ${command}`, pick(command, label, fixture)])));
   assert.deepEqual(
     uncoordinatedOutcomes((command, label, fixture) => judged(command, fixture).reason),
-    uncoordinatedOutcomes((command, label) => (label === 'the note alone' ? heldRefusal(command, ['sign-off']) : '')),
+    uncoordinatedOutcomes((command) => heldRefusal(command, ['sign-off'])),
   );
 });
 

@@ -4,9 +4,8 @@
 // The run's mark reaches the publishing rule here: PRE_APPROVED_RUN_SESSION=<run start> admits only the delivery forms of its own card,
 // claimed by its GitHub account since the run start, while fetched-main waitForOwner is on-screen or when-needed,
 // for a push while no own pull request from its branch is ready or queued and, for a ready or merge,
-// while no wait reason holds for HEAD or the published body and its card does not carry show-me-first,
-// unless the card's recorded owner answer admits that head. Under PRE_APPROVED_RUN_SESSION an unreadable
-// call is refused, not passed. PRE_APPROVED_RUN_CARD, which a lead sets on a continue session, binds that session to
+// while no wait reason holds for HEAD or the published body and its card does not carry show-me-first.
+// Under PRE_APPROVED_RUN_SESSION an unreadable call is refused, not passed. PRE_APPROVED_RUN_CARD, which the coordinator sets on each job session it starts, binds that session to
 // the one card it names. FABRAIK_COORDINATED_JOB=1, which a Herdr coordinator sets on the job it starts, makes the
 // guard take the Herdr exact path, where no comment or note ever admits a held head, and makes every publish and
 // merge watch first verify the job's workflow version, FABRAIK_WORKFLOW_ROOT, whole.

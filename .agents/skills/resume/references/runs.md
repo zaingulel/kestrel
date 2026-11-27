@@ -147,6 +147,10 @@ it names say so.
 
 This holds for every session a coordinator started or took over and that has not ended, on every
 route and machine, including a run's card session, a native app chat and a coordinated job in a Herdr terminal.
+Claude Code jobs start and deliver through the coordinated delivery lane on Linux and Windows the same way, and Codex
+jobs on Linux only; a Herdr coordinator's shared cap on running jobs is held under a lock that
+works on Linux, macOS and Windows, where it relies on the Windows user profile's default permissions and so refuses a
+state folder outside the profile.
 
 Before the coordinator tells the owner anything about such a session, it reads the session's record: whenever the owner
 asks about the session, and unasked each time its wait on the session has run 30 minutes. It then tells the owner in

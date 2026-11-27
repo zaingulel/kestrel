@@ -253,8 +253,8 @@ that block as saved, with any screenshot inline, then blocks 6 and 7.
    [merge-on-evidence.md](merge-on-evidence.md) says.
 6. **Full write-up:** the saved `body.md`'s path, or the pull request's address only where that pull request's body
    already is the saved write-up, that the owner can ask to see it here, and the log's path or link.
-7. **The question,** which asks for a yes, the change the owner wants, or a no, and says the answer is recorded on the
-   card. It says what a yes does: it approves this card, whatever wait reason held it, and, in plain words, the
+7. **The question,** which asks for a yes, the change the owner wants, or a no, and says the answer goes to the session
+   that delivers it. It says what a yes does: it approves this card, whatever wait reason held it, and, in plain words, the
    delivery section 8 then runs. A change merges without being shown again only where the fix path of
    [owner-answer.md](owner-answer.md) admits it.
 
@@ -276,12 +276,12 @@ per file. On showing the card the session prints `<head>` and that identity in t
 to `shown-hash` in that folder. Before section 8 begins `git rev-parse HEAD` must print `<head>`, `git status
 --porcelain --untracked-files=normal` must print nothing and the same command must print the identity shown: the session
 that showed the card compares it with `shown-hash`, a coordinator that showed a job whose named session still runs
-compares it with the identity it printed, and a session acting on a recorded answer compares it with the identity that
-record names; neither of the last two reads `shown-hash`, which a card shown again at the same head rewrites. Otherwise
+compares it with the identity it printed, and a coordinator acting on a queue panel answer compares it with the identity that
+answer names; neither of the last two reads `shown-hash`, which a card shown again at the same head rewrites. Otherwise
 the yes does not count: save again and show the card again.
 
-**Owner answer.** How the owner's answer reaches a waiting card, as the record owner-answer.md gives for the job's route, the fix path and who acts on a
-record, is in [references/owner-answer.md](owner-answer.md), read whole before a session records or acts on an answer.
+**Owner answer.** How the owner's answer reaches the session that delivers a waiting card, the fix path and who acts
+on it, is in [references/owner-answer.md](owner-answer.md), read whole before a session acts on an answer.
 
 **Which template wins.** The `pr` skill carries a template of its own and never reads the repository's. Wherever
 the two differ, `.github/pull_request_template.md` wins: it decides which sections and lines the body has, their

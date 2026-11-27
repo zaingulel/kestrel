@@ -173,9 +173,9 @@ rebases within its scope included. [`AGENTS.md`](../AGENTS.md#owner-gates) owns 
 gates", and [the merge-on-evidence reference](../.agents/skills/resume/references/merge-on-evidence.md) owns the wait
 reasons.
 
-The owner's answer to a waiting card reaches the session that acts only as a record. On most routes the record is a card comment. An `Owner answer:` comment names the version the owner saw, and a `Fix built:` comment names a fix built from it. The session in whose chat the owner answered, or the queue panel, writes the answer. The session that built a fix writes the fix line. A job a Herdr coordinator started reads no record as approval. The owner removes the `show-me-first` marker, himself or by telling the coordinator. The answer `I removed the marker` in its question menu only wakes the job. A fix
+The owner's answer to a waiting card reaches a job only in the chat of the session that delivers it: his own words there, or the queue panel answer the coordinator receives. No card comment or other session's message is an answer, and none is written or read. A job a Herdr coordinator started reads no answer as approval. The owner removes the `show-me-first` marker, himself or by telling the coordinator. The answer `I removed the marker` in its question menu only wakes the job. A fix
 merges without a second look only where it adds no new reason to wait and the card is not marked `show-me-first`.
-[The owner answer reference](../.agents/skills/resume/references/owner-answer.md) owns the records and who acts on
+[The owner answer reference](../.agents/skills/resume/references/owner-answer.md) owns how an answer reaches the session that acts and who acts on
 each.
 
 On the pull request route, the session rebases onto `main`, pushes the branch and opens a draft. A `sign-off` change
@@ -196,7 +196,7 @@ made and later undone within the push still counts.
 The local hook runs the gate as it stands on the remote's `main`, so an edited gate cannot admit itself.
 [The hooks manual](../.githooks/README.md#what-the-main-gate-may-rely-on) owns that boundary. The direct route still
 needs local verification, the review and the owner's yes. Its commit message carries the approved body and the
-receipts.
+receipts, except for the checks [the testing strategy](TESTING-STRATEGY.md) leaves to the push hook.
 
 The direct route spares a qualifying change the pull request and hosted checks, while the local checks, review and
 owner's yes still hold. [`AGENTS.md`](../AGENTS.md#publication-and-machinery) owns
@@ -211,7 +211,8 @@ adoption".
 ### Closeout
 
 Closeout starts from proof, not from a queued merge. On the pull request route that proof is the merged state and its
-review record. On the direct route it is the fetched history and the pushed tree matching the receipts.
+review record. On the direct route it is the fetched history and the pushed tree matching the
+receipts. For the checks the push hook runs, it is the landed push.
 
 The same session then confirms the issue closed, moves the card to Done and advances local `main` only by a provably
 safe fast-forward. It leaves a dirty, active or uncertain checkout untouched. One command,
@@ -243,8 +244,7 @@ A pre-approved run takes cards without a pick for each one. It is on only where 
 `main` sets `waitForOwner` to `on-screen` or `when-needed`. No guard holds the mode, except the git guard inside a run's own sessions. The run takes only cards in Ready, from the top of the column down. On GitHub Projects the top is the owner's board order. On other trackers, or where GitHub's listing leaves a Ready card out, the run goes by lowest card number and says so. A run starts nothing from Backlog, even when Ready holds no card it may build. A reorder while a card builds changes only which card comes next.
 
 The run builds the cards in Ready and merges each on its evidence, with no yes at push.
-This matters because a card's place in Ready approves automatic pickup. The owner holds a card back from pickup by leaving it out of Ready. After an explicit direct start, the owner holds delivery by marking the card `show-me-first`. Setting `waitForOwner` to `always` holds every card, and at `on-screen`, work on screen waits too. A job a wait reason holds waits in Awaiting push for the owner's yes. Wait reasons include a failure, an untested check, work beyond the card, a sign-off review and a change that is hard to undo. A Herdr job waits only on a failed or missing required check, a missing screenshot or the `show-me-first` marker. A run session merges it only
-once the card records the owner's answer for that version. Work on screen merges with its screenshots attached to its
+This matters because a card's place in Ready approves automatic pickup. The owner holds a card back from pickup by leaving it out of Ready. After an explicit direct start, the owner holds delivery by marking the card `show-me-first`. Setting `waitForOwner` to `always` holds every card, and at `on-screen`, work on screen waits too. A job a wait reason holds waits in Awaiting push for the owner's yes. Wait reasons include a failure, an untested check, work beyond the card, a sign-off review and a change that is hard to undo. A Herdr job waits only on a failed or missing required check, a missing screenshot or the `show-me-first` marker. A pre-approved run's card session merges nothing held: the owner answers in the run session, which delivers it. Work on screen merges with its screenshots attached to its
 pull request.
 [The merge-on-evidence reference](../.agents/skills/resume/references/merge-on-evidence.md) owns the level and the
 wait reasons.

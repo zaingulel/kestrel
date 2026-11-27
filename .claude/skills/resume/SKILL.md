@@ -379,8 +379,10 @@ startable cards build meanwhile.
   native awaited operation or as a named session whose completion wakes the coordinator, which carries the owner's
   questions, widened as "Owner gates" in `AGENTS.md` says, and answers to and from it by message, the receiver acting on
   one only when the sender shown is the session that started it or took it over, or the session it started or took over
-  (no hook sees a message, so this rests on the receiver); a push yes reaches a job only as the record **Owner
-  answer** in [references/owner-answer.md](references/owner-answer.md) gives for that job's route, never by message alone, and a Herdr job takes none, its owner removing the marker, so a job
+  (no hook sees a message, so this rests on the receiver); a push yes reaches a job only in the chat of the session that
+  delivers it, as the owner's own words there or the queue panel answer the coordinator receives, as
+  [references/owner-answer.md](references/owner-answer.md) gives for its route, never as a card record or another
+  session's message, and a Herdr job takes none, its owner removing the marker, so a job
   whose named session still runs is shown and delivered by the coordinator itself as **Batch review** under "7. Push
   authorisation" says, an owner gate's yes still counting only where `AGENTS.md` says; a terminal tab is only for the
   owner to watch.
@@ -402,7 +404,7 @@ Read [references/review-and-push.md](references/review-and-push.md) whole before
 
 Read [references/review-and-push.md](references/review-and-push.md) whole, as "6. Verify and review" says, before this section's first step.
 
-**Batch review.** Its steps are in [references/batch-review.md](references/batch-review.md), and the Saved write-up and presentation rules its steps use are in [references/review-and-push.md](references/review-and-push.md), and the records an owner's answer leaves are in [references/owner-answer.md](references/owner-answer.md): read all three whole before applying any step of it, whether the owner's message asks to see what is waiting or a run's step names it.
+**Batch review.** Its steps are in [references/batch-review.md](references/batch-review.md), the Saved write-up and presentation rules they use in [references/review-and-push.md](references/review-and-push.md), and how an answer reaches the delivering session in [references/owner-answer.md](references/owner-answer.md): read all three whole before applying any step of it, however it starts.
 
 ## 8. Deliver
 

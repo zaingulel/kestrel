@@ -18,7 +18,7 @@ import { delimiter, dirname, join, parse, relative } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { runCommand } from './closeout-cleanup.mjs';
+import { parseWorktreeList, runCommand } from './closeout-cleanup.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { main } from '../closeout-cleanup.mjs';
 import { runFolderPrefix } from './run-folder.mjs';
@@ -434,6 +434,15 @@ test('a Linear issue ID is accepted as the issue and names the job/<ID> branch',
     err: [],
   });
   assert.deepEqual(calls, ['worktree list --porcelain -z', 'rev-parse --verify --quiet refs/heads/job/ENG-1']);
+});
+
+test('parseWorktreeList reads Windows drive paths on win32 and refuses a non-absolute path', () => {
+  const listing = 'worktree C:/ft/repo\0HEAD 1111\0branch refs/heads/main\0\0worktree C:/ft/repo/.claude/worktrees/job-9\0HEAD 2222\0branch refs/heads/job/9\0\0';
+  assert.deepEqual(parseWorktreeList(listing, 'win32'), [
+    { path: 'C:/ft/repo', HEAD: '1111', branch: 'refs/heads/main' },
+    { path: 'C:/ft/repo/.claude/worktrees/job-9', HEAD: '2222', branch: 'refs/heads/job/9' },
+  ]);
+  assert.equal(parseWorktreeList('worktree ft/repo\0HEAD 1111\0\0', 'win32'), null);
 });
 
 test('an unreadable worktree list exits 1 having done nothing', async (t) => {

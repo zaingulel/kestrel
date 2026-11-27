@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The Fabraik queue panel. Its own view is the inbox, drawn live from Herdr's agent list: each session blocked on the
 // owner under Needs you, with the waiting menu its job asked and that menu's answers, and each working session under
 // Running, each with Open, which selects its space, tab and pane. The inbox reads the waiting menus with `queue.mjs menus`
@@ -8,19 +7,20 @@
 // Decisions to read it. `queue.mjs` beside this file builds that saved queue, which the views draw. Nothing here reads the
 // tracker on a timer: each overlay view runs `queue.mjs refresh` once as it opens and again at each press of its Refresh control
 // (and where a sheet opens or an answer lands), with the herdr-core terminal list it reads as each refresh begins; ages are
-// clock times, which stay true with no timer. Its Clear runs `queue.mjs clear-digest`, a failed lead
-// card's Open log runs `queue.mjs open-log` with the item's key, and the owner's answers run `queue.mjs act` with the
+// clock times, which stay true with no timer. Its Clear runs `queue.mjs clear-digest`, and the owner's answers run
+// `queue.mjs act` with the
 // item's key, action and version (and an answer's text), a waiting menu's `queue.mjs answer-menu`, and Undo on a put-aside, accepted or rejected card's receipt runs `queue.mjs undo` with the record `act` printed. Each merge
 // a view draws is a button that opens its merge's sheet, which shows at once the report `queue.mjs report`
 // kept in `fabraik-queue/reports/`, in the file its sha and a digest of its repository name, else runs `queue.mjs report` with `<repository>@<sha>`, or joins that run
 // where one is already going; the Board also reads its merges' reports that way in the background after each queue
 // read. A copy opened with the props `{ view: "decisions" }` draws the
 // saved queue as the Decisions view: a tile for each project, then each waiting item as a whole card under its project.
-// The tile's runtime controls run `queue.mjs open-coordinator` with the registered project and runtime. A card the view
+// The tile's runtime controls run `queue.mjs open-coordinator` with the registered project and runtime. Each card leads its title with the agent its card's claim names,
+// or "Agent unknown". A card the view
 // cannot read is a problem line in its place. One opened with `{ view: "floor" }`
 // draws it as the Floor: a grid of every project's open cards, a row per project and a column per stage, whose card
 // tiles are buttons that open the card's side sheet, which reads the card's current state as it opens, shows its detail and answers from the latest read. One opened with
-// `{ view: "board", repository }` draws that project's board as the Board: a header naming the project and its lead, a
+// `{ view: "board", repository }` draws that project's board as the Board: a header naming the project and its Coordinator, a
 // strip of what waits in other projects, and five columns, Needs you, Backlog, Ready to build, In progress and Merged,
 // whose cards open the same side sheet and, on a GitHub board, carry the moves Move to Ready, Back to Backlog and Move
 // up, which run `queue.mjs move` with the card's key, the move and the version drawn, as dragging the card between Backlog and Ready to build or to a place within it does, adding the place, and on a Ready to build or In progress
@@ -31,14 +31,18 @@
 // leave a new or stopped Coordinator's tab handling to the project's locked opener. A view's header shows when it read,
 // with Refresh and Close. Esc in a view ends a drag, else closes its open sheet, else closes the overlay, as its
 // Close control does.
+// @ts-expect-error Herdr supplies this module at panel load and ships no type declarations
 import { View, div, image, svg } from "gpui-kit";
+// @ts-expect-error Herdr supplies this module at panel load and ships no type declarations
 import { v_flex, h_flex, TextView, Button, Toggle, InputState, Input, Progress, ProgressTrack, ProgressIndicator, Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "gpui-base";
-import { exec, appHome, readTextFile, terminals, knownAgents, agents, panes, spaces, machines, setAgentOrder, run, watchFolder, theme, props, shared, setShared, openOverlay, closeOverlay } from "herdr";
+// @ts-expect-error Herdr supplies this module at panel load and ships no type declarations
+import { exec, appHome, readTextFile, terminals, knownAgents, agents, panes, spaces, machines, setAgentOrder, run, watchFolder, theme, props, shared, setShared, openOverlay, closeOverlay, settings } from "herdr";
 
 // Herdr's longest exec: queue.mjs gives each repository's reader up to 120 s, all at once.
 const EXEC_OPTIONS = { timeout: 600000 };
-// Herdr keeps an image box at the picture's own pixel height unless a height is set, leaving blank space
-// around a wide screenshot.
+// GPUI gives an image whose width is a share, such as w_full, its picture's own pixel height, leaving bands above and
+// below a wide screenshot; a width in pixels gives it the height its proportions give. A taller one is held to this.
+// The measured width is divided by the zoom: Herdr scales the panel's pixels by it, while the measure reports them after it.
 const SHOT_MAX_HEIGHT = 360;
 const CACHE_FORMAT = 2;
 const MAX_ANSWER = 500;
@@ -97,30 +101,24 @@ const RECEIPTS = {
   dismissed: "Dismissed",
   park: `Put aside${NEXT_READ}`,
   answer: `Answer recorded on the card${NEXT_READ}`,
+  relay: "Sent to your coordinator chat",
   keep: `Accepted${NEXT_READ}`,
   drop: `Rejected${NEXT_READ}`,
   close: `Closed${NEXT_READ}`,
 };
 const PLAIN_NOTE = "Shown as written, without formatting or links.";
-// The line under a merge's answer box: who acts on the answer the panel records on the card.
-const WHO_ACTS = new Map([
-  ["lead", "The lead continues this card on your answer."],
-  ["coordinator", "Your coordinator acts on your answer the next time you ask it what is waiting."],
-]);
-const NO_RECORD_LINE = "Answer this card in your coordinator chat: the panel records answers only on a GitHub board.";
-const UNREAD_LINE = "This card’s comments could not be read: refresh the queue, or answer in your coordinator chat.";
+// The line under a merge's answer box, and the line of a merge whose waiting version the panel cannot read.
+const CARRY_LINE = "Your coordinator chat gets this answer and carries it to the job.";
+const UNREAD_VERSION_LINE = "The panel cannot read this card's waiting version, so answer in your coordinator chat.";
 const HELD_UNREAD_LINE = "Answer this question in chat. The holding computer could not be read.";
 // The saved queue is a file anyone can leave malformed, so only a name of one unbroken word is drawn as a computer's.
 const heldLine = (machine) => (typeof machine === "string" && /^\S+$/.test(machine)
   ? `This question is waiting on ${machine}. Answer it in chat.` : HELD_UNREAD_LINE);
-const NO_UNDO_ANSWER = "No Undo: the lead may already have read this answer, so correct it in chat";
 const NO_UNDO_COORDINATOR = "No Undo: your coordinator may already have read this answer, so correct it in chat";
 // The written actions `queue.mjs undo` takes back; an answer has none.
 const UNDOABLE = ["park", "keep", "drop"];
 const NO_SCOPE_LINE = "Accept needs its What to build and acceptance criteria: answer it in chat";
 const REPLACED_LINE = "This question changed; your draft was cleared.";
-// The words a project tile shows for each state a lead reports.
-const LEAD_WORDS = new Map([["working", "working"], ["blocked", "waiting on you"], ["done", "done"], ["idle", "idle"], ["unknown", "state unknown"]]);
 // The tab of a project's Herdr space its Coordinator runs in, and the state word of the line for each status Herdr gives
 // its pane, after the muted label "Coordinator"; null is an agent that reports none yet.
 const COORDINATOR_TAB = "Coordinator";
@@ -134,13 +132,13 @@ const COORDINATOR_LINES = new Map([
 const PANEL_MOD = "fabraik-queue";
 const VIEW_CLOSE_ID = "fabraik-queue-view-close";
 const VIEW_REFRESH_ID = "fabraik-queue-view-refresh";
-const UNREADABLE_BOARD = "Lead state unreadable: its board entry is not one this view can read";
 const FLOOR_ID = "fabraik-queue-floor-";
 const SHEET_ID = `${FLOOR_ID}sheet`;
 const SHEET_CLOSE_ID = `${FLOOR_ID}sheet-close`;
 const SHEET_BODY_ID = `${FLOOR_ID}sheet-body`;
 const SHEET_PANEL_ID = `${FLOOR_ID}sheet-panel`;
 const SHEET_END_ID = `${FLOOR_ID}sheet-end`;
+const SHEET_SHOTS_ID = `${FLOOR_ID}sheet-shots`;
 const SHEET_TRY_ID = `${FLOOR_ID}sheet-try-again`;
 const SHEET_SEEN_ID = `${FLOOR_ID}sheet-seen`;
 const SHEET_PULL_ID = `${FLOOR_ID}sheet-pull`;
@@ -209,9 +207,6 @@ const BOARD_PLACES = new Map([[null, "backlog"], ["Backlog", "backlog"], ["Ready
 // The line under a Board card's title for a proposal and for the columns In progress gathers.
 const SUGGESTED_LINE = "Suggested card: accept or reject it in Needs you";
 const CARD_LINES = new Map([["In review", "Merging"], ["Awaiting push", "Awaiting your yes"]]);
-// The line of a card whose waiting version the owner has answered: under its title on the Floor, in place of its column's
-// line on the Board.
-const ANSWERED_LINE = "You answered this version";
 // The strip's chips name each kind shortly; it shows three at most. 14 is 8 %, its fill.
 const SHORT_KINDS = { merge: "merge", question: "question", "usage-limit": "stopped", suggested: "suggested", failure: "failed run" };
 const STRIP_CHIPS = 3;
@@ -230,7 +225,7 @@ const BOARD_LIST_GAP = 8;
 // Once a merge is queued its marker is not read again, so an In review card's switch says so.
 const SHOW_FIRST_QUEUED = "If its merge is already queued, Show me first does not stop it: use Disable auto-merge on its pull request";
 // The stages whose cards show the agent that holds them.
-const AGENT_STAGES = ["ready", "building", "awaiting"];
+const AGENT_STAGES = /** @type {(string | null)[]} */ (["ready", "building", "awaiting"]);
 // The states a tied terminal reports, most urgent first; null is no report.
 const AGENT_STATES = ["blocked", "working", "done", "idle", "error", null];
 const AGENT_WAITING = "Agent waiting on you";
@@ -241,15 +236,12 @@ const AGENT_LINES = new Map([["blocked", AGENT_WAITING], ["working", "Building n
 const RUNTIME_PROGRAMS = new Map([["Claude Code", "claude"], ["Claude Code cloud", "claude"], ["Codex", "codex"]]);
 const SPINNER = "mods/workspace-chrome/spinner.svg";
 const SEND = "mods/workspace-chrome/chevron-right.svg";
-// The retired lead named a card session's terminal `lead-s<slot>-job-<card>-<step>` and started it in
-// the project's folder.
-const LEAD_SESSION = /^lead-s\d+-job-(\d+)-\w+$/;
-
 const oneLine = (text) => String(text).replace(/\s+/g, " ").trim();
 const folderName = (path) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 const twoDigits = (number) => String(number).padStart(2, "0");
 const clock = (iso) => { const at = new Date(iso); return `${twoDigits(at.getHours())}:${twoDigits(at.getMinutes())}`; };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const datedClock = (at) => { const day = new Date(at); return `${day.getDate()} ${MONTHS[day.getMonth()]}, ${clock(at)}`; };
 const plural = (count, unit) => `${count} ${unit}${count === 1 ? "" : "s"}`;
 const cardRef = (item) => (item.category === "menu" ? `card ${item.card}` : `${folderName(item.repository)} card ${item.card}`);
 const firstLine = (text) => text.split("\n").map(oneLine).find(Boolean) ?? "";
@@ -298,18 +290,14 @@ const problemTexts = ({ problems, items }) => [
   ...items.filter((item) => item.category === "problem").map((item) => `${folderName(item.repository)}: ${item.problem}`),
 ];
 
-// The terminal list a refresh reads lead state from, as its one argument: each herdr-core terminal's address, status
-// report and running program's folder, or why the app could not give the list. Only these fields go, keeping the
-// argument small; a terminal without a report key keeps none, so queue.mjs refuses the list.
+// The terminal list a refresh reads the waiting menus' terminal states from, as its one argument: each herdr-core terminal's address and
+// status report state, or why the app could not give the list. Only these fields go, keeping the argument small; a
+// terminal without a report key keeps none, so queue.mjs refuses the list.
 function terminalList() {
   try {
-    return JSON.stringify(terminals().map(({ address, report, foreground }) => ({
-      address,
-      report: report && { state: report.state, app: report.app },
-      folder: foreground?.cwd,
-    })));
+    return JSON.stringify(terminals().map(({ address, report }) => ({ address, report: report && { state: report.state } })));
   } catch (error) {
-    return JSON.stringify({ unread: String(error?.message ?? error) });
+    return JSON.stringify({ unread: String(/** @type {{ message?: string } | null} */ (error)?.message ?? error) });
   }
 }
 
@@ -347,8 +335,7 @@ function readMenusOutput(stdout) {
 // When a read or fetch was made, as a clock time that needs no timer to stay true: "Read at 14:02", and with the date,
 // "Read 18 Nov, 14:02", when it was not today.
 function stamp(verb, iso) {
-  const at = new Date(iso);
-  return isToday(iso) ? `${verb} at ${clock(iso)}` : `${verb} ${at.getDate()} ${MONTHS[at.getMonth()]}, ${clock(iso)}`;
+  return isToday(iso) ? `${verb} at ${clock(iso)}` : `${verb} ${datedClock(iso)}`;
 }
 
 function problemLine(t, text) {
@@ -359,11 +346,11 @@ function mutedLine(t, text) {
   return div().text_color(t.muted).child(text);
 }
 
-// A lead's line: a coordinator line's label muted and its state word in the foreground, on one line; any other line in
-// the pattern of its kind.
-function leadLine(t, lead) {
-  if (lead.word === undefined) return (lead.problem ? problemLine : mutedLine)(t, lead.text);
-  return h_flex().child(div().text_color(t.muted).child("Coordinator ")).child(div().text_color(t.foreground).child(lead.word));
+// A project's Coordinator line: its label muted and its state word in the foreground, on one line; a line with no state
+// word muted.
+function coordinatorLine(t, line) {
+  if (line.word === undefined) return mutedLine(t, line.text);
+  return h_flex().child(div().text_color(t.muted).child("Coordinator ")).child(div().text_color(t.foreground).child(line.word));
 }
 
 // A button pressed by `onClick`, or, where it is null, a button beneath the open sheet, which takes no press and no Tab.
@@ -425,10 +412,18 @@ const newChip = (t) => roleChip(t, t.accent, "New");
 // A merged opener's first row: its first line, led by the New chip while the merge is unseen.
 const mergeRow = (t, unseen, first) => (unseen ? h_flex().max_w_full().items_center().gap(6).child(newChip(t)).child(first.min_w_0()) : first);
 
-// The kind chip and the folder and card, which lead a row and an open card.
+// How long a card has waited, as the clock time its agent asked it, which needs no timer to stay true. Only a waiting
+// menu records that time; one that is not a readable past time is said to be unreadable, never drawn as a clock.
+function waitedText(item) {
+  if (item.category !== "menu") return "wait time not recorded";
+  if (!Number.isFinite(item.askedAt) || item.askedAt > Date.now() || Number.isNaN(new Date(item.askedAt).getTime())) return "wait time unreadable";
+  return `waiting since ${isToday(item.askedAt) ? clock(item.askedAt) : datedClock(item.askedAt)}`;
+}
+
+// The kind chip, the folder and card, and its wait time, which lead a row and an open card.
 function cardHeading(t, item) {
   return h_flex().items_center().gap(8).child(kindChip(t, item, false))
-    .child(div().text_size(11).text_color(t.muted).child(cardRef(item)));
+    .child(h_flex().text_size(11).text_color(t.muted).child(div().child(cardRef(item))).child(div().child(`, ${waitedText(item)}`)));
 }
 
 // The one line a closed item shows under its title.
@@ -461,27 +456,6 @@ function retroDetail(t, { key, writeUp, proposals }) {
   ];
 }
 
-// A project tile's lead line, whether a lead waits on the owner, and whether its state was not read (which only the Floor
-// reads), from the project's board entry (undefined where the read has none). queue.mjs gives `lead` either `here`,
-// `[{ terminal, state }]` with each terminal once, or `hereUnread`, why that is not known; an entry in any other shape is
-// a problem line, never read as no lead. Where no lead runs the line is the project's Coordinator's.
-function leadStatus(board) {
-  if (board === undefined) return { text: "Lead state not in this read" };
-  const { here, hereUnread } = board.lead ?? {};
-  const isLead = (lead) => typeof lead?.terminal === "string" && LEAD_WORDS.has(lead.state);
-  const hereReadable = here === undefined || (Array.isArray(here) && here.every(isLead) && new Set(here.map((lead) => lead.terminal)).size === here.length);
-  const unreadReadable = hereUnread === undefined || typeof hereUnread === "string";
-  if (!hereReadable || !unreadReadable || (here === undefined && hereUnread === undefined)) return { text: UNREADABLE_BOARD, problem: true };
-  if (hereUnread !== undefined) return { text: `Lead state not read: ${hereUnread}`, unread: true };
-  const words = here.map((lead) => LEAD_WORDS.get(lead.state));
-  if (words.length === 0) return coordinatorStatus(board);
-  return {
-    text: words.length === 1 ? `Lead: ${words[0]}` : `${words.length} leads: ${words.join(", ")}`,
-    blocked: here.some((lead) => lead.state === "blocked"),
-    unread: here.some((lead) => lead.state === "unknown"),
-  };
-}
-
 // A project's one local space, undefined where none is open, or why this computer's layout cannot tell.
 function coordinatorSpace(board) {
   const layout = machines().find((machine) => machine.name === null)?.layout;
@@ -494,8 +468,14 @@ function coordinatorSpace(board) {
   return { space };
 }
 
-// The Coordinator pane's most urgent reported status, so a running coordinator never reads as done.
+// A project's Coordinator line and its flags, whether it waits on the owner and whether its state was not read (which only
+// the Floor reads), from the project's board entry (undefined where the read has none): the Coordinator pane's most
+// urgent reported status, so a running coordinator never reads as done.
+/** @typedef {{ text?: string, word?: string, unread?: boolean, blocked?: boolean }} CoordinatorLine A Coordinator line and its flags. */
+
+/** @returns {CoordinatorLine} */
 function coordinatorStatus(board) {
+  if (board === undefined) return { text: "Coordinator state not in this read" };
   const { space, unread } = coordinatorSpace(board);
   if (unread) return { text: unread, unread: true };
   if (!space) return { text: "No Herdr space for this project" };
@@ -503,7 +483,7 @@ function coordinatorStatus(board) {
   if (tabs.size === 0) return { text: "No Coordinator tab in this project's space" };
   const states = panes().filter((pane) => tabs.has(pane.tab) && pane.program?.agent === true).map((pane) => pane.status);
   const state = ["blocked", "working", "done", "idle", null].find((status) => states.includes(status));
-  return state === undefined ? { text: "Coordinator not running" } : COORDINATOR_LINES.get(state);
+  return state === undefined ? { text: "Coordinator not running" } : /** @type {CoordinatorLine} */ (COORDINATOR_LINES.get(state));
 }
 
 // Opening requires an unambiguous raw tab and pane. The display line can summarize several panes, which cannot
@@ -544,23 +524,21 @@ function coordinatorChoice(board) {
   return { unread: "Saved default unavailable: the queue returned invalid coordinator settings" };
 }
 
-// The project tile keeps its lead line and carries the runtime controls below it.
-function projectTile(t, repository, waiting, lead, controls) {
+// The project tile keeps its Coordinator line and carries the runtime controls below it.
+function projectTile(t, repository, waiting, line, controls) {
   return v_flex().flex_grow(1).flex_shrink(1).flex_basis(200).min_w(0).gap(6).px(12).py(10).rounded(10).bg(t.raised).border_1()
-    .border_color(lead.blocked ? t.blocked : t.border)
+    .border_color(line.blocked ? t.blocked : t.border)
     .child(h_flex().items_center().justify_between().gap(8)
       .child(div().min_w(0).truncate().text_size(14).font_semibold().child(folderName(repository)))
       .child(div().flex_none().text_size(12).text_color(t.muted).child(waiting === 0 ? "Nothing for you" : `${waiting} need you`)))
-    .child(leadLine(t, lead).text_size(12)).children(controls);
+    .child(coordinatorLine(t, line).text_size(12)).children(controls);
 }
 
 // The Floor stage a board card is drawn in, or null where it is not drawn: a proposed card is Suggested whatever its
-// column, a card awaiting push whose waiting version the owner has answered is Building, and Backlog, a null column and a
-// column with no stage are not drawn.
+// column, and Backlog, a null column and a column with no stage are not drawn.
 function floorStage(card) {
   if (card.title.startsWith(PROPOSED)) return "suggested";
-  const stage = COLUMN_STAGES.get(card.column) ?? null;
-  return stage === "awaiting" && card.answered === true ? "building" : stage;
+  return COLUMN_STAGES.get(card.column) ?? null;
 }
 const floorRef = (id) => (typeof id === "number" ? `#${id}` : id);
 const floorTitle = (title) => (title.startsWith(PROPOSED) ? title.slice(PROPOSED.length) : title);
@@ -581,7 +559,6 @@ const isFloorCard = (card) => typeof card === "object" && card !== null && isCar
   && (card.column === null || typeof card.column === "string")
   && Array.isArray(card.blockers) && card.blockers.every(isCardId)
   && (card.waitsOn === undefined || card.waitsOn === null || TIERS.includes(card.waitsOn))
-  && (card.answered === undefined || card.answered === true)
   && (card.unread === undefined || typeof card.unread === "string")
   && isOutcome(card.outcome)
   && (card.claim === undefined || card.claim === null || (typeof card.claim === "object" && typeof card.claim.machine === "string"
@@ -650,7 +627,7 @@ const isTerminal = (terminal) => typeof terminal === "object" && terminal !== nu
   && (terminal.foreground === undefined || terminal.foreground === null
     || (typeof terminal.foreground === "object" && isOptionalText(terminal.foreground.cwd)))
   && (terminal.report === null || (typeof terminal.report === "object" && typeof terminal.report.state === "string"
-    && AGENT_STATES.includes(terminal.report.state) && isOptionalText(terminal.report.app)))
+    && AGENT_STATES.includes(terminal.report.state)))
   && isProgram(terminal.program) && typeof terminal.program.agent === "boolean";
 const isTerminalList = (list) => Array.isArray(list) && list.every(isTerminal);
 const isProgramList = (list) => Array.isArray(list) && list.every((program) => isProgram(program) && typeof program.key === "string");
@@ -661,14 +638,12 @@ const inWorktree = (folder, worktree) => typeof folder === "string" && typeof wo
 const urgency = (terminal) => AGENT_STATES.indexOf(terminal.report?.state ?? null);
 
 // Each card's most urgent tied terminal, by `<repository>#<card>`, from readable boards and a checked terminal list. Only
-// this computer's agents take part, never the Fabraik lead itself. A terminal ties to one card at most, by the first rule
-// that holds, boards in cache order: a card session's name, launched in the board's folder; then its live folder in a
-// card's job worktree; then its launch folder there.
+// this computer's agents take part. A terminal ties to one card at most, by the first of two folder rules that holds,
+// boards in cache order: its live folder in a card's job worktree; then its launch folder there.
 function tieAgents(boards, list) {
   const ties = new Map();
   for (const terminal of list) {
-    if (terminal.address.includes("/") || terminal.program.agent !== true || terminal.report?.app === "fabraik-lead") continue;
-    const session = LEAD_SESSION.exec(terminal.name ?? "");
+    if (terminal.address.includes("/") || terminal.program.agent !== true) continue;
     const tied = (rule) => {
       for (const board of boards) {
         const card = rule(board);
@@ -676,8 +651,7 @@ function tieAgents(boards, list) {
       }
       return undefined;
     };
-    const key = tied((board) => (session && typeof board.folder === "string" && terminal.cwd === board.folder ? session[1] : undefined))
-      ?? tied((board) => board.cards.find((card) => inWorktree(terminal.foreground?.cwd, card.worktree))?.card)
+    const key = tied((board) => board.cards.find((card) => inWorktree(terminal.foreground?.cwd, card.worktree))?.card)
       ?? tied((board) => board.cards.find((card) => inWorktree(terminal.cwd, card.worktree))?.card);
     if (key !== undefined && (!ties.has(key) || urgency(terminal) < urgency(ties.get(key)))) ties.set(key, terminal);
   }
@@ -685,18 +659,29 @@ function tieAgents(boards, list) {
 }
 
 // The program a card's claim names: Herdr's own from `programs` (null where Herdr's table was not read), else the
-// runtime's name with no icon; null where the claim names no runtime.
+// runtime's name with no icon; null where the claim names no runtime. A program Herdr gives no name is named by the runtime.
 function claimProgram(claim, programs) {
-  if (typeof claim?.runtime !== "string" || claim.runtime === "") return null;
+  if (typeof claim?.runtime !== "string" || claim.runtime.trim() === "") return null;
   const key = RUNTIME_PROGRAMS.get(claim.runtime);
-  return programs?.find((program) => program.key === key) ?? { name: claim.runtime, icon: null };
+  const program = programs?.find((entry) => entry.key === key);
+  if (program === undefined) return { name: claim.runtime, icon: null };
+  return typeof program.name === "string" && program.name.trim() !== "" ? program : { ...program, name: claim.runtime };
 }
 
-// What lights a Floor card, as its kind line and role: its own lit kind unless the owner has answered its waiting version,
-// else its agent waiting on the owner; null where neither does. The tile and the row's count both read it, so a card
+const UNKNOWN_AGENT = { name: "Agent unknown", icon: null };
+
+// The program the newest claim of an item's card names, from the cache's boards; "Agent unknown" where the read gives none:
+// the repository on more than one board, a board or card that cannot be read, or a claim naming no runtime.
+function itemProgram(item, boards, programs) {
+  const matches = boards.filter((entry) => isProject(entry) && entry.repository === item.repository);
+  const card = matches.length === 1 && boardCause(matches[0]) === null ? matches[0].cards.find((entry) => String(entry.card) === String(item.card)) : undefined;
+  return (card?.unread === undefined ? claimProgram(card?.claim, programs) : null) ?? UNKNOWN_AGENT;
+}
+
+// What lights a Floor card, as its kind line and role: its own lit kind, else its agent waiting on the owner; null where neither does. The tile and the row's count both read it, so a card
 // counts once whatever lights it.
 function floorLight(card, state) {
-  if (LIT_KINDS.includes(card.waitsOn) && card.answered !== true) return { label: LABELS[card.waitsOn], role: KIND_ROLES[card.waitsOn] };
+  if (LIT_KINDS.includes(card.waitsOn)) return { label: LABELS[card.waitsOn], role: KIND_ROLES[card.waitsOn] };
   return state === "blocked" ? { label: AGENT_WAITING, role: "blocked" } : null;
 }
 
@@ -713,12 +698,22 @@ function stagedCard(board, card, { ties, programs }) {
   return { card, stage, agent, program, light: floorLight(card, agent?.report?.state) };
 }
 
-// An agent's mark: Herdr's icon for its program, a one-colour glyph in its line's colour or a picture, named for a screen
-// reader; a program with no icon is its name as a word.
-function agentMark(program, colour) {
-  if (!program.icon) return div().text_size(11).text_color(colour).child(program.name);
-  const icon = program.tint ? svg(program.icon).size(13).text_color(colour) : image(program.icon).w(13).h(13);
-  return div().flex_none().accessibility_label(program.name).child(icon.flex_none());
+// Herdr's icon for a program at `size`: a one-colour glyph in `colour` or a picture.
+const programIcon = (program, colour, size) => (program.tint ? svg(program.icon).size(size).text_color(colour) : image(program.icon).w(size).h(size)).flex_none();
+
+// An agent's name as the 11 word in its line's colour.
+const agentWord = (program, colour) => div().text_size(11).text_color(colour).child(program.name);
+
+// An agent's mark on a tile: its icon at `size`, named for a screen reader; a program with no icon is its name as a word.
+function agentMark(program, colour, size) {
+  if (!program.icon) return agentWord(program, colour);
+  return div().flex_none().accessibility_label(program.name).child(programIcon(program, colour, size));
+}
+
+// An agent's mark on a card: its icon at `size` with its name as a word after it; a program with no icon is the word alone.
+function agentNamedMark(program, colour, size) {
+  if (!program.icon) return agentWord(program, colour);
+  return h_flex().items_center().gap(4).child(programIcon(program, colour, size)).child(agentWord(program, colour));
 }
 
 // Why a project's Floor row or Board cannot draw its cards, or null where it can.
@@ -788,11 +783,10 @@ function cardTile(t, repository, { card, stage, agent, program, light }, tiles) 
     .when(returned !== null, (el) => el.track_focus(returned))
     .focus((s) => s.border_color(t.foreground))
     .when(Boolean(light), (el) => el.child(div().text_size(11).font_semibold().child(light.label)))
-    .child(h_flex().items_center().gap(4).when(Boolean(program), (el) => el.child(agentMark(program, quiet)))
+    .child(h_flex().items_center().gap(4).when(Boolean(program), (el) => el.child(agentMark(program, quiet, 13)))
       .child(div().text_size(11).text_color(quiet).child(ref)))
     .child(tileTitle(title))
     .when(stage === "building" && card.column === "In review", (el) => el.child(div().text_size(11).text_color(quiet).child("Merging")))
-    .when(card.answered === true, (el) => el.child(div().text_size(11).text_color(quiet).child(ANSWERED_LINE)))
     .when(Boolean(agent) && light?.label !== AGENT_WAITING, (el) => el.child(h_flex().items_center().gap(4).text_size(11).text_color(quiet)
       .when(state === "working", (line) => line.child(svg(SPINNER).size(12).flex_none().text_color(t.working).spin(900)))
       .child(AGENT_LINES.get(state))))
@@ -822,8 +816,8 @@ function mergedToday(t, repository, merged, readToday, tiles) {
   });
 }
 
-// A project's row. Its first cell holds the name, the lead line where the lead waits on the owner or its state was not
-// read, the count line, then a line for each part of the board the read could not give; a board the view cannot read
+// A project's row. Its first cell holds the name, the Coordinator line where the Coordinator waits on the owner or its
+// state was not read, the count line, then a line for each part of the board the read could not give; a board the view cannot read
 // is one cell naming why, never an empty row. `ties` is null where Herdr's terminal list was not read, and `programs`
 // where its program table was not; `tiles` is what a card's tile, a merged tile and the project's Open board control do
 // while the sheet is open or shut.
@@ -833,10 +827,10 @@ function floorRow(t, board, index, readToday, { ties, programs, tiles }) {
   const stageCell = (column) => cell(column).flex_1().flex_basis(0).min_w(0).flex().flex_col().gap(6).px(6).py(10).text_size(12)
     .border_l(1).border_color(t.border);
   const name = folderName(board.repository);
-  const lead = leadStatus(board);
+  const coordinator = coordinatorStatus(board);
   const project = (lines) => cell(1).flex_none().w(PROJECT_WIDTH).min_w(0).flex().flex_col().gap(6).px(6).py(10).text_size(12)
     .child(div().min_w(0).truncate().text_size(14).font_semibold().tooltip(name).child(name))
-    .when(Boolean(lead.problem || lead.unread || lead.blocked), (el) => el.child(leadLine(t, lead)))
+    .when(Boolean(coordinator.unread || coordinator.blocked), (el) => el.child(coordinatorLine(t, coordinator)))
     .children(lines)
     .child(h_flex().child(controlButton(t, `${FLOOR_ID}open-${index}`, "Open board", tiles.openBoard(board.repository), tiles.inert)
       .accessibility_label(`Open the ${name} board`)));
@@ -848,16 +842,14 @@ function floorRow(t, board, index, readToday, { ties, programs, tiles }) {
   const staged = cards.map((card) => stagedCard(board, card, { ties, programs }));
   const lit = staged.filter(({ stage, light }) => stage !== null && light !== null).length;
   const details = cards.filter((card) => card.unread !== undefined).map((card) => floorRef(card.card));
-  const folderUnread = typeof board.folder !== "string";
   const worktreeUnread = cards.some((card) => card.worktree === undefined);
-  const agentsUnread = (ties === null || folderUnread || worktreeUnread) && staged.some(({ stage }) => AGENT_STAGES.includes(stage));
+  const agentsUnread = (ties === null || worktreeUnread) && staged.some(({ stage }) => AGENT_STAGES.includes(stage));
   return row
     .child(project([
       ...countLine(t, lit, details.length > 0 || waitsUnread.length > 0 || agentsUnread),
       ...(orderUnread === undefined ? [] : [problemLine(t, `Order not read: ${orderUnread}`)]),
       ...(waitsUnread.length === 0 ? [] : [problemLine(t, `What cards wait on not read: ${waitsUnread.join(", ")}`)]),
       ...(details.length === 0 ? [] : [problemLine(t, `Details not read: cards ${details.join(", ")}`)]),
-      ...(folderUnread ? [problemLine(t, "Lead sessions not matched to cards: this project's folder was not read")] : []),
       ...(worktreeUnread ? [problemLine(t, `Agents in job worktrees not matched to cards: ${waitsUnread.includes("worktrees")
         ? "the worktree list was not read" : "its queue reader's release predates worktree reading"}`)] : []),
       ...staged.filter(({ card, stage }) => stage === null && card.column !== null && card.column !== "Backlog")
@@ -944,17 +936,23 @@ function dragTarget({ from, rank, count, moves, places, pointer, over, near }) {
 // Whether a card offers Show me first: on a board that takes moves, a card the Board draws in Ready to build or In
 // progress, a proposal never, whose read gives its marker. A marker not read is then a line in the switch's place.
 const offersShowFirst = (board, card) => board.moves === true && card.showFirst !== undefined
-  && ["ready", "progress"].includes(boardColumn(card));
+  && /** @type {(string | null)[]} */ (["ready", "progress"]).includes(boardColumn(card));
 
 // A Board column: its header, its note, its notice, then its entries, which scroll, or the line saying it has none.
 // `count` is a number or its text, or null where the column cannot say how many it holds; `action` is a control that ends
 // the header; the data's `empty` replaces the column's empty line, and null leaves it out. `drop`, on a column a card can
 // be dragged to, is `{ marked, move, release }`: whether a dragged card would land in it, which draws its outline and its
 // list's fill in `accent`, and the handlers that follow the pointer over it and take the release.
+/**
+ * @param {any} t
+ * @param {{ id: string, label: string, role: string, note?: string, empty: string }} column
+ * @param {any} entries
+ * @param {{ marked: boolean, move: any, release: any } | null} [drop]
+ */
 function kanbanColumn(t, { id, label, role, note, empty: columnEmpty }, { count, list, notice, empty = columnEmpty, action = null }, drop = null) {
   return v_flex().id(`${BOARD_ID}column-${id}`).w(280).flex_none().min_h(0).rounded(10).bg(t.canvas).border_1().border_color(drop?.marked ? t.accent : t.border)
     .overflow_hidden()
-    .when(drop !== null, (el) => el.on_mouse_move(drop.move).on_mouse_up("left", drop.release))
+    .when(drop !== null, (el) => el.on_mouse_move(drop?.move).on_mouse_up("left", drop?.release))
     .child(h_flex().flex_none().h(40).px(12).gap(8).items_center().border_b(2).border_color(t[role])
       .child(div().flex_none().size(8).rounded(4).bg(t[role]))
       .child(div().text_size(13.5).font_semibold().child(label))
@@ -978,6 +976,11 @@ function openView(view, repository) {
   openOverlay({ mod: PANEL_MOD, props: { view, repository }, kind: "window", key: "fabraik-queue-view", width: 0.94, height: 0.9 });
 }
 
+/** @typedef {{ checking?: boolean, reading?: boolean, failure?: string, report?: any }} ReportState What a merge sheet's report read gave. */
+/** @typedef {any} Handle A focus handle, task or other object Herdr's kit hands the panel, which ships no declarations. */
+/** @typedef {{ key: string, board: any, card: any, from: string | null, rank: any, count: number, moves: any, places: boolean, at: any, pointer: any,
+ *   over: { column: any, bounds: any } | null, near: { rank: any, bounds: any } | null, target: any }} Drag The Board card being dragged. */
+
 export default class Queue extends View {
   init(_props, cx) {
     this.home = appHome();
@@ -987,6 +990,7 @@ export default class Queue extends View {
     this.repository = props()?.repository;
     // The overlay this copy is drawn in, or null for the panel in its place in the layout.
     this.overlay = props()?.overlay ?? null;
+    /** @type {{ kind: string, cache?: any, error?: string }} */
     this.state = { kind: "loading" };
     this.refreshing = false;
     this.refreshAgain = false;
@@ -994,24 +998,35 @@ export default class Queue extends View {
     this.refreshFailure = null;
     this.clearFailure = null;
     // Per item key: the button pressed while a command runs, and the line saying why the last press was refused.
+    /** @type {Map<string, string>} */
     this.running = new Map();
+    /** @type {Map<string, string>} */
     this.failures = new Map();
+    /** @type {Map<string, { text: string, pending?: boolean, problem?: boolean }>} */
     this.coordinatorOpens = new Map();
     // `<key>@<version>` to the receipt of an item the owner handled, and whether only this panel knows it (so Undo).
+    /** @type {Map<string, any>} */
     this.marks = new Map();
     // `<key>@<version>` to the local date the owner handled the item: the Decisions view's count of the day, kept after
     // the read confirms the item so the count never falls back.
+    /** @type {Map<string, string>} */
     this.handled = new Map();
     // One InputState per merge answer box and answerable question, by `<key>@<version>`; the draft keys whose input
     // holds the keyboard; and the questions whose draft a changed version cleared.
+    /** @type {Map<string, Handle>} */
     this.drafts = new Map();
+    /** @type {Set<string>} */
     this.typing = new Set();
+    /** @type {Set<string>} */
     this.replaced = new Set();
     // The labels picked for each question of a waiting menu that takes several, by draft key; and the asks whose answer this
     // panel sent, which read as sent at once, before the next read.
+    /** @type {Map<string, Set<string>>} */
     this.chosen = new Map();
+    /** @type {Set<string>} */
     this.sent = new Set();
     // `<key>#<proposal>` of each retro proposal this panel made a card and no read has yet shown as one.
+    /** @type {Set<string>} */
     this.picks = new Set();
     this.focusHandle = cx.focus_handle();
     // Herdr gives an opened window no keyboard, so an overlay copy takes it, for Esc.
@@ -1026,6 +1041,7 @@ export default class Queue extends View {
     // inside it, the handles its Close and its end stop track, and the handle the opening tile, line or Board control
     // tracks, made by each opening, and when the opening was.
     this.sheetOpen = false;
+    /** @type {number | null} */
     this.sheetOpenedAt = null;
     this.opener = null;
     this.sheetFocus = null;
@@ -1034,15 +1050,21 @@ export default class Queue extends View {
     this.sheetClose = null;
     this.sheetEnd = null;
     this.sheetEntering = false;
+    // The width a merge report's screenshots are drawn at, as their column's last layout measured it; null until then.
+    this.shotWidth = null;
     // A merge sheet's report: the count of report runs, so a reply to any but the latest is dropped, and what the latest
     // gave: `{ checking: true }` while it looks for the report the queue kept, `{ reading: true }` while the queue runs,
     // then `{ failure }`, the line saying why it failed, or `{ report }`, the document the queue kept or printed.
+    /** @type {number} */
     this.reportRuns = 0;
+    /** @type {ReportState | null} */
     this.report = null;
     // The queue's report runs going, by `<repository>@<sha>`, each a promise of `{ failure }` or `{ report }` that every
     // read of that merge joins, removed once it settles; and the outcome each merge's kept or read report gave, "direct"
     // or its outcome, kept while a board of the latest read lists the merge.
+    /** @type {Map<string, Promise<any>>} */
     this.reading = new Map();
+    /** @type {Map<string, string>} */
     this.outcomes = new Map();
     // The Board's background read of its merges' reports: whether a pass runs, and the read's `refreshedAt` the last pass
     // began on, and the sha of the merge whose run failed in the last pass, which the next pass reads last.
@@ -1054,13 +1076,17 @@ export default class Queue extends View {
     // Show me first, the state written), and the card title that holds the keyboard after a Board press with the handle
     // made for it.
     this.boardMove = null;
+    /** @type {Map<string, string>} */
     this.boardFailures = new Map();
+    /** @type {{ key: string, line: string, at: number, showFirst?: any } | null} */
     this.boardMoved = null;
+    /** @type {{ key: string, handle: Handle } | null} */
     this.boardReturn = null;
     // The Board card being dragged, or null: `{ key, board, card, from, rank, count, moves, places, at, pointer, over, near,
     // target }`, `from` its column, `count` the cards in Ready to build, `places` whether it may take a place there, `at`
     // the press and `pointer` the latest position, `over` the column (`{ column, bounds }`) and `near` the Ready card
     // (`{ rank, bounds }`) the pointer was last over, and `target` where a release would land it.
+    /** @type {Drag | null} */
     this.drag = null;
     // Whether the Merged column shows every merge, and the handle that keeps the keyboard on its Show all control.
     this.mergedExpanded = false;
@@ -1068,12 +1094,17 @@ export default class Queue extends View {
     // The inbox's waiting menus: what the latest `queue.mjs menus` read printed (null before one lands or where it failed),
     // why the latest read or a watch failed, the blocked sessions the latest read was given (null before the first), whether
     // a read runs and whether a change during it asks for one more; and the watches it keeps, which `close` cancels.
+    /** @type {{ items: any[], problems: any[] } | null} */
     this.menus = null;
+    /** @type {string | null} */
     this.menusFailure = null;
+    /** @type {string | null} */
     this.watchFailure = null;
+    /** @type {string | null} */
     this.menusBlocked = null;
     this.menusReading = false;
     this.menusAgain = false;
+    /** @type {Set<Handle>} */
     this.watches = new Set();
     this.closed = false;
     // The panel only loads the saved queue it finds, for its deliver menus; a view reads the tracker once as it opens, and at
@@ -1134,7 +1165,7 @@ export default class Queue extends View {
           batch = await watch;
         } catch (error) {
           if (folder === data) {
-            this.watchFailure = oneLine(error?.message ?? error);
+            this.watchFailure = oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error);
             cx.notify();
             return;
           }
@@ -1159,7 +1190,7 @@ export default class Queue extends View {
         try {
           await watch;
         } catch (error) {
-          this.watchFailure = oneLine(error?.message ?? error);
+          this.watchFailure = oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error);
           cx.notify();
           return;
         } finally {
@@ -1185,19 +1216,19 @@ export default class Queue extends View {
       const result = await exec("node", [`${this.home}/mods/fabraik-queue/queue.mjs`, ...args, "--home", this.home], EXEC_OPTIONS);
       return { code: result.code, failure: result.code === 0 ? null : oneLine(result.stderr || result.stdout) || `exit ${result.code}`, stdout: result.stdout };
     } catch (error) {
-      return { code: null, failure: oneLine(error?.message ?? error), stdout: "" };
+      return { code: null, failure: oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error), stdout: "" };
     }
   }
 
   async load() {
     const today = localDate();
     for (const [key, date] of this.handled) if (date !== today) this.handled.delete(key);
-    // Herdr's agent programs, which the Floor and the side sheet show for a card's claim: `{ list }`, or `{ unread }`
-    // naming why not.
-    if (this.view === "floor" || this.view === "board") {
+    // Herdr's agent programs, which the Floor, the Decisions cards and the side sheet show for a card's claim: `{ list }`,
+    // or `{ unread }` naming why not.
+    if (this.view !== "panel") {
       this.programs = await knownAgents().then(
         (list) => (isProgramList(list) ? { list } : { unread: "it is not a program list" }),
-        (error) => ({ unread: oneLine(error?.message ?? error) }),
+        (error) => ({ unread: oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error) }),
       );
     }
     try {
@@ -1227,7 +1258,7 @@ export default class Queue extends View {
         this.takeKeyboardInSheet();
       }
     } catch (error) {
-      this.state = { kind: "unreadable", error: oneLine(error?.message ?? error) };
+      this.state = { kind: "unreadable", error: oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error) };
     }
   }
 
@@ -1264,7 +1295,7 @@ export default class Queue extends View {
 
   newDraft(item, key, index) {
     const menu = item.category === "menu";
-    const placeholder = menu ? MENU_PLACEHOLDER : item.category === "merge" ? "Your answer: yes, what to change, or no" : `Your answer to the ${folderName(item.repository)} lead`;
+    const placeholder = menu ? MENU_PLACEHOLDER : item.category === "merge" ? "Your answer: yes, what to change, or no" : `Your answer for ${folderName(item.repository)}`;
     const state = InputState.new({ placeholder });
     // Typing into a single-select question's box takes its picked choice back: it takes one choice or a text, never both.
     state.on("change", (_event, cx) => {
@@ -1311,11 +1342,11 @@ export default class Queue extends View {
 
   // Runs one queue.mjs command for an item: its pressed button reads "Working" and its other controls are off until
   // the command ends. A refusal leaves the item open with one line naming the button; a success leaves `receipt`
-  // (none for Open log) and starts no refresh, since the next read confirms it; a made retro proposal instead keeps its
+  // and starts no refresh, since the next read confirms it; a made retro proposal instead keeps its
   // item open, its control giving way to the line saying so, and starts the refresh that reads the card it became; a sent
   // waiting menu answer reads the waiting menus again in the inbox and refreshes in a view; a written put-aside, accept or reject keeps
   // the record the queue printed, which its Undo hands back, and an undo that succeeds takes the receipt away. The panel hands
-  // queue.mjs the item's key and never a path; queue.mjs reads and checks the log itself.
+  // queue.mjs the item's key and never a path.
   press(item, label, args, receipt, cx) {
     if (this.running.has(item.key)) return;
     const [command, , action] = args;
@@ -1371,6 +1402,13 @@ export default class Queue extends View {
   // one line naming the control on its card. The keyboard goes to the card's title, which keeps it through the refresh
   // that follows every press, or, for a press in the side sheet, stays in the sheet; a press while a refresh runs asks for
   // one more, since that one began before the write ended.
+  /**
+   * @param {any} board
+   * @param {any} card
+   * @param {{ args: any[], label: string, done: string, showFirst?: any }} write
+   * @param {any} cx
+   * @param {boolean} [fromSheet]
+   */
   writeCard(board, card, { args, label, done, showFirst }, cx, fromSheet = false) {
     if (this.boardMove !== null || this.boardMoved !== null) return;
     const key = `${board.repository}#${card.card}`;
@@ -1425,9 +1463,10 @@ export default class Queue extends View {
 
   // Redraws only when where the card would land has changed.
   showDrag(cx) {
-    const target = dragTarget(this.drag);
-    if (target?.column === this.drag.target?.column && target?.before === this.drag.target?.before) return;
-    this.drag.target = target;
+    const drag = /** @type {Drag} */ (this.drag);
+    const target = dragTarget(drag);
+    if (target?.column === drag.target?.column && target?.before === drag.target?.before) return;
+    drag.target = target;
     cx.notify();
   }
 
@@ -1620,7 +1659,7 @@ export default class Queue extends View {
       } else {
         this.report = { report: kept };
       }
-      if (this.report.report !== undefined) markSeen(repository, [sha]);
+      if (this.report?.report !== undefined) markSeen(repository, [sha]);
       cx.notify();
     });
   }
@@ -1631,9 +1670,11 @@ export default class Queue extends View {
   moveInSheet(backward) {
     if (backward) {
       if (this.sheetClose.is_focused() || this.sheetFocus.is_focused()) this.sheetEnd.focus();
+      // @ts-expect-error Herdr's window global has focus_prev, which the DOM Window type lacks
       window.focus_prev();
       return;
     }
+    // @ts-expect-error Herdr's window global has focus_next, which the DOM Window type lacks
     if (!this.sheetEnd.is_focused()) window.focus_next();
     if (this.sheetEnd.is_focused()) this.sheetClose.focus();
   }
@@ -1665,7 +1706,7 @@ export default class Queue extends View {
       cx.notify();
       return;
     }
-    this.press(item, SEND_LABEL, ["act", item.key, "answer", item.version, reply], RECEIPTS.answer, cx);
+    this.press(item, SEND_LABEL, ["act", item.key, "answer", item.version, reply], item.category === "merge" ? RECEIPTS.relay : RECEIPTS.answer, cx);
   }
 
   // What the owner has picked and typed for each question of the waiting menu `item`.
@@ -1873,14 +1914,9 @@ export default class Queue extends View {
     if (item.category === "menu") return this.menuResponses(item, t, local);
     if (item.category === "merge" && hasMenu(this.state.cache.items, item)) return { lines: [mutedLine(t, MERGE_AT_MENU)], buttons: [] };
     if (item.category === "merge") {
-      const who = WHO_ACTS.get(item.actedOnBy);
-      const lines = who === undefined
-        ? [mutedLine(t, item.actedOnBy === "unread" ? UNREAD_LINE : NO_RECORD_LINE)]
-        : [
-          ...(item.answered ? [mutedLine(t, `You answered: ${item.answered}`)] : []),
-          this.answerBox(t, item, `Answer to card ${item.card}`),
-          mutedLine(t, who),
-        ];
+      const lines = item.missing === undefined
+        ? [this.answerBox(t, item, `Answer to card ${item.card}`), mutedLine(t, CARRY_LINE)]
+        : [mutedLine(t, UNREAD_VERSION_LINE)];
       return { lines, buttons: [written("park", "Put aside", act("park"), RECEIPTS.park)] };
     }
     if (item.category === "question" && item.answerable) {
@@ -1915,7 +1951,7 @@ export default class Queue extends View {
     if (item.category === "failure") {
       return {
         lines: [],
-        buttons: [local("dismiss", "Dismiss", RECEIPTS.dismissed, true), ...(item.log ? [written("open-log", "Open log", ["open-log", item.key], null)] : [])],
+        buttons: [local("dismiss", "Dismiss", RECEIPTS.dismissed, true)],
       };
     }
     return { lines: [], buttons: [] };
@@ -1938,23 +1974,24 @@ export default class Queue extends View {
       return v_flex().w_full().rounded(10).bg(t.raised).border_1().border_color(t.border).overflow_hidden()
         .child(v_flex().px(16).pt(14).gap(8)
           .child(cardHeading(t, item))
-          .child(div().text_size(16).font_semibold().line_height(1.3).child(titleOf(item))))
+          .child(h_flex().items_center().gap(8)
+            .child(agentNamedMark(itemProgram(item, Array.isArray(this.state.cache.boards) ? this.state.cache.boards : [], this.programs?.list ?? null), t.muted, 18))
+            .child(div().text_size(16).font_semibold().line_height(1.3).child(titleOf(item)))))
         .child(v_flex().px(16).py(12).gap(8).children(this.itemDetail(item, t)))
         .children(this.footer(item, t));
     } catch (error) {
-      return problemLine(t, `${cardRef(item)} cannot be read: ${oneLine(error?.message ?? error)}`);
+      return problemLine(t, `${cardRef(item)} cannot be read: ${oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error)}`);
     }
   }
 
   // A handled card: its chip and title, with Undo where the answer can be taken back (a local mark, or a written one
-  // with a record), above what was done, which wraps inside the card. A merge answer's receipt keeps the line saying
-  // who acts on it; then the line saying why Undo failed, and where the answer cannot be taken back the line saying why.
+  // with a record), above what was done, which wraps inside the card; then the line saying why Undo failed, and where
+  // the answer cannot be taken back the line saying why.
   receipt(item, mark, t) {
-    const who = item.category === "merge" && mark.receipt === RECEIPTS.answer ? WHO_ACTS.get(item.actedOnBy) : undefined;
     const refused = this.failures.get(item.key);
     const undoable = mark.local || Boolean(mark.record);
     const why = item.category === "menu" ? NO_UNDO_MENU : mark.action !== "answer" ? `No Undo: ${folderName(item.repository)}'s queue reader predates it`
-      : item.actedOnBy === "coordinator" ? NO_UNDO_COORDINATOR : NO_UNDO_ANSWER;
+      : NO_UNDO_COORDINATOR;
     return v_flex().w_full().gap(4).px(12).py(10).rounded(10).border_1().border_color(t.border)
       .child(h_flex().w_full().items_center().gap(8)
         .child(kindChip(t, item, true))
@@ -1963,7 +2000,6 @@ export default class Queue extends View {
           ? this.unmark(item, cx) : this.press(item, "Undo", ["undo", item.key, mark.action, mark.record], null, cx)))
           .accessibility_label(`Undo for card ${item.card}`))))
       .child(div().w_full().min_w(0).child(mark.receipt))
-      .when(who !== undefined, (el) => el.child(mutedLine(t, who).w_full().min_w(0)))
       .when(Boolean(refused), (el) => el.child(problemLine(t, refused).w_full().min_w(0)))
       .when(!undoable, (el) => el.child(mutedLine(t, why).w_full().min_w(0).text_size(12)));
   }
@@ -2005,7 +2041,7 @@ export default class Queue extends View {
       if (this.view === "board") return this.boardLines(state.cache, t);
       return this.decisionLines(state.cache, t);
     } catch (error) {
-      return [problemLine(t, `Queue cache unreadable: ${oneLine(error?.message ?? error)}`)];
+      return [problemLine(t, `Queue cache unreadable: ${oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error)}`)];
     }
   }
 
@@ -2029,7 +2065,7 @@ export default class Queue extends View {
     });
   }
 
-  coordinatorControls(t, board, lead) {
+  coordinatorControls(t, board, line) {
     const choice = coordinatorChoice(board);
     if (!choice) return [];
     if (choice.unread) return [problemLine(t, choice.unread).text_size(12)];
@@ -2045,7 +2081,7 @@ export default class Queue extends View {
       ...(!installed.includes(runtime) ? [mutedLine(t, "The saved default is unavailable because it is not installed.").text_size(12)] : []),
       div().child("Choose for this session"),
       h_flex().flex_wrap().gap(6).children(controls),
-      ...(blocked && blocked !== lead.text ? [mutedLine(t, blocked).text_size(12)] : []),
+      ...(blocked && blocked !== line.text ? [mutedLine(t, blocked).text_size(12)] : []),
       ...(opened && opened.text !== blocked ? [(opened.problem ? problemLine : mutedLine)(t, opened.text).text_size(12)] : []),
     ];
   }
@@ -2073,8 +2109,8 @@ export default class Queue extends View {
           `You handled ${plural(handled, "card")} today. Cards answered in chat leave when the queue next confirms them.`)))] : []),
       ...(projects.length === 0 ? [] : [h_flex().flex_wrap().gap(10).children(projects.map((repository) => {
         const board = boards.find((entry) => entry?.repository === repository);
-        const lead = leadStatus(board);
-        return projectTile(t, repository, unmarked(tiered.filter((item) => item.repository === repository)), lead, this.coordinatorControls(t, board, lead));
+        const line = coordinatorStatus(board);
+        return projectTile(t, repository, unmarked(tiered.filter((item) => item.repository === repository)), line, this.coordinatorControls(t, board, line));
       }))]),
       ...[...projects.map((repository) => [folderName(repository), tiered.filter((item) => item.repository === repository)]),
         [PROJECT_UNREAD, unplaced]].flatMap(([heading, group]) => {
@@ -2093,14 +2129,16 @@ export default class Queue extends View {
   // The agents the Floor reads for its projects: the tied terminals (ties is null where the terminal list was not read,
   // and terminalsUnread says why) and Herdr's program table (programs is null where it was not, programsUnread says why).
   floorAgents(projects) {
+    /** @type {string | null} */
     let terminalsUnread = null;
+    /** @type {Map<any, any> | null} */
     let ties = null;
     try {
       const list = terminals();
       if (isTerminalList(list)) ties = tieAgents(projects.filter((board) => boardCause(board) === null), list);
       else terminalsUnread = "the terminal list is not one this view can read";
     } catch (error) {
-      terminalsUnread = oneLine(error?.message ?? error);
+      terminalsUnread = oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error);
     }
     const { list: programs = null, unread: programsUnread } = this.programs;
     return { ties, programs, terminalsUnread, programsUnread };
@@ -2158,15 +2196,15 @@ export default class Queue extends View {
     ];
   }
 
-  // The Board's header: the project's folder and its lead's state, then its right end.
+  // The Board's header: the project's folder and its Coordinator's state, then its right end.
   boardHeader(t, cache, readAge) {
     const { board } = cache === null ? {} : this.shownBoard(cache);
-    const lead = board === undefined ? null : leadStatus(board);
+    const coordinator = board === undefined ? null : coordinatorStatus(board);
     return h_flex().flex_none().px(16).py(12).gap(12).justify_between().items_center().border_b(1).border_color(t.border)
       .child(h_flex().min_w(0).items_center().gap(12)
         .when(typeof this.repository === "string", (el) => el.child(div().min_w(0).truncate().text_size(16).font_semibold()
           .child(folderName(this.repository))))
-        .when(lead !== null, (el) => el.child(leadLine(t, lead).text_size(12.5))))
+        .when(coordinator !== null, (el) => el.child(coordinatorLine(t, coordinator).text_size(12.5))))
       .child(this.headerEnd(t, cache, readAge));
   }
 
@@ -2227,7 +2265,7 @@ export default class Queue extends View {
         .accessibility_label(`${unseen ? "New, " : ""}${merge.subject}, ${time}`).tooltip(merge.subject)
         .w_full().min_w(0).flex().flex_col().items_start().rounded(4).border_1().border_color(t.raised)
         .focus((s) => s.border_color(t.foreground))
-        .when(this.boardReturn?.key === key, (el) => el.track_focus(this.boardReturn.handle))
+        .when(this.boardReturn?.key === key, (el) => el.track_focus(this.boardReturn?.handle))
         .child(div().text_size(13.5).font_semibold().text_color(t.muted).line_height("19px").max_h(57).overflow_hidden().child(merge.subject)))
       .child(h_flex().id(`${BOARD_ID}merged-line-${merge.sha}`).flex_wrap().items_center().gap(6)
         .when(unseen, (el) => el.child(newChip(t)))
@@ -2287,7 +2325,7 @@ export default class Queue extends View {
   showFirstSwitch(t, id, board, card, off, fromSheet) {
     const key = `${board.repository}#${card.card}`;
     const written = this.boardMoved?.key === key && typeof this.boardMoved.showFirst === "boolean";
-    const on = written ? this.boardMoved.showFirst : card.showFirst;
+    const on = written ? this.boardMoved?.showFirst : card.showFirst;
     const working = this.boardMove?.key === key && this.boardMove.label === SHOW_FIRST;
     return Toggle.new(id).pressed(on).disabled(off).accessibility_label(`${SHOW_FIRST} for card ${card.card}`)
       .h(24).min_w(24).px(8).flex().items_center().rounded(6).border_1().border_color(on ? t.accent : t.muted)
@@ -2327,7 +2365,7 @@ export default class Queue extends View {
     const title = floorTitle(card.title);
     const blocked = blockedNote(card);
     const name = blocked ? `${ref} ${title}. ${blocked}` : `${ref} ${title}`;
-    const line = card.title.startsWith(PROPOSED) ? SUGGESTED_LINE : card.answered === true ? ANSWERED_LINE : CARD_LINES.get(card.column);
+    const line = card.title.startsWith(PROPOSED) ? SUGGESTED_LINE : CARD_LINES.get(card.column);
     const key = `${board.repository}#${card.card}`;
     const moves = cardMoves(board, card, rank, ordered);
     const off = this.boardMove !== null || this.boardMoved !== null || this.sheetOpen;
@@ -2336,7 +2374,7 @@ export default class Queue extends View {
     // The 2 high mark a drag draws where the card it holds would go in Ready to build: before this card, or after the last.
     const before = this.drag?.target?.before;
     const mark = rank === null || before === undefined ? null
-      : before === rank ? "top" : before === this.drag.count + 1 && rank === this.drag.count ? "bottom" : null;
+      : before === rank ? "top" : before === (this.drag?.count ?? 0) + 1 && rank === this.drag?.count ? "bottom" : null;
     return v_flex().id(`${BOARD_ID}card-${card.card}`).flex_none().gap(6).px(10).py(8).rounded(8).bg(t.raised).border_1().border_color(t.border)
       .when(rank !== null, (el) => el.child(h_flex().items_center().gap(6)
         .child(rankBadge(t, rank))
@@ -2346,7 +2384,7 @@ export default class Queue extends View {
       .child(this.sheetOpener(`${BOARD_ID}title-${card.card}`, { repository: board.repository, card: card.card }).accessibility_label(name).tooltip(name)
         .w_full().min_w(0).flex().flex_col().items_start().rounded(4).border_1().border_color(t.raised)
         .focus((s) => s.border_color(t.foreground))
-        .when(this.boardReturn?.key === key, (el) => el.track_focus(this.boardReturn.handle))
+        .when(this.boardReturn?.key === key, (el) => el.track_focus(this.boardReturn?.handle))
         .child(div().text_size(13.5).font_semibold().line_height("19px").max_h(57).overflow_hidden().child(title)))
       .when(moves.length > 0 || toggle !== null, (el) => el.child(h_flex().flex_wrap().gap(6)
         .children(moves.map((move) => controlButton(t, `${BOARD_ID}move-${card.card}-${move.move}`,
@@ -2356,7 +2394,7 @@ export default class Queue extends View {
         .when(toggle !== null, (row) => row.child(toggle.on_mouse_down("left", (_event, cx) => this.controlPress(cx))))))
       .children(lines)
       .when(failure !== undefined, (el) => el.child(problemLine(t, failure).text_size(12)))
-      .when(this.boardMoved?.key === key, (el) => el.child(mutedLine(t, this.boardMoved.line).text_size(12)))
+      .when(this.boardMoved?.key === key, (el) => el.child(mutedLine(t, this.boardMoved?.line).text_size(12)))
       .when(line !== undefined, (el) => el.child(mutedLine(t, line).text_size(12)))
       .when(Boolean(blocked), (el) => el.child(this.blockerNote(t, board, card, rank === 1)))
       .when(moves.length > 0 && !off, (el) => el.cursor_grab().on_mouse_down("left", (event, cx) => this.holdCard(board, card, rank, moves, event, cx)))
@@ -2459,7 +2497,7 @@ export default class Queue extends View {
   // read begun before the opening that finished last, or a read time the panel cannot trust.
   readLine(t, cache) {
     const began = cache === null ? null : readStart(cache);
-    if (began !== null && began >= this.sheetOpenedAt) return [];
+    if (began !== null && began >= /** @type {number} */ (this.sheetOpenedAt)) return [];
     if (this.refreshing || this.refreshAgain) {
       return [mutedLine(t, "Reading this card's current state. Until that read lands, this is the earlier read.")];
     }
@@ -2481,13 +2519,13 @@ export default class Queue extends View {
     const { stage, agent, program, light } = stagedCard(board, card, { ties, programs });
     const detailsUnread = card.unread !== undefined;
     const waitsUnread = board.waitsOnUnread ?? [];
-    const lead = leadStatus(board);
+    const coordinator = coordinatorStatus(board);
     const blocked = blockedNote(card);
     const { outcome, claim } = card;
+    /** @type {string | null} */
     let unmatched = null;
     if (!detailsUnread && AGENT_STAGES.includes(stage) && agent === undefined) {
       if (ties === null) unmatched = `Agent state not read: ${terminalsUnread}`;
-      else if (typeof board.folder !== "string") unmatched = "Agent not matched: this project's folder was not read";
       else if (card.worktree === undefined) {
         unmatched = waitsUnread.includes("worktrees") ? "Agent not matched: the worktree list was not read"
           : "Agent not matched: this project's queue reader predates worktree reading";
@@ -2500,7 +2538,7 @@ export default class Queue extends View {
       : [div().child(outcome.text), ...(outcome.more ? [mutedLine(t, "The card text goes on past this paragraph.").text_size(12)] : [])];
     const stageLine = this.view === "board" ? `Column: ${card.column ?? "none"}`
       : stage === null ? `Not on the Floor now: the card ${card.column === null ? "has no column" : `is in ${card.column}`}`
-      : `Stage: ${STAGES.find(({ id }) => id === stage).label}${stage === "building" && card.column === "In review" ? ", merging" : ""}`;
+      : `Stage: ${/** @type {{ label: string }} */ (STAGES.find(({ id }) => id === stage)).label}${stage === "building" && card.column === "In review" ? ", merging" : ""}`;
     const agentLine = agent ? `${program.name}: ${AGENT_LINES.get(agent.report?.state ?? null)}`
       : claim ? `Claimed on ${claim.machine}${claim.runtime ? ` in ${claim.runtime}` : ""}` : "Not claimed";
     const item = cache.items.find((found) => found.repository === repository && found.card === number && TIERS.includes(found.category));
@@ -2511,7 +2549,7 @@ export default class Queue extends View {
         .child(div().child(stageLine))
         .children(this.view === "board" ? this.sheetShowFirst(t, board, card) : [])
         .child(blocked ? div().border_l(2).border_color(t.idle).pl(6).child(blocked) : mutedLine(t, "No open blockers"))
-        .child(leadLine(t, lead))
+        .child(coordinatorLine(t, coordinator))
         .children(detailsUnread ? [] : [
           mutedLine(t, agentLine),
           ...(unmatched === null ? [] : [problemLine(t, unmatched)]),
@@ -2549,7 +2587,7 @@ export default class Queue extends View {
   // where the report was not read, the seen control alone for a direct change, the seen control and the pull request's
   // link for a report; null while the report is being looked for or read.
   reportFooter(t) {
-    const { checking, reading, failure, report } = this.report;
+    const { checking, reading, failure, report } = /** @type {ReportState} */ (this.report);
     if (checking || reading) return null;
     const row = h_flex().flex_none().flex_wrap().gap(6).px(16).py(12).border_t(1).border_color(t.border);
     if (failure !== undefined) {
@@ -2567,7 +2605,7 @@ export default class Queue extends View {
   // it was not; or the report, a group at a time in the owner's order, a field the reader could not read named in its
   // group's place.
   reportBody(t) {
-    const { checking, reading, failure, report } = this.report;
+    const { checking, reading, failure, report } = /** @type {ReportState} */ (this.report);
     if (checking) return [];
     if (reading) return [mutedLine(t, "Reading this merge's report")];
     if (failure !== undefined) return [problemLine(t, `Report not read: ${failure}`)];
@@ -2582,9 +2620,11 @@ export default class Queue extends View {
       waited: () => [report.waiting],
       disagrees: () => [`Not known: its write-up holds ${report.holds.join("; ")} and its card has no Waiting for you comment.`],
     };
+    const zoomSetting = settings().zoom;
+    const zoom = Number.isFinite(zoomSetting) && zoomSetting > 0 ? zoomSetting : 1;
     const shot = (entry, at) => {
       const name = `Screenshot ${/^screenshot-(\d+)/.exec(entry.alt)?.[1] ?? at + 1}`;
-      return entry.unread === undefined ? group(div().child(name), image(entry.path).w_full().max_h(SHOT_MAX_HEIGHT)) : notRead(name, entry.unread);
+      return entry.unread === undefined ? group(div().child(name), (this.shotWidth === null ? image(entry.path).w_full() : image(entry.path).w(this.shotWidth / zoom)).max_h(SHOT_MAX_HEIGHT)) : notRead(name, entry.unread);
     };
     return [
       ...(outcome === "unread" ? [] : [h_flex().child(roleChip(t, t[outcome === "disagrees" ? "blocked" : "done"], REPORT_CHIPS[outcome]))]),
@@ -2598,7 +2638,7 @@ export default class Queue extends View {
       ...(noScreen
         ? [group(mutedLine(t, "No visual change"), ...(isUnreadField(checks) ? [notRead("Test results", checks.unread)]
           : [heading("Test results"), ...checks.map((line) => div().child(line))]))]
-        : screenshots.length === 0 ? [notRead("Screenshots", "it shows no screenshot, and its Evidence section has no line saying no visual change")] : [v_flex().gap(8).children(screenshots.map(shot))]),
+        : screenshots.length === 0 ? [notRead("Screenshots", "it shows no screenshot, and its Evidence section has no line saying no visual change")] : [v_flex().id(SHEET_SHOTS_ID).gap(8).on_size_change(({ width }, cx) => { if (width !== this.shotWidth) { this.shotWidth = width; cx.notify(); } }).children(screenshots.map(shot))]),
     ];
   }
 
@@ -2675,7 +2715,7 @@ export default class Queue extends View {
         ...(buttons.length > 0 ? [h_flex().flex_wrap().gap(6).children(buttons)] : []),
       ];
     } catch (error) {
-      return [problemLine(t, `${cardRef(ask)} cannot be read: ${oneLine(error?.message ?? error)}`)];
+      return [problemLine(t, `${cardRef(ask)} cannot be read: ${oneLine(/** @type {{ message?: string } | null} */ (error)?.message ?? error)}`)];
     }
   }
 

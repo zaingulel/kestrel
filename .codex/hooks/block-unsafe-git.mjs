@@ -5,7 +5,7 @@
 // scripts/lib/unsafe-git.mjs says what does and does not limit a push. blockReason() judges the
 // command using its checkout and the session's run restrictions. The run can be marked by the
 // launcher or bound to a native app session. A failed native lookup cannot drop those restrictions.
-// PRE_APPROVED_RUN_CARD, which a lead sets on a continue session, binds that session to the one card it names.
+// PRE_APPROVED_RUN_CARD, which the coordinator sets on each job session it starts, binds that session to the one card it names.
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { blockReason } from "../../scripts/lib/unsafe-git.mjs";

@@ -46,11 +46,11 @@ run session reads this file with [pre-approved-run.md](pre-approved-run.md); a c
    line, or a result the board contradicts ends new starts, and the run goes to step 7 once the sessions still working
    are idle. The route writes no outcome record and no waiting line: the session's last message and the board are the
    evidence.
-6. **The owner's answers.** The owner answers a card in its own session or in the run session. Either records the
-   answer on the card as **Owner answer** in [owner-answer.md](owner-answer.md) gives, before it acts. The run
-   session sends a card session a fix or a no as the Waiting rule of "5. Build" says, the words being the record's, and
-   shows a waiting card and delivers the owner's yes itself, as **Batch review** under "7. Push authorisation" says. A
-   message alone never carries a push yes: the record on the card does, where its mark's guard admits it.
+6. **The owner's answers.** The owner answers a card in the run session. A card session the owner answers tells him
+   in one line to answer in the run session, which shows a waiting card and delivers his yes itself, as **Batch
+   review** under "7. Push authorisation" says. The run session sends a card session a fix or a no as the Waiting rule
+   of "5. Build" says, the words being the owner's, and a message alone never carries a push yes: a card session
+   merges no held work.
 7. **The end.** With no candidate left and every session idle, or at a stop, the run session gives the summary step 8
    of [pre-approved-run.md](pre-approved-run.md) names, in its own chat, with each card's session named so the owner
    can open it. No end session starts.
@@ -65,8 +65,7 @@ as [pre-approved-phase.md](pre-approved-phase.md) items 2 and 6 give them, and t
   account during that run, only while `waitForOwner` on fetched `main` reads
   `on-screen` or `when-needed`, pushes only while its pull request is neither ready nor has a merge queued, and readies or merges it
   only where the judgement of [merge-on-evidence.md](merge-on-evidence.md) finds no wait reason in the saved write-up
-  or the published pull request body, including `show-me-first` on its card and, at `on-screen`, work on screen, unless the card records the owner's answer
-  for its head, as that file gives. Where the guard cannot read that first message in the desktop app, it refuses every push and merge.
+  or the published pull request body, including `show-me-first` on its card and, at `on-screen`, work on screen. Where the guard cannot read that first message in the desktop app, it refuses every push and merge.
 - **Its probes.** After the hook check under "Before intake" it runs
   `git push --dry-run ./.pre-approved-run-no-remote HEAD` as one plain command on its own, and stops unless the guard
   refuses it with a reason beginning `a pre-approved run session`. A session whose first message differs from step 3's

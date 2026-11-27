@@ -1,4 +1,3 @@
-// @ts-nocheck
 // queue.mjs — the queue panel's machine aggregator. It reads every repository the machine record lists and writes
 // the one ranked list the panel draws. Node built-ins only: the file is copied to the Herdr home, outside any
 // repository.
@@ -10,7 +9,6 @@
 //   node queue.mjs menus [<terminals>] --home <dir>
 //                                                print the waiting menus as JSON `{ items, problems }`, writing nothing
 //   node queue.mjs clear-digest --home <dir>     mark each repository's newest merge as read and drop the digest
-//   node queue.mjs open-log <key> --home <dir>   open the log of the cached failure item `key` with xdg-open
 //   node queue.mjs act <key> <action> <version> [<reply>|<proposal>] --home <dir>
 //                                                hand a panel answer on the cached item `key` to its repository
 //   node queue.mjs undo <key> <action> <record> --home <dir>
@@ -63,32 +61,8 @@
 // Clear marks hide from the queue's digest, null where it was not read; and each card that has a `worktree` carries it as
 // a real path, null where it does not resolve. Each card may carry its `version`, 64 lowercase hex, the digest the panel
 // draws a Board move against, and a board its `moves` and `places`, true only on a GitHub board, the one that takes moves. A cache
-// over the limit first makes every board `unreadable: 'too large to show'`, keeping its `problems` and `lead` and dropping those fields,
+// over the limit first makes every board `unreadable: 'too large to show'`, keeping its `problems` and dropping those fields,
 // then drops the items as above.
-//
-// Each board entry also carries `lead`, the state of the repository's lead, read once per refresh for the whole
-// machine, after the collectors and only when some repository has an entry, from `<terminals>`: the herdr-core terminal
-// list the panel read as the refresh began, as JSON, each terminal's address, status report and running program's
-// folder, or `{ unread }` with why the panel could not read it. The lead reports from its own terminal under the app
-// `fabraik-lead`, and reports its `unknown` as `error`, which herdr-core has in its place. `here` is
-// `[{ terminal, state }]` in list order for each such terminal whose folder, as a real path, is the repository's real
-// path, `error` recorded as `unknown`, `[]` meaning no lead is running. In its place `hereUnread` gives why that is not
-// known, the first that holds: its queue reader predates the board read (so its lead predates state reporting), the
-// refresh was given no list, the panel could not read it or it is not a terminal list, or no lead terminal is the
-// repository's while some lead terminal's folder is missing or cannot be resolved, so it may be. `elsewhere` is
-// `[{ machine, cards }]`, in the order the board gives the cards, for the machines other than this one whose non-cloud
-// claims are on its cards, and null where its board is unreadable; `claimsUnread` lists the cards whose details were
-// not read, so whose claims are not known, where any.
-//
-// An item's `log`, the lead's session log for a failure, is kept only where it is an absolute, normalized path to a
-// regular file, not a link, inside the lead's runs folder `<state>/runs/`, `<state>` being
-// `${XDG_STATE_HOME:-~/.local/state}/fabraik-lead` read at each refresh; any other is left off the item, which keeps its
-// reason, and adds its repository's line naming the card and why.
-//
-// `open-log` writes nothing. It finds the cached failure item whose `key` is the one given and checks its `log` again
-// under that rule, as the file is when it opens, so a log moved or made a link since the refresh opens nothing; only a
-// log that passes goes, as the one argument and with no shell, to `xdg-open`, which it waits for. No such item, a
-// refused log or a failed `xdg-open` exits 1 naming the key or card and why.
 //
 // `act` writes nothing local and takes no write lock. Its action is `park`, `answer`, `keep`, `drop` or `pick` and its
 // version 64 lowercase hex; a `pick` takes the number of the weekly retro proposal to make a card, in place of a reply.
@@ -144,7 +118,7 @@
 // A lock held for under a minute is waited for up to 2 s, then the command fails writing nothing; an older one is left
 // by a crashed command and is removed.
 //
-// Order: `problem` items (such as a corrupt lead record from an older collector), then tier 1 (merge awaiting a
+// Order: `problem` items (such as an unreadable machine record), then tier 1 (merge awaiting a
 // yes, blocking question, usage-limit stop), then tier 2 (suggested card, unrecovered failure), then tier 3, the
 // digest. Within a category the repositories keep the order the machine record lists them in, and a repository's cards
 // run by card number, lowest first; its digest entries run newest first, and its problems keep the order the collector
@@ -156,7 +130,7 @@ import {
   closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync,
   utimesSync, writeFileSync, readSync,
 } from 'node:fs';
-import { homedir, hostname } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -182,7 +156,7 @@ const RELEASE_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const RELEASE_KEYS = ['assetId', 'digest', 'id', 'tag'];
 // The panel reads no larger cache.
 const CACHE_MAX_BYTES = 1024 * 1024;
-const USAGE = 'usage: node queue.mjs refresh [<terminals>] --home <dir> | menus [<terminals>] --home <dir> | clear-digest --home <dir> | open-log <key> --home <dir> | act <key> <action> <version> [<reply>|<proposal>] --home <dir> | undo <key> <action> <record> --home <dir> | move <key> <move> <version> [<place>] --home <dir> | report <key> --home <dir> | show-first <key> <on|off> --home <dir> | waiting-menu <terminal> --home <dir> | answer-menu <terminal> <askId> --answer <json> --home <dir> | notify [--initialize] --home <dir> | open-coordinator <repository> <claude|codex> --home <dir>';
+const USAGE = 'usage: node queue.mjs refresh [<terminals>] --home <dir> | menus [<terminals>] --home <dir> | clear-digest --home <dir> | act <key> <action> <version> [<reply>|<proposal>] --home <dir> | undo <key> <action> <record> --home <dir> | move <key> <move> <version> [<place>] --home <dir> | report <key> --home <dir> | show-first <key> <on|off> --home <dir> | waiting-menu <terminal> --home <dir> | answer-menu <terminal> <askId> --answer <json> --home <dir> | notify [--initialize] --home <dir> | open-coordinator <repository> <claude|codex> --home <dir>';
 // The project's coordinator setting names one of these runtimes (scripts/lib/runtimes.mjs).
 const COORDINATOR_RUNTIMES = ['claude', 'codex'];
 // The panel's answers, as the repository's `owner-queue.mjs act` takes them, and those of them it can take back; an
@@ -206,17 +180,11 @@ const TOO_LARGE = 'The queue is too large to show: its cache would be over 1 MiB
 const BOARD_TOO_LARGE = 'too large to show';
 const BOARD_PREDATES = "its queue reader's release predates the board read";
 const NOT_A_BOARD = 'its board is not a board document';
-const LEAD_PREDATES = "its lead's release predates state reporting";
 const TERMINALS_UNREAD = "Herdr's terminal list could not be read";
-const LEAD_FOLDER_UNREAD = "a lead terminal's folder could not be read, so it may be this repository's";
 const RECEIPT_DAMAGED = 'Machine record damaged: its release receipt is incomplete, so the panel files cannot be checked';
 const QUEUE_BUSY = `the queue is busy: another refresh or Clear held its write lock for ${LOCK_WAIT_MS / 1000} s`;
 const SHOT_UNREADABLE = { fact: 'screenshot unreadable', next: "Reopen the job's session on this machine." };
 
-// Older lead reports use this name. The cloud claim label matches scripts/lib/board-claim.mjs.
-// These values are repeated because the standalone panel uses only Node built-ins.
-const LEAD_AGENT = 'fabraik-lead';
-const CLOUD_RUNTIME = 'Claude Code cloud';
 // The states of a herdr-core status report; `clear` removes a report, so a terminal list never holds it.
 const REPORT_STATES = ['idle', 'working', 'blocked', 'done', 'error'];
 
@@ -234,7 +202,7 @@ const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 // Mirrors `compareCardIds` in scripts/lib/tracker.mjs: numbers first and by value, then issue keys by team text, digit count
 // and digits, so ENG-9 comes before ENG-10.
 function compareCards(a, b) {
-  if (typeof a === 'number' || typeof b === 'number') return (typeof a === 'string') - (typeof b === 'string') || a - b;
+  if (typeof a === 'number' || typeof b === 'number') return Number(typeof a === 'string') - Number(typeof b === 'string') || a - b;
   const [teamA, digitsA] = [a.slice(0, a.lastIndexOf('-')), a.slice(a.lastIndexOf('-') + 1)];
   const [teamB, digitsB] = [b.slice(0, b.lastIndexOf('-')), b.slice(b.lastIndexOf('-') + 1)];
   return compareText(teamA, teamB) || digitsA.length - digitsB.length || compareText(digitsA, digitsB);
@@ -280,7 +248,7 @@ function requireRealFolder(folder) {
   try {
     stats = lstatSync(folder);
   } catch (error) {
-    if (error.code === 'ENOENT') return;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return;
     throw error;
   }
   if (!stats.isDirectory()) throw new Error(`${folder} is not a real folder; move it aside, then refresh`);
@@ -294,13 +262,13 @@ function withWriteLock(lock, write) {
       mkdirSync(lock);
       break;
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EEXIST') throw error;
     }
     let held;
     try {
       held = Date.now() - statSync(lock).mtimeMs;
     } catch (error) {
-      if (error.code === 'ENOENT') continue;
+      if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') continue;
       throw error;
     }
     if (held > LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true });
@@ -346,7 +314,7 @@ export const notificationPair = (phase, disposition) => Object.hasOwn(NOTIFICATI
 
 function notificationDirectory(path, privateMode = false) {
   const info = lstatSync(path);
-  if (!info.isDirectory() || info.uid !== process.getuid() || realpathSync(path) !== path
+  if (!info.isDirectory() || info.uid !== /** @type {() => number} */ (process.getuid)() || realpathSync(path) !== path
     || (privateMode && (info.mode & 0o777) !== 0o700)) throw new Error('notification directory unavailable');
   return info;
 }
@@ -354,7 +322,7 @@ function notificationDirectory(path, privateMode = false) {
 function notificationFile(fd, path) {
   const info = fstatSync(fd);
   const named = lstatSync(path);
-  if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600
+  if (!info.isFile() || info.uid !== /** @type {() => number} */ (process.getuid)() || info.nlink !== 1 || (info.mode & 0o777) !== 0o600
     || !named.isFile() || named.dev !== info.dev || named.ino !== info.ino || named.nlink !== 1
     || realpathSync(path) !== path) throw new Error('notification file unavailable');
   return info;
@@ -388,7 +356,7 @@ export function notificationConfiguration(configHome) {
   const path = join(configHome, 'fabraik', 'notifications.json');
   let config;
   try { config = readNotificationJson(path); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null; throw error; }
   if (!notificationKeys(config, ['format', 'login', 'claudeConfigDir', 'trustedDirectory', 'morning']) || config.format !== 1
     || !notificationLogin(config.login) || !notificationMorning(config.morning)
     || !notificationPath(config.claudeConfigDir) || !notificationPath(config.trustedDirectory)) throw new Error('notification configuration unavailable');
@@ -450,7 +418,7 @@ function withNotificationJournal(state, work, initial) {
     notificationDirectory(directory, true);
     notificationFile(fd, lock);
     const absent = () => {
-      try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      try { lstatSync(path); } catch (error) { if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return; throw error; }
       throw new Error('notification state already exists');
     };
     if (initial !== undefined) absent();
@@ -780,7 +748,7 @@ function fileSha256(path) {
   try {
     return sha256(readFileSync(path));
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -792,7 +760,7 @@ function readMarks(path) {
   try {
     marks = JSON.parse(readFileSync(path, 'utf8'))?.marks;
   } catch (error) {
-    if (error.code === 'ENOENT') return {};
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return {};
     throw error;
   }
   if (typeof marks !== 'object' || marks === null || Array.isArray(marks)) {
@@ -826,7 +794,7 @@ function readRecord(paths, home) {
   try {
     record = JSON.parse(readFileSync(paths.record, 'utf8'));
   } catch (error) {
-    const problem = error.code === 'ENOENT' ? NO_RECORD : `Machine record unreadable: ${oneLine(error.message)}`;
+    const problem = /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' ? NO_RECORD : `Machine record unreadable: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}`;
     return { repositories: [], tag: null, problems: [problem] };
   }
   const { repositories: listed, format, release, files, derived } = record ?? {};
@@ -936,8 +904,8 @@ function isQueueDocument({ sources, items, digest, fetchedAt }) {
 
 // A card of the board section: its number or issue key, title and column (a Status or null), then its place, open blockers,
 // claim and what it waits on (a ranked category or null), and why its details were not read where they were not; the last three
-// are absent from a card whose details were not read. Its answered marker is absent or exactly `true`, where the owner
-// has answered the version it waits on. Its outcome is absent, null, `{ unread }` or `{ text, more }`;
+// are absent from a card whose details were not read. An `answered` key, which older readers still send, is ignored
+// unvalidated. Its outcome is absent, null, `{ unread }` or `{ text, more }`;
 // its version is absent or 64 lowercase hex; its job worktree is absent, null or a path; its Show me first marker is absent,
 // a boolean or `{ unread }`.
 const isBoardCard = (card) => isObject(card) && isCardId(card.card) && isString(card.title)
@@ -948,7 +916,6 @@ const isBoardCard = (card) => isObject(card) && isCardId(card.card) && isString(
     && (card.claim.runtime === undefined || isString(card.claim.runtime))))
   && (card.waitsOn === undefined || card.waitsOn === null
     || (CATEGORY_ORDER.includes(card.waitsOn) && card.waitsOn !== 'problem' && card.waitsOn !== 'digest'))
-  && (card.answered === undefined || card.answered === true)
   && (card.unread === undefined || isString(card.unread))
   && (card.version === undefined || (isString(card.version) && SHA256_HEX.test(card.version)))
   && (card.outcome === undefined || card.outcome === null
@@ -984,12 +951,10 @@ function boardOf({ board, sources }) {
 
 const firstLine = (text) => text.trim().split(/\r?\n/)[0];
 
-// Whether `entry` is a terminal of the panel's list as far as the panel reads it: an address, an own status report
-// (null where the terminal has none) and the folder of its running program where herdr-core gives one.
+// Whether `entry` is a terminal of the panel's list as far as the panel reads it: an address and an own status report
+// (null where the terminal has none).
 const isTerminal = (entry) => isObject(entry) && isString(entry.address)
-  && (entry.report === null || (isObject(entry.report) && REPORT_STATES.includes(entry.report.state)
-    && (entry.report.app === undefined || entry.report.app === null || isString(entry.report.app))))
-  && (entry.folder === undefined || entry.folder === null || isString(entry.folder));
+  && (entry.report === null || (isObject(entry.report) && REPORT_STATES.includes(entry.report.state)));
 
 // The real path of an absolute `folder`, or null where it is not one or cannot be resolved.
 function realFolder(folder) {
@@ -1001,65 +966,10 @@ function realFolder(folder) {
   }
 }
 
-/**
- * The lead terminals of the panel's terminal list `text` (the refresh's argument, undefined where none was given),
- * `{ terminals: [{ terminal, state, folder }] }` in list order with `error` recorded as `unknown` and each `folder` a
- * real path or null where it is missing or cannot be resolved; or `{ unread }`, why the list is unknown: none given,
- * the panel's `{ unread }` cause, or text that is not a terminal list. A list is checked whole before any terminal is
- * set aside.
- */
-function leadTerminals(text) {
-  if (text === undefined) return { unread: `${TERMINALS_UNREAD}: the refresh was given none` };
-  let list = null;
-  try {
-    list = JSON.parse(text);
-  } catch {
-    // Not JSON: told apart below from a list only by not being one.
-  }
-  if (isObject(list) && isString(list.unread)) return { unread: `${TERMINALS_UNREAD}: ${firstLine(list.unread)}` };
-  if (!listOf(list, isTerminal)) return { unread: `${TERMINALS_UNREAD}: it is not a terminal list` };
-  // A `machine/address` terminal belongs to another machine; only a bare address is this machine's.
-  return {
-    terminals: list.filter((entry) => entry.report?.app === LEAD_AGENT && !entry.address.includes('/')).map(({ address, report, folder }) => ({
-      terminal: address,
-      state: report.state === 'error' ? 'unknown' : report.state,
-      folder: realFolder(folder),
-    })),
-  };
-}
-
-// The machines other than this one that claim a card in `cards`, each with its cards in board order; cloud claims and
-// cards whose details were not read have none to count.
-function claimsElsewhere(cards) {
-  const byMachine = new Map();
-  for (const { card, claim } of cards) {
-    if (claim && claim.machine !== hostname() && claim.runtime !== CLOUD_RUNTIME) {
-      byMachine.set(claim.machine, [...(byMachine.get(claim.machine) ?? []), card]);
-    }
-  }
-  return [...byMachine].map(([machine, claimed]) => ({ machine, cards: claimed }));
-}
-
-// A board entry's `lead` from the lead terminals read once for the machine (`leadTerminals`).
-function leadOf({ folder, cards, unreadable }, { terminals, unread }) {
-  const lead = { elsewhere: cards ? claimsElsewhere(cards) : null };
-  const claimsUnread = cards?.filter((card) => card.unread !== undefined).map((card) => card.card) ?? [];
-  if (claimsUnread.length > 0) lead.claimsUnread = claimsUnread;
-  if (unreadable === BOARD_PREDATES) return { hereUnread: LEAD_PREDATES, ...lead };
-  if (unread !== undefined) return { hereUnread: unread, ...lead };
-  const here = terminals.filter((entry) => folder !== null && entry.folder === folder)
-    .map(({ terminal, state }) => ({ terminal, state }));
-  if (here.length === 0 && terminals.some((entry) => entry.folder === null)) return { hereUnread: LEAD_FOLDER_UNREAD, ...lead };
-  return { here, ...lead };
-}
-
-/**
- * Every repository's board entry that has one, in record order, each with its own problem lines and its `lead`; the
- * terminal list `terminals` is read once, and only where there is an entry.
- */
-function boardsWithLeads(repositories, read, terminals) {
+// Every repository's board entry that has one, in record order, each with its own problem lines.
+function boardsOf(repositories, read) {
   const withRealWorktree = (card) => (card.worktree === undefined ? card : { ...card, worktree: realFolder(card.worktree) });
-  const boards = repositories.flatMap((repository, index) => {
+  return repositories.flatMap((repository, index) => {
     const { board, digest, problems } = read[index];
     if (board === null) return [];
     return [{
@@ -1071,36 +981,6 @@ function boardsWithLeads(repositories, read, terminals) {
       problems,
     }];
   });
-  if (boards.length === 0) return boards;
-  const leads = leadTerminals(terminals);
-  return boards.map((board) => ({ ...board, lead: leadOf(board, leads) }));
-}
-
-/**
- * Why `log` is not a session log of the lead's runs folder, or undefined where it is one: it must be an absolute,
- * normalized path to a regular file that is not a link, whose real path lies inside the runs folder's real path, so a
- * link anywhere along the way cannot lead outside it.
- */
-function whyLogRefused(log) {
-  if (!isString(log)) return 'is not a path';
-  if (!isAbsolute(log)) return 'is not an absolute path';
-  if (normalize(log) !== log) return 'is not a normalized path';
-  let stats;
-  try {
-    stats = lstatSync(log);
-  } catch (error) {
-    return `cannot be read: ${error.code ?? oneLine(error.message)}`;
-  }
-  if (stats.isSymbolicLink()) return 'is a symbolic link';
-  if (!stats.isFile()) return 'is not a regular file';
-  const runs = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'fabraik-lead', 'runs');
-  let inside;
-  try {
-    inside = realpathSync(log).startsWith(`${realpathSync(runs)}${sep}`);
-  } catch (error) {
-    return `cannot be checked against the lead's runs folder ${runs}: ${error.code ?? oneLine(error.message)}`;
-  }
-  return inside ? undefined : `is outside the lead's runs folder ${runs}`;
 }
 
 /**
@@ -1110,8 +990,9 @@ function whyLogRefused(log) {
  * reader, which has no entry. An unreadable folder, a missing, timed-out or
  * failed collector, output that is not a queue document (not an object, or a source, item, digest entry or fetch time
  * that breaks the shapes `isQueueDocument` checks), or a document of another format is one problem line with no items, a null digest and no `fetchedAt`;
- * each source the document could not read, and each item whose `log` `whyLogRefused` refuses, which is kept without that
- * `log`, is a problem line beside its items.
+ * each source the document could not read is a problem line beside its items.
+ *
+ * @returns {Promise<{ problems: any[], items: any[], digest: any, board: any, fetchedAt?: string | null }>}
  */
 async function readRepository(repository, runCollector, tag) {
   const failed = (problem, rawLine) => ({
@@ -1120,15 +1001,16 @@ async function readRepository(repository, runCollector, tag) {
   try {
     readdirSync(repository);
   } catch (error) {
-    return failed(`folder unreadable: ${oneLine(error.message)}`);
+    return failed(`folder unreadable: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}`);
   }
   let document;
   try {
     document = await runCollector(repository);
   } catch (error) {
     if (error instanceof NoQueueReader) return { ...failed(error.message), board: null };
-    if (error.killed) return failed(TIMED_OUT);
-    const message = String(error.message);
+    const failure = /** @type {{ killed?: boolean, stderr?: string, message: string }} */ (error);
+    if (failure.killed) return failed(TIMED_OUT);
+    const message = String(failure.message);
     if (!message.startsWith('Command failed: ')) return failed(`the queue reader failed: ${oneLine(message)}`);
     const reason = oneLine(message.split('\n').slice(1).join('\n'));
     return failed(`the queue reader failed: ${reason || 'it stopped without saying why'}`, `queue reader raw failure: ${oneLine(message)}`);
@@ -1139,15 +1021,6 @@ async function readRepository(repository, runCollector, tag) {
     return failed(`on release ${document.release ?? 'no release'}, panel on release ${tag ?? 'no release'}: its items are not shown`);
   }
   if (!isQueueDocument(document)) return failed(notDocument);
-  const refusedLogs = [];
-  const items = document.items.map((item) => {
-    if (item.log === undefined) return item;
-    const why = whyLogRefused(item.log);
-    if (why === undefined) return item;
-    refusedLogs.push(`card ${item.card} failure log ${why}`);
-    const { log, ...kept } = item;
-    return kept;
-  });
   return {
     fetchedAt: document.fetchedAt ?? null,
     problems: [
@@ -1155,9 +1028,9 @@ async function readRepository(repository, runCollector, tag) {
         `${source.name} could not be read: ${source.error}`,
         ...(source.details === undefined ? [] : [`${source.name} raw failure: ${source.details}`]),
       ]),
-      ...refusedLogs,
     ],
-    items,
+    // No reader takes a failure item's `log`, so it is dropped before the cache's size limit can count it.
+    items: document.items.map(({ log, ...item }) => item),
     digest: document.digest,
     board: boardOf(document),
   };
@@ -1208,7 +1081,7 @@ function keptShots(reports, now) {
   try {
     names = readdirSync(reports);
   } catch (error) {
-    if (error.code === 'ENOENT') return [];
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return [];
     throw error;
   }
   const named = [];
@@ -1236,7 +1109,7 @@ function pruneShots(shots, referenced, now) {
   try {
     names = readdirSync(shots);
   } catch (error) {
-    if (error.code === 'ENOENT') return;
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return;
     throw error;
   }
   for (const name of names) {
@@ -1252,8 +1125,7 @@ function oldestFetch(times) {
 }
 
 // Writes the cache, or where it would be over the panel's read limit first with every board unreadable, keeping its problem
-// lines, and its lead cut to `here` or `hereUnread` (the machines claiming its cards, and the cards unread, may be as large as
-// the board), then with only its problems and the too-large line (it keeps `digestUnread` and `machineProblems` either way), then prunes the kept reports over a day old and the
+// lines, then with only its problems and the too-large line (it keeps `digestUnread` and `machineProblems` either way), then prunes the kept reports over a day old and the
 // shots neither it nor a remaining kept report names.
 function writeCache(paths, readStartedAt, problems, machineProblems, items, digestUnread, fetchedAt, boards) {
   const now = new Date();
@@ -1265,9 +1137,7 @@ function writeCache(paths, readStartedAt, problems, machineProblems, items, dige
   if (tooLarge(shown)) {
     shown = {
       ...shown,
-      boards: boards.map(({ repository, problems: own, lead: { here, hereUnread } }) => ({
-        repository, unreadable: BOARD_TOO_LARGE, problems: own, lead: { ...(here === undefined ? { hereUnread } : { here }), elsewhere: null },
-      })),
+      boards: boards.map(({ repository, problems: own }) => ({ repository, unreadable: BOARD_TOO_LARGE, problems: own })),
     };
   }
   if (tooLarge(shown)) shown = { ...shown, problems: [...problems, TOO_LARGE], items: [] };
@@ -1284,9 +1154,10 @@ function writeCache(paths, readStartedAt, problems, machineProblems, items, dige
  * `runCollector(repository)` returns, or resolves to, that repository's collector document; by default it runs
  * `node <repository>/scripts/owner-queue.mjs` there, all repositories at once. It throws before writing anything where
  * `shots` or `reports` is not a real folder. `terminals` is the herdr-core terminal list text the panel read as the refresh began,
- * undefined where none was given; once the collectors have finished it reads lead state from it, once and only where
- * some repository has a board entry, then holds the write lock through its writes. The cache records when its read began,
+ * undefined where none was given, which it reads the waiting menus against once the collectors have finished; it holds
+ * the write lock through its writes. The cache records when its read began,
  * so a reader can tell a read begun after it asked from one begun before.
+ * @param {{ home: string, runCollector?: (repository: string) => unknown, terminals?: string }} options
  */
 export async function refresh({ home, runCollector = runCollectorProcess, terminals }) {
   const readStartedAt = new Date().toISOString();
@@ -1296,7 +1167,7 @@ export async function refresh({ home, runCollector = runCollectorProcess, termin
   const record = readRecord(paths, home);
   if (record.repositories.length === 0) return withWriteLock(paths.lock, () => writeCache(paths, readStartedAt, record.problems, record.problems, [], [], null, []));
   const read = await Promise.all(record.repositories.map((repository) => readRepository(repository, runCollector, record.tag)));
-  const boards = boardsWithLeads(record.repositories, read, terminals);
+  const boards = boardsOf(record.repositories, read);
   return withWriteLock(paths.lock, () => {
     const collected = record.repositories.map((repository, index) => ({
       repository,
@@ -1309,7 +1180,7 @@ export async function refresh({ home, runCollector = runCollectorProcess, termin
     try {
       marks = readMarks(paths.marks);
     } catch (error) {
-      problems.push(`Clear marks unreadable: ${oneLine(error.message)}; the digest is shown whole`);
+      problems.push(`Clear marks unreadable: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}; the digest is shown whole`);
     }
     problems.push(...record.repositories.flatMap((repository, index) => read[index].problems
       .map((problem) => `${basename(repository)}: ${problem}`)));
@@ -1342,20 +1213,6 @@ export function clearDigest({ home }) {
 }
 
 /**
- * Opens the log of the cached failure item whose `key` is `key` with `xdg-open`, after checking it again with
- * `whyLogRefused` as the file is now. It throws, opening nothing, where there is no such item or the log is refused, and
- * throws naming the error where `xdg-open` fails.
- */
-function openLog({ home, key }) {
-  const { items } = JSON.parse(readFileSync(statePaths(home).cache, 'utf8'));
-  const item = items.find((entry) => entry.category === 'failure' && entry.key === key);
-  if (item === undefined) throw new Error(`${key}: no cached failure item`);
-  const why = whyLogRefused(item.log);
-  if (why !== undefined) throw new Error(`card ${item.card} failure log ${why}`);
-  execFileSync('xdg-open', [item.log], { stdio: ['ignore', 'ignore', 'pipe'] });
-}
-
-/**
  * Runs `args` through `repository`'s `scripts/owner-queue.mjs` with no shell and returns its stdout, of at most
  * `maxBuffer` bytes. It throws, running
  * nothing, where the repository has no queue reader, and throws the reader's reason, named by `key`, where it refuses or
@@ -1373,13 +1230,16 @@ async function runReader(key, repository, args, maxBuffer = COLLECTOR_MAX_BUFFER
     });
     return stdout;
   } catch (error) {
-    throw new Error(error.killed ? TIMED_OUT : `${key}: ${oneLine(error.stderr || error.message)}`);
+    const failure = /** @type {{ killed?: boolean, stderr?: string, message: string }} */ (error);
+    throw new Error(failure.killed ? TIMED_OUT : `${key}: ${oneLine(failure.stderr || failure.message)}`);
   }
 }
 
 /**
  * Hands `action` on the cached item whose `key` is `key`, with `version` and any `reply`, to its repository's
- * `scripts/owner-queue.mjs act`; a `pick`'s reply is its proposal number, handed on as `--proposal`. It returns the undo record the reader's last line gives, or null where it gives none.
+ * `scripts/owner-queue.mjs act`; a `pick`'s reply is its proposal number, handed on as `--proposal`, and an answer to a
+ * merge goes to `scripts/owner-queue.mjs relay`, which sends it to the coordinator. An older reader refuses `relay`
+ * before any read, so it never writes a merge answer to the card. It returns the undo record the reader's last line gives, or null where it gives none.
  * It throws, running nothing, where there is no such item, the item has no version or the repository has no queue
  * reader, and throws the reader's reason where it refuses or fails.
  */
@@ -1388,8 +1248,10 @@ async function act({ home, key, action, version, reply }) {
   const item = items.find((entry) => entry.key === key);
   if (item === undefined) throw new Error(`${key}: no cached item`);
   if (item.version === undefined) throw new Error(`${key}: the cached item has no version, so its queue reader cannot take an answer`);
-  const args = ['act', `--card=${item.card}`, `--action=${action}`, `--version=${version}`,
-    ...(reply === undefined ? [] : [`--${action === 'pick' ? 'proposal' : 'reply'}=${reply}`])];
+  const args = item.category === 'merge' && action === 'answer'
+    ? ['relay', `--card=${item.card}`, `--version=${version}`, `--reply=${reply ?? ''}`]
+    : ['act', `--card=${item.card}`, `--action=${action}`, `--version=${version}`,
+      ...(reply === undefined ? [] : [`--${action === 'pick' ? 'proposal' : 'reply'}=${reply}`])];
   const last = (await runReader(key, item.repository, args)).split('\n').findLast((line) => line.trim() !== '');
   return last?.startsWith(UNDO_RECORD) ? last.slice(UNDO_RECORD.length) : null;
 }
@@ -1408,7 +1270,7 @@ function openCoordinator({ home, repository, runtime }) {
   const scripts = realFolder(join(repository, 'scripts'));
   const opener = realFolder(join(repository, 'scripts', 'coordinator.mjs'));
   const inside = (path) => path?.startsWith(repository.endsWith(sep) ? repository : `${repository}${sep}`);
-  if (!inside(scripts) || !inside(opener) || !statSync(opener, { throwIfNoEntry: false })?.isFile()) {
+  if (!inside(scripts) || !inside(opener) || !statSync(/** @type {string} */ (opener), { throwIfNoEntry: false })?.isFile()) {
     throw new Error('scripts/coordinator.mjs must be a regular file inside the registered project.');
   }
   try {
@@ -1418,7 +1280,7 @@ function openCoordinator({ home, repository, runtime }) {
     });
     return 0;
   } catch (error) {
-    const { status, stderr, stdout, code, message } = error;
+    const { status, stderr, stdout, code, message } = /** @type {{ status?: number, stderr?: string, stdout?: string, code?: string, message: string }} */ (error);
     const cause = firstLine(stderr || stdout || (code ? message : '')).slice(0, 500);
     if (status === 5) {
       console.log(cause || 'Coordinator is already open.');
@@ -1430,7 +1292,7 @@ function openCoordinator({ home, repository, runtime }) {
 
 // The `<repository>#<card>` key's repository and card, checked against the machine record.
 function listedCard(home, key) {
-  const [, repository, card] = CARD_KEY.exec(key);
+  const [, repository, card] = /** @type {RegExpExecArray} */ (CARD_KEY.exec(key));
   requireListed(home, key, repository);
   return { repository, card };
 }
@@ -1530,7 +1392,7 @@ function keptReportName(repository, sha) {
  * refuses or fails, and throws naming the part where its document breaks the report format, before it stores anything.
  */
 async function report({ home, key }) {
-  const [, repository, sha] = REPORT_KEY.exec(key);
+  const [, repository, sha] = /** @type {RegExpExecArray} */ (REPORT_KEY.exec(key));
   requireListed(home, key, repository);
   let document;
   try {
@@ -1729,7 +1591,7 @@ function menuAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return error.code === 'EPERM';
+    return /** @type {NodeJS.ErrnoException} */ (error).code === 'EPERM';
   }
 }
 
@@ -1738,7 +1600,7 @@ function menuNames(path) {
   try {
     return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
   } catch (error) {
-    if (error.code === 'ENOENT') return [];
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return [];
     throw error;
   }
 }
@@ -1749,7 +1611,7 @@ function menuEntries(path) {
   try {
     return readdirSync(path);
   } catch (error) {
-    if (error.code === 'ENOENT') return [];
+    if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return [];
     throw error;
   }
 }
@@ -1795,7 +1657,7 @@ function menuItem(ask, folder, { superseded, stuck, state, problems }) {
     rejected = menuRecord(folder, 'rejected.json', MENU_ASK_MAX);
     if ((end !== undefined && !isString(end?.reason)) || (rejected !== undefined && !isString(rejected?.reason))) throw new Error('end.json or rejected.json holds no reason');
   } catch (error) {
-    problems.push(`Waiting menu ${ask.terminal}/${ask.id}: a file of the ask cannot be used: ${oneLine(error.message)}`);
+    problems.push(`Waiting menu ${ask.terminal}/${ask.id}: a file of the ask cannot be used: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}`);
     return undefined;
   }
   const taken = existsSync(join(folder, 'taken.json'));
@@ -1850,7 +1712,7 @@ function readMenus(home, terminals) {
         if (!MENU_ASK_ID.test(id)) throw new Error('its folder is not named for an ask id');
         asks.push(readMenuAsk(terminal, id, join(root, terminal, id)));
       } catch (error) {
-        failed.set(id, `Waiting menu ${terminal}/${id}: ${oneLine(error.message)}`);
+        failed.set(id, `Waiting menu ${terminal}/${id}: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}`);
       }
     }
     asks.sort((a, b) => a.askedAt - b.askedAt);
@@ -1868,7 +1730,7 @@ function readMenus(home, terminals) {
       const superseded = index !== asks.length - 1 || hookTimes.some((askedAt) => askedAt > ask.askedAt);
       const state = states?.has(terminal) ? states.get(terminal) : undefined;
       const item = menuItem(ask, join(root, terminal, ask.id), { superseded, stuck: stuck.length > 0, state, problems });
-      if (item !== undefined && (!superseded || item.delivery === 'undelivered')) items.push(item);
+      if (item !== undefined && (!superseded || /** @type {{ delivery?: string }} */ (item).delivery === 'undelivered')) items.push(item);
     }
   }
   return { items, problems };
@@ -1885,7 +1747,7 @@ function waitingAsk(home, terminal, askId) {
   try {
     ask = readMenuAsk(terminal, askId, folder);
   } catch (error) {
-    throw refuse(`no such waiting ask: ${error.message}`);
+    throw refuse(`no such waiting ask: ${/** @type {NodeJS.ErrnoException} */ (error).message}`);
   }
   if (menuClosed(folder)) throw refuse('it is already answered or ended');
   if (!menuAlive(ask.pid)) throw refuse('its hook has ended, so the job no longer waits for an answer');
@@ -1902,7 +1764,7 @@ function menuGone(pid) {
     process.kill(pid, 0);
     return false;
   } catch (error) {
-    return error.code === 'ESRCH';
+    return /** @type {NodeJS.ErrnoException} */ (error).code === 'ESRCH';
   }
 }
 
@@ -1927,7 +1789,7 @@ function menuInFlight(ask, folder, now) {
   try {
     taken = lstatSync(join(folder, 'taken.json'));
   } catch (error) {
-    return error.code !== 'ENOENT' && !menuSettled(ask, folder);
+    return /** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT' && !menuSettled(ask, folder);
   }
   return !menuSettled(ask, folder) && (!taken.isFile() || now() - taken.mtimeMs < MENU_APPLIED_MS);
 }
@@ -1954,7 +1816,7 @@ export function waitingMenu({ home, terminal, now = Date.now }) {
   try {
     return waitingMenuJson({ home, terminal });
   } catch (error) {
-    if (menuClear(home, terminal, now)) error.message += MENU_TYPING_CLAUSE;
+    if (menuClear(home, terminal, now)) /** @type {NodeJS.ErrnoException} */ (error).message += MENU_TYPING_CLAUSE;
     throw error;
   }
 }
@@ -1970,7 +1832,7 @@ function waitingMenuJson({ home, terminal }) {
     try {
       asks.push(readMenuAsk(terminal, name, menuFolder(home, terminal, name)));
     } catch (error) {
-      firstError ??= error.message;
+      firstError ??= /** @type {NodeJS.ErrnoException} */ (error).message;
     }
   }
   if (asks.length === 0) throw refuse(`no ask of the job can be read: ${firstError}`);
@@ -1997,19 +1859,19 @@ export function answerMenu({ home, terminal, askId, payload }) {
   try {
     record = JSON.parse(payload);
   } catch (error) {
-    throw refuse(`the answer is not JSON: ${error.message}`);
+    throw refuse(`the answer is not JSON: ${/** @type {NodeJS.ErrnoException} */ (error).message}`);
   }
   try {
     menuAnswerWords(ask, record);
   } catch (error) {
-    throw refuse(error.message);
+    throw refuse(/** @type {NodeJS.ErrnoException} */ (error).message);
   }
   const staged = join(folder, `answer.json.${randomUUID()}.tmp`);
   writeFileSync(staged, `${JSON.stringify(record)}\n`, { flag: 'wx' });
   try {
     linkSync(staged, join(folder, 'answer.json'));
   } catch (error) {
-    throw refuse(error.code === 'EEXIST' ? 'it is already answered' : error.message);
+    throw refuse(/** @type {NodeJS.ErrnoException} */ (error).code === 'EEXIST' ? 'it is already answered' : /** @type {NodeJS.ErrnoException} */ (error).message);
   } finally {
     unlinkSync(staged);
   }
@@ -2020,7 +1882,6 @@ const COMMANDS = {
   refresh: ({ home, operands: [terminals] }) => refresh({ home, terminals }),
   menus: ({ home, operands: [terminals] }) => JSON.stringify(readMenus(home, terminals)),
   'clear-digest': ({ home }) => clearDigest({ home }),
-  'open-log': ({ home, operands: [key] }) => openLog({ home, key }),
   act: ({ home, operands: [key, action, version, reply] }) => act({ home, key, action, version, reply }),
   undo: ({ home, operands: [key, action, record] }) => undo({ home, key, action, record }),
   move: ({ home, operands: [key, move, version, place] }) => moveCard({ home, key, move, version, place }),
@@ -2033,7 +1894,7 @@ const COMMANDS = {
 
 const isValue = (value) => Boolean(value) && !value.startsWith('--');
 
-// What each command takes before `--home <dir>`: `refresh` and `menus` an optional terminal list; `open-log` a key; `act` a key, a
+// What each command takes before `--home <dir>`: `refresh` and `menus` an optional terminal list; `act` a key, a
 // panel action, a version of 64 lowercase hex and an optional reply, which for a `pick` is its proposal number and
 // required; `undo` a `<repository>#<card>` key, an action
 // that can be taken back and a non-empty record; `move` a `<repository>#<card>` key, a Board move, a version of
@@ -2046,7 +1907,6 @@ const OPERANDS = {
   refresh: ([terminals, ...extra]) => !terminals?.startsWith('-') && extra.length === 0,
   menus: ([terminals, ...extra]) => !terminals?.startsWith('-') && extra.length === 0,
   'clear-digest': (operands) => operands.length === 0,
-  'open-log': ([key, ...extra]) => isValue(key) && extra.length === 0,
   act: ([key, action, version, ...reply]) => isValue(key) && ACTIONS.includes(action) && SHA256_HEX.test(version ?? '')
     && (action === 'pick' ? reply.length === 1 && POSITIVE_WHOLE.test(reply[0]) : reply.length <= 1),
   undo: ([key, action, record, ...extra]) => CARD_KEY.test(key ?? '') && UNDOABLE.includes(action) && Boolean(record)
@@ -2076,7 +1936,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (typeof result === 'string') console.log(result);
     return 0;
   } catch (error) {
-    console.error(`queue: ${oneLine(error.message)}`);
+    console.error(`queue: ${oneLine(/** @type {NodeJS.ErrnoException} */ (error).message)}`);
     return 1;
   }
 }

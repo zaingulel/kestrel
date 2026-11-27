@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, posix as posixPath, relative, resolve, sep, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { herdrCommand, jobTerminals, interpretTerminal, isLive, LAUNCH_PROGRAM, readRecord, readTerminal } from './board-claim.mjs';
@@ -20,10 +20,10 @@ import { fetchBoard, fetchCardDetails, isClaim, isContentUnresolved, newestClaim
 import { parseWorktreeList } from './closeout-cleanup.mjs';
 import { gitEnvironment } from './factory-sync.mjs';
 import { ghExec } from './gh-exec.mjs';
-import { checkLeadFile, lockLeadFile } from './cap-lock.mjs';
+import { checkLeadFile, lockLeadFile, openLeadFile } from './cap-lock.mjs';
 import { cardIneligibility, COMMIT_TEXT, originRepository, readCoordinator, readOrigin, showFirstAmong } from './merge-evidence.mjs';
-import { coordinatedWatchIsLive, defaultStateDir, SETTLE_AFTER_MS } from './merge-watch.mjs';
-import { isCanonicalLeadFolder, managedPath, readManagedRecord, readyOnBoard } from './pre-approved-run.mjs';
+import { coordinatedWatchIsLive, defaultStateDir, platformProcessTable, SETTLE_AFTER_MS } from './merge-watch.mjs';
+import { insideWindowsProfile, isCanonicalLeadFolder, managedPath, readManagedRecord, readyOnBoard } from './pre-approved-run.mjs';
 import { isRecord, LOCAL_HERDR_TERMINAL, readSettingsHeader } from './runtimes.mjs';
 import { cardRef } from './tracker.mjs';
 import { onReviewedMain, repairWorkflowSnapshot, selectWorkflowVersion, verifyJobPin, verifyWorkflowSnapshot, workflowDrift, workflowStore } from './workflow-pin.mjs';
@@ -36,6 +36,48 @@ export const COORDINATOR_TAB = 'Coordinator';
 const TURNED_OFF = 'HERDR_OFF';
 
 const coordinatorPrompt = (login) => `Coordinate this project from its Herdr space: read .agents/skills/resume/references/herdr-lead.md whole and follow its "Coordinator" section.\n${JSON.stringify({ login })}`;
+
+// What starts the coordinator for `login` on `runtime` with the `model` and `effort` of `coordinator`: the `NAME=value` words of its
+// environment, its program and its arguments, the prompt last.
+/** @param {string} runtime @param {{ model?: string, effort?: string }} coordinator @param {string} login */
+function coordinatorCommand(runtime, { model, effort }, login) {
+  const prompt = coordinatorPrompt(login);
+  return runtime === 'codex'
+    ? { environment: [], program: 'codex', args: ['--no-daemon', '--enable', 'default_mode_request_user_input', '--', prompt] }
+    : { environment: [`ANTHROPIC_MODEL=${model}`, `CLAUDE_CODE_EFFORT_LEVEL=${effort}`], program: 'claude', args: ['--permission-mode', 'auto', '--', prompt] };
+}
+
+// Runs the coordinator in this terminal, as a Windows Coordinator tab does through `coordinator.mjs launch`: the prompt reaches the
+// runtime as one argument, past Herdr's PowerShell wrapping. Returns the runtime's exit status; 1, printed why, where it did not
+// run, and 1 where a signal ended it.
+/** @param {Record<string, any>} options */
+export function launchCoordinator({ runtime, login, model, effort, env, spawn, print }) {
+  const { environment, program, args } = coordinatorCommand(runtime, { model, effort }, login);
+  return runWithEnvironment({ environment, program, args, env, spawn, print, refusal: 'Coordinator not started' });
+}
+
+// Runs `program` with `args` in this terminal, the `NAME=value` words of `environment` set over `env`. Returns its exit status; 1,
+// printed why under `refusal`, where it did not run, and 1 where a signal ended it.
+function runWithEnvironment({ environment, program, args, env, spawn, print, refusal }) {
+  const words = Object.fromEntries(environment.map((word) => {
+    const at = word.indexOf('=');
+    return [word.slice(0, at), word.slice(at + 1)];
+  }));
+  const run = spawn(program, args, { stdio: 'inherit', env: { ...env, ...words } });
+  if (run.error) {
+    print(`${refusal}: ${program} did not run: ${run.error.message}`);
+    return 1;
+  }
+  return run.status ?? 1;
+}
+
+// Starts a job's program in this terminal, as a Windows job tab does through `coordinator.mjs launch-job`: the leading `NAME=value`
+// words of `command` are its environment, the next word its program and the rest its arguments. Same returns as launchCoordinator.
+/** @param {{ command: string[], env: NodeJS.ProcessEnv, spawn: Function, print: (line: string) => void }} options */
+export function launchJob({ command, env, spawn, print }) {
+  const marks = command.findIndex((word) => !ENVIRONMENT_WORD.test(word));
+  return runWithEnvironment({ environment: command.slice(0, marks), program: command[marks], args: command.slice(marks + 1), env, spawn, print, refusal: 'Job not started' });
+}
 
 // The spaces `herdr-app ls` lists, or throws when it fails or lists them in a shape this does not read.
 export async function listSpaces(herdrApp) {
@@ -56,11 +98,19 @@ export async function listSpaces(herdrApp) {
 }
 
 const manySpaces = (here, root) => `Herdr spaces ${here.map(({ id }) => id).join(', ')} all have folder ${root}; close all but one.`;
-const localProjectSpaces = (spaces, root) => spaces.filter(({ folder, machine }) => folder === root && machine === null);
+// Herdr lists a Windows folder with forward slashes and its own drive letter case, so on win32 the folder and the root
+// compare as resolved Windows paths with case folded; an empty or relative folder resolves against no directory, so it matches no root.
+const sameFolder = (folder, root, platform) => (platform === 'win32' ? win32.isAbsolute(folder) && win32.resolve(folder).toLowerCase() === win32.resolve(root).toLowerCase() : folder === root);
+// On Windows a launch folder must be a full path naming the root or the worktree; nothing is resolved, so a drive-less or missing folder never matches.
+export const sameLaunchFolder = (folder, path, platform) => (platform === 'win32' ? typeof folder === 'string' && normalize(folder).toLowerCase() === path.toLowerCase() : folder === path);
+// Whether the Windows folder `folder` is `root` or inside it, compared as resolved paths with case folded.
+const insideFolder = (folder, root) => win32.isAbsolute(folder) && (win32.resolve(folder).toLowerCase() + '\\').startsWith(win32.resolve(root).toLowerCase().replace(/\\?$/, '\\'));
+/** @param {any[]} spaces @param {string} root @param {string} [platform] */
+const localProjectSpaces = (spaces, root, platform = process.platform) => spaces.filter(({ folder, machine }) => sameFolder(folder, root, platform) && machine === null);
 
 // The one local space whose folder is the project's root: `{ space }`, `{ space: undefined }` where there is none, or `{ code }`
 // after printing why the project cannot be told from its space.
-async function projectSpace({ root, herdrApp, print }) {
+async function projectSpace({ root, herdrApp, print, platform = process.platform }) {
   let spaces;
   try {
     spaces = await listSpaces(herdrApp);
@@ -68,7 +118,7 @@ async function projectSpace({ root, herdrApp, print }) {
     print(/** @type {Error} */ (error).message);
     return { code: 1 };
   }
-  const here = localProjectSpaces(spaces, root);
+  const here = localProjectSpaces(spaces, root, platform);
   if (here.length > 1) {
     print(manySpaces(here, root));
     return { code: 1 };
@@ -84,7 +134,7 @@ async function closeStoppedCoordinatorTab(herdrApp, id) {
 }
 
 // A last-tab close would close the space. Confirm both tab identities before rechecking and closing the original.
-async function verifySoleCoordinatorReplacement({ root, herdrApp, hc, spaceId, tabId, terminals, reply }) {
+async function verifySoleCoordinatorReplacement({ root, herdrApp, hc, platform, spaceId, tabId, terminals, reply }) {
   let opened;
   try {
     opened = JSON.parse(reply);
@@ -97,7 +147,7 @@ async function verifySoleCoordinatorReplacement({ root, herdrApp, hc, spaceId, t
   }
 
   const spaces = await listSpaces(herdrApp);
-  const here = localProjectSpaces(spaces, root);
+  const here = localProjectSpaces(spaces, root, platform);
   if (here.length > 1) throw new Error(manySpaces(here, root));
   const [space] = here;
   if (space?.id !== spaceId || spaces.filter(({ id }) => id === spaceId).length !== 1) {
@@ -124,7 +174,7 @@ async function verifySoleCoordinatorReplacement({ root, herdrApp, hc, spaceId, t
     throw new Error('herdr-app ls shows ambiguous original or replacement terminal addresses');
   }
   for (const address of addresses) {
-    if ((await readCoordinatorTerminal(hc, address)).running) {
+    if ((await readCoordinatorTerminal(hc, address, platform)).running) {
       throw new Error(`the original ${COORDINATOR_TAB} terminal ${address} is now running`);
     }
   }
@@ -133,10 +183,19 @@ async function verifySoleCoordinatorReplacement({ root, herdrApp, hc, spaceId, t
 // Opens the coordinator in the project's space as a Coordinator tab, or in a new space named for the folder, using the installed
 // runtime chosen for this open or the one saved on fetched main. The listing and the opening share `capLock`, so two opens
 // cannot both create a tab. A Coordinator tab with a running or starting program is kept; one in which every terminal is positively
-// stopped (finished, or a kept shell) is replaced. Exit 0 opened; 1 opening or cleanup failed; 3 the Herdr add-on is off on
-// main; 5 a Coordinator tab with a running terminal is already open.
-/** @param {{ root: string, login: string, runtimeOverride?: string, git: (args: string[]) => string, herdrApp: HerdrCommand, hc: HerdrCommand, capLock: <T>(work: () => Promise<T>) => Promise<T>, checkStandingLead?: () => void, print: (line: string) => void }} options */
-export async function openCoordinator({ root, login, runtimeOverride, git, herdrApp, hc, capLock, checkStandingLead, print }) {
+// stopped (finished, or a kept shell) is replaced. On `platform` win32 the tab runs `node` on this project's
+// `coordinator.mjs launch`, since Herdr wraps a Windows tab's argv in single-quoted PowerShell, which can pass neither
+// `/usr/bin/env` nor the prompt's double quotes; a `node` or `root` holding a single quote is refused before any call. Exit 0
+// opened; 1 opening or cleanup failed; 3 the Herdr add-on is off on main; 5 a Coordinator tab with a running terminal is already open.
+/** @param {{ root: string, login: string, runtimeOverride?: string, git: (args: string[]) => string, herdrApp: HerdrCommand, hc: HerdrCommand, capLock: <T>(work: () => Promise<T>) => Promise<T>, platform?: string, node?: string, print: (line: string) => void }} options */
+export async function openCoordinator({ root, login, runtimeOverride, git, herdrApp, hc, capLock, platform = process.platform,
+  node = process.execPath, print }) {
+  const windows = platform === 'win32';
+  const quoted = windows ? [node, root].find((path) => path.includes("'")) : undefined;
+  if (quoted !== undefined) {
+    print(`Coordinator not opened: ${quoted} holds a single quote, which a Windows Herdr tab cannot pass.`);
+    return 1;
+  }
   try {
     git(['fetch', '--no-prune', 'origin', 'main']);
   } catch (error) {
@@ -159,10 +218,9 @@ export async function openCoordinator({ root, login, runtimeOverride, git, herdr
   }
   try {
     return await capLock(async () => {
-      checkStandingLead?.();
       let found;
       try {
-        found = await coordinatorTerminals({ root, herdrApp, hc });
+        found = await coordinatorTerminals({ root, herdrApp, hc, platform });
       } catch (error) {
         print(/** @type {Error} */ (error).message);
         return 1;
@@ -180,21 +238,22 @@ export async function openCoordinator({ root, login, runtimeOverride, git, herdr
         }
         if (!soleTab) await closeStoppedCoordinatorTab(herdrApp, tab.id);
       }
-      const prompt = coordinatorPrompt(login);
-      const argv = JSON.stringify(runtime === 'codex'
-        ? [LAUNCH_PROGRAM, 'codex', '--no-daemon', '--enable', 'default_mode_request_user_input', '--', prompt]
-        : [LAUNCH_PROGRAM, `ANTHROPIC_MODEL=${coordinator.model}`, `CLAUDE_CODE_EFFORT_LEVEL=${coordinator.effort}`, 'claude',
-          '--permission-mode', 'auto', '--', prompt]);
+      const { environment, program, args } = coordinatorCommand(runtime, coordinator, login);
+      const argv = JSON.stringify(windows
+        ? [node, win32.join(root, 'scripts', 'coordinator.mjs'), 'launch', '--runtime', runtime, '--login', login,
+          ...(runtime === 'codex' ? [] : ['--model', coordinator.model, '--effort', coordinator.effort])]
+        : [LAUNCH_PROGRAM, ...environment, program, ...args]);
+      const spaceName = windows ? win32.basename(root) : basename(root);
       const opened = await herdrApp(space
         ? ['do', 'tab.new', '--space', space.id, '--name', COORDINATOR_TAB, '--folder', root, '--argv', argv]
-        : ['do', 'space.new', '--name', basename(root), '--folder', root, '--tab', COORDINATOR_TAB, '--machine', '', '--argv', argv]);
+        : ['do', 'space.new', '--name', spaceName, '--folder', root, '--tab', COORDINATOR_TAB, '--machine', '', '--argv', argv]);
       if (opened.code !== 0) {
         print(`Coordinator not opened: herdr-app could not open it: ${opened.stderr.trim() || `exit ${opened.code}`}`);
         return 1;
       }
       if (soleTab) {
         try {
-          await verifySoleCoordinatorReplacement({ root, herdrApp, hc, spaceId: space.id, tabId: tab.id, terminals, reply: opened.stdout });
+          await verifySoleCoordinatorReplacement({ root, herdrApp, hc, platform, spaceId: space.id, tabId: tab.id, terminals, reply: opened.stdout });
           await closeStoppedCoordinatorTab(herdrApp, tab.id);
         } catch (error) {
           print(`Herdr reported that the Coordinator opened. The original tab ${tab.id} was left for cleanup: ${/** @type {Error} */ (error).message}`);
@@ -202,7 +261,7 @@ export async function openCoordinator({ root, login, runtimeOverride, git, herdr
         }
       }
       if (tab) print(`Replaced the ${COORDINATOR_TAB} tab ${tab.id}, in which nothing ran.`);
-      print(`Coordinator opened in ${space ? `space ${space.id}` : `a new space named ${basename(root)}`}.`);
+      print(`Coordinator opened in ${space ? `space ${space.id}` : `a new space named ${spaceName}`}.`);
       return 0;
     });
   } catch (error) {
@@ -249,7 +308,7 @@ function trackerGate(rawGh) {
   };
 }
 
-// The startable Ready cards, `{ number, title }` in build order: the Ready cards the lead's own candidate rule takes on the
+// The startable Ready cards, `{ number, title }` in build order: the Ready cards the coordinator's own candidate rule takes on the
 // board's facts, `readyOnBoard`, that are no proposal, in the board's own order; or undefined, printed why, when the read
 // holds card content that did not resolve, so what is startable is unknown. One board read through the gated `gh`.
 /** @param {(args: string[]) => string} gh @param {(line: string) => void} print */
@@ -287,7 +346,14 @@ export async function listCards({ print, ...tracker }) {
 // A same-process foreground only proves a tab stopped if it is a recognized interactive shell with nothing to run.
 const INTERACTIVE_SHELLS = new Set(['bash', 'dash', 'fish', 'ksh', 'sh', 'zsh']);
 const interactiveShellName = (program) => basename(program).replace(/^-/, '');
-function interpretCoordinatorTerminal(address, record) {
+// Herdr's wrapper of a Windows tab's argv; its foreground, not its argv, tells a running coordinator from its `-NoExit` shell.
+const isPowerShellWrapper = ([program, noExit, command]) => win32.basename(program).toLowerCase() === 'powershell.exe' && noExit === '-NoExit'
+  && command === '-Command';
+// Node running this project's launch command as the Windows launcher emits it: `coordinator.mjs`, whatever its own path, then `launch`.
+const isLaunchCommand = (argv) => Array.isArray(argv) && typeof argv[1] === 'string' && !argv[1].startsWith('-') && win32.basename(argv[1]).toLowerCase() === 'coordinator.mjs'
+  && argv[2] === 'launch';
+/** @param {string} address @param {any} record @param {string} [platform] */
+function interpretCoordinatorTerminal(address, record, platform = process.platform) {
   if (record.state !== 'live' && record.state !== 'finished') throw new Error();
   const state = interpretTerminal(record, record.state === 'live');
   const foregroundName = record.foreground?.name;
@@ -297,7 +363,10 @@ function interpretCoordinatorTerminal(address, record) {
       throw new Error();
     }
     const [program] = record.argv;
-    if (foregroundName !== 'claude' && foregroundName !== 'codex' && program !== LAUNCH_PROGRAM) {
+    if (platform === 'win32' && isPowerShellWrapper(record.argv)) {
+      // Running is only Node on this project's launch command in the wrapper's foreground; another program the shell started is neither a coordinator nor a stopped tab.
+      if (state.running ? foregroundName !== 'node.exe' || !isLaunchCommand(record.foreground.argv) : (foregroundName !== 'powershell.exe' || record.foreground.pid !== record.pid || record.status !== null)) throw new Error();
+    } else if (foregroundName !== 'claude' && foregroundName !== 'codex' && program !== LAUNCH_PROGRAM) {
       if (!INTERACTIVE_SHELLS.has(interactiveShellName(program))) throw new Error();
       if (!state.running) {
         // Herdr keeps the launch arguments after its wrapper execs an interactive shell at the same PID.
@@ -310,10 +379,13 @@ function interpretCoordinatorTerminal(address, record) {
       }
     }
   }
-  return { address, state: record.state, foregroundName, ...state };
+  const launched = platform === 'win32' && state.running && isPowerShellWrapper(record.argv) ? record.foreground.argv[record.foreground.argv.indexOf('--runtime') + 1] : undefined;
+  return { address, state: record.state, foregroundName, ...(launched && { runtime: launched }), ...state };
 }
 
-const readCoordinatorTerminal = (hc, address) => readRecord(hc, address, 'tell whether the Coordinator terminal is running', (record) => interpretCoordinatorTerminal(address, record));
+/** @param {HerdrCommand} hc @param {string} address @param {string} [platform] */
+const readCoordinatorTerminal = (hc, address, platform = process.platform) => readRecord(hc, address, 'tell whether the Coordinator terminal is running',
+  (record) => interpretCoordinatorTerminal(address, record, platform));
 
 function coordinatorTabAddresses(tab) {
   if (!Array.isArray(tab.terminals) || !tab.terminals.every((entry) => typeof entry?.terminal === 'string' && entry.terminal.length > 0)) {
@@ -326,10 +398,11 @@ function coordinatorTabAddresses(tab) {
 
 // The project space, its Coordinator tab (undefined where there is none) and the tab's terminals, each `{ address, state, running,
 // foregroundName, status }` as `hc get` reads it, or throws, naming the cause, when the space holds more than one Coordinator tab,
-// a tab or terminal identity is ambiguous, or a record cannot prove that the terminal is running or stopped.
-export async function coordinatorTerminals({ root, herdrApp, hc }) {
+// a tab or terminal identity is ambiguous, or a record cannot prove that the terminal is running or stopped on `platform`.
+/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, platform?: string }} options */
+export async function coordinatorTerminals({ root, herdrApp, hc, platform = process.platform }) {
   const spaces = await listSpaces(herdrApp);
-  const here = localProjectSpaces(spaces, root);
+  const here = localProjectSpaces(spaces, root, platform);
   if (here.length > 1) throw new Error(manySpaces(here, root));
   const [space] = here;
   const tabs = space?.tabs.filter(({ name }) => name === COORDINATOR_TAB) ?? [];
@@ -343,7 +416,7 @@ export async function coordinatorTerminals({ root, herdrApp, hc }) {
   }
   const terminals = [];
   for (const address of coordinatorTabAddresses(tab)) {
-    terminals.push(await readCoordinatorTerminal(hc, address));
+    terminals.push(await readCoordinatorTerminal(hc, address, platform));
   }
   return { space, tab, terminals };
 }
@@ -351,19 +424,23 @@ export async function coordinatorTerminals({ root, herdrApp, hc }) {
 // The line the board tools type into a coordinator when a card moves to Ready.
 const WAKE_LINE = 'A card moved to Ready.';
 
-// Types `WAKE_LINE` without force into a live Claude coordinator or, if no live Claude is present, a lone receptive Codex.
+// What a running terminal is: its runtime where it runs under the Windows launcher and Herdr reports its status, else its foreground.
+const programOf = ({ runtime, status, foregroundName }) => runtime && status != null ? runtime : foregroundName;
+
+// Types `WAKE_LINE` without force into a live Claude coordinator or, if no live Claude is present, a lone receptive
+// Codex; a Windows coordinator running under the launcher is read by its runtime once Herdr reports its status.
 // Exit 0 sent; 4 no suitable target, with the reason printed; 1 a Herdr reply could not be read or the send failed.
-export async function wakeCoordinator({ root, herdrApp, hc, print }) {
+export async function wakeCoordinator({ root, herdrApp, hc, print, platform = process.platform }) {
   let found;
   try {
-    found = await coordinatorTerminals({ root, herdrApp, hc });
+    found = await coordinatorTerminals({ root, herdrApp, hc, platform });
   } catch (error) {
     print(`The coordinator is not woken: ${/** @type {Error} */ (error).message}`);
     return /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' ? 4 : 1;
   }
   const running = found.terminals.filter(({ state, running }) => state === 'live' && running);
-  const claudes = running.filter(({ foregroundName }) => foregroundName === 'claude');
-  const codex = claudes.length === 0 ? running.find(({ foregroundName }) => foregroundName === 'codex') : undefined;
+  const claudes = running.filter((terminal) => programOf(terminal) === 'claude');
+  const codex = claudes.length === 0 ? running.find((terminal) => programOf(terminal) === 'codex') : undefined;
   if (codex && running.length > 1) {
     print('The coordinator is not woken: more than one terminal is running in the Coordinator tab, so the target is ambiguous.');
     return 4;
@@ -386,6 +463,40 @@ export async function wakeCoordinator({ root, herdrApp, hc, print }) {
   }
   print(`Woke the coordinator ${target.address}.`);
   return 0;
+}
+
+// Sends the queue panel's answer `line` to the project's one receptive coordinator: the only terminal running in the
+// Coordinator tab, where it is Claude Code not asking the owner or Codex that is idle or done, a Windows coordinator
+// running under the launcher read by its runtime once Herdr reports its status. Any other tab sends nothing; an answer
+// never reaches a guessed or busy terminal. The caller's `hc` runs without HC_TERMINAL_ID, so the
+// line arrives bare, as the coordinator takes the panel's answer. Resolves `{ code, message }`, the message one line:
+// 0 sent; 4 no receptive coordinator; 1 a Herdr reply could not be read or the send failed.
+/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, line: string, platform?: NodeJS.Platform }} options */
+export async function relayToCoordinator({ root, herdrApp, hc, line, platform = process.platform }) {
+  let found;
+  try {
+    found = await coordinatorTerminals({ root, herdrApp, hc, platform });
+  } catch (error) {
+    return { code: /** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT' ? 4 : 1, message: `the answer is not sent: ${/** @type {Error} */ (error).message}` };
+  }
+  const running = found.terminals.filter(({ state, running }) => state === 'live' && running);
+  if (running.length !== 1) {
+    const where = found.tab ? `the ${COORDINATOR_TAB} tab ${found.tab.id}` : `a ${COORDINATOR_TAB} tab`;
+    return { code: 4, message: running.length === 0
+      ? `the answer is not sent: no coordinator is running in ${where}; answer in your coordinator chat`
+      : `the answer is not sent: ${running.length} terminals are running in ${where}, so the coordinator is ambiguous` };
+  }
+  const [target] = running;
+  const program = programOf(target);
+  const receptive = program === 'claude' ? target.status !== 'blocked'
+    : program === 'codex' && ['idle', 'done'].includes(target.status);
+  if (!receptive) {
+    const why = program === 'claude' || program === 'codex' ? `its status is ${JSON.stringify(target.status ?? null)}` : 'it is still starting';
+    return { code: 4, message: `the answer is not sent: the coordinator ${target.address} cannot take it now, as ${why}; answer in your coordinator chat` };
+  }
+  const sent = await hc(['send', target.address, line]);
+  if (sent.code !== 0) return { code: 1, message: `the answer is not sent: hc send ${target.address} failed: ${sent.stderr.trim().split(/\r?\n/, 1)[0] || `exit ${sent.code}`}` };
+  return { code: 0, message: `sent to the coordinator ${target.address}` };
 }
 
 // What the note forwarder reads of one job terminal: its `hc get` state, status (null where it has none or is finished),
@@ -649,26 +760,30 @@ function readOf(what, work) {
 
 // Registered job worktrees by card. A job branch names its card, wherever it is registered. A detached job must be in
 // one of the two job layouts. Git paths and card identities must be unambiguous.
-function registeredWorktrees(root, git) {
-  const records = readOf('the worktrees', () => parseWorktreeList(git(['worktree', 'list', '--porcelain', '-z'])));
+// On win32 git prints forward-slash paths: each is read in its Windows form and layouts and duplicates compare as Windows folders.
+function registeredWorktrees(root, git, platform = process.platform) {
+  const windows = platform === 'win32';
+  const { dirname, join, normalize } = windows ? win32 : posixPath;
+  const records = readOf('the worktrees', () => parseWorktreeList(git(['worktree', 'list', '--porcelain', '-z']), platform));
   if (!records) throw new Error('the worktrees could not be read: git worktree list printed an unreadable registry');
   const legacy = join(root, '.claude', 'worktrees');
   const siblings = join(dirname(root), 'jobs');
-  const paths = new Set();
+  const paths = [];
   /** @type {Map<number, string>} */
   const worktrees = new Map();
   for (const record of records) {
-    const { path, HEAD, branch } = record;
-    if (join(path) !== path || paths.has(path)) throw new Error(`the worktree path ${path} is malformed or registered more than once`);
-    paths.add(path);
+    const { HEAD, branch } = record;
+    const path = windows ? normalize(record.path) : record.path;
+    if (join(path) !== path || paths.some((known) => sameFolder(known, path, platform))) throw new Error(`the worktree path ${path} is malformed or registered more than once`);
+    paths.push(path);
     if ('bare' in record) continue;
     const detached = 'detached' in record;
     if (!FULL_COMMIT.test(HEAD) || (detached ? record.detached !== '' || 'branch' in record : !branch?.startsWith('refs/heads/'))) {
       throw new Error(`the worktree record for ${path} has no valid HEAD and branch or detached state`);
     }
-    const folder = basename(path);
-    const layoutCard = dirname(path) === siblings ? /^([1-9]\d*)$/.exec(folder)?.[1]
-      : dirname(path) === legacy ? /^job-([1-9]\d*)$/.exec(folder)?.[1] : undefined;
+    const folder = windows ? win32.basename(path) : basename(path);
+    const layoutCard = sameFolder(dirname(path), siblings, platform) ? /^([1-9]\d*)$/.exec(folder)?.[1]
+      : sameFolder(dirname(path), legacy, platform) ? /^job-([1-9]\d*)$/.exec(folder)?.[1] : undefined;
     const branchCard = JOB_BRANCH_REF.exec(branch ?? '')?.[1];
     if (branchCard && layoutCard && branchCard !== layoutCard) {
       throw new Error(`the worktree ${path} identifies different cards by path and branch ${branch}`);
@@ -713,8 +828,8 @@ function jobSources({ worktrees, git, gh }) {
 // the card's job in space `space`, where there is one, or one whose folder is the card's job worktree or inside it. Each is
 // judged by `readTerminal`, so a shell kept in place of a lost program is not running. A running holder wins over a
 // stopped job. Throws when a listing or the record of a listed or matched terminal cannot be read.
-/** @param {{ hc: HerdrCommand, space: string | undefined, worktrees: Map<number, string | undefined>, except?: string }} options */
-async function runningTerminals({ hc, space, worktrees, except }) {
+/** @param {{ hc: HerdrCommand, space: string | undefined, worktrees: Map<number, string | undefined>, except?: string, platform?: NodeJS.Platform }} options */
+async function runningTerminals({ hc, space, worktrees, except, platform = process.platform }) {
   /** @type {Map<number, { address: string, stopped: string | undefined }>} */
   const running = new Map();
   const read = new Map();
@@ -738,7 +853,7 @@ async function runningTerminals({ hc, space, worktrees, except }) {
     if (read.has(address) && cwd === undefined) continue;
     if (typeof cwd !== 'string') throw new Error(`hc ls listed terminal ${address} with no readable folder`);
     for (const [card, path] of worktrees) {
-      if (path && (cwd === path || cwd.startsWith(path + sep))) await judge(address, card);
+      if (path && (platform === 'win32' ? insideFolder(cwd, path) : cwd === path || cwd.startsWith(path + sep))) await judge(address, card);
     }
   }
   return running;
@@ -786,8 +901,8 @@ function unfinishedVerdicts({ root, sources, cards, details, running, hostname }
 // and the comments of each card found through the gated `gh`, and Herdr through `hc`. A card missing from the board read is
 // read from its issue: a closed one enters `cards` as closed, an open one throws in unfinishedVerdicts, and one whose issue cannot
 // be read throws here, naming the card and the cause; it throws, naming the cause, where any read fails.
-/** @param {{ root: string, git: (args: string[]) => string, gate: ReturnType<typeof trackerGate>, hc: HerdrCommand, space: string | undefined, hostname: string, only?: number, worktrees?: Map<number, string>, except?: string }} reads */
-async function unfinishedJobs({ root, git, gate, hc, space, hostname, only, worktrees = registeredWorktrees(root, git), except }) {
+/** @param {{ root: string, git: (args: string[]) => string, gate: ReturnType<typeof trackerGate>, hc: HerdrCommand, space: string | undefined, hostname: string, only?: number, platform?: NodeJS.Platform, worktrees?: Map<number, string>, except?: string }} reads */
+async function unfinishedJobs({ root, git, gate, hc, space, hostname, only, platform = process.platform, worktrees = registeredWorktrees(root, git, platform), except }) {
   const { gh } = gate;
   const sources = jobSources({ worktrees, git, gh });
   if (only !== undefined) for (const card of sources.keys()) if (card !== only) sources.delete(card);
@@ -801,7 +916,7 @@ async function unfinishedJobs({ root, git, gate, hc, space, hostname, only, work
   }
   const details = fetchCardDetails(gh, numbers);
   gate.check();
-  const running = await runningTerminals({ hc, space, except, worktrees: new Map([...sources].map(([card, { worktree }]) => [card, worktree])) });
+  const running = await runningTerminals({ hc, space, except, platform, worktrees: new Map([...sources].map(([card, { worktree }]) => [card, worktree])) });
   return unfinishedVerdicts({ root, sources, cards, details, running, hostname });
 }
 
@@ -811,14 +926,14 @@ const verdictLine = ({ card, verdict, detail }) => `${cardRef(card)} ${verdict}:
 // A job is unfinished where its card has a local branch job/N, a job worktree or an open draft pull request. Exit 0 complete;
 // 1 where any read fails or answers what it does not read: it prints `Unfinished jobs unknown: <cause>` and no verdict, since
 // a job that cannot be seen is not gone.
-/** @param {TrackerTools & { root: string, herdrApp: HerdrCommand, hc: HerdrCommand, git: (args: string[]) => string, hostname: string }} options */
-export async function listUnfinished({ root, herdrApp, hc, git, hostname, print, ...tracker }) {
+/** @param {TrackerTools & { root: string, herdrApp: HerdrCommand, hc: HerdrCommand, git: (args: string[]) => string, hostname: string, platform?: NodeJS.Platform }} options */
+export async function listUnfinished({ root, herdrApp, hc, git, hostname, print, platform = process.platform, ...tracker }) {
   const gate = trackerGate(tracker.rawGh);
   let verdicts;
   try {
-    const here = (await listSpaces(herdrApp)).filter(({ folder, machine }) => folder === root && machine === null);
+    const here = localProjectSpaces(await listSpaces(herdrApp), root, platform);
     if (here.length > 1) throw new Error(manySpaces(here, root));
-    verdicts = await unfinishedJobs({ root, git, gate, hc, space: here[0]?.id, hostname });
+    verdicts = await unfinishedJobs({ root, git, gate, hc, space: here[0]?.id, hostname, platform });
   } catch (error) {
     const ended = gate.ended(print);
     if (ended !== undefined) return ended;
@@ -928,7 +1043,7 @@ const RESUMED_LABELS = ['fabraik.card', 'fabraik.session', 'fabraik.runstart', '
 const CODEX_JOB_FLAGS = ['--no-daemon', '--enable', 'default_mode_request_user_input'];
 const CODEX_LAUNCH_HELD = 'Codex child launch is held pending job binding and guard activation';
 const WORKFLOW_ROOT_MARK = 'FABRAIK_WORKFLOW_ROOT=';
-const ENVIRONMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
+export const ENVIRONMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
 // The launch marks of a job; only a Claude job carries its pinned workflow root `workflowRoot`.
 const jobLaunchMarks = (card, runStart, workflowRoot) => [LAUNCH_PROGRAM, `PRE_APPROVED_RUN_SESSION=${runStart}`,
   `PRE_APPROVED_RUN_CARD=${card}`, 'FABRAIK_COORDINATED_JOB=1', ...(workflowRoot === undefined ? [] : [`${WORKFLOW_ROOT_MARK}${workflowRoot}`])];
@@ -1209,12 +1324,12 @@ function coordinatorSetting(git) {
 
 // The project space as listed now, its sole running Coordinator terminal and that terminal's runtime, or a throw where
 // terminal `parent` is not the one running Claude or Codex Coordinator in space `space`.
-/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, space: string, parent: string }} options */
-async function soleCoordinator({ root, herdrApp, hc, space, parent }) {
-  const { space: currentSpace, terminals } = await coordinatorTerminals({ root, herdrApp, hc });
+/** @param {{ root: string, herdrApp: HerdrCommand, hc: HerdrCommand, space: string, parent: string, platform?: string }} options */
+async function soleCoordinator({ root, herdrApp, hc, space, parent, platform = process.platform }) {
+  const { space: currentSpace, terminals } = await coordinatorTerminals({ root, herdrApp, hc, platform });
   const running = terminals.filter((terminal) => terminal.running);
   const [coordinator] = running;
-  const runtime = coordinator?.foregroundName;
+  const runtime = coordinator?.runtime ?? coordinator?.foregroundName;
   if (currentSpace?.id !== space || running.length !== 1 || (runtime !== 'claude' && runtime !== 'codex')
     || coordinator.address !== parent) {
     throw new Error(`HC_TERMINAL_ID ${parent} is not the sole running Claude or Codex Coordinator in space ${space}`);
@@ -1224,10 +1339,10 @@ async function soleCoordinator({ root, herdrApp, hc, space, parent }) {
 
 // Tab `tabName` with id `tabId` as `herdr-app ls` shows it now, with every listed tab, or a throw unless it shows that tab
 // once, in the project's space `space`.
-/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabId: string, tabName: string }} options */
-async function listOwnTab({ root, herdrApp, space, tabId, tabName }) {
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabId: string, tabName: string, platform?: string }} options */
+async function listOwnTab({ root, herdrApp, space, tabId, tabName, platform = process.platform }) {
   const spaces = await listSpaces(herdrApp);
-  const [here] = localProjectSpaces(spaces, root);
+  const [here] = localProjectSpaces(spaces, root, platform);
   const tabs = spaces.flatMap(({ tabs }) => tabs);
   const ownTab = here?.tabs.find(({ id, name }) => id === tabId && name === tabName);
   if (here?.id !== space || !ownTab || tabs.filter(({ id }) => id === tabId).length !== 1) {
@@ -1238,8 +1353,8 @@ async function listOwnTab({ root, herdrApp, space, tabId, tabName }) {
 
 // Tab `tabName` of space `space`, found among `tabs` or opened holding only a Help pane, which `helpPane` names when it was
 // opened; a throw names why it could not be opened.
-/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabs: { id: string, name: string }[], tabName: string }} options */
-async function openHelpTab({ root, herdrApp, space, tabs, tabName }) {
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tabs: { id: string, name: string }[], tabName: string, platform?: string }} options */
+async function openHelpTab({ root, herdrApp, space, tabs, tabName, platform = process.platform }) {
   const tab = tabs.find(({ name: open }) => open === tabName);
   if (tab) return { tab, helpPane: undefined };
   // Herdr opens a shell by default. The bundled Help mod occupies a pane without starting a terminal.
@@ -1250,7 +1365,7 @@ async function openHelpTab({ root, herdrApp, space, tabs, tabName }) {
     || tabs.some(({ id }) => id === created.tab) || typeof created.pane !== 'string' || !created.pane) {
     throw new Error('herdr-app tab.new returned no distinct job tab and Help pane in the project space');
   }
-  return { tab: (await listOwnTab({ root, herdrApp, space, tabId: created.tab, tabName })).ownTab, helpPane: /** @type {string} */ (created.pane) };
+  return { tab: (await listOwnTab({ root, herdrApp, space, tabId: created.tab, tabName, platform })).ownTab, helpPane: /** @type {string} */ (created.pane) };
 }
 
 // The local terminal address `hc run --json` reply `launched` names, distinct from `parent`, or throws `refusal`.
@@ -1263,12 +1378,12 @@ function launchedAddress(launched, parent, refusal) {
 
 // Closes Help pane `helpPane` once the app shows terminal `address`, which `hc run` started in tab `tab`; a throw names why
 // the pane was kept.
-/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tab: string, tabName: string, helpPane: string, address: string }} options */
-async function closeAdoptedHelpPane({ root, herdrApp, space, tab, tabName, helpPane, address }) {
+/** @param {{ root: string, herdrApp: HerdrCommand, space: string, tab: string, tabName: string, helpPane: string, address: string, platform?: string }} options */
+async function closeAdoptedHelpPane({ root, herdrApp, space, tab, tabName, helpPane, address, platform = process.platform }) {
   // Close the Help pane only after the app has adopted the terminal in this tab.
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if (attempt > 0) await delay(100);
-    const { ownTab, tabs } = await listOwnTab({ root, herdrApp, space, tabId: tab, tabName });
+    const { ownTab, tabs } = await listOwnTab({ root, herdrApp, space, tabId: tab, tabName, platform });
     if (!Array.isArray(ownTab.terminals)) throw new Error(`herdr-app ls returned no terminal list for ${tabName}`);
     if (tabs.some(({ terminals }) => Array.isArray(terminals) && terminals.some((entry) => entry?.pane === helpPane))) {
       throw new Error(`herdr-app ls shows Help pane ${helpPane} as a terminal`);
@@ -1297,9 +1412,9 @@ async function closeAdoptedHelpPane({ root, herdrApp, space, tab, tabName, helpP
 // After a restart, Claude resumes the recorded session and removes the old records after the replacement's labels match.
 // Codex resumes the bound native thread, observes its replacement's own binding outside the cap lock, and reacquires it to
 // recheck eligibility and both records before removing the predecessor. Failed Codex proof leaves both records available.
-/** @param {TrackerTools & { root: string, card: number, login?: string, herdrApp: HerdrCommand, hc: HerdrCommand, parent: string | undefined, hostname: string, transcript: (session: string) => 'file' | 'link' | undefined, newSessionId: () => string, now: () => number, cap: () => number, capLock: <T>(work: () => Promise<T>) => Promise<T>, git: (args: string[]) => string, checkCodexHooks?: (options: { root: string }) => CodexHookPreflight | Promise<CodexHookPreflight>, readCodexBinding?: (options: { root: string, address: string, wait: boolean }) => CodexBinding | null | Promise<CodexBinding | null>, readCodexClaimHistory?: (options: { root: string, threadId: string }, preflight: CodexHookPreflight) => unknown | Promise<unknown> }} options */
+/** @param {TrackerTools & { root: string, card: number, login?: string, herdrApp: HerdrCommand, hc: HerdrCommand, parent: string | undefined, hostname: string, transcript: (session: string) => 'file' | 'link' | undefined, newSessionId: () => string, now: () => number, cap: () => number, capLock: <T>(work: () => Promise<T>) => Promise<T>, git: (args: string[]) => string, platform?: NodeJS.Platform, checkCodexHooks?: (options: { root: string }) => CodexHookPreflight | Promise<CodexHookPreflight>, readCodexBinding?: (options: { root: string, address: string, wait: boolean }) => CodexBinding | null | Promise<CodexBinding | null>, readCodexClaimHistory?: (options: { root: string, threadId: string }, preflight: CodexHookPreflight) => unknown | Promise<unknown> }} options */
 export async function startJob({ root, card, login, herdrApp, hc, parent, hostname, transcript, newSessionId, now, cap, capLock, git, print,
-  checkCodexHooks, readCodexBinding: observeCodexBinding, readCodexClaimHistory, ...tracker }) {
+  platform = process.platform, checkCodexHooks, readCodexBinding: observeCodexBinding, readCodexClaimHistory, ...tracker }) {
   if (!parent) {
     print(`Card ${card} not started: HC_TERMINAL_ID names no coordinator terminal.`);
     return 1;
@@ -1311,7 +1426,7 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
     print(`Card ${card} not started: ${/** @type {Error} */ (error).message}`);
     return 1;
   }
-  const { space, code } = await projectSpace({ root, herdrApp, print });
+  const { space, code } = await projectSpace({ root, herdrApp, print, platform });
   if (code !== undefined) return code;
   if (!space) {
     print(`No Herdr space has folder ${root}; open the coordinator first.`);
@@ -1377,8 +1492,8 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
         print(`Card ${card} not started: ${taken.length} of ${limit} running places are taken (cards ${taken.join(', ')}); a job waiting on the owner takes none.`);
         return 1;
       }
-      const { currentSpace, coordinator, runtime } = await soleCoordinator({ root, herdrApp, hc, space: space.id, parent });
-      if (!settings.installed.includes(runtime)) throw new Error(`the Coordinator runtime ${runtime} is not installed on fetched main`);
+      const { currentSpace, coordinator, runtime } = await soleCoordinator({ root, herdrApp, hc, space: space.id, parent, platform });
+if (!settings.installed.includes(runtime)) throw new Error(`the Coordinator runtime ${runtime} is not installed on fetched main`);
       if (runtime === 'codex' && (!checkCodexHooks || !observeCodexBinding)) throw new Error(CODEX_LAUNCH_HELD);
 
       const worktree = registeredWorktrees(root, git).get(card);
@@ -1413,7 +1528,7 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
       const jobRuntime = knownCodex ? 'codex' : records.length === 0 ? runtime : 'claude';
       if (!settings.installed.includes(jobRuntime)) throw new Error(`the job runtime ${jobRuntime} is not installed on fetched main`);
       const verifyPrebranchStart = async (step) => {
-        const liveParent = await coordinatorTerminals({ root, herdrApp, hc });
+        const liveParent = await coordinatorTerminals({ root, herdrApp, hc, platform });
         const live = liveParent.terminals.filter(({ running }) => running);
         if (liveParent.space?.id !== space.id || live.length !== 1 || !isDeepStrictEqual(live[0], coordinator)) {
           throw new Error(`the sole native Coordinator changed before ${step}`);
@@ -1524,7 +1639,7 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
       let tab;
       let helpPane;
       try {
-        ({ tab, helpPane } = await openHelpTab({ root, herdrApp, space: space.id, tabs: currentSpace.tabs, tabName }));
+        ({ tab, helpPane } = await openHelpTab({ root, herdrApp, space: space.id, tabs: currentSpace.tabs, tabName, platform }));
       } catch (error) {
         print(`Card ${card} not started: tab ${tabName} could not be opened: ${/** @type {Error} */ (error).message}`);
         return 1;
@@ -1537,7 +1652,7 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
         if (launched.code !== 0 || !helpPane) return launched;
         try {
           await closeAdoptedHelpPane({ root, herdrApp, space: space.id, tab: tab.id, tabName, helpPane,
-            address: launchedAddress(launched, parent, 'hc run returned no distinct local job terminal') });
+            address: launchedAddress(launched, parent, 'hc run returned no distinct local job terminal'), platform });
         } catch (error) {
           print(`Card ${card}'s Help pane ${helpPane} was kept: ${/** @type {Error} */ (error).message}.`);
         }
@@ -1588,7 +1703,9 @@ export async function startJob({ root, card, login, herdrApp, hc, parent, hostna
       const workflow = /** @type {{ commit: string }} */ (pin).commit;
       const labels = { 'fabraik.card': String(card), 'fabraik.session': session, 'fabraik.runstart': runStart, 'fabraik.workflow': workflow };
       const { model, effort } = settings;
-      const run = (claude) => launch([`fabraik.session=${session}`, `fabraik.workflow=${workflow}`], [...marks, `ANTHROPIC_MODEL=${model}`,
+      // Windows has no /usr/bin/env: its tab runs this repository's launch-job command, which sets the same marks.
+      const launcher = platform === 'win32' ? [process.execPath, win32.join(root, 'scripts', 'coordinator.mjs'), 'launch-job'] : marks.slice(0, 1);
+      const run = (claude) => launch([`fabraik.session=${session}`, `fabraik.workflow=${workflow}`], [...launcher, ...marks.slice(1), `ANTHROPIC_MODEL=${model}`,
         `CLAUDE_CODE_EFFORT_LEVEL=${effort}`, 'claude', '--permission-mode', 'auto', ...claude]);
       if (!recorded) {
         const launched = await run(['--session-id', session, '--', jobPrompt(card)]);
@@ -1742,17 +1859,40 @@ const deliveryUid = () => /** @type {() => number} */ (process.getuid)();
 const deliveryError = (reason) => new Error(reason.startsWith('Delivery stopped:') ? reason : `Delivery stopped: ${reason}`);
 const reasonOf = (error) => error instanceof Error ? error.message : String(error);
 
-// Linux /proc start time distinguishes a reused PID; a zombie cannot own a delivery.
-function deliveryProcessStart(pid) {
+// The start time distinguishes a reused PID: Linux reads /proc, where a zombie cannot own a delivery, and Windows reads
+// Get-Process, whose empty answer means the process has gone.
+export function deliveryProcessStart(pid, platform = process.platform, exec = execFileSync) {
+  if (platform === 'win32') {
+    const start = String(exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Process -Id $env:FABRAIK_DELIVERY_PID).StartTime.ToUniversalTime().Ticks'], {
+      encoding: 'utf8', windowsHide: true, env: { ...process.env, FABRAIK_DELIVERY_PID: String(pid) },
+    })).trim();
+    if (!/^\d+$/.test(start)) throw deliveryError('the delivery process is no longer live.');
+    return start;
+  }
   const line = readFileSync(`/proc/${pid}/stat`, 'utf8');
   const fields = line.slice(line.lastIndexOf(')') + 2).split(' ');
   if (fields[0] === 'Z' || fields[0] === 'X' || !/^\d+$/.test(fields[19])) throw deliveryError('the delivery process is no longer live.');
   return fields[19];
 }
 
-function sameDeliveryProcess({ pid, start }) {
+// On Windows the delivery's nearest claude.exe ancestor is the job's Claude Code only when the job terminal's
+// foreground started it.
+function windowsJobClaude(table, pid, foregroundPid) {
+  const seen = new Set();
+  let current = pid;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const row = table.find((entry) => entry.pid === current);
+    if (!row) return false;
+    if (row.name?.toLowerCase() === 'claude.exe') return row.ppid === foregroundPid;
+    current = row.ppid;
+  }
+  return false;
+}
+
+function sameDeliveryProcess({ pid, start }, readProcessStart) {
   try {
-    return deliveryProcessStart(pid) === start;
+    return readProcessStart(pid) === start;
   } catch {
     return false;
   }
@@ -1789,7 +1929,8 @@ function labelState(value) {
   }
 }
 
-function checkedLaneDirectory(path, create) {
+// On Windows, which has no owner ids or folder modes, the lane must lie inside the user profile, as the cap lock's folder must.
+function checkedLaneDirectory(path, create, { accountHome, platform }) {
   if (!managedPath(path)) throw deliveryError('the delivery lane path must be physical and absolute.');
   if (!entryAt(path) && create) {
     try {
@@ -1799,31 +1940,34 @@ function checkedLaneDirectory(path, create) {
     }
   }
   if (!entryAt(path)) return false;
-  if (!isCanonicalLeadFolder(path)) throw deliveryError('the delivery lane directory must be owned and private.');
+  if (!isCanonicalLeadFolder(path, platform)) throw deliveryError('the delivery lane directory must be owned and private.');
+  if (platform === 'win32' && !insideWindowsProfile(accountHome, path)) throw deliveryError('the delivery lane directory must be inside the user profile on Windows.');
   return true;
 }
 
-function checkedStateDirectory(path, { accountHome, excluded }) {
-  if (!managedPath(path) || excluded.some((folder) => beneath(path, folder))) {
+function checkedStateDirectory(path, { accountHome, excluded, platform }) {
+  const posix = platform !== 'win32';
+  if (!managedPath(path) || excluded.some((folder) => (posix ? beneath(path, folder) : insideFolder(path, folder)))) {
     throw deliveryError('the merge-watch state path is within a writable job or temporary directory.');
   }
   if (entryAt(path)) {
-    if (!isCanonicalLeadFolder(path)) throw deliveryError('the merge-watch state directory must be physical, owned and private.');
+    if (!isCanonicalLeadFolder(path, platform)) throw deliveryError('the merge-watch state directory must be physical, owned and private.');
+    if (!posix && !insideWindowsProfile(accountHome, path)) throw deliveryError('the merge-watch state directory must be inside the user profile on Windows.');
     return true;
   }
   if (!beneath(path, accountHome)) throw deliveryError('the missing merge-watch state directory has no verified account-state ancestor.');
   let existing = path;
   while (!entryAt(existing)) existing = dirname(existing);
   const ancestor = lstatSync(existing);
-  if (!ancestor.isDirectory() || ancestor.uid !== deliveryUid() || (ancestor.mode & 0o022) !== 0 || realpathSync(existing) !== existing) {
+  if (!ancestor.isDirectory() || (posix && (ancestor.uid !== deliveryUid() || (ancestor.mode & 0o022) !== 0)) || realpathSync(existing) !== existing) {
     throw deliveryError('the merge-watch state ancestor must be physical and owned by this account.');
   }
   return false;
 }
 
-function optionalDeliveryRecord(path) {
+function optionalDeliveryRecord(path, platform) {
   try {
-    return readManagedRecord(path);
+    return readManagedRecord(path, { platform });
   } catch (error) {
     if (/** @type {NodeJS.ErrnoException} */ (error).code === 'ENOENT') return undefined;
     throw deliveryError('a delivery record is unreadable or is not an owned private file.');
@@ -1939,13 +2083,17 @@ async function settleDeliveryReceipt({ receipt, pull, watchStatus, label, assert
   await cleanup();
 }
 
+// Records are compared by bigint stats alone, from `recordAt` or `fstatSync(fd, { bigint: true })`.
+const recordAt = (path) => lstatSync(path, { bigint: true, throwIfNoEntry: false });
 const sameDeliveryInode = (first, second) => first && second && first.dev === second.dev && first.ino === second.ino;
+// The record lock beside a readiness record, named from its inode so that a replacement record has no holder.
+const recordLockPath = (folder, record) => join(folder, `ready-${record.dev}-${record.ino}.lock`);
 
 async function holdDelivery(context) {
-  const { lane, lockPath, readyPath, generation, processIdentity, signal, label, assertLive, watchStatus, pull, now, waitTo, pinned, watchStateDir } = context;
+  const { lane, lockPath, readyPath, generation, processIdentity, signal, label, assertLive, watchStatus, pull, now, waitTo, pinned, watchStateDir, lockRecord, platform } = context;
   lane(true);
   await assertLive();
-  let lock = await lockLeadFile(lockPath, { wait: ['-n'], signal });
+  let lock = await lockLeadFile(lockPath, { waitMs: 0, signal });
   if (lock === undefined) {
     await label('waiting', { reason: DELIVERY_CONTENTION });
     do {
@@ -1956,11 +2104,12 @@ async function holdDelivery(context) {
   const temporary = `${readyPath}.${randomUUID()}`;
   let prepared;
   let ready;
+  let recordFd;
   let readyLock;
   let published = false;
   try {
     await assertLive();
-    if (optionalDeliveryRecord(readyPath) !== undefined) unlinkSync(readyPath);
+    if (optionalDeliveryRecord(readyPath, platform) !== undefined) unlinkSync(readyPath);
     const prior = context.readReceipt();
     if (prior) {
       await settleDeliveryReceipt({ receipt: prior, pull, label, assertLive, watchStatus: () => watchStatus(prior.repo), now, waitTo, pinned, watchStateDir });
@@ -1970,24 +2119,29 @@ async function holdDelivery(context) {
         unlinkSync(context.receiptPath);
       }
     }
-    checkLeadFile(lock, lockPath);
+    lock.check();
     await assertLive();
     const { delivery, ...terminal } = generation;
     ready = { terminal, worktree: context.worktree, process: processIdentity, origin: context.origin, repositoryId: context.id };
     writeDeliveryRecord(temporary, ready);
-    prepared = entryAt(temporary);
-    readyLock = await lockLeadFile(temporary, { wait: ['-n'], readOnly: true, signal });
-    if (readyLock === undefined || !sameDeliveryInode(fstatSync(readyLock), prepared)) {
-      throw deliveryError('the delivery reservation record could not be locked.');
-    }
+    prepared = recordAt(temporary);
+    recordFd = openLeadFile(temporary, platform);
+    const record = fstatSync(recordFd, { bigint: true });
+    if (!sameDeliveryInode(record, prepared)) throw deliveryError('the delivery reservation record could not be locked.');
+    // A readiness probe may still hold a leftover lock at this name, so wait while the job is live.
+    do {
+      await assertLive();
+      readyLock = await lockRecord(recordLockPath(dirname(readyPath), record), { signal });
+    } while (readyLock === undefined);
     await label('clear-waiting');
     await assertLive();
     renameSync(temporary, readyPath);
     published = true;
     for (;;) {
-      checkLeadFile(readyLock, readyPath);
+      checkLeadFile(recordFd, readyPath, platform);
+      readyLock.check();
       await waitTo(now() + DELIVERY_PROBE_MS);
-      checkLeadFile(lock, lockPath);
+      lock.check();
     }
   } catch (error) {
     const requestedRelease = signal.aborted
@@ -1997,26 +2151,32 @@ async function holdDelivery(context) {
     return 0;
   } finally {
     try {
-      if (published && readyLock !== undefined) {
-        const owned = fstatSync(readyLock);
-        if (sameDeliveryInode(entryAt(readyPath), owned) && isDeepStrictEqual(optionalDeliveryRecord(readyPath), ready)
-          && sameDeliveryInode(entryAt(readyPath), owned)) unlinkSync(readyPath);
-      } else if (sameDeliveryInode(entryAt(temporary), prepared)) {
+      if (published && recordFd !== undefined) {
+        const owned = fstatSync(recordFd, { bigint: true });
+        if (sameDeliveryInode(recordAt(readyPath), owned) && isDeepStrictEqual(optionalDeliveryRecord(readyPath, platform), ready)
+          && sameDeliveryInode(recordAt(readyPath), owned)) unlinkSync(readyPath);
+      } else if (sameDeliveryInode(recordAt(temporary), prepared)) {
         unlinkSync(temporary);
       }
     } finally {
       try {
-        if (readyLock !== undefined) closeSync(readyLock);
+        // The record lock's file stays: a probe may still be about to lock it, and a reused inode reuses it.
+        readyLock?.release();
       } finally {
-        closeSync(lock);
+        try {
+          if (recordFd !== undefined) closeSync(recordFd);
+        } finally {
+          lock.release();
+        }
       }
     }
   }
 }
 
 // Claude has no binding locator. An unclassified lane is only a hint; a record for this job requires full proof.
-async function localDeliveryLease({ lockRoot, worktree, generation, origin, assertLive, signal }, id) {
-  if (!checkedLaneDirectory(lockRoot, false)) return undefined;
+async function localDeliveryLease({ lockRoot, accountHome, platform, worktree, generation, origin, assertLive, signal }, id) {
+  const where = { accountHome, platform };
+  if (!checkedLaneDirectory(lockRoot, false, where)) return undefined;
   const keys = id ? [sha256(id)] : readdirSync(lockRoot).filter((key) => DELIVERY_DIGEST.test(key));
   let match;
   for (const key of keys) {
@@ -2025,10 +2185,10 @@ async function localDeliveryLease({ lockRoot, worktree, generation, origin, asse
     let original;
     let ready;
     try {
-      if (!checkedLaneDirectory(folder, false)) continue;
-      original = entryAt(readyPath);
+      if (!checkedLaneDirectory(folder, false, where)) continue;
+      original = recordAt(readyPath);
       if (!original) continue;
-      ready = optionalDeliveryRecord(readyPath);
+      ready = optionalDeliveryRecord(readyPath, platform);
     } catch (error) {
       if (id) throw error;
       continue;
@@ -2044,17 +2204,17 @@ async function localDeliveryLease({ lockRoot, worktree, generation, origin, asse
     if (ready.origin !== origin) throw deliveryError('the local origin changed since the delivery reservation.');
     await assertLive();
     const released = 'the original delivery process has released its reservation.';
-    for (const path of [join(folder, 'delivery.lock'), readyPath]) {
-      const unlocked = await lockLeadFile(path, { wait: ['-n'], readOnly: true, shared: true, signal }).catch((error) => {
+    for (const path of [join(folder, 'delivery.lock'), recordLockPath(folder, original)]) {
+      const unlocked = await lockLeadFile(path, { shared: true, waitMs: 0, create: false, signal }).catch((error) => {
         throw deliveryError(`the delivery reservation lock could not be verified: ${error.message}`);
       });
       if (unlocked !== undefined) {
-        closeSync(unlocked);
+        unlocked.release();
         throw deliveryError(released);
       }
     }
-    if (!sameDeliveryInode(entryAt(readyPath), original) || !isDeepStrictEqual(optionalDeliveryRecord(readyPath), ready)
-      || !sameDeliveryInode(entryAt(readyPath), original)) throw deliveryError(released);
+    if (!sameDeliveryInode(recordAt(readyPath), original) || !isDeepStrictEqual(optionalDeliveryRecord(readyPath, platform), ready)
+      || !sameDeliveryInode(recordAt(readyPath), original)) throw deliveryError(released);
     if (match) throw deliveryError('more than one reservation matches this delivery job.');
     match = ready;
   }
@@ -2176,15 +2336,18 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
   const {
     cwd = process.cwd(), gitExec: git = (args) => execFileSync('git', args, { cwd, env: gitEnvironment(), encoding: 'utf8', stdio: 'pipe', timeout: 15_000 }),
     hc = herdrCommand('hc', 5_000), env = process.env, ghExec: gh, output, watch,
-    accountHome = userInfo().homedir, lockRoot = `/tmp/fabraik-delivery-${userInfo().uid}`, watchStateDir = defaultStateDir(),
-    pid = process.pid, now = Date.now, sleep = delay, readProcessTable,
+    platform = process.platform, accountHome = userInfo().homedir,
+    lockRoot = platform === 'win32' ? win32.join(accountHome, 'AppData', 'Local', 'fabraik-delivery') : `/tmp/fabraik-delivery-${userInfo().uid}`,
+    watchStateDir = defaultStateDir(), pid = process.pid, now = Date.now, sleep = delay,
+    readProcessTable = () => platformProcessTable(platform), readProcessStart = (target) => deliveryProcessStart(target, platform),
     readLiveCodexBinding: liveBinding = readLiveCodexBinding, readDeliveryLease = localDeliveryLease, untilSignal = () => new Promise(() => {}),
   } = dependencies;
   const controller = new AbortController();
   const { signal } = controller;
   let label;
   try {
-    if (process.platform !== 'linux') throw deliveryError('coordinated delivery requires Linux.');
+    const windows = platform === 'win32';
+    if (platform !== 'linux' && !windows) throw deliveryError('coordinated delivery requires Linux.');
     const address = env.HC_TERMINAL_ID;
     if (!LOCAL_HERDR_TERMINAL.test(address ?? '')) throw deliveryError('HC_TERMINAL_ID must name the local Herdr job.');
     const terminal = () => readRecord(hc, address, 'verify the delivery job', (value) => value);
@@ -2192,6 +2355,8 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
     const generation = deliveryGeneration(live);
     const labels = generation.labels;
     const codex = labels['fabraik.runtime'] === 'codex';
+    // Only a Claude Code job delivers on Windows.
+    if (codex && windows) throw deliveryError('coordinated delivery requires Linux.');
     const card = Number(labels['fabraik.card']);
     const runStart = labels['fabraik.runstart'];
     if (live?.state !== 'live' || generation.address !== address || !positiveNumber(generation.pid)
@@ -2201,16 +2366,20 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
       || (codex ? labels['fabraik.session'] !== undefined : labels['fabraik.runtime'] !== undefined || !V4_UUID.test(labels['fabraik.session'] ?? ''))) {
       throw deliveryError('Herdr could not verify the live job generation.');
     }
-    const worktree = git(['rev-parse', '--show-toplevel']).trim();
-    const inventory = parseWorktreeList(git(['worktree', 'list', '--porcelain', '-z']));
+    // Git and Herdr print Windows paths with forward slashes; compare them in the host's own form.
+    const hostPath = (path) => windows && typeof path === 'string' ? normalize(path) : path;
+    const worktree = hostPath(git(['rev-parse', '--show-toplevel']).trim());
+    const inventory = parseWorktreeList(git(['worktree', 'list', '--porcelain', '-z']))?.map((entry) => Object.assign(entry, { path: hostPath(entry.path) }));
     const root = dependencies.root ?? inventory?.[0]?.path;
     if (!inventory || !managedPath(root) || realpathSync(root) !== root || root !== inventory[0].path
       || !managedPath(worktree) || worktree !== realpathSync(cwd)
       || inventory.filter((entry) => entry.path === worktree && entry.branch === `refs/heads/job/${card}`).length !== 1
-      // Herdr keeps cwd as the launch folder; only the live Claude foreground shows the worktree the job entered.
+      // Herdr keeps cwd as the launch folder; on Linux only the live Claude foreground shows the worktree the job entered,
+      // and on Windows the delivery's process chain proves the job instead.
       || (codex ? generation.cwd !== root
-        : (generation.cwd !== root && generation.cwd !== worktree)
-          || live.foreground?.name !== 'claude' || live.foreground.cwd !== worktree)) {
+        : (!sameLaunchFolder(generation.cwd, root, platform) && !sameLaunchFolder(generation.cwd, worktree, platform))
+          || (windows ? !windowsJobClaude(readProcessTable(), pid, live.foreground?.pid)
+            : live.foreground?.name !== 'claude' || live.foreground.cwd !== worktree))) {
       throw deliveryError('the native job does not match its registered physical worktree.');
     }
 
@@ -2262,11 +2431,11 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
       return verified;
     };
 
-    const processIdentity = { pid, start: deliveryProcessStart(pid) };
+    const processIdentity = { pid, start: readProcessStart(pid) };
     const liveRow = async () => {
       const current = await terminal();
       const row = deliveryGeneration(current);
-      if (current?.state !== 'live' || !sameDeliveryRow(generation, row) || row.pid !== generation.pid || !sameDeliveryProcess(processIdentity)) {
+      if (current?.state !== 'live' || !sameDeliveryRow(generation, row) || row.pid !== generation.pid || !sameDeliveryProcess(processIdentity, readProcessStart)) {
         throw deliveryError('the original delivery process or Herdr job is no longer live.');
       }
       return row;
@@ -2286,7 +2455,7 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
     if (options.mode !== 'pr') {
       void untilSignal().then((name) => controller.abort(deliveryError(`stopped by ${name}.`)));
     }
-    const leaseContext = { lockRoot, worktree, generation, origin, assertLive, signal };
+    const leaseContext = { lockRoot, accountHome, platform, worktree, generation, origin, assertLive, signal };
     if (options.mode === 'ready') {
       const readLease = () => readDeliveryLease(leaseContext, binding?.repositoryId);
       return await deliveryReadiness({ now, output, assertLive, waitTo, readLease }, options.seconds, generation.delivery);
@@ -2309,19 +2478,20 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
       ({ id, nameWithOwner: repo, defaultBranch: base } = verified);
     }
 
-    if (!managedPath(accountHome) || realpathSync(accountHome) !== accountHome || lstatSync(accountHome).uid !== deliveryUid()) {
+    if (!managedPath(accountHome) || realpathSync(accountHome) !== accountHome || (!windows && lstatSync(accountHome).uid !== deliveryUid())) {
       throw deliveryError('the operating-system account home could not be verified.');
     }
     const excluded = [lockRoot, ...inventory.map(({ path }) => path)];
-    if (dependencies.accountHome === undefined) excluded.push('/tmp', '/var/tmp', '/dev/shm');
-    const state = { accountHome, excluded };
-    const receiptFolder = join(accountHome, '.local', 'state', 'fabraik-merge-watch');
+    if (dependencies.accountHome === undefined && !windows) excluded.push('/tmp', '/var/tmp', '/dev/shm');
+    const state = { accountHome, excluded, platform };
+    const joinPath = windows ? win32.join : join;
+    const receiptFolder = joinPath(accountHome, '.local', 'state', 'fabraik-merge-watch');
     const key = sha256(id);
-    const laneFolder = join(lockRoot, key);
-    const lane = (create) => checkedLaneDirectory(lockRoot, create) && checkedLaneDirectory(laneFolder, create);
-    const lockPath = join(laneFolder, 'delivery.lock');
-    const readyPath = join(laneFolder, 'ready.json');
-    const receiptPath = join(receiptFolder, `delivery-${key}.json`);
+    const laneFolder = joinPath(lockRoot, key);
+    const lane = (create) => checkedLaneDirectory(lockRoot, create, state) && checkedLaneDirectory(laneFolder, create, state);
+    const lockPath = joinPath(laneFolder, 'delivery.lock');
+    const readyPath = joinPath(laneFolder, 'ready.json');
+    const receiptPath = joinPath(receiptFolder, `delivery-${key}.json`);
     const watchDigest = sha256(watchStateDir);
     const checkReceiptDirectory = () => checkedStateDirectory(receiptFolder, state);
     const checkWatchDirectory = () => checkedStateDirectory(watchStateDir, state);
@@ -2329,7 +2499,7 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
     const contextRecord = { id, repo, slug, watchDigest };
     const readReceipt = () => {
       if (!checkReceiptDirectory()) return undefined;
-      const record = optionalDeliveryRecord(receiptPath);
+      const record = optionalDeliveryRecord(receiptPath, platform);
       if (record !== undefined && !validDeliveryReceipt(record, contextRecord)) {
         throw deliveryError('the previous delivery receipt does not match the verified repository and merge-watch state context.');
       }
@@ -2340,11 +2510,11 @@ export async function runDelivery(/** @type {DeliveryForm} */ options, dependenc
       if (!ready || (expected && !isDeepStrictEqual(ready, expected))) throw deliveryError('the current job has no matching live delivery reservation.');
       return ready;
     };
-    const watchStatus = (slug) => checkWatchDirectory() ? coordinatedWatchIsLive(watchStateDir, slug, readProcessTable) : undefined;
+    const watchStatus = (slug) => checkWatchDirectory() ? coordinatedWatchIsLive(watchStateDir, slug, readProcessTable, platform) : undefined;
     const pull = (target) => exactDeliveryPull(gh, target.repo ?? repo, target);
     const context = { id, base, repo, card, codex, worktree, generation, origin, processIdentity, receiptPath, readyPath, lockPath, signal,
       lane, label, readReceipt, checkReceiptDirectory, watchDigest, watchStatus, assertLive, liveRow, waitTo, requireLease,
-      output, pull, now, watch, gh, verifyOrigin, watchStateDir, pinned };
+      output, pull, now, watch, gh, verifyOrigin, watchStateDir, pinned, platform, lockRecord: dependencies.lockRecord ?? lockLeadFile };
     if (options.mode === 'hold') return await holdDelivery(context);
     if (options.mode === 'pr') return await observeDeliveryPull(context, options);
     return await watchHeldDelivery(context, options.pr);

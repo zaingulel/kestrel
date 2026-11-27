@@ -350,23 +350,7 @@ const claimLapse = (card, login, newest, start) => {
   return '';
 };
 
-// The two records a card comment can hold, each on its first line: the owner's answer for the saved card at a head,
-// named by its identity, and a fix built at a new head from an answered one. Each captures the card, the head, the
-// identity or the head built from, and the words.
-const OWNER_ANSWER = new RegExp(`^Owner answer: job/([1-9]\\d*) at (${COMMIT_TEXT}) (${COMMIT_TEXT}(?:,${COMMIT_TEXT})*): (.*)$`);
-const FIX_BUILT = new RegExp(`^Fix built: job/([1-9]\\d*) at (${COMMIT_TEXT}) from (${COMMIT_TEXT}): (.*)$`);
-
-// The record a card comment's `body` holds for card `card`, read on its first line after leading blanks as isClaim
-// reads a claim: { kind: 'answer', head, identity, words } or { kind: 'fix', head, from, words }, or undefined where
-// that line is neither, names another card or holds blank words.
-export function cardRecord(body, card) {
-  const line = body.trimStart().split(/\r?\n/, 1)[0];
-  const [, named, head, other, words] = OWNER_ANSWER.exec(line) ?? FIX_BUILT.exec(line) ?? [];
-  if (named !== String(card) || words.trim() === '') return undefined;
-  return line.startsWith('Owner answer: ') ? { kind: 'answer', head, identity: other, words } : { kind: 'fix', head, from: other, words };
-}
-
-// Text that quotes error output or a command, such as a lead's reason, may carry a credential, so each credential shape in it becomes `[redacted]`: GitHub's token prefixes,
+// Text that quotes error output or a command, such as a job's reason, may carry a credential, so each credential shape in it becomes `[redacted]`: GitHub's token prefixes,
 // Anthropic keys, a bearer token, a URL's user information and the value of a secret-named parameter.
 const CREDENTIALS = [
   [/\bgh[pousr]_[A-Za-z0-9]+/g, '[redacted]'],
@@ -379,23 +363,6 @@ const CREDENTIALS = [
 export const redact = (text) => CREDENTIALS.reduce((redacted, [pattern, replacement]) => redacted.replace(pattern, replacement), text);
 
 export const REPLY_MAX = 500;
-
-// The one form of the owner answer record cardRecord reads.
-export const ownerAnswerLine = (card, head, identity, words) => `Owner answer: job/${card} at ${head} ${identity}: ${words}`;
-
-// The newest owner answer on card `card` by `login` among `comments`, oldest first: { at, comment, answer }, with `at`
-// its index in `comments` and `answer` the record cardRecord reads, or undefined where no answer holds. The newest
-// comment of that account whose first line begins `Owner answer: job/<card> ` is the answer, and none holds where it is
-// not a whole record, since an older answer never stands in for one the owner replaced, or where any comment of that
-// account names, as `editor`, another account as its last editor. A comment edited with no `editor` counts as edited by
-// another account, since GitHub names no editor it no longer has.
-export function newestOwnerAnswer(card, comments, login) {
-  const own = (comment) => comment.author?.login === login;
-  if (comments.some((comment) => own(comment) && (comment.editor ? comment.editor.login !== login : comment.lastEditedAt !== null))) return undefined;
-  const at = comments.findLastIndex((comment) => own(comment) && comment.body.trimStart().startsWith(`Owner answer: job/${card} `));
-  const answer = at === -1 ? undefined : cardRecord(comments[at].body, card);
-  return answer && { at, comment: comments[at], answer };
-}
 
 // The marker by which the owner holds a card for their own answer, whatever the wait level.
 export const SHOW_FIRST = 'show-me-first';
@@ -670,14 +637,6 @@ export function savedIdentity(card, cwd, head, git) {
   return git(['hash-object', '--no-filters', '--', ...files.map((name) => `${folder}/${name}`)]).trim().split(/\r?\n/).join(',');
 }
 
-// The reasons the saved card of card `card` at `head` in `cwd` holds, with what wait level `level` and the marker,
-// `marked`, add, as withHolds gives them, in Herdr mode where `herdr` is set; no published body is read. It throws as
-// savedCard does.
-export function folderReasons(card, cwd, head, { level, marked, herdr }) {
-  const { reasons, onScreen } = savedCard(card, cwd, head);
-  return withHolds(reasons, { level, onScreen, marked, herdr });
-}
-
 // The reasons the saved write-up of card `card` at HEAD in `cwd` holds its finished work for the owner, as waitReasons
 // gives them, read from the review folder `.claude/worklog/job_<card>-review-<head>/` with its `screenshot-<n>` files.
 // Given `pull`, { number, headRefOid }, its head must be HEAD, the reasons waitReasons finds in its published body, read
@@ -755,52 +714,6 @@ function deliveryReview(card, cwd, head, git, objects) {
   const hashes = screenshots.map((name) => blob(boundedBytes(join(folder, name))));
   if (realpathSync.native(folder) !== folder) throw new Error(`${folder} changed during saved review capture`);
   return { ...assessReviewBody(writeUp, screenshots), screenshots, hashes };
-}
-
-// Whether the owner's recorded answer lets pull request head `head` of card `card` mark ready or merge while the wait
-// reasons `held` hold, judged from the card read `read`, whose comments come oldest first: undefined where it does, ''
-// where no answer holds for the acting account, as newestOwnerAnswer reads it, and otherwise
-// `, and ` then why not. That answer must name the identity of the saved card at the head it answers, and admits that
-// head only where every reason held is one that saved card holds, as folderReasons reads it at wait level `level`, so a
-// reason only the published body adds still holds. It admits a later head only where the card does not carry the
-// show-me-first label, `marked`, read now since no record says whether the card carried it when the owner answered; a
-// later fix line by that account names that head and the head answered; the head answered is an ancestor of it; and no
-// reason held there is check or failed to hold at the head answered, as folderReasons reads that head. `git` runs in
-// `cwd`, and a failed ancestor read throws. A Herdr job never asks: only its card's marker holds it.
-function answerLapse(card, { login, issue }, { cwd, git, head, held, level, marked }) {
-  const lapse = (why) => `, and ${why}`;
-  const newest = newestOwnerAnswer(card, issue.comments.nodes, login);
-  if (!newest) return '';
-  const { at, answer } = newest;
-  const source = `the newest owner answer on card ${card}`;
-  let identity;
-  try {
-    identity = savedIdentity(card, cwd, answer.head, git);
-  } catch {
-    // An unreadable saved card names nothing.
-  }
-  if (identity !== answer.identity) return lapse(`${source} does not name the saved card at ${answer.head}`);
-  if (answer.head !== head) {
-    if (marked) return lapse(`card ${card} asks to see every version first, so the fix at ${head} needs an owner answer of its own`);
-    const fixed = issue.comments.nodes.slice(at + 1).some((comment) => {
-      const record = comment.author?.login === login ? cardRecord(comment.body, card) : undefined;
-      return record?.kind === 'fix' && record.head === head && record.from === answer.head;
-    });
-    if (!fixed) return lapse(`the newest owner answer on card ${card} names ${answer.head}, and no fix built from it by ${login} names ${head}`);
-    // Git exits 0 where the first commit is an ancestor of the second, and 1 where it is not.
-    try {
-      git(['merge-base', '--is-ancestor', answer.head, head]);
-    } catch (error) {
-      if (/** @type {{ status?: number | null }} */ (error).status !== 1) throw error;
-      return lapse(`${answer.head}, which the newest owner answer on card ${card} names, is not an ancestor of ${head}`);
-    }
-    if (held.includes('check')) return lapse(`the fix at ${head} has failed, untested or unsettled evidence`);
-  }
-  const answered = folderReasons(card, cwd, answer.head, { level, marked, herdr: false });
-  if (held.every((reason) => answered.includes(reason))) return undefined;
-  return lapse(answer.head === head
-    ? `the saved card ${source} names does not hold every wait reason that holds for HEAD`
-    : `the fix at ${head} holds a wait reason that did not hold at ${answer.head}`);
 }
 
 // The version deliver.md's squash showed, read in the session checkout by `git` with replacement refs disabled, as the
@@ -1095,10 +1008,7 @@ function publicationDecision(kind, segment, { start, tracker, boundCard, coordin
         if (holds.length) return refuse(`${heldAction}: ${holds.join(', ')}`);
       } else {
         const held = heldReasons(card, cwd, runners, { number, headRefOid: pr.headRefOid }, policy);
-        if (held.length > 0) {
-          const lapse = answerLapse(card, read, { cwd, git: runners.git, head: pr.headRefOid, held, level, marked });
-          if (lapse !== undefined) return refuse(`${heldAction}: ${held.join(', ')}${lapse}`);
-        }
+        if (held.length > 0) return refuse(`${heldAction}: ${held.join(', ')}`);
       }
       if (pinnedMerge) {
         const lapse = requiredChecksLapse(number, pr.baseRefName, runners.exec);

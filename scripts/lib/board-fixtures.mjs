@@ -1,4 +1,4 @@
-// Canonical test fixture for the raw boardQuery response shape.
+// Canonical test fixture for the raw boardQuery response shape, and at the end the Linear fake.
 // GitHub's ProjectV2Item.content field is nullable. parseBoardPage then
 // normalizes that raw null to content: {}, which downstream tests should reach
 // through the real parser rather than spelling a second response shape.
@@ -272,3 +272,121 @@ export function onePageAtATime(exec) {
   };
   return Object.assign(paged, { onePagePerRequest: true });
 }
+
+// The Linear fake: team ENG with its workflow states and automation rules, its issues and their comments, answered
+// as Linear's GraphQL API answers each query the Linear board reader sends. Its pull request addresses name
+// LINEAR_TEST_CONFIG's repository, example-owner/example-repo.
+export const linearState = (id, name, type) => ({ id, name, type });
+export const LINEAR_BACKLOG = linearState('s-backlog', 'Backlog', 'backlog');
+export const LINEAR_TODO = linearState('s-todo', 'Todo', 'unstarted');
+export const LINEAR_PROGRESS = linearState('s-progress', 'In Progress', 'started');
+export const LINEAR_AWAITING = linearState('s-awaiting', 'Awaiting Push', 'started');
+export const LINEAR_DONE = linearState('s-done', 'Done', 'completed');
+const LINEAR_CANCELED = linearState('s-canceled', 'Canceled', 'canceled');
+const LINEAR_DUPLICATE = linearState('s-duplicate', 'Duplicate', 'duplicate');
+const LINEAR_TRIAGE = linearState('s-triage', 'Triage', 'triage');
+
+export const LINEAR_TEAM_STATES = [
+  LINEAR_BACKLOG, LINEAR_TODO, LINEAR_PROGRESS, LINEAR_AWAITING, linearState('s-review', 'In Review', 'started'),
+  LINEAR_DONE, LINEAR_CANCELED, LINEAR_DUPLICATE, LINEAR_TRIAGE,
+];
+
+// The default automation rules a Linear team must hold: an opened pull request starts review and a merged
+// one is done. A draft pull request moves nothing because the team holds no draft rule, which Linear's
+// settings show as "No action" (Linear refuses a default rule with no state).
+/** @param {string} event @param {string | null} stateId @param {{ branchPattern: string, isRegex: boolean } | null} [targetBranch] */
+export const linearRule = (event, stateId, targetBranch = null) => ({ event, state: stateId && { id: stateId }, targetBranch });
+export const LINEAR_VALID_RULES = [linearRule('start', 's-review'), linearRule('merge', 's-done')];
+
+export function linearTeamWith({ states = LINEAR_TEAM_STATES, rules = LINEAR_VALID_RULES, statesPage = { hasNextPage: false }, rulesPage = { hasNextPage: false } } = {}) {
+  return {
+    teams: {
+      nodes: [{
+        id: 'team-eng',
+        key: 'ENG',
+        states: { nodes: states, pageInfo: statesPage },
+        gitAutomationStates: { nodes: rules, pageInfo: rulesPage },
+      }],
+    },
+  };
+}
+
+export const LINEAR_TEAM_READ = linearTeamWith();
+
+export const LINEAR_NO_MORE = { hasNextPage: false };
+export const linearList = (nodes) => ({ nodes, pageInfo: LINEAR_NO_MORE });
+
+/** @param {string} identifier @param {string} title @param {object} issueState @param {{ assignee?: string | null, parent?: string | null, labels?: string[], relations?: string[][], urls?: string[][] }} [options] */
+export function linearIssue(identifier, title, issueState, { assignee = null, parent = null, labels = [], relations = [], urls = [] } = {}) {
+  return {
+    id: `id-${identifier}`,
+    identifier,
+    title,
+    state: issueState,
+    assignee: assignee && { displayName: assignee },
+    parent: parent && { identifier: parent },
+    labels: linearList(labels.map((name) => ({ name }))),
+    inverseRelations: linearList(relations.map(([type, from, fromState]) => ({ type, issue: { identifier: from, state: { type: fromState } } }))),
+    attachments: linearList(urls.map(([url, linkKind]) => ({ url, metadata: { linkKind } }))),
+  };
+}
+
+const LINEAR_PULL = 'https://github.com/example-owner/example-repo/pull';
+
+// The board's active issues: the epic ENG-1 with its active child ENG-3, which carries a blocker of each
+// state, a related issue that blocks nothing and five attachments of which two are this repository's pull
+// requests: one Linear marks as closing and one it marks as only contributing.
+const LINEAR_ACTIVE = [
+  linearIssue('ENG-1', 'Epic', LINEAR_TODO, { labels: ['epic'] }),
+  linearIssue('ENG-3', 'Active child', LINEAR_TODO, {
+    assignee: 'alice',
+    parent: 'ENG-1',
+    labels: ['task', 'bug'],
+    relations: [['blocks', 'ENG-4', 'started'], ['blocks', 'ENG-5', 'canceled'], ['related', 'ENG-8', 'started']],
+    urls: [
+      [`${LINEAR_PULL}/12`, 'closes'],
+      [`${LINEAR_PULL}/16`, 'contributes'],
+      ['https://github.com/example-owner/other-repo/pull/13', 'closes'],
+      ['https://example.com/example-owner/example-repo/pull/14', 'closes'],
+      [`${LINEAR_PULL}/15/files`, 'closes'],
+    ],
+  }),
+  linearIssue('ENG-4', 'Started', LINEAR_PROGRESS),
+  linearIssue('ENG-5', 'Canceled', LINEAR_CANCELED),
+  linearIssue('ENG-6', 'Duplicate', LINEAR_DUPLICATE),
+  linearIssue('ENG-7', 'Triage', LINEAR_TRIAGE),
+  linearIssue('ENG-8', 'Backlog', LINEAR_BACKLOG),
+];
+
+// Linear leaves ENG-2, the epic's archived completed child, out of every read but the children query
+// that asks for `includeArchived: true`. A card read answers from `cards`, keyed by identifier: its description and
+// its comments, on one page.
+/** @param {{ issues?: object[], pageSize?: number, cards?: Record<string, { description: string, comments: { id: string, body: string, createdAt: string }[] }> }} [options] */
+export function linearBoard({ issues = LINEAR_ACTIVE, pageSize = issues.length, cards = {} } = {}) {
+  const calls = [];
+  const exec = (query, variables) => {
+    calls.push({ query, variables });
+    if (query.includes('teams(')) return LINEAR_TEAM_READ;
+    if (query.includes('filter: { parent:')) {
+      const archived = { identifier: 'ENG-2', parent: { identifier: 'ENG-1' }, state: { type: 'completed' } };
+      const active = { identifier: 'ENG-3', parent: { identifier: 'ENG-1' }, state: { type: 'unstarted' } };
+      return { issues: linearList(query.includes('includeArchived: true') ? [archived, active] : [active]) };
+    }
+    if (query.includes('comments(first:')) {
+      const { description, comments } = cards[variables.id];
+      return { issue: { identifier: variables.id, description, parent: null, comments: linearList(comments) } };
+    }
+    const start = variables.after === null ? 0 : Number(variables.after);
+    const end = start + pageSize;
+    return { issues: { nodes: issues.slice(start, end), pageInfo: { hasNextPage: end < issues.length, endCursor: String(end) } } };
+  };
+  return { exec, calls };
+}
+
+export const LINEAR_COMMENT_PAGES = {
+  'ENG-5': [
+    { nodes: [{ id: 'c2', createdAt: '2026-01-02T00:00:00.000Z', body: 'Claim: second' }, { id: 'c1', createdAt: '2026-01-01T00:00:00.000Z', body: 'first' }], pageInfo: { hasNextPage: true, endCursor: 'p1' } },
+    { nodes: [{ id: 'c3', createdAt: '2026-01-02T00:00:00.000Z', body: 'third' }], pageInfo: LINEAR_NO_MORE },
+  ],
+  'ENG-9': [{ nodes: [], pageInfo: LINEAR_NO_MORE }],
+};

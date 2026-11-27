@@ -1,7 +1,7 @@
 // Admission and native app phase checks bind a job to its live claim and reviewed identity.
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, sep, win32 } from 'node:path';
 import { createHash } from 'node:crypto';
 import { fetchBoard, fetchCardDetails, normalizeItem } from './board.mjs';
 import { isEpic } from './board-rules.mjs';
@@ -782,9 +782,11 @@ export function managedPath(path) {
   return typeof path === 'string' && isAbsolute(path) && normalize(path) === path && !CONTROL.test(path);
 }
 
-export function readManagedRecord(path, limit = 16 * 1024) {
-  const privateFile = (entry) => entry.isFile() && entry.nlink === 1 && entry.uid === /** @type {() => number} */ (process.getuid)()
-    && (entry.mode & 0o7777) === 0o600 && entry.size <= limit;
+// Windows has no owner ids or file modes to compare, so `platform` win32 skips those two checks here and in isCanonicalLeadFolder.
+export function readManagedRecord(path, { limit = 16 * 1024, platform = process.platform } = {}) {
+  const posix = platform !== 'win32';
+  const privateFile = (entry) => entry.isFile() && entry.nlink === 1 && (!posix || entry.uid === /** @type {() => number} */ (process.getuid)())
+    && (!posix || (entry.mode & 0o7777) === 0o600) && entry.size <= limit;
   const entry = lstatSync(path);
   if (!privateFile(entry)) throw new Error('invalid private managed record');
   const file = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -800,8 +802,16 @@ export function readManagedRecord(path, limit = 16 * 1024) {
   }
 }
 
+// Whether `folder` lies inside the user profile `home`, compared case-insensitively as Windows compares paths.
+export function insideWindowsProfile(home, folder) {
+  const relation = win32.relative(home.toLowerCase(), folder.toLowerCase());
+  return relation !== '..' && !relation.startsWith('..\\') && !win32.isAbsolute(relation);
+}
+
 export const MAX_CAP = 16;
-export function isCanonicalLeadFolder(folder) {
+export function isCanonicalLeadFolder(folder, platform = process.platform) {
   const stat = lstatSync(folder);
-  return stat.isDirectory() && stat.uid === /** @type {() => number} */ (process.getuid)() && (stat.mode & 0o7777) === 0o700 && realpathSync(folder) === folder;
+  const posix = platform !== 'win32';
+  return stat.isDirectory() && (!posix || stat.uid === /** @type {() => number} */ (process.getuid)()) && (!posix || (stat.mode & 0o7777) === 0o700)
+    && realpathSync(folder) === folder;
 }

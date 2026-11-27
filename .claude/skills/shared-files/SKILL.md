@@ -102,6 +102,8 @@ install, after the owner connects the repository to the review service in that s
 install does; it is changed later the same way as the runtimes: the update writes or removes the add-on's files to match, and the
 owner connects or disconnects the repository in the service's dashboard, which no update does.
 
+**How the owner records the external review as unavailable.** The same file may carry `externalReviewUnavailable`, `true` or a re-check date written `YYYY-MM-DD`; the `greptile` skill owns what jobs do with it, under "Read the allowance". Set it only once the installed release knows the key: a job pinned to an older copy stops at publication, as [deliver](../resume/references/deliver.md#delivery) says. The owner sets it with `File and start a card that sets externalReviewUnavailable to true on main, and deliver it`, a date written `YYYY-MM-DD` in place of `true`, and clears it with `File and start a card that removes externalReviewUnavailable from main, and deliver it`. The session that receives either message files a card quoting it, whose outcome and only acceptance criterion is that one-key change. That message is the owner's naming of the card under owner gate one and the push authorisation of owner gate two. The session builds the change as a commit of its own in that card's job, presents the plan where plan approval is on, and delivers it through a pull request, since the direct route refuses the settings file.
+
 A job that changes the setting is delivered under the value the fetched `main` held. A job that turns the add-on off
 therefore still owes the external review where its tier is `sign-off`, though its own change has removed the add-on's
 files from its worktree: it reads the add-on's skill from the fetched `main` with

@@ -1,31 +1,50 @@
-// The coordinator's shared cap lock and checks for a still-running legacy lead.
-import { spawn } from 'node:child_process';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
-import { MAX_CAP } from './pre-approved-run.mjs';
+// The coordinator's shared cap lock.
+import { execFileSync } from 'node:child_process';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { homedir, userInfo } from 'node:os';
+import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
+import { insideWindowsProfile, isCanonicalLeadFolder, MAX_CAP } from './pre-approved-run.mjs';
+
+const ACL_CHANGE_RIGHTS = ['add_file', 'add_subdirectory', 'delete_child', 'delete', 'writesecurity', 'chown'];
+
+// The first allow entry in a macOS `ls -lde` listing that lets a principal other than `user` or root change the folder's entries, or undefined.
+// An inherit-only entry counts only when `includeInheritOnly` is true.
+export function aclGrantsOthers(listing, user, includeInheritOnly = false) {
+  return listing.split('\n').slice(1).find((line) => {
+    const entry = /^\s*\d+: (.+?) (?:inherited )?(allow|deny) (\S+)$/.exec(line);
+    const rights = entry?.[3].split(',') ?? [];
+    // An inherit-only entry does not apply to the folder it sits on, so an ancestor's is skipped; the lock folder's own reaches the lock files it holds.
+    return entry?.[2] === 'allow' && entry[1] !== `user:${user}` && entry[1] !== 'user:root' && (includeInheritOnly || !rights.includes('only_inherit')) && rights.some((right) => ACL_CHANGE_RIGHTS.includes(right));
+  });
+}
 
 const DEFAULT_CAP = 4;
+const SQLITE_BUSY = 5;
+const BUSY_RETRY_MS = 100;
 
-export function checkLeadFile(fd, path) {
+// Windows has no owner ids or file modes to compare, so `platform` win32 skips those two checks.
+export function checkLeadFile(fd, path, platform = process.platform) {
   const file = fstatSync(fd);
   const named = lstatSync(path);
   const mode = file.mode & 0o7777;
+  const posix = platform !== 'win32';
   const fault = !file.isFile() ? 'is not a regular file' : file.nlink !== 1 ? 'has more than one link'
-    : file.uid !== /** @type {() => number} */ (process.getuid)() ? 'belongs to another user' : mode !== 0o600 ? `has mode ${mode.toString(8).padStart(4, '0')}, not 0600`
+    : posix && file.uid !== /** @type {() => number} */ (process.getuid)() ? 'belongs to another user' : posix && mode !== 0o600 ? `has mode ${mode.toString(8).padStart(4, '0')}, not 0600`
       : file.dev !== named.dev || file.ino !== named.ino ? 'was replaced while the lead opened it' : undefined;
   if (fault) throw new Error(`${path} ${fault}`);
 }
 
-function openLeadFile(path, readOnly) {
+export function openLeadFile(path, platform = process.platform) {
   let fd;
   try {
-    const access = readOnly ? constants.O_RDONLY : constants.O_RDWR | constants.O_CREAT;
-    fd = openSync(path, access | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     throw /** @type {NodeJS.ErrnoException} */ (error).code === 'ELOOP' ? new Error(`${path} is a symbolic link, not a lead file`) : error;
   }
   try {
-    checkLeadFile(fd, path);
+    checkLeadFile(fd, path, platform);
   } catch (error) {
     closeSync(fd);
     throw error;
@@ -33,7 +52,7 @@ function openLeadFile(path, readOnly) {
   return fd;
 }
 
-// Runs `work` under the cap lock in `state`, so no other lead or coordinator takes or probes a place meanwhile.
+// Runs work under the cap lock in state, so no other coordinator takes or probes a place meanwhile.
 export async function capLock(state, work) {
   const path = join(state, 'cap.lock');
   const lock = await lockLeadFile(path);
@@ -41,33 +60,148 @@ export async function capLock(state, work) {
   try {
     return await work();
   } finally {
-    closeSync(lock);
+    lock.release();
   }
 }
 
-// Locks a checked descriptor. Shared probes discover exclusive holders without blocking one another.
-/** @param {{ wait?: string[], signal?: AbortSignal, readOnly?: boolean, shared?: boolean }} [options] */
-export async function lockLeadFile(path, options = {}) {
-  const { wait = ['-w', '5'], signal, readOnly = false, shared = false } = options;
-  const fd = openLeadFile(path, readOnly);
-  let status;
+// Off Windows the folder must be private to this account, no ancestor changeable by another; on Windows, whose folder permissions Node cannot read, it
+// must lie inside the user profile, whose default permissions the lock relies on.
+function checkLockFolder(folder) {
+  if (process.platform === 'win32') {
+    const home = realpathSync.native(homedir());
+    if (insideWindowsProfile(home, realpathSync.native(folder))) return;
+    throw new Error(`${folder} must be inside the user profile ${home} on Windows`);
+  }
+  if (!isCanonicalLeadFolder(folder)) throw new Error(`${folder} must be a physical folder owned by this account with mode 0700`);
+  // On macOS the folder's own access control list, inherit-only entries included, can let another account change the lock files.
+  if (process.platform === 'darwin' && aclGrantsOthers(execFileSync('/bin/ls', ['-lde', folder], { encoding: 'utf8' }), userInfo().username, true)) {
+    throw new Error(`${folder} has an access control list that lets another account change it`);
+  }
+  const uid = /** @type {() => number} */ (process.getuid)();
+  for (let ancestor = dirname(folder); ; ancestor = dirname(ancestor)) {
+    const { uid: owner, mode } = lstatSync(ancestor);
+    if ((owner !== 0 && owner !== uid) || ((mode & 0o022) !== 0 && (mode & 0o1000) === 0)) {
+      throw new Error(`${folder} has an ancestor ${ancestor} that another account can change`);
+    }
+    // On macOS an access control list can let another account change entries whatever the mode says.
+    if (process.platform === 'darwin' && aclGrantsOthers(execFileSync('/bin/ls', ['-lde', ancestor], { encoding: 'utf8' }), userInfo().username)) {
+      throw new Error(`${folder} has an ancestor ${ancestor} that another account can change`);
+    }
+    if (dirname(ancestor) === ancestor) return;
+  }
+}
+
+// Why the bigint stat `file` of `path` is not a lock file, or undefined when it is one.
+function lockFileFault(path, file) {
+  const mode = Number(file.mode & 0o7777n);
+  const posix = process.platform !== 'win32';
+  if (file.isSymbolicLink()) return 'is a symbolic link';
+  if (!file.isFile()) return 'is not a regular file';
+  if (file.nlink !== 1n) return 'has more than one link';
+  if (file.size !== 0n) return 'is not empty';
+  if (posix && file.uid !== BigInt(/** @type {() => number} */ (process.getuid)())) return 'belongs to another user';
+  if (posix && mode !== 0o600) return `has mode ${mode.toString(8).padStart(4, '0')}, not 0600`;
+  // SQLite would roll a journal beside the file back into it, so the lock file would no longer be empty.
+  if (['-journal', '-wal'].some((suffix) => lstatSync(path + suffix, { throwIfNoEntry: false }))) return 'a SQLite journal is beside it';
+  return undefined;
+}
+
+function admit(path) {
+  const file = lstatSync(path, { bigint: true });
+  const fault = lockFileFault(path, file);
+  if (fault) throw new Error(`${path} is not a lock file: ${fault}`);
+  return file;
+}
+
+// Why `path` no longer holds the `admitted` lock file, or undefined while it does. SQLite opens by name, so only
+// this re-check ties a lock to the file that was admitted.
+function lockFileChange(path, admitted) {
+  const file = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  if (!file) return 'another file took its place';
+  return lockFileFault(path, file) ?? (file.dev !== admitted.dev || file.ino !== admitted.ino ? 'another file took its place' : undefined);
+}
+
+function createLockFile(path) {
   try {
-    status = await new Promise((resolve, reject) => {
-      const child = spawn('/usr/bin/flock', [shared ? '-s' : '-x', ...wait, '-E', '75', '3'],
-        { stdio: ['ignore', 'ignore', 'ignore', fd], signal });
-      let fault;
-      child.once('error', (error) => { fault = error; });
-      child.once('close', (code) => fault ? reject(fault) : resolve(code));
-    });
-    if (status === 0 || status === 75) checkLeadFile(fd, path);
+    closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_WRONLY, 0o600));
   } catch (error) {
-    closeSync(fd);
+    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'EEXIST') throw error;
+  }
+}
+
+// One lock attempt on the admitted file: its handle, or undefined when another holder has it.
+function attemptLock(path, admitted, { shared, create, open }) {
+  let database;
+  try {
+    let busy = false;
+    let refusal;
+    try {
+      database = open(path, { timeout: 0, readOnly: !create });
+      if (shared) {
+        database.exec('BEGIN');
+        database.prepare('SELECT count(*) FROM sqlite_schema').get();
+      } else {
+        // A real SQLite database keeps page 1 in its main file, so a swapped-in one is refused before the pragma can touch it.
+        if (database.prepare('PRAGMA page_count').get().page_count !== 0) {
+          refusal = new Error(`${path} is not a lock file: is not empty`);
+          throw refusal;
+        }
+        // SQLite's default journal would create `<path>-journal`, which admission refuses; MEMORY keeps it in RAM.
+        database.exec('PRAGMA journal_mode = MEMORY');
+        database.exec('BEGIN EXCLUSIVE');
+      }
+    } catch (error) {
+      if (error === refusal) throw error;
+      const { errcode, message } = /** @type {{ errcode?: number, message: string }} */ (error);
+      if (errcode !== SQLITE_BUSY) throw new Error(`${path} could not be locked: ${message}`);
+      busy = true;
+    }
+    const change = lockFileChange(path, admitted);
+    if (change) throw new Error(`${path} changed while it was being locked: ${change}`);
+    if (busy) {
+      database?.close();
+      return undefined;
+    }
+  } catch (error) {
+    database?.close();
     throw error;
   }
-  if (status === 0) return fd;
-  closeSync(fd);
-  if (status !== 75) throw new Error(`${path} could not be locked: flock exited ${status}`);
-  return undefined;
+  const held = /** @type {DatabaseSync} */ (database);
+  let released = false;
+  return {
+    identity: { dev: admitted.dev, ino: admitted.ino },
+    check() {
+      const change = lockFileChange(path, admitted);
+      if (change) throw new Error(`${path} changed while locked: ${change}`);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        held.exec('ROLLBACK');
+      } finally {
+        held.close();
+      }
+    },
+  };
+}
+
+// Locks the empty lock file at `path` through SQLite, whose operating-system lock its holder's death frees: a handle
+// `{ identity, check(), release() }`, or undefined when another holder kept it for `waitMs`. Shared probes discover
+// exclusive holders without blocking one another, and a probe with `create: false` opens read-only and creates nothing.
+/** @param {{ waitMs?: number, signal?: AbortSignal, shared?: boolean, create?: boolean, open?: (path: string, options: { timeout: number, readOnly: boolean }) => DatabaseSync }} [options] */
+export async function lockLeadFile(path, options = {}) {
+  const { waitMs = 5000, signal, shared = false, create = true, open = (file, settings) => new DatabaseSync(file, settings) } = options;
+  if (!create && !shared) throw new Error(`${path} can be locked exclusively only by a lock that may create it`);
+  checkLockFolder(dirname(path));
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    signal?.throwIfAborted();
+    if (create && !lstatSync(path, { throwIfNoEntry: false })) createLockFile(path);
+    const lock = attemptLock(path, admit(path), { shared, create, open });
+    if (lock !== undefined || performance.now() >= deadline) return lock;
+    await delay(BUSY_RETRY_MS, undefined, { signal }).catch((error) => { throw signal?.aborted ? signal.reason : error; });
+  }
 }
 
 // The shared cap from the file at `path`: DEFAULT_CAP when there is none; throws, naming the cause, when it cannot be read.
@@ -89,137 +223,4 @@ export function readCap(path) {
   const cap = settings?.cap;
   if (!Number.isInteger(cap) || cap < 1 || cap > MAX_CAP) throw new Error(`${path} must set cap to a whole number from 1 to ${MAX_CAP}, not ${JSON.stringify(cap)}`);
   return cap;
-}
-
-// The arguments of process `pid`, read from its whole NUL-ended command line of at most 64 KiB; throws when that
-// cannot be read, so a longer one counts as unreadable, and an empty one as ESRCH, gone.
-function processArguments(pid) {
-  const limit = 64 * 1024;
-  const fd = openSync(`/proc/${pid}/cmdline`, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const bytes = Buffer.alloc(limit + 1);
-    let length = 0;
-    for (let read = 1; read > 0 && length < bytes.length; length += read) read = readSync(fd, bytes, length, bytes.length - length, null);
-    // Linux gives an exiting or zombie process an empty command line, so it counts as gone, as `standingLead` already treats ESRCH.
-    if (length === 0) throw Object.assign(new Error(`process ${pid} has exited`), { code: 'ESRCH' });
-    if (length > limit || bytes[length - 1] !== 0) throw new Error(`process ${pid}'s command line is unavailable`);
-    return bytes.subarray(0, length - 1).toString('utf8').split('\0');
-  } finally {
-    closeSync(fd);
-  }
-}
-
-const NODE_NON_FILE_OPTIONS = new Set(['-e', '-pe', '-p', '--eval', '--print', '--run']);
-const NODE_OPTIONS_WITH_OPERANDS = new Set([
-  '-r', '--require', '--import', '--loader', '--experimental-loader',
-  '-C', '--conditions', '--env-file', '--env-file-if-exists',
-]);
-
-function nodeEntryCandidates(args) {
-  const entries = [];
-  let uncertain = false;
-  for (let index = 1; index < args.length; index++) {
-    const argument = args[index];
-    if (argument === '-') break;
-    if (argument === '--') {
-      if (args[index + 1] !== undefined && args[index + 1] !== '-') entries.push(index + 1);
-      break;
-    }
-    if (!argument.startsWith('-')) {
-      if (argument !== 'inspect') entries.push(index);
-      break;
-    }
-    const flag = argument.split('=', 1)[0].replaceAll('_', '-');
-    if (NODE_NON_FILE_OPTIONS.has(flag)) break;
-    if (argument.includes('=')) continue;
-    if (NODE_OPTIONS_WITH_OPERANDS.has(flag)) {
-      index++;
-      continue;
-    }
-    const base = flag.replace(/^--(?:no-)?/, '');
-    if (flag.startsWith('--') && process.allowedNodeEnvironmentFlags.has(`--no-${base}`)) continue;
-
-    const next = args[index + 1];
-    if (next !== undefined && !next.startsWith('-')) {
-      // It could be the entry itself. Keep walking in case the option consumed it instead.
-      uncertain = true;
-      index++;
-      if (next !== 'inspect') entries.push(index);
-    }
-  }
-  return { entries, uncertain };
-}
-
-// A removed script can still be running, so use its physical parent when the script entry is absent.
-function leadScriptPath(folder, argument) {
-  const name = basename(argument);
-  if (name !== 'lead.mjs') return '';
-  const path = resolve(folder, argument);
-  try {
-    return realpathSync(path);
-  } catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') return '';
-  }
-  try {
-    lstatSync(path);
-    // A dangling symlink still occupies the script entry.
-    return '';
-  } catch (error) {
-    if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') return '';
-  }
-  try {
-    return join(realpathSync(dirname(path)), name);
-  } catch {
-    // Without a resolvable parent, the missing script has no project identity.
-    return '';
-  }
-}
-
-// Keep possible standalone script identities separate from a proven entry.
-export function standingLeadProcessCommand(pid) {
-  const args = processArguments(pid);
-  const folder = realpathSync(`/proc/${pid}/cwd`);
-  const { entries, uncertain } = nodeEntryCandidates(args);
-  if (!uncertain) {
-    const [entry] = entries;
-    return { args, script: leadScriptPath(folder, args[entry] ?? ''), entry };
-  }
-  const uncertainScripts = [];
-  for (const entry of entries) {
-    if (args.includes('--space', entry + 1)) continue;
-    const script = leadScriptPath(folder, args[entry]);
-    if (script) uncertainScripts.push(script);
-  }
-  return { args, script: '', uncertainScripts };
-}
-
-// The standing lead running the project at `root`: `{ pid }`, `{}` where none runs, or `{ cause, fix }` where that
-// cannot be read. A standing lead is a Node process running this project's scripts/lead.mjs without `--space`.
-// Legacy coordinated drivers used `--space`. Off Linux there is no /proc to identify these processes.
-export function standingLead({ root, machine, env, command }) {
-  const linux = `run ${command} on the Linux machine that runs Herdr`;
-  if (machine.platform !== 'linux') return { cause: `${machine.platform} has no /proc to read running processes from`, fix: linux };
-  const run = machine.run('pgrep', ['-u', String(machine.account.uid), '-f', 'scripts/lead\\.mjs'], { env });
-  if (run.status === 1) return {};
-  if (run.status !== 0) return { cause: run.stderr?.trim() || 'pgrep did not answer', fix: `check that pgrep runs, then rerun ${command}` };
-  const lead = join(root, 'scripts', 'lead.mjs');
-  for (const pid of run.stdout.trim().split('\n')) {
-    let running;
-    try {
-      running = machine.processCommand(pid);
-    } catch (error) {
-      const { code, message } = /** @type {NodeJS.ErrnoException} */ (error);
-      if (code === 'ENOENT' || code === 'ESRCH') continue;
-      return { cause: message, fix: linux };
-    }
-    if (!['node', 'nodejs'].includes(basename(running.args[0]))) continue;
-    if (running.script === lead && !running.args.includes('--space', (running.entry ?? 1) + 1)) return { pid };
-    if (running.uncertainScripts?.includes(lead)) {
-      return {
-        cause: `Node options make it unclear whether process ${pid} runs ${lead}. Inspect its invocation`,
-        fix: `rerun ${command} once the process entry point is clear`,
-      };
-    }
-  }
-  return {};
 }

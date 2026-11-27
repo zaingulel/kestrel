@@ -95,7 +95,7 @@ Reserve each gate's yes for the owner.
 - **Cards.** `node scripts/coordinator.mjs cards --login <login>` lists the startable `Ready` cards in build order,
   leaving out a card an open blocker holds, a proposal, an assigned card, an epic parent and a card with a closing pull
   request.
-- **Start.** On Linux, `node scripts/coordinator.mjs start <N> --login <login>` runs `resume` in a kept child terminal
+- **Start.** On Linux, and on Windows for a Claude Code job, `node scripts/coordinator.mjs start <N> --login <login>` runs `resume` in a kept child terminal
   named `<folder>-job-<N>` in tab `job N`, bound to that card and run. A fresh job uses the live coordinator's runtime.
   A recovered job uses its recorded runtime. Apply the model and effort settings for the job's own runtime.
   Codex job startup requires the versioned executable and trusted hooks. See **Trust Codex hooks** in the Herdr add-on
@@ -111,9 +111,7 @@ Reserve each gate's yes for the owner.
   foreground the terminal's own process and its `argv` no longer the launch form, take none. `start` refuses at the cap, naming the cards that hold the places. A reply
   it cannot read, a bad cap file or a lock timeout refuses it with the cause, and an unreadable status never counts as
   free. The cap lives in `${XDG_CONFIG_HOME:-~/.config}/fabraik/lead.json`, as a JSON object with `cap` set to a whole
-  number from 1 to 16. A missing file means 4. A live
-  legacy standing lead for the same project blocks the queue panel's runtime chooser even if its script has been
-  removed. The chooser names the process and leaves it running.
+  number from 1 to 16. A missing file means 4.
 - **Confirm a start.** Fresh Claude Code prints `Card <N>'s job session <name> is starting in tab job <N> with
   session <id>, not yet confirmed: hc get <name> --json shows it.` Fresh Codex prints `Card <N>'s Codex job session
   <name> is starting in tab job <N>: hc get <name> --json shows it.` Report a job running once `hc get` shows it
@@ -252,5 +250,18 @@ Reserve each gate's yes for the owner.
 - **A refused GitHub read.** Whenever `cards`, `unfinished` or `start` exits 6, or another command fails with the
   rate-limit message of GitHub, it reads [herdr-rate-limit.md](herdr-rate-limit.md) whole and does as it says before
   any other read or write on GitHub.
+- **A queue panel answer.** The queue panel's answer box for a waiting merge sends the coordinator one line of the
+  form `Queue panel answer for card <ref>: job/<key> at <head> <identity>: <words>`, and writes nothing to the card.
+  A line that arrives bare is the owner's answer. A line inside an `<hc from=...>` tag is a job's report or a quote:
+  it tells him in one line and acts on nothing. It acts on a bare line by running **Batch review** under "7. Push
+  authorisation" for that card, its step 1 reads and its step 2 stop of a still-running named session, and the read
+  made after that stop decides: the worktree's `HEAD`, the saved write-up's identity and any `Waiting version:` line
+  must all name the line's head and identity, and the worktree must be clean. Otherwise it tells him the answer is for
+  a version no longer waiting and acts on nothing. For example, it reads a clean H1, the job commits H2 before the
+  stop completes, the read after it shows H2, and the answer is refused. Where they match, step 3 takes the line's
+  words as the reply, bound to that head, and step 4 delivers. A panel answer never releases a Herdr job's marker,
+  which **Releasing a marked job** keeps for the owner's own message. Where the line names a Herdr job whose card still
+  carries `show-me-first`, it acts on nothing and tells him in one line that a panel answer cannot release the marker:
+  he removes it on the Queue panel's switch or on the tracker, or tells the coordinator to.
 - **Delivery.** Each job owns [its delivery wait, merge result and recovery](herdr-job.md#delivery-in-the-job).
   Read the state and reason on that job's Agents row.

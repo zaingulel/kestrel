@@ -1,4 +1,3 @@
-// @ts-nocheck
 // herdr-queue.test.mjs — the queue panel's machine aggregator (.agents/herdr/fabraik-queue/queue.mjs).
 // Run: node --test scripts/lib/herdr-queue.test.mjs
 //
@@ -13,8 +12,8 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
-import { hostname, tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COLLECTOR_FORMAT, main as queueMain, rank, refresh, waitingMenu as waitingMenuIn } from '../../.agents/herdr/fabraik-queue/queue.mjs';
 import { ownerMenu } from './owner-menu.mjs';
@@ -22,7 +21,7 @@ import { FORMAT } from './owner-queue.mjs';
 
 const QUEUE = fileURLToPath(new URL('../../.agents/herdr/fabraik-queue/queue.mjs', import.meta.url));
 // What `queue.mjs` prints on stderr, with exit 2, for any argument shape it does not take.
-const QUEUE_USAGE = 'usage: node queue.mjs refresh [<terminals>] --home <dir> | menus [<terminals>] --home <dir> | clear-digest --home <dir> | open-log <key> --home <dir> | act <key> <action> <version> [<reply>|<proposal>] --home <dir> | undo <key> <action> <record> --home <dir> | move <key> <move> <version> [<place>] --home <dir> | report <key> --home <dir> | show-first <key> <on|off> --home <dir> | waiting-menu <terminal> --home <dir> | answer-menu <terminal> <askId> --answer <json> --home <dir> | notify [--initialize] --home <dir> | open-coordinator <repository> <claude|codex> --home <dir>\n';
+const QUEUE_USAGE = 'usage: node queue.mjs refresh [<terminals>] --home <dir> | menus [<terminals>] --home <dir> | clear-digest --home <dir> | act <key> <action> <version> [<reply>|<proposal>] --home <dir> | undo <key> <action> <record> --home <dir> | move <key> <move> <version> [<place>] --home <dir> | report <key> --home <dir> | show-first <key> <on|off> --home <dir> | waiting-menu <terminal> --home <dir> | answer-menu <terminal> <askId> --answer <json> --home <dir> | notify [--initialize] --home <dir> | open-coordinator <repository> <claude|codex> --home <dir>\n';
 
 const A = join('/', 'repos', 'a');
 const B = join('/', 'repos', 'b');
@@ -99,9 +98,6 @@ const terminal = (address, report, folder) => ({ address, report, folder });
 const terminalList = (list) => JSON.stringify(list);
 const NO_TERMINALS = terminalList([]);
 
-// The lead of a repository with no lead terminal and no claim elsewhere, and where its board could not be read.
-const NO_LEAD = { here: [], elsewhere: [] };
-const NO_LEAD_UNREAD_BOARD = { here: [], elsewhere: null };
 // Board entries without their own problem lines, which the board problems test owns, so a test of other fields holds
 // whatever lines its repositories gave.
 const withoutProblems = (boards) => boards.map(({ problems, ...entry }) => entry);
@@ -111,7 +107,7 @@ function parseMessage(text) {
   try {
     JSON.parse(text);
   } catch (error) {
-    return error.message;
+    return /** @type {Error} */ (error).message;
   }
 }
 
@@ -211,6 +207,7 @@ test('a rebuild after restart gives the same items once each and keeps cleared d
   assert.deepEqual(readFileSync(dismissed), marks);
 
   rmSync(join(state, 'queue.json'));
+  // @ts-expect-error the query string loads a fresh module instance, which the checker cannot resolve
   const restarted = await import('../../.agents/herdr/fabraik-queue/queue.mjs?after-clear');
   await restarted.refresh({ home, runCollector: collector([c4, c3, c2, c1]) });
   assert.deepEqual(keys(), [`${repository}#5`, `${repository}@c4`]);
@@ -372,48 +369,41 @@ test('an unreadable, readerless or incompatible repository is reported, adds no 
     folder: realpathSync(good),
     cards: [{ card: 3, title: 'g3', column: 'Ready', order: 1, blockers: [], claim: null, waitsOn: 'question' }],
     merged: [merge('g1', '2026-11-09T09:00:00Z')],
-    lead: NO_LEAD,
   });
   assert.equal(boards[1].repository, join(root, 'absent'));
   assert.match(boards[1].unreadable, new RegExp(
     `^folder unreadable: ENOENT: no such file or directory, \\w+ '${literal(join(root, 'absent'))}'$`,
   ));
-  assert.deepEqual(boards[1].lead, NO_LEAD_UNREAD_BOARD);
   assert.deepEqual(boards.slice(2), [
     {
       repository: join(root, 'slow'),
       folder: realpathSync(join(root, 'slow')),
       unreadable: 'the queue reader timed out after 120 s',
       merged: null,
-      lead: NO_LEAD_UNREAD_BOARD,
     },
     {
       repository: join(root, 'broken'),
       folder: realpathSync(join(root, 'broken')),
       unreadable: 'the queue reader failed: owner-queue: board exploded',
       merged: null,
-      lead: NO_LEAD_UNREAD_BOARD,
     },
     {
       repository: join(root, 'garbled'),
       folder: realpathSync(join(root, 'garbled')),
       unreadable: `the queue reader failed: ${parseMessage('queue reader crashed')}`,
       merged: null,
-      lead: NO_LEAD_UNREAD_BOARD,
     },
     {
       repository: join(root, 'newer'),
       folder: realpathSync(join(root, 'newer')),
       unreadable: 'on release v9.0.0, panel on release v1.0.0: its items are not shown',
       merged: null,
-      lead: NO_LEAD_UNREAD_BOARD,
     },
     {
       repository: partial,
       folder: realpathSync(partial),
       cards: [],
       merged: [merge('p1', '2026-11-09T08:00:00Z')],
-      lead: NO_LEAD,
     },
   ]);
 
@@ -470,25 +460,22 @@ test("each readable repository's board is gathered in record order, and a null, 
     {
       ...entry('placed'),
       cards: placedCards,
-      lead: { here: [], elsewhere: [{ machine: 'other-host', cards: [2] }], claimsUnread: [3] },
     },
     {
       ...entry('unplaced'),
       cards: unplacedCards,
       orderUnread: 'a card was recovered from the issue list',
       waitsOnUnread: ['approvals'],
-      lead: NO_LEAD,
     },
-    { ...entry('failed'), unreadable: 'board exploded', lead: NO_LEAD_UNREAD_BOARD },
+    { ...entry('failed'), unreadable: 'board exploded' },
     {
       ...entry('old'),
       unreadable: "its queue reader's release predates the board read",
-      lead: { hereUnread: "its lead's release predates state reporting", elsewhere: null },
     },
-    { ...entry('notlist'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('badcard'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('text'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('badoutcome'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
+    { ...entry('notlist'), unreadable: notBoard },
+    { ...entry('badcard'), unreadable: notBoard },
+    { ...entry('text'), unreadable: notBoard },
+    { ...entry('badoutcome'), unreadable: notBoard },
   ]);
   // Every repository's queue items still show beside its unreadable board.
   const itemCards = { placed: 1, unplaced: 4, failed: 5, old: 6, notlist: 7, badcard: 8, text: 9, badoutcome: 10 };
@@ -545,21 +532,18 @@ test("each board carries its repository's real folder, its last-day merges whate
         card(24),
       ],
       merged: [m2, m1],
-      lead: NO_LEAD,
     },
     {
       repository: odd,
       folder: realpathSync(odd),
       unreadable: 'its board is not a board document',
       merged: [],
-      lead: NO_LEAD_UNREAD_BOARD,
     },
     {
       repository: broken,
       folder: realpathSync(broken),
       unreadable: 'the queue reader failed: collector blew up',
       merged: null,
-      lead: NO_LEAD_UNREAD_BOARD,
     },
   ]);
 });
@@ -602,14 +586,13 @@ test('a board keyed by issue keys is recorded with its keys, and its place stays
     {
       ...entry('linear'),
       cards: linearCards,
-      lead: { here: [], elsewhere: [{ machine: 'other-host', cards: ['ENG-12'] }], claimsUnread: ['ENG-13'] },
     },
-    { ...entry('jira'), cards: jiraCards, lead: NO_LEAD },
-    { ...entry('azure'), cards: azureCards, lead: NO_LEAD },
-    { ...entry('emptycard'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('objectcard'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('emptyblocker'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
-    { ...entry('textplace'), unreadable: notBoard, lead: NO_LEAD_UNREAD_BOARD },
+    { ...entry('jira'), cards: jiraCards },
+    { ...entry('azure'), cards: azureCards },
+    { ...entry('emptycard'), unreadable: notBoard },
+    { ...entry('objectcard'), unreadable: notBoard },
+    { ...entry('emptyblocker'), unreadable: notBoard },
+    { ...entry('textplace'), unreadable: notBoard },
   ]);
 });
 
@@ -695,236 +678,18 @@ test('a cache too large with boards drops the boards first and keeps the queue',
   await refresh({ home, runCollector: (repository) => collectors[basename(repository)](), terminals: NO_TERMINALS });
 
   assert.ok(statSync(join(state, 'queue.json')).size < 1024 * 1024);
-  // Every board is replaced, the small one too, but each keeps the lead read from its board, here and not the machines
-  // claiming its cards; the items and the problems are the ones a small cache has.
+  // Every board is replaced, the small one too; the items and the problems are the ones a small cache has.
   assert.deepEqual(withoutProblems(cache().boards), [
-    { repository: join(root, 'big'), unreadable: 'too large to show', lead: NO_LEAD_UNREAD_BOARD },
-    { repository: join(root, 'small'), unreadable: 'too large to show', lead: NO_LEAD_UNREAD_BOARD },
+    { repository: join(root, 'big'), unreadable: 'too large to show' },
+    { repository: join(root, 'small'), unreadable: 'too large to show' },
   ]);
   assert.deepEqual(cache().items.map((item) => item.key), [`${join(root, 'big')}#1`, `${join(root, 'small')}#2`]);
   assert.deepEqual(cache().problems, []);
 });
 
-test('the too-large fallback keeps lead state within the read limit', async (t) => {
-  const root = temporaryFolder(t, 'herdr-queue-repos-');
-  const led = join(root, 'led');
-  const blind = join(root, 'blind');
-  for (const folder of [led, blind]) mkdirSync(folder);
-  // Twenty machines with distinct 60,000-character names claim cards, so the machine names alone would fill the cache.
-  const card = (number, claim) => ({ card: number, title: `t${number}`, column: 'Ready', blockers: [], claim, waitsOn: null });
-  const machine = (number) => String(number).padStart(2, '0') + 'm'.repeat(59_998);
-  const ledCards = [
-    ...Array.from({ length: 20 }, (_, index) => card(index + 1, { machine: machine(index + 1), runtime: 'Claude Code' })),
-    { card: 21, title: 't21', column: 'Ready', blockers: [], unread: 'comments unavailable' },
-  ];
-  const cards = { led: ledCards, blind: [card(30, { machine: 'other-host', runtime: 'Codex' })] };
-  // The lead terminal of `led` is read; the other lead terminal gives no folder, so whether it is blind's lead is unknown.
-  const list = terminalList([
-    terminal('t1', { state: 'working', app: 'fabraik-lead' }, led),
-    terminal('t2', { state: 'idle', app: 'fabraik-lead' }, undefined),
-  ]);
-  const { home, state, cache } = releasedHome(t, [led, blind]);
-
-  await refresh({
-    home,
-    runCollector: (repository) => collectorDocument({ board: { cards: cards[basename(repository)] } }),
-    terminals: list,
-  });
-
-  assert.ok(statSync(join(state, 'queue.json')).size <= 1024 * 1024, 'the cache is within the panel read limit');
-  assert.deepEqual(withoutProblems(cache().boards), [
-    { repository: led, unreadable: 'too large to show', lead: { here: [{ terminal: 't1', state: 'working' }], elsewhere: null } },
-    {
-      repository: blind,
-      unreadable: 'too large to show',
-      lead: { hereUnread: "a lead terminal's folder could not be read, so it may be this repository's", elsewhere: null },
-    },
-  ]);
-  assert.deepEqual(cache().problems, []);
-});
-
-test("each repository's lead is the Herdr terminal reporting as the lead from its folder, and the machines claiming its cards elsewhere", async (t) => {
-  const root = temporaryFolder(t, 'herdr-queue-repos-');
-  const links = temporaryFolder(t, 'herdr-queue-links-');
-  const unlisted = temporaryFolder(t, 'herdr-queue-unlisted-');
-  const alpha = join(root, 'alpha');
-  const beta = join(root, 'beta');
-  const gamma = join(root, 'gamma');
-  for (const folder of [alpha, beta, gamma]) mkdirSync(folder);
-  // The record names beta through a link, and Herdr gives the folder of alpha's first lead through another.
-  const alphaLink = join(links, 'alpha-link');
-  const betaLink = join(links, 'beta');
-  symlinkSync(alpha, alphaLink, 'junction');
-  symlinkSync(beta, betaLink, 'junction');
-  const card = (number, claim) => ({ card: number, title: `t${number}`, column: 'Ready', blockers: [], claim, waitsOn: null });
-  const alphaCards = [
-    card(1, { machine: hostname(), runtime: 'Claude Code' }),
-    card(2, { machine: 'other-machine', runtime: 'Claude Code' }),
-    card(3, { machine: 'remote-box', runtime: 'Codex' }),
-    card(4, { machine: 'other-machine', runtime: 'Claude Code cloud' }),
-    card(5, { machine: 'other-machine', runtime: 'Codex' }),
-    { card: 6, title: 't6', column: 'Ready', blockers: [], unread: 'comments unavailable' },
-    card(7, null),
-  ];
-  const betaCards = [
-    card(8, { machine: hostname(), runtime: 'Codex' }),
-    card(9, { machine: 'remote-box', runtime: 'Claude Code cloud' }),
-  ];
-  const gammaCards = [card(10, null)];
-  const collectors = {
-    alpha: () => collectorDocument({ board: { cards: alphaCards } }),
-    beta: () => collectorDocument({ board: { cards: betaCards } }),
-    gamma: () => collectorDocument({ board: { cards: gammaCards } }),
-  };
-  // The lead reports its own `unknown` as herdr-core's `error`. t5 is a lead in no listed repository, t6 reports nothing,
-  // and t7 is no lead, so its missing folder leaves every repository's lead readable.
-  const list = terminalList([
-    terminal('t1', { state: 'working', app: 'fabraik-lead' }, alphaLink),
-    terminal('t2', { state: 'working', app: 'claude-code' }, alpha),
-    terminal('t3', { state: 'blocked', app: 'fabraik-lead' }, alpha),
-    terminal('t4', { state: 'error', app: 'fabraik-lead' }, beta),
-    terminal('t5', { state: 'idle', app: 'fabraik-lead' }, unlisted),
-    terminal('t6', null, gamma),
-    terminal('t7', { state: 'done', app: null }, undefined),
-    terminal('t8', { state: 'done', app: 'fabraik-lead' }, beta),
-  ]);
-  const { home, cache } = releasedHome(t, [alpha, betaLink, gamma]);
-
-  await refresh({ home, runCollector: (repository) => collectors[basename(repository)](), terminals: list });
-
-  assert.deepEqual(withoutProblems(cache().boards), [
-    {
-      repository: alpha,
-      folder: realpathSync(alpha),
-      cards: alphaCards,
-      merged: [],
-      lead: {
-        here: [{ terminal: 't1', state: 'working' }, { terminal: 't3', state: 'blocked' }],
-        elsewhere: [{ machine: 'other-machine', cards: [2, 5] }, { machine: 'remote-box', cards: [3] }],
-        claimsUnread: [6],
-      },
-    },
-    {
-      repository: betaLink,
-      folder: realpathSync(beta),
-      cards: betaCards,
-      merged: [],
-      lead: { here: [{ terminal: 't4', state: 'unknown' }, { terminal: 't8', state: 'done' }], elsewhere: [] },
-    },
-    { repository: gamma, folder: realpathSync(gamma), cards: gammaCards, merged: [], lead: NO_LEAD },
-  ]);
-});
-
-test("a lead terminal on another machine is never a repository's lead, and its missing folder never makes lead state unreadable", async (t) => {
-  const root = temporaryFolder(t, 'herdr-queue-repos-');
-  const alpha = join(root, 'alpha');
-  const beta = join(root, 'beta');
-  for (const folder of [alpha, beta]) mkdirSync(folder);
-  // Another machine's terminal address carries that machine's name before a slash; this machine's has none. The remote
-  // lead's folder may exist here too, and the panel knows that machine's lead only from its card claims.
-  const list = terminalList([
-    terminal('remote-box/t1', { state: 'blocked', app: 'fabraik-lead' }, alpha),
-    terminal('t1', { state: 'working', app: 'fabraik-lead' }, alpha),
-    terminal('remote-box/t2', { state: 'idle', app: 'fabraik-lead' }, undefined),
-  ]);
-  const { home, cache } = releasedHome(t, [alpha, beta]);
-
-  await refresh({ home, runCollector: () => collectorDocument({ board: { cards: [] } }), terminals: list });
-
-  assert.deepEqual(withoutProblems(cache().boards), [
-    {
-      repository: alpha,
-      folder: realpathSync(alpha),
-      cards: [],
-      merged: [],
-      lead: { here: [{ terminal: 't1', state: 'working' }], elsewhere: [] },
-    },
-    { repository: beta, folder: realpathSync(beta), cards: [], merged: [], lead: NO_LEAD },
-  ]);
-});
-
-test('an unreadable terminal list or lead folder makes lead state unreadable, never no lead', async (t) => {
-  const repository = temporaryFolder(t, 'herdr-queue-repo-');
-  const cards = [
-    { card: 1, title: 't1', column: 'Ready', blockers: [], claim: null, waitsOn: null },
-    { card: 2, title: 't2', column: 'Ready', blockers: [], claim: { machine: 'other-machine', runtime: 'Claude Code' }, waitsOn: null },
-  ];
-  const unreadLead = (hereUnread) => ({ hereUnread, elsewhere: [{ machine: 'other-machine', cards: [2] }] });
-  const notATerminalList = unreadLead("Herdr's terminal list could not be read: it is not a terminal list");
-  // Each bad entry sits beside this repository's lead and is not a lead's, so the whole list is checked before any
-  // entry is set aside.
-  const lead = terminal('t1', { state: 'working', app: 'fabraik-lead' }, repository);
-  const rows = {
-    'no list given': {
-      terminals: undefined,
-      lead: unreadLead("Herdr's terminal list could not be read: the refresh was given none"),
-    },
-    'a list the app failed to give': {
-      terminals: JSON.stringify({ unread: 'terminals failed\nat main.js' }),
-      lead: unreadLead("Herdr's terminal list could not be read: terminals failed"),
-    },
-    'text that is not JSON': { terminals: 'herdr is starting', lead: notATerminalList },
-    'a JSON object without a cause': { terminals: JSON.stringify({ terminals: [lead] }), lead: notATerminalList },
-    'an entry with no address': {
-      terminals: terminalList([lead, { report: { state: 'idle', app: 'claude-code' }, folder: repository }]),
-      lead: notATerminalList,
-    },
-    'an entry with no report': {
-      terminals: terminalList([lead, { address: 't2', folder: repository }]),
-      lead: notATerminalList,
-    },
-    'a report with a state herdr-core does not have': {
-      terminals: terminalList([lead, terminal('t2', { state: 'unknown', app: 'claude-code' }, repository)]),
-      lead: notATerminalList,
-    },
-    'a report whose app is not text': {
-      terminals: terminalList([lead, terminal('t2', { state: 'idle', app: 7 }, repository)]),
-      lead: notATerminalList,
-    },
-    'an entry whose folder is not text': {
-      terminals: terminalList([lead, terminal('t2', { state: 'idle', app: 'claude-code' }, 7)]),
-      lead: notATerminalList,
-    },
-    "a lead terminal whose folder Herdr does not give, so it may be this repository's": {
-      terminals: terminalList([
-        terminal('t1', { state: 'working', app: 'fabraik-lead' }, undefined),
-        terminal('t2', { state: 'idle', app: 'claude-code' }, repository),
-      ]),
-      lead: unreadLead("a lead terminal's folder could not be read, so it may be this repository's"),
-    },
-    'a reader that predates the board': {
-      board: undefined,
-      terminals: terminalList([lead]),
-      lead: { hereUnread: "its lead's release predates state reporting", elsewhere: null },
-      unreadable: "its queue reader's release predates the board read",
-    },
-  };
-
-  for (const [name, row] of Object.entries(rows)) {
-    const { home, cache } = releasedHome(t, [repository]);
-
-    await refresh({
-      home,
-      runCollector: () => collectorDocument({ board: 'board' in row ? row.board : { cards } }),
-      terminals: row.terminals,
-    });
-
-    assert.deepEqual(
-      withoutProblems(cache().boards),
-      [{
-        repository,
-        folder: realpathSync(repository),
-        ...(row.unreadable ? { unreadable: row.unreadable } : { cards }),
-        merged: [],
-        lead: row.lead,
-      }],
-      name,
-    );
-  }
-});
-
 // The panel reads herdr-core's terminal list as a refresh begins and runs `queue.mjs refresh` with that list as its one
-// operand, so this runs the command as the panel does, over a queue reader built as the failure log test builds one.
+// operand, so this runs the command as the panel does, over a queue reader that prints an empty document. The list reaches
+// the refresh where the waiting menu of its blocked terminal is answerable and no line says the list was not read.
 test("the panel's terminal list reaches a refresh as its one argument", (t) => {
   const repository = temporaryFolder(t, 'herdr-queue-repo-');
   mkdirSync(join(repository, 'scripts'));
@@ -932,15 +697,19 @@ test("the panel's terminal list reaches a refresh as its one argument", (t) => {
   const { home, state, cache } = releasedHome(t, [repository]);
   const refreshWith = (...lists) => spawnSync(process.execPath, [QUEUE, 'refresh', ...lists, '--home', home], { encoding: 'utf8' });
 
-  const refreshed = refreshWith(terminalList([terminal('t1', { state: 'idle', app: 'fabraik-lead' }, repository)]));
+  const id = writeAsk(home, 't1', 1);
+
+  const answerable = () => cache().items.filter((item) => item.category === 'menu').map((item) => [item.terminal, item.askId, item.answerable]);
+  const refreshed = refreshWith(blockedAt('t1'));
   assert.equal(refreshed.status, 0, refreshed.stderr);
-  assert.deepEqual(withoutProblems(cache().boards), [{
-    repository,
-    folder: realpathSync(repository),
-    cards: [],
-    merged: [],
-    lead: { here: [{ terminal: 't1', state: 'idle' }], elsewhere: [] },
-  }]);
+  assert.deepEqual(cache().problems, [], 'no line says the terminal list was not read');
+  assert.deepEqual(answerable(), [['t1', id, true]], "the blocked terminal's waiting menu is answerable");
+
+  // A report's app and a terminal's folder are fields no reader takes, so a sibling's malformed ones refuse nothing.
+  const sibling = refreshWith(terminalList([terminal('t1', { state: 'blocked' }), terminal('t2', { state: 'working', app: 7 }, 9)]));
+  assert.equal(sibling.status, 0, sibling.stderr);
+  assert.deepEqual(cache().problems, [], "a sibling's malformed app and folder do not refuse the terminal list");
+  assert.deepEqual(answerable(), [['t1', id, true]], "a sibling's malformed app and folder leave the blocked terminal's waiting menu answerable");
 
   const listing = () => readdirSync(home, { recursive: true }).sort();
   const before = listing();
@@ -994,7 +763,7 @@ test('a corrupt machine record or marks file is reported', async (t) => {
   });
   const record = (fields) => ({ ...releaseReceipt(), repositories: [repository], ...fields });
   // Refreshes a fresh home holding `machine` (no record where undefined), after `prepare(home, state)`.
-  const outcome = async (machine, prepare = () => {}) => {
+  const outcome = async (machine, /** @type {(home: string, state: string) => unknown} */ prepare = () => {}) => {
     const { home, state, cache } = temporaryHome(t, machine);
     writePanelFiles(home);
     prepare(home, state);
@@ -1082,7 +851,7 @@ test('an unreadable screenshot is named on its card', async (t) => {
     items.push({ card: 6, title: 'a6', category: 'merge', decisionCard: 'Ship it.', screenshots: [linked] });
   } catch (error) {
     // Windows without Developer Mode or administrator rights refuses an unprivileged file symlink with EPERM.
-    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
     t.diagnostic('this account cannot create a file symlink, so the linked screenshot case is left out');
   }
 
@@ -1313,7 +1082,7 @@ test('an incomplete release receipt is reported and the repositories are still r
 
 test('a format 1 and a format 2 machine record each read with no problem', async (t) => {
   const repository = temporaryFolder(t, 'herdr-queue-repo-');
-  for (const [format, receipt] of [['format 1', releaseReceipt()], ['format 2', derivedReceipt()]]) {
+  for (const [format, receipt] of /** @type {[string, object][]} */ ([['format 1', releaseReceipt()], ['format 2', derivedReceipt()]])) {
     const { home, cache } = releasedHome(t, [repository], receipt);
 
     await refresh({
@@ -1435,131 +1204,6 @@ test('a screenshots folder that is a link fails the refresh and nothing outside 
   assert.equal(existsSync(join(state, 'queue.json')), false, 'a refused refresh writes no cache');
 });
 
-// A temporary `XDG_STATE_HOME` for one test, and the lead's runs folder under it, created empty.
-function leadRuns(t) {
-  const xdgState = temporaryFolder(t, 'herdr-queue-xdg-');
-  const before = process.env.XDG_STATE_HOME;
-  process.env.XDG_STATE_HOME = xdgState;
-  t.after(() => {
-    if (before === undefined) delete process.env.XDG_STATE_HOME;
-    else process.env.XDG_STATE_HOME = before;
-  });
-  const runs = join(xdgState, 'fabraik-lead', 'runs');
-  mkdirSync(runs, { recursive: true });
-  return { xdgState, runs };
-}
-
-// The lead writes each session's log under `<state>/runs/`, `<state>` being `${XDG_STATE_HOME}/fabraik-lead`. A failure
-// item keeps its `log` only where it is absolute, normalized, inside that folder, a regular file and not a link; any
-// other `log` is left off the item, which keeps its reason, and its repository's problem line names the card.
-test("the queue cache refuses a failure log outside the lead's runs folder", async (t) => {
-  const { xdgState, runs } = leadRuns(t);
-  mkdirSync(join(runs, 'sub'));
-  const kept = join(runs, 'kept.jsonl');
-  const again = join(runs, 'again.jsonl');
-  const outside = join(xdgState, 'outside.jsonl');
-  for (const file of [kept, again, outside]) writeFileSync(file, '{}\n');
-  // Card numbers no file or folder name holds, so a line names the card only by naming it.
-  const failure = (card, log) => ({
-    card, title: `a${card}`, category: 'failure', reason: `Card ${card} stopped while building: tests red`, log,
-  });
-  const refused = [
-    failure(42, outside),
-    failure(44, join('runs', 'kept.jsonl')),
-    // Built by hand, since `join` would normalize the `..` away; it resolves to a regular file inside the runs folder.
-    failure(45, [runs, 'sub', '..', 'again.jsonl'].join(sep)),
-  ];
-  const linked = join(runs, 'linked.jsonl');
-  try {
-    symlinkSync(outside, linked, 'file');
-    refused.push(failure(43, linked));
-  } catch (error) {
-    // Windows without Developer Mode or administrator rights refuses an unprivileged file symlink with EPERM.
-    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
-    t.diagnostic('this account cannot create a file symlink, so the linked log case is left out');
-  }
-  const repository = temporaryFolder(t, 'herdr-queue-repo-');
-  const { home, cache } = releasedHome(t, [repository]);
-
-  await refresh({ home, runCollector: () => collectorDocument({ items: [failure(41, kept), ...refused] }) });
-
-  // Ranked by card within the one repository; only card 41 keeps its log.
-  const withoutLog = ({ log, ...item }) => item;
-  assert.deepEqual(cache().items, [failure(41, kept), ...refused.map(withoutLog)]
-    .sort((a, b) => a.card - b.card)
-    .map((item) => ({ ...item, repository, key: `${repository}#${item.card}` })));
-  const { problems } = cache();
-  assert.equal(problems.length, refused.length, problems.join('\n'));
-  for (const { card } of refused) {
-    const naming = problems.filter((line) => new RegExp(`^${literal(basename(repository))}: .*\\b${card}\\b`).test(line));
-    assert.equal(naming.length, 1, `one problem line names card ${card}:\n${problems.join('\n')}`);
-  }
-});
-
-// `open-log <key>` opens a cached failure item's log only after checking it again, as the file is at open time, under
-// the rule the cache keeps it by; the reasons expected are that rule's own. A fake `xdg-open` first on PATH appends one
-// line per call naming each argument in angle brackets. `refresh` runs as a command, so the runs folder reaches it
-// through its own environment and this process's stays as it is.
-test('opening a failure log runs xdg-open only on a checked log', {
-  skip: process.platform === 'win32' && 'opening a log is built for Linux',
-}, (t) => {
-  const xdgState = temporaryFolder(t, 'herdr-queue-xdg-');
-  const runs = join(xdgState, 'fabraik-lead', 'runs');
-  mkdirSync(runs, { recursive: true });
-  const kept = join(runs, 'kept.jsonl');
-  const swapped = join(runs, 'swapped.jsonl');
-  const outside = join(xdgState, 'outside.jsonl');
-  for (const file of [kept, swapped, outside]) writeFileSync(file, '{}\n');
-  // Card numbers no file or folder name holds, so a line names the card only by naming it.
-  const failure = (card, log) => ({
-    card, title: `a${card}`, category: 'failure', reason: `Card ${card} stopped while building: tests red`, log,
-  });
-  const repository = temporaryFolder(t, 'herdr-queue-repo-');
-  mkdirSync(join(repository, 'scripts'));
-  const document = collectorDocument({ items: [failure(41, kept), failure(43, swapped)] });
-  writeFileSync(join(repository, 'scripts', 'owner-queue.mjs'), `process.stdout.write(${JSON.stringify(JSON.stringify(document))});\n`);
-  const { home, state, cache } = releasedHome(t, [repository]);
-  const env = { ...process.env, XDG_STATE_HOME: xdgState };
-
-  const refreshed = spawnSync(process.execPath, [QUEUE, 'refresh', '--home', home], { encoding: 'utf8', env });
-  assert.equal(refreshed.status, 0, refreshed.stderr);
-  assert.deepEqual(cache().problems, []);
-  assert.deepEqual(cache().items.map((item) => [item.key, item.log]), [[`${repository}#41`, kept], [`${repository}#43`, swapped]]);
-  // Entries no refresh would keep, appended in the shape it writes, so only the check at open time can refuse them.
-  const written = cache();
-  written.items.push(...[failure(42, outside), failure(44, join('runs', 'kept.jsonl'))]
-    .map((item) => ({ ...item, repository, key: `${repository}#${item.card}` })));
-  writeFileSync(join(state, 'queue.json'), JSON.stringify(written));
-  // Cached while a regular file inside the runs folder, then made a link to a file outside it.
-  rmSync(swapped);
-  symlinkSync(outside, swapped, 'file');
-
-  const bin = temporaryFolder(t, 'herdr-queue-bin-');
-  const record = join(bin, 'calls');
-  writeFileSync(join(bin, 'xdg-open'), `#!/bin/sh\n{ printf call; printf ' <%s>' "$@"; printf '\\n'; } >> '${record}'\n`, { mode: 0o755 });
-  const calls = () => (existsSync(record) ? readFileSync(record, 'utf8') : '');
-  const openLog = (key) => spawnSync(process.execPath, [QUEUE, 'open-log', key, '--home', home], {
-    encoding: 'utf8', env: { ...env, PATH: `${bin}${delimiter}${process.env.PATH}` },
-  });
-
-  const opened = openLog(`${repository}#41`);
-  assert.equal(calls(), `call <${kept}>\n`, `exit ${opened.status}, stderr: ${opened.stderr}`);
-  assert.equal(opened.status, 0, opened.stderr);
-
-  for (const [card, why] of [
-    [42, "is outside the lead's runs folder"],
-    [44, 'is not an absolute path'],
-    [43, 'is a symbolic link'],
-    [99, 'no cached failure item'],
-  ]) {
-    const refused = openLog(`${repository}#${card}`);
-    assert.equal(calls(), `call <${kept}>\n`, `card ${card} opens nothing`);
-    assert.notEqual(refused.status, 0, `card ${card} exits non-zero`);
-    assert.match(refused.stderr, new RegExp(`\\b${card}\\b`), `stderr names card ${card}`);
-    assert.ok(refused.stderr.includes(why), `stderr for card ${card} says it ${why}: ${refused.stderr}`);
-  }
-});
-
 // `act <key> <action> <version> [<reply>]` hands a panel answer to the repository's own queue reader. The stub reader
 // prints its document when run with no argument and, with arguments, records them and the folder it ran in, so a
 // refusal is seen as nothing recorded.
@@ -1618,6 +1262,44 @@ test('queue act refuses an unknown key, an item without a version and any other 
   const yes = queue('act', key, 'yes', version, '--home', home);
   assert.deepEqual({ status: yes.status, stderr: yes.stderr }, { status: 2, stderr: QUEUE_USAGE }, 'yes is not an act action');
   assert.equal(forwarded().length, 1, 'a refused yes runs no queue reader');
+});
+
+// A merge answer goes to the coordinator, so its reader verb is `relay`; a question answer and a merge put aside keep `act`.
+test('queue act hands a merge answer to its reader as relay and a question answer as act', (t) => {
+  const [mergeVersion, questionVersion] = ['c'.repeat(64), 'd'.repeat(64)];
+  const repository = temporaryFolder(t, 'herdr-queue-repo-');
+  const record = join(repository, 'acts.jsonl');
+  mkdirSync(join(repository, 'scripts'));
+  const document = collectorDocument({ items: [
+    { card: 5, title: 'a5', category: 'merge', decisionCard: 'Ship it.', visual: 'none', version: mergeVersion },
+    { card: 6, title: 'a6', category: 'question', question: 'Which colour?', answerable: true, version: questionVersion },
+  ] });
+  writeFileSync(join(repository, 'scripts', 'owner-queue.mjs'), [
+    "import { appendFileSync } from 'node:fs';",
+    'const args = process.argv.slice(2);',
+    `if (args.length > 0) appendFileSync(${JSON.stringify(record)}, JSON.stringify(args) + '\\n');`,
+    `else process.stdout.write(${JSON.stringify(JSON.stringify(document))});`,
+    '',
+  ].join('\n'));
+  const { home } = releasedHome(t, [repository]);
+  const queue = (...args) => spawnSync(process.execPath, [QUEUE, ...args], { encoding: 'utf8' });
+  const forwarded = () => (existsSync(record) ? readFileSync(record, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []);
+  const refreshed = queue('refresh', '--home', home);
+  assert.equal(refreshed.status, 0, refreshed.stderr);
+
+  for (const shape of [
+    ['act', `${repository}#5`, 'answer', mergeVersion, 'yes'],
+    ['act', `${repository}#6`, 'answer', questionVersion, 'Blue.'],
+    ['act', `${repository}#5`, 'park', mergeVersion],
+  ]) {
+    const acted = queue(...shape, '--home', home);
+    assert.equal(acted.status, 0, `${JSON.stringify(shape)}: ${acted.stderr}`);
+  }
+  assert.deepEqual(forwarded(), [
+    ['relay', '--card=5', `--version=${mergeVersion}`, '--reply=yes'],
+    ['act', '--card=6', '--action=answer', `--version=${questionVersion}`, '--reply=Blue.'],
+    ['act', '--card=5', '--action=park', `--version=${mergeVersion}`],
+  ]);
 });
 
 test('queue act forwards a pick with its proposal number', (t) => {
@@ -2057,12 +1739,14 @@ test('queue report keeps a report it read whole and never one with a part it may
 });
 
 // A kept report is named `<sha>-<digest>.json`, the digest of its repository: two listed repositories holding the same merge
-// commit keep two files, so reading the second leaves the first's kept report as it was, and a repository whose path is
-// 250 characters or more keeps its file too (percent-encoded, its key would pass the 255-byte file name limit).
+// commit keep two files, so reading the second leaves the first's kept report as it was, and a repository whose path stays
+// under 240 characters keeps its file too when its percent-encoded key (each '€' becoming nine bytes) passes the 255-byte file name limit.
 test("queue report keeps the reports of two repositories' same merge commit apart", (t) => {
-  const deep = join(temporaryFolder(t, 'herdr-queue-repo-'), ...Array(5).fill('n'.repeat(50)));
+  const deep = join(temporaryFolder(t, 'herdr-queue-repo-'), '€'.repeat(30));
   mkdirSync(deep, { recursive: true });
-  assert.ok(deep.length >= 250, `the deep repository's path is ${deep.length} characters`);
+  const encodedKey = Buffer.byteLength(encodeURIComponent(`${deep}@${MERGE_SHA}`));
+  assert.ok(encodedKey > 255, `the deep repository's encoded key is ${encodedKey} bytes`);
+  assert.ok(deep.length < 240, `the deep repository's path is ${deep.length} characters`);
   const repositories = [temporaryFolder(t, 'herdr-queue-repo-'), deep];
   for (const [at, folder] of repositories.entries()) {
     mkdirSync(join(folder, 'scripts'));
@@ -2141,10 +1825,9 @@ test('a kept reports folder that is a link fails the refresh and the report and 
   assert.equal(existsSync(old), true, 'the file outside the Herdr home is untouched by the report');
 });
 
-// The cache keeps a board whose cards' `answered` is absent or exactly `true`, whose cards' `version` is 64 lowercase hex
-// or absent, whose cards' `showFirst` is absent, a boolean or exactly `{ unread: <text> }`, and whose `moves` and `places`
+// The cache keeps a board whose cards' `version` is 64 lowercase hex or absent, whose cards' `showFirst` is absent, a boolean or exactly `{ unread: <text> }`, and whose `moves` and `places`
 // are each a boolean or absent; a board with any other value in any is unreadable on its own, and its repository's items
-// still show.
+// still show. A card's `answered` key, which older readers still send, is ignored whatever its value.
 test('a board whose card version, answered marker, moves or places flag or show-me-first marker is malformed is unreadable while its items still show', async (t) => {
   const root = temporaryFolder(t, 'herdr-queue-repos-');
   const version = 'a'.repeat(64);
@@ -2187,7 +1870,7 @@ test('a board whose card version, answered marker, moves or places flag or show-
     { name: basename(repository), ...(unreadable === undefined ? { cards, moves, places } : { unreadable }) }
   ));
   assert.deepEqual(entries, names.map((name) => (
-    ['versioned', 'plain', 'marked', 'answeredtrue', 'placed'].includes(name)
+    ['versioned', 'plain', 'marked', 'answeredtrue', 'answeredyes', 'answeredfalse', 'placed'].includes(name)
       ? { name, cards: boards[name].cards, moves: boards[name].moves, places: boards[name].places }
       : { name, unreadable: notBoard }
   )));
@@ -2236,7 +1919,8 @@ const isDisabled = (node) => called(node, 'disabled').at(-1)?.[0] === true;
 // `props()` gives the panel `props`, as Herdr gives a mod the props it was opened with; `run` records each Herdr command
 // in `runs` and returns null, as Herdr's does, so a panel that imports it shows each command it ran; `openOverlay` records
 // each spec in `overlays` and returns `overlay-<n>`, and `closeOverlay` records each id in `closedOverlays` and returns null.
-// `shared()` reads `sharedState` and `setShared()` writes it, each write recorded in `sets`.
+// `shared()` reads `sharedState` and `setShared()` writes it, each write recorded in `sets`. `settings()` gives `settingsValue`,
+// live, as Herdr's gives the person's settings, such as `zoom`; none unless a test sets it.
 // `timers` records each `cx.timer.every` as `{ ms, handler, cancelled, cancel }`, which a test runs through `host.cx`.
 // `terminals()` gives `terminalList` and `knownAgents()` resolves `agentPrograms`, each an empty list unless a test sets it,
 // and each throws or rejects with it when it is an Error, as Herdr's do; `agents()` gives `agentList`, live, as Herdr's
@@ -2254,6 +1938,17 @@ const isDisabled = (node) => called(node, 'disabled').at(-1)?.[0] === true;
 // with `as` keeps its new name. `bindings` records `cx.bind_keys`.
 // By default `init` runs at load with a `spawn` that starts nothing, so no start-up work runs. With `lifecycle`, `init` waits
 // for `started()`, which runs it with the recording `cx`, so a test sets the cache first, and settles every task it started.
+/**
+ * @typedef {{ code: number, stdout: string, stderr: string }} ExecResult
+ * @typedef {ExecResult | ((program: string, args: string[], options?: { timeout?: number }) => ExecResult | Promise<ExecResult>)} Exec what the stub `exec` resolves
+ * @typedef {any} PanelHost the stub host a test drives: a mutable fixture, whose fields the tests set and read freely
+ */
+/**
+ * @param {Exec} execResult
+ * @param {any} [props]
+ * @param {{ lifecycle?: boolean }} [options]
+ * @returns {Promise<PanelHost>}
+ */
 async function loadPanel(execResult, props = {}, { lifecycle = false } = {}) {
   const source = readFileSync(PANEL, 'utf8');
   const imports = [...source.matchAll(HOST_IMPORT)];
@@ -2268,6 +1963,7 @@ async function loadPanel(execResult, props = {}, { lifecycle = false } = {}) {
   let cacheText;
   let rendering = false;
   // The task whose start is running, which a watch opened during it marks as a watcher.
+  /** @type {{ watcher?: boolean } | null} */
   let starting = null;
   let host;
   globalThis[key] = {
@@ -2310,9 +2006,10 @@ async function loadPanel(execResult, props = {}, { lifecycle = false } = {}) {
     TableRow: { new: (id, index) => element('table-row', id, { index }) },
     TableHead: { new: (id, index) => element('table-head', id, { index }) },
     TableCell: { new: (id, index) => element('table-cell', id, { index }) },
-    exec: async (...call) => { calls.push(call); return typeof execResult === 'function' ? execResult(...call) : execResult; },
+    exec: async (/** @type {[string, string[], { timeout?: number }?]} */ ...call) => { calls.push(call); return typeof execResult === 'function' ? execResult(...call) : execResult; },
     appHome: () => '/herdr/home',
     props: () => props,
+    settings: () => host.settingsValue,
     run: (name, args) => { runs.push([name, args]); return null; },
     openOverlay: (spec) => { host.overlays.push(spec); return `overlay-${host.overlays.length}`; },
     closeOverlay: (id) => { host.closedOverlays.push(id); return null; },
@@ -2334,6 +2031,7 @@ async function loadPanel(execResult, props = {}, { lifecycle = false } = {}) {
     watchFolder: (path) => {
       if (starting !== null) starting.watcher = true;
       const entry = { path, settled: false, cancelled: false };
+      /** @type {Promise<any> & { cancel?: () => void }} */
       const watch = new Promise((resolve, reject) => {
         entry.resolve = (paths) => { entry.settled = true; resolve(paths); };
         entry.reject = (error) => { entry.settled = true; reject(error); };
@@ -2425,6 +2123,7 @@ async function loadPanel(execResult, props = {}, { lifecycle = false } = {}) {
     overlays: [],
     closedOverlays: [],
     sharedState: {},
+    settingsValue: {},
     files: {},
     cacheGate: null,
     sets: [],
@@ -2490,106 +2189,50 @@ const labelOf = (node) => called(node, 'accessibility_label').at(-1)?.[0];
 // The Open log controls a tree draws.
 const openLogButtons = (tree) => buttonsIn(tree).filter((button) => textOf(button).trim() === 'Open log');
 
-const LEAD_LOG = '/state/runs/lead-7.jsonl';
-const failureCache = (items) => ({
-  format: 2,
-  refreshedAt: new Date().toISOString(),
-  fetchedAt: null,
-  problems: [],
-  digestUnread: [],
-  items: items.map((item, index) => ({
-    category: 'failure', key: `/repos/a#${item.card}`, card: item.card, repository: '/repos/a', title: `a${item.card}`, reason: `stopped ${index}`, ...item,
-  })),
-});
-
-test('a failure item with a log draws Open log, which opens it by key', async () => {
-  const host = await loadPanel({ code: 0, stdout: '', stderr: '' }, DECISIONS);
-  const { panel, calls, click } = host;
-  panel.home = '/herdr/home';
-  panel.state = { kind: 'read', cache: failureCache([{ card: 7, log: LEAD_LOG }, { card: 8 }]) };
-
-  const buttons = openLogButtons(cardOf(host.render(), keyOf(7)));
-  assert.equal(buttons.length, 1, `exactly one Open log is drawn, found ${buttons.length}`);
-  assert.equal(textOf(buttons[0]), 'Open log');
-  assert.deepEqual(openLogButtons(cardOf(host.render(), keyOf(8))), [], 'the item without a log has no button');
-
-  await click(buttons[0]);
-
-  assert.equal(calls.length, 1);
-  const [program, args, options] = calls[0];
-  assert.equal(program, 'node');
-  assert.deepEqual(args, ['/herdr/home/mods/fabraik-queue/queue.mjs', 'open-log', '/repos/a#7', '--home', '/herdr/home']);
-  assert.equal(typeof options, 'object');
-  assert.ok(args.every((arg) => !arg.includes(LEAD_LOG)), 'no argument carries the log path');
-});
-
-test('a refused Open log shows why beside its item', async () => {
-  let result = { code: 1, stdout: '', stderr: 'card 7 failure log is a symbolic link\n' };
-  const refused = await loadPanel(() => result, DECISIONS);
-  refused.panel.home = '/herdr/home';
-  refused.panel.state = { kind: 'read', cache: failureCache([{ card: 7, log: LEAD_LOG }, { card: 8, log: '/state/runs/lead-8.jsonl' }]) };
-
-  const [button] = openLogButtons(cardOf(refused.render(), keyOf(7)));
-  assert.ok(button, 'card 7 draws an Open log button');
-  await refused.click(button);
-
-  assert.ok(textOf(refused.render()).includes('Open log failed: card 7 failure log is a symbolic link'), 'card 7 says why');
-  assert.ok(!textOf(cardOf(refused.render(), keyOf(8))).includes('Open log failed'), 'card 8 says nothing');
-
-  result = { code: 0, stdout: '', stderr: '' };
-  await refused.click(openLogButtons(cardOf(refused.render(), keyOf(7)))[0]);
-  assert.ok(!textOf(refused.render()).includes('Open log failed'), 'a later successful open clears the line');
-
-  const opened = await loadPanel({ code: 0, stdout: '', stderr: '' }, DECISIONS);
-  opened.panel.home = '/herdr/home';
-  opened.panel.state = { kind: 'read', cache: failureCache([{ card: 7, log: LEAD_LOG }]) };
-  const [openButton] = openLogButtons(opened.render());
-  assert.ok(openButton, 'an Open log button is drawn');
-  await opened.click(openButton);
-  assert.ok(!textOf(opened.panel.render()).includes('Open log failed'), 'a successful open shows no failure');
-});
-
-test('a second click while a log opens starts no second open', async () => {
-  let release;
-  const held = new Promise((resolve) => { release = resolve; });
-  const host = await loadPanel(() => held, DECISIONS);
-  const { panel, calls, click } = host;
-  panel.home = '/herdr/home';
-  panel.state = { kind: 'read', cache: failureCache([{ card: 7, log: LEAD_LOG }]) };
-
-  const [button] = openLogButtons(host.render());
-  assert.ok(button, 'an Open log button is drawn');
-  const first = click(button);
-  click(button);
-  assert.equal(calls.length, 1, 'the second click starts no second open');
-
-  release({ code: 0, stdout: '', stderr: '' });
-  await first;
-  await click(button);
-  assert.equal(calls.length, 2, 'a click after the open finished opens again');
-});
-
-// A card can fail before its session writes a log, as when the lead's starter refuses the session, so the collector
-// document's `log` names a file that does not exist. The cache keeps the failure item without it, and the panel draws
-// that item's reason with no Open log.
-test('a failure item whose log is missing keeps its reason, reports the log apart and draws no Open log', async (t) => {
-  const { runs } = leadRuns(t);
-  const reason = 'Card 81 stopped at the settings check: the session was refused';
+// new behaviour: the panel reads no failure log, so an item's `log`, wherever it points, is dropped from the cache,
+// adds no problem line, draws no Open log, and `open-log` is a command `queue.mjs` does not take.
+test('a failure item with a log outside any runs folder adds no problem line, draws no Open log and has no open-log command', async (t) => {
+  const log = join(temporaryFolder(t, 'herdr-queue-log-'), 'session.jsonl');
+  writeFileSync(log, '{}\n');
+  const reason = 'Card 81 stopped while building: tests red';
   const repository = temporaryFolder(t, 'herdr-queue-repo-');
   const { home, cache } = releasedHome(t, [repository]);
 
   await refresh({ home, runCollector: () => collectorDocument({
-    items: [{ card: 81, title: 'a81', category: 'failure', reason, log: join(runs, 'never-written.jsonl') }],
+    items: [{ card: 81, title: 'a81', category: 'failure', reason, log }],
   }) });
 
+  assert.deepEqual(cache().problems, [], 'a log adds no problem line');
   assert.deepEqual(cache().items, [{ card: 81, title: 'a81', category: 'failure', reason, repository, key: `${repository}#81` }]);
-  assert.deepEqual(cache().problems, [`${basename(repository)}: card 81 failure log cannot be read: ENOENT`]);
   const host = await loadPanel({ code: 0, stdout: '', stderr: '' }, DECISIONS);
   host.panel.home = '/herdr/home';
   host.panel.state = { kind: 'read', cache: cache() };
   const drawn = host.render();
   assert.ok(textOf(drawn).includes(reason), `the item shows its reason: ${textOf(drawn)}`);
-  assert.deepEqual(openLogButtons(drawn), [], 'the item without a log has no Open log');
+  assert.deepEqual(openLogButtons(drawn), [], 'an item with a log has no Open log');
+
+  const opened = spawnSync(process.execPath, [QUEUE, 'open-log', `${repository}#81`, '--home', home], { encoding: 'utf8' });
+  assert.deepEqual({ status: opened.status, stderr: opened.stderr }, { status: 2, stderr: QUEUE_USAGE });
+});
+
+test('a failure log over the cache limit is dropped and its item and a sibling both reach the cache', async (t) => {
+  const reason = 'Card 81 stopped while building: tests red';
+  const repository = temporaryFolder(t, 'herdr-queue-repo-');
+  const { home, cache } = releasedHome(t, [repository]);
+
+  await refresh({ home, runCollector: () => collectorDocument({
+    items: [
+      { card: 81, title: 'a81', category: 'failure', reason, log: `/${'l'.repeat(1024 * 1024 + 1)}` },
+      { card: 82, title: 'a82', category: 'question', question: 'Which one?' },
+    ],
+  }) });
+
+  assert.deepEqual(cache().problems, [], 'no line says the queue is too large');
+  // The cache ranks a question above a failure.
+  assert.deepEqual(cache().items, [
+    { card: 82, title: 'a82', category: 'question', question: 'Which one?', repository, key: `${repository}#82` },
+    { card: 81, title: 'a81', category: 'failure', reason, repository, key: `${repository}#81` },
+  ], 'both items reach the cache and neither carries a log');
 });
 
 // An item's controls: its response buttons hand the item's key, version and action to `queue.mjs act`. The expected
@@ -2641,15 +2284,14 @@ const iconPaths = (button) => nodesOf(button, 'svg').map((icon) => icon.path);
 const SEND_ICON = 'mods/workspace-chrome/chevron-right.svg';
 const SPINNER_ICON = 'mods/workspace-chrome/spinner.svg';
 const MERGE_PLACEHOLDER = 'Your answer: yes, what to change, or no';
-const LEAD_LINE = 'The lead continues this card on your answer.';
-const COORDINATOR_LINE = 'Your coordinator acts on your answer the next time you ask it what is waiting.';
-const NO_RECORD_LINE = 'Answer this card in your coordinator chat: the panel records answers only on a GitHub board.';
-const UNREAD_LINE = 'This card’s comments could not be read: refresh the queue, or answer in your coordinator chat.';
+const NO_RECORD_PHRASE = 'records answers only on a GitHub board';
+// The line under a merge's answer box, and the line of a merge whose waiting version the panel cannot read.
+const CARRY_LINE = 'Your coordinator chat gets this answer and carries it to the job.';
+const UNREAD_VERSION_LINE = "The panel cannot read this card's waiting version, so answer in your coordinator chat.";
 const RECORDED = 'Answer recorded on the card; the queue confirms on its next read';
-const heldLine = (machine) => `This question is waiting on ${machine}. Answer it in chat.`;
+const RELAYED = 'Sent to your coordinator chat';
+const heldLine = (/** @type {string} */ machine) => `This question is waiting on ${machine}. Answer it in chat.`;
 const HELD_UNREAD_LINE = 'Answer this question in chat. The holding computer could not be read.';
-// A complete merge item the queue says its coordinator acts on, which is the panel's one-box merge.
-const COORDINATOR = { actedOnBy: 'coordinator' };
 const undoOf = (tree, card) => buttonsIn(tree).find((button) => button.elementId === `fabraik-queue-undo-${keyOf(card)}`);
 
 test("panel controls match each item's category and send its key, version and action", async () => {
@@ -2658,17 +2300,17 @@ test("panel controls match each item's category and send its key, version and ac
   const parkMerge = { press: 'Put aside', expected: ['act', keyOf(5), 'park', versionOf(5)] };
   const boxed = { responses: ['Put aside', sendName(5)], boxes: [MERGE_PLACEHOLDER] };
   const unboxed = { responses: ['Put aside'], boxes: [] };
+  const linearMerge = queueItem('merge', 'ENG-7', { version: versionOf(7) });
+  /** @type {{ why: string, item: any, responses: string[], boxes: string[], texts?: string[], answerLabel?: string, answer?: string, press?: string, expected?: any[] }[]} */
   const rows = [
-    { why: 'a merge the coordinator acts on, answered by the send control', item: merge(COORDINATOR), ...boxed, answerLabel: 'Answer to card 5', answer: 'yes',
-      texts: [COORDINATOR_LINE], press: sendName(5), expected: ['act', keyOf(5), 'answer', versionOf(5), 'yes'] },
-    { why: 'a merge the lead acts on, put aside', item: merge({ actedOnBy: 'lead' }), ...boxed, texts: [LEAD_LINE], ...parkMerge },
-    { why: 'a merge with a recorded answer', item: merge({ ...COORDINATOR, answered: 'shorten the title' }), ...boxed,
-      texts: ['You answered: shorten the title', COORDINATOR_LINE], ...parkMerge },
-    { why: 'a merge on a board the panel cannot record on', item: merge(), ...unboxed, texts: [NO_RECORD_LINE], ...parkMerge },
-    { why: 'a merge whose comments could not be read', item: merge({ actedOnBy: 'unread' }), ...unboxed, texts: [UNREAD_LINE], ...parkMerge },
+    { why: 'a merge answered by the send control', item: merge(), ...boxed, answerLabel: 'Answer to card 5', answer: 'yes',
+      texts: [CARRY_LINE], press: sendName(5), expected: ['act', keyOf(5), 'answer', versionOf(5), 'yes'] },
+    { why: 'a merge put aside', item: merge(), ...boxed, texts: [CARRY_LINE], ...parkMerge },
+    { why: 'a Linear merge answered by the send control', item: linearMerge, responses: ['Put aside', sendName('ENG-7')], boxes: [MERGE_PLACEHOLDER],
+      answerLabel: 'Answer to card ENG-7', answer: 'yes', texts: [CARRY_LINE], press: sendName('ENG-7'), expected: ['act', keyOf('ENG-7'), 'answer', versionOf(7), 'yes'] },
     { why: 'a merge missing its proof', item: merge({ decisionCard: undefined, missing: { fact: 'screenshot unreadable', next: 'Reopen the job session.' } }), ...unboxed,
-      texts: ['Proof missing: screenshot unreadable. Reopen the job session.', NO_RECORD_LINE], ...parkMerge },
-    { why: 'a question explicitly answerable by an older queue reader', item: queueItem('question', 6, { answerable: true }), responses: [sendName(6)], boxes: ['Your answer to the a lead'],
+      texts: ['Proof missing: screenshot unreadable. Reopen the job session.', UNREAD_VERSION_LINE], ...parkMerge },
+    { why: 'a question explicitly answerable by an older queue reader', item: queueItem('question', 6, { answerable: true }), responses: [sendName(6)], boxes: ['Your answer for a'],
       answerLabel: 'Answer to card 6', answer: 'Blue.', texts: ['Which colour?'], press: sendName(6), expected: ['act', keyOf(6), 'answer', versionOf(6), 'Blue.'] },
     { why: 'a question waiting on another computer', item: queueItem('question', 7, { heldOn: 'machine-b' }), responses: [], boxes: [], texts: [heldLine('machine-b')] },
     { why: 'a question whose holding computer was not read', item: queueItem('question', 7), responses: [], boxes: [], texts: [HELD_UNREAD_LINE] },
@@ -2678,14 +2320,13 @@ test("panel controls match each item's category and send its key, version and ac
       press: 'Reject', expected: ['act', keyOf(8), 'drop', versionOf(8)] },
     { why: 'a suggested card without a scope', item: queueItem('suggested', 9), responses: ['Reject'], boxes: [],
       texts: ['Accept needs its What to build and acceptance criteria: answer it in chat'], press: 'Reject', expected: ['act', keyOf(9), 'drop', versionOf(9)] },
-    { why: 'a failure with a log', item: queueItem('failure', 10, { log: '/state/runs/lead-10.jsonl' }), responses: ['Dismiss', 'Open log'], boxes: [],
-      press: 'Open log', expected: ['open-log', keyOf(10)] },
     { why: 'a failure without a log', item: queueItem('failure', 13), responses: ['Dismiss'], boxes: [] },
     { why: 'a usage-limit stop', item: queueItem('usage-limit', 11), responses: [], boxes: [] },
   ];
   for (const row of rows) {
     const host = await itemScene([row.item]);
     const tree = host.render();
+    assert.ok(!strings(tree).some((text) => text.includes(NO_RECORD_PHRASE)), `${row.why}: no line says the panel records answers only on a GitHub board`);
     assert.deepEqual(itemNames(tree, row.item.key), row.responses, `${row.why}: its buttons`);
     assert.deepEqual(nodesOf(tree, 'input').map((input) => input.state.placeholder), row.boxes, `${row.why}: its boxes`);
     for (const text of row.texts ?? []) assert.ok(strings(tree).includes(text), `${row.why} draws "${text}"`);
@@ -2698,15 +2339,15 @@ test("panel controls match each item's category and send its key, version and ac
       assert.ok(!isDisabled(named(host.render(), row.press)), `${row.why}: the send control is on once the box holds words`);
     }
     if (row.press !== undefined) await host.click(named(host.render(), row.press));
-    assert.deepEqual(ran(host), row.press === undefined ? [] : [queueCall(...row.expected)], `${row.why}: the commands run`);
+    assert.deepEqual(ran(host), row.press === undefined ? [] : [queueCall(.../** @type {any[]} */ (row.expected))], `${row.why}: the commands run`);
   }
 
   // While a command of the item runs, the pressed button reads Working or the send control shows the spinner, and the
   // item's other controls are off.
-  for (const [press, receipt] of [['Put aside', 'Put aside; the queue confirms on its next read'], [sendName(5), RECORDED]]) {
+  for (const [press, receipt] of [['Put aside', 'Put aside; the queue confirms on its next read'], [sendName(5), 'Sent to your coordinator chat']]) {
     let release;
     const held = new Promise((resolve) => { release = resolve; });
-    const working = await itemScene([merge(COORDINATOR)], () => held);
+    const working = await itemScene([merge()], () => held);
     working.type(nodesOf(working.render(), 'input')[0], 'yes');
     const pressed = working.click(named(working.render(), press));
     const during = working.render();
@@ -2842,7 +2483,7 @@ test('an answer draft is cleared when its question changes', async () => {
 });
 
 test('one key clears the digest', async () => {
-  const host = await itemScene([queueItem('merge', 5, COORDINATOR), digestEntry]);
+  const host = await itemScene([queueItem('merge', 5), digestEntry]);
   const root = [...walk(host.render())].find(([node]) => node.keyDown)?.[0];
   assert.ok(root, 'the panel root handles key presses');
   assert.equal(host.handles.length, 1, 'init makes one focus handle and render makes none');
@@ -2860,7 +2501,7 @@ test('one key clears the digest', async () => {
   await host.press('c');
   assert.deepEqual(ran(host), [queueCall('clear-digest')], 'c clears the digest again after blur');
 
-  const bare = await itemScene([queueItem('merge', 5, COORDINATOR)]);
+  const bare = await itemScene([queueItem('merge', 5)]);
   await bare.press('c');
   assert.deepEqual(ran(bare), [], 'c runs nothing while the digest is empty');
 });
@@ -2869,10 +2510,9 @@ test("a handled item becomes a receipt whose Undo takes back the panel's own rec
   const parked = 'Put aside; the queue confirms on its next read';
   const record = { code: 0, stdout: '{"r":5}\n', stderr: '' };
   const moved = 'queue: x: card 5 moved since it was put aside: it is now in Ready';
-  const noUndo = 'No Undo: the lead may already have read this answer, so correct it in chat';
   const noUndoCoordinator = 'No Undo: your coordinator may already have read this answer, so correct it in chat';
-  const items = [queueItem('merge', 5, COORDINATOR), queueItem('merge', 6, COORDINATOR), queueItem('failure', 10),
-    queueItem('merge', 11, { actedOnBy: 'lead' }), queueItem('question', 12, { answerable: true }), queueItem('merge', 7, COORDINATOR)];
+  const items = [queueItem('merge', 5), queueItem('merge', 6), queueItem('failure', 10),
+    queueItem('question', 12, { answerable: true }), queueItem('merge', 7)];
   const results = [];
   const host = await itemScene(items, () => results.shift() ?? OK);
 
@@ -2910,25 +2550,23 @@ test("a handled item becomes a receipt whose Undo takes back the panel's own rec
   assert.equal(undoOf(tree, 7), undefined, 'an act without a record has no Undo');
   assert.ok(strings(tree).includes("No Undo: a's queue reader predates it"), `the reason is shown: ${strings(tree).join(' | ')}`);
 
-  // A sent answer is a written action too, with no Undo; a merge's receipt keeps the line saying who acts, under the
-  // receipt line, and the line saying why it has no Undo under that.
-  for (const [card, who, why] of [[6, COORDINATOR_LINE, noUndoCoordinator], [11, LEAD_LINE, noUndo]]) {
-    host.type(boxOf(host.render(), `Answer to card ${card}`), 'yes');
-    await host.click(named(host.render(), sendName(card)));
-    tree = host.render();
-    const lines = strings(tree);
-    assert.ok(!hasCard(tree, card) && lines.includes(RECORDED) && lines.includes(`a card ${card}, a${card}`), `card ${card}: the answer's receipt is drawn: ${lines.join(' | ')}`);
-    assert.equal(lines[lines.indexOf(who) - 1], RECORDED, `card ${card}: the who-acts line follows the receipt line`);
-    assert.equal(lines[lines.indexOf(who) + 1], why, `card ${card}: the no-Undo line follows the who-acts line`);
-    assert.equal(undoOf(tree, card), undefined, `card ${card}: a sent answer has no Undo`);
-  }
-  // A question's receipt has no who-acts line, and says why it has no Undo.
+  // A sent merge answer is a written action too, with no Undo: its receipt says it went to the coordinator chat, and
+  // the line saying why it has no Undo follows.
+  host.type(boxOf(host.render(), 'Answer to card 6'), 'yes');
+  await host.click(named(host.render(), sendName(6)));
+  tree = host.render();
+  const lines = strings(tree);
+  assert.ok(!hasCard(tree, 6) && lines.includes(RELAYED) && lines.includes('a card 6, a6'), `card 6: the answer's receipt is drawn: ${lines.join(' | ')}`);
+  assert.equal(lines[lines.indexOf(RELAYED) + 1], noUndoCoordinator, 'card 6: the no-Undo line follows the receipt line');
+  assert.equal(undoOf(tree, 6), undefined, 'card 6: a sent answer has no Undo');
+  // A question's receipt says it was recorded, and why it has no Undo.
   host.type(boxOf(host.render(), 'Answer to card 12'), 'Blue.');
   await host.click(named(host.render(), sendName(12)));
   tree = host.render();
   assert.deepEqual(ran(host).at(-1), queueCall('act', keyOf(12), 'answer', versionOf(12), 'Blue.'));
   const receipts = strings(tree);
-  assert.deepEqual([RECORDED, COORDINATOR_LINE, LEAD_LINE, noUndo, noUndoCoordinator].map((line) => receipts.filter((found) => found === line).length), [3, 1, 1, 2, 1], 'the question adds its receipt and no-Undo lines and no who-acts line');
+  assert.deepEqual([RELAYED, RECORDED, noUndoCoordinator].map((line) => receipts.filter((found) => found === line).length), [1, 1, 2], 'the question adds its receipt and no-Undo lines');
+  assert.equal(receipts[receipts.indexOf(RECORDED) + 1], noUndoCoordinator, 'the no-Undo line follows the question receipt line');
   assert.equal(undoOf(tree, 12), undefined, 'an answer has no Undo');
 
   // A local mark has Undo, which reopens the card and runs nothing.
@@ -2983,7 +2621,7 @@ test('no view starts a timer once it has started, and the panel runs no refresh 
 
 test('a view runs one refresh per press of its Refresh control, which is off while one runs, and the panel has no such control', async () => {
   for (const view of LIFECYCLE_VIEWS) {
-    let release = null;
+    let release = /** @type {(() => void) | null} */ (null);
     let hold = false;
     const host = await loadPanel((_program, args) => (hold && args[1] === 'refresh' ? new Promise((resolve) => { release = () => resolve(OK); }) : OK),
       view.props, { lifecycle: true });
@@ -2996,6 +2634,7 @@ test('a view runs one refresh per press of its Refresh control, which is off whi
     const pressing = host.click(named(host.render(), 'Refresh'));
     assert.equal(refreshesOf(host).length, 2, `${view.name}: a press runs one more refresh`);
     assert.ok(isDisabled(named(host.render(), 'Refresh')), `${view.name}: Refresh is off while the refresh runs`);
+    assert.ok(release, `${view.name}: the held refresh is waiting`);
     release();
     await pressing;
     assert.equal(refreshesOf(host).length, 2, `${view.name}: the press runs no third refresh`);
@@ -3027,7 +2666,7 @@ test('a view shows when it read as a clock time, with the date when that was not
 // are written by hand from the plan's Decisions view rules, `owner-queue.mjs` ROUTES (the only actions `act` writes:
 // park, answer, keep, drop and pick) and each fixture's own order, never read off the panel.
 const DECISIONS = { view: 'decisions' };
-const QUEUE_COMMANDS = ['refresh', 'act', 'open-log', 'clear-digest', 'report'];
+const QUEUE_COMMANDS = ['refresh', 'act', 'clear-digest', 'report'];
 const ROUTE_ACTIONS = ['answer', 'drop', 'keep', 'park', 'pick'];
 // The Herdr commands that make, show or close a space or tab, none of which a view control runs (card #858, criteria 1 and 5).
 const SPACE_COMMANDS = ['space.new', 'space.select', 'tab.new', 'tab.select', 'tab.close'];
@@ -3039,7 +2678,7 @@ const inRepository = (folder, category, card, fields) => queueItem(category, car
 });
 const progressText = (tree) => strings(tree).filter((line) => /^\d+ waiting, \d+ handled$/.test(line)).join();
 
-async function decisionsScene(cache, execResult = OK) {
+async function decisionsScene(cache, /** @type {Exec} */ execResult = OK) {
   const host = await loadPanel(execResult, DECISIONS);
   host.setCache(cache);
   await host.panel.load();
@@ -3073,24 +2712,20 @@ function cardOf(tree, key) {
   assert.ok(node, `the card of ${key} is drawn`);
   return node;
 }
-const itemScene = (items, execResult = OK) => decisionsScene(panelCache(items), execResult);
+const itemScene = (items, /** @type {Exec} */ execResult = OK) => decisionsScene(panelCache(items), execResult);
 
 // Scope: items that are not `menu` items. A waiting menu offers its job's own choices, an approving one such as Yes, deliver
 // included, and its press runs `answer-menu`, which is no queue command of this test's list; the waiting-menu test below pins it.
 test('no control approves, pushes, merges or marks ready: every press runs a panel command, and only typed words answer', async () => {
   const merge = ['Put aside', sendName(5)];
   const kinds = [
-    { why: 'a merge the coordinator acts on', item: queueItem('merge', 5, COORDINATOR), controls: merge },
-    { why: 'a merge the lead acts on', item: queueItem('merge', 5, { actedOnBy: 'lead' }), controls: merge },
-    { why: 'a merge with no box', item: queueItem('merge', 5), controls: ['Put aside'] },
-    { why: 'a merge whose comments could not be read', item: queueItem('merge', 5, { actedOnBy: 'unread' }), controls: ['Put aside'] },
+    { why: 'a complete merge', item: queueItem('merge', 5), controls: merge },
     { why: 'a merge missing its proof', item: queueItem('merge', 5, { decisionCard: undefined, missing: { fact: 'screenshot unreadable', next: 'Reopen the job session.' } }), controls: ['Put aside'] },
     { why: 'an answerable question', item: queueItem('question', 6, { answerable: true }), controls: [sendName(6)] },
     { why: 'a question waiting on another computer', item: queueItem('question', 7), controls: [] },
     { why: 'a suggested card with a scope', item: queueItem('suggested', 8, { scope: 'Build the thing.' }), controls: ['Accept card', 'Reject'] },
     { why: 'a suggested card without a scope', item: queueItem('suggested', 9), controls: ['Reject'] },
     { why: 'a weekly retro', item: retroItem(), controls: ['Close retro', 'Make proposal 1 a card'] },
-    { why: 'a failure with a log', item: queueItem('failure', 10, { log: '/state/runs/lead-10.jsonl' }), controls: ['Dismiss', 'Open log'] },
     { why: 'a failure without a log', item: queueItem('failure', 13), controls: ['Dismiss'] },
     { why: 'a usage-limit stop', item: queueItem('usage-limit', 11), controls: [] },
   ];
@@ -3129,7 +2764,7 @@ test('no control approves, pushes, merges or marks ready: every press runs a pan
     // The positive control: the presses reached every command and answer the view offers.
     const executed = hosts.slice(before).flatMap((host) => host.calls.map(([, args]) => args));
     assert.deepEqual([...new Set(executed.filter((args) => args[1] === 'act').map((args) => args[3]))].sort(), ROUTE_ACTIONS, `${view}: its presses reached each answer`);
-    assert.ok(['open-log', 'clear-digest'].every((command) => executed.some((args) => args[1] === command)), `${view}: its presses reached Open log and Clear`);
+    assert.ok(executed.some((args) => args[1] === 'clear-digest'), `${view}: its presses reached Clear`);
     assert.ok(executed.some((args) => args[3] === 'answer' && args[5] === TYPED), `${view}: an answer carried the typed words`);
   }
 
@@ -3156,11 +2791,10 @@ test('every waiting merge offers one answer box with a send control and no Yes b
   const reason = 'check; beyond-card';
   const merges = [
     // A cache an older collector wrote may still mark a merge Yes open; no button comes of it.
-    { why: 'a merge an older collector marked Yes open', item: queueItem('merge', 8, { yes: 'open', ...COORDINATOR }), who: COORDINATOR_LINE },
-    { why: 'a merge holding reasons', item: queueItem('merge', 5, { reason, ...COORDINATOR }), reason, who: COORDINATOR_LINE },
-    { why: 'a merge holding none', item: queueItem('merge', 6, COORDINATOR), who: COORDINATOR_LINE },
-    { why: 'a merge the lead acts on', item: queueItem('merge', 9, { actedOnBy: 'lead' }), who: LEAD_LINE },
-    { why: 'a merge missing its proof', item: queueItem('merge', 7, { decisionCard: undefined, missing: { fact: 'screenshot unreadable', next: 'Reopen the job session.' } }), nothing: NO_RECORD_LINE },
+    { why: 'a merge an older collector marked Yes open', item: queueItem('merge', 8, { yes: 'open' }), who: CARRY_LINE },
+    { why: 'a merge holding reasons', item: queueItem('merge', 5, { reason }), reason, who: CARRY_LINE },
+    { why: 'a merge holding none', item: queueItem('merge', 6), who: CARRY_LINE },
+    { why: 'a merge missing its proof', item: queueItem('merge', 7, { decisionCard: undefined, missing: { fact: 'screenshot unreadable', next: 'Reopen the job session.' } }), nothing: UNREAD_VERSION_LINE },
   ];
   const noYesButton = (tree) => buttonsIn(tree).every((button) => nameOf(button) !== 'Yes' && !labelOf(button)?.startsWith('Yes to card'));
 
@@ -3178,19 +2812,19 @@ test('every waiting merge offers one answer box with a send control and no Yes b
       if (nothing !== undefined) {
         assert.deepEqual(names(tree), ['Put aside'], `${why}, ${view}: only Put aside`);
         assert.deepEqual(nodesOf(tree, 'input'), [], `${why}, ${view}: no box`);
-        assert.ok(strings(tree).includes(nothing), `${why}, ${view}: it says the panel records no answer`);
+        assert.ok(strings(tree).includes(nothing), `${why}, ${view}: it says to answer in the coordinator chat`);
         continue;
       }
       assert.deepEqual(names(tree), ['Put aside', sendName(item.card)], `${why}, ${view}: one send control beside Put aside`);
       assert.deepEqual(nodesOf(tree, 'input').map((box) => box.state.placeholder), [MERGE_PLACEHOLDER], `${why}, ${view}: one answer box`);
-      assert.ok(strings(tree).includes(who), `${why}, ${view}: the line says who acts`);
+      assert.ok(strings(tree).includes(who), `${why}, ${view}: the line says the coordinator chat carries the answer`);
       assert.deepEqual(iconPaths(named(tree, sendName(item.card))), [SEND_ICON], `${why}, ${view}: the send control draws the arrow`);
       assert.ok(isDisabled(named(tree, sendName(item.card))), `${why}, ${view}: the send control is off while the box is empty`);
       host.type(nodesOf(tree, 'input')[0], 'yes');
       await host.task(() => host.emit(nodesOf(host.render(), 'input')[0], 'submit'));
       assert.deepEqual(ran(host), [queueCall('act', item.key, 'answer', item.version, 'yes')], `${why}, ${view}: Enter sends the answer`);
       const receipt = strings(host.render());
-      assert.equal(receipt[receipt.indexOf(who) - 1], RECORDED, `${why}, ${view}: the receipt says the answer was recorded and who acts`);
+      assert.ok(receipt.includes(RELAYED) && !receipt.includes(who), `${why}, ${view}: the receipt says the answer went to the coordinator chat`);
     }
   }
 });
@@ -3217,7 +2851,7 @@ test('a waiting menu shows each choice as a button beside its answer box, and a 
   });
   // The job asked about the version its merge shows, which is what draws Yes, deliver and the answer box.
   const deliver = { ...menu(1, 5, 't1', [deliverQuestion]), version: DELIVER_VERSION };
-  const merge = queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION });
+  const merge = queueItem('merge', 5, { ...DELIVER_VERSION });
   const several = menu(2, 6, 't2', [colour, letters]);
   const answerCalls = (host) => ran(host).filter(({ args }) => args[1] === 'answer-menu');
   const record = (id, answers) => ({ format: 1, askId: id, by: 'panel', answers });
@@ -3282,12 +2916,44 @@ const waitingMenu = (n, fields) => ({
   category: 'menu', key: `menu:t${n}/${menuAskId(n)}`, terminal: `t${n}`, askId: menuAskId(n), card: '5', repository: '/repos/a',
   kind: 'question', toolName: 'AskUserQuestion', askedAt: 1_795_000_000_000, questions: [DELIVER_QUESTION], answerable: true, ...fields,
 });
+test('a Decisions card shows when its agent asked it, as a clock time, with the date when that was not today', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 19, 15, 30).getTime() });
+  const today = waitingMenu(1, { askedAt: new Date(2026, 10, 19, 14, 2).getTime() });
+  const earlier = waitingMenu(2, { askedAt: new Date(2026, 10, 18, 14, 2).getTime() });
+  const tree = (await decisionsScene(panelCache([today, earlier]))).render();
+  const drawn = strings(tree);
+  const todays = strings(cardOf(tree, today.key));
+  const earliers = strings(cardOf(tree, earlier.key));
+  assert.ok(drawn.includes('card 5'), `a waiting menu draws its card: ${drawn.join(' | ')}`);
+  assert.ok(todays.includes(', waiting since 14:02'), `a menu asked today shows its clock time: ${todays.join(' | ')}`);
+  assert.ok(!todays.includes(', waiting since 18 Nov, 14:02'), `a menu asked today shows no date: ${todays.join(' | ')}`);
+  assert.ok(earliers.includes(', waiting since 18 Nov, 14:02'), `a menu asked on another day shows its date and time: ${earliers.join(' | ')}`);
+  assert.ok(!earliers.includes(', waiting since 14:02'), `a menu asked on another day shows its date: ${earliers.join(' | ')}`);
+});
+
+test('a Decisions card that no agent ask times says its wait time is not recorded', async () => {
+  const items = [queueItem('merge', 5), queueItem('question', 6), queueItem('usage-limit', 11), queueItem('suggested', 8), queueItem('failure', 10)];
+  const drawn = strings((await decisionsScene(panelCache(items))).render());
+  assert.equal(drawn.filter((line) => line === ', wait time not recorded').length, 5, `each of the five cards says so: ${drawn.join(' | ')}`);
+  assert.ok(!drawn.some((line) => line.startsWith(', waiting since')), 'no card claims a time it does not have');
+});
+
+test('a waiting menu whose ask time is not a past time says its wait time is unreadable and still draws its card', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 19, 15, 30).getTime() });
+  const asked = ['abc', null, undefined, Date.now() + 60000, -1e20];
+  const menus = asked.map((askedAt, i) => waitingMenu(i + 1, { askedAt }));
+  const drawn = strings((await decisionsScene(panelCache(menus))).render());
+  assert.equal(drawn.filter((line) => line === ', wait time unreadable').length, 5, `each menu says its wait time is unreadable: ${drawn.join(' | ')}`);
+  assert.equal(drawn.filter((line) => line === 'Deliver').length, 5, `each menu still draws its title: ${drawn.join(' | ')}`);
+  assert.ok(!drawn.some((line) => line.includes('cannot be read')), 'nothing is drawn as a problem line');
+});
+
 // The decision cards a tree draws as Markdown.
 const decisionCards = (tree) => nodesOf(tree, 'markdown').map(textOf);
 
 test("a deliver menu shows the decision card of the merge of its own repository and numeric card, or says why it shows none", async () => {
-  const mergeA = queueItem('merge', 5, { ...COORDINATOR, decisionCard: 'Ship card 5 of a.' });
-  const mergeB = inRepository('b', 'merge', 5, { ...COORDINATOR, decisionCard: 'Ship card 5 of b.' });
+  const mergeA = queueItem('merge', 5, { decisionCard: 'Ship card 5 of a.' });
+  const mergeB = inRepository('b', 'merge', 5, { decisionCard: 'Ship card 5 of b.' });
   const menuB = waitingMenu(1, { repository: '/repos/b' });
 
   // The merge of the menu's own repository and numeric card, never one of another repository with the same number.
@@ -3306,8 +2972,8 @@ test("a deliver menu shows the decision card of the merge of its own repository 
 });
 
 test('a merge whose repository and card have a waiting menu draws no answer box and no Put aside, so the menu is the one place to answer', async () => {
-  const mergeA = queueItem('merge', 5, COORDINATOR);
-  const mergeB = inRepository('b', 'merge', 5, COORDINATOR);
+  const mergeA = queueItem('merge', 5);
+  const mergeB = inRepository('b', 'merge', 5);
   const menuB = waitingMenu(1, { repository: '/repos/b' });
   const decisions = (await decisionsScene(panelCache([mergeA, mergeB, menuB]))).render();
   assert.deepEqual(itemButtons(decisions, mergeB.key), [], 'the Decisions view draws no control for the merge of the waiting menu');
@@ -3334,7 +3000,7 @@ const FORM_MENUS = [
   { item: waitingMenu(4, { card: '6', questions: [SINGLE_QUESTION, MULTI_QUESTION] }), card: 6, multiple: 1 },
   { item: waitingMenu(5, { card: '7', questions: [SINGLE_QUESTION] }), card: 7, multiple: 0 },
   { item: waitingMenu(6, { card: '8', questions: [MULTI_QUESTION] }), card: 8, multiple: 1 },
-  { item: waitingMenu(1, { version: DELIVER_VERSION }), card: 5, multiple: 0, beside: [queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION })] },
+  { item: waitingMenu(1, { version: DELIVER_VERSION }), card: 5, multiple: 0, beside: [queueItem('merge', 5, { ...DELIVER_VERSION })] },
 ];
 
 test('a multi-select question says in words that more than one choice may be picked', async () => {
@@ -3382,7 +3048,7 @@ const COLOUR_QUESTION = { question: 'Which colour do you pick?', header: 'Colour
 // question offers its other choices and says why, and a menu with several questions has no answer control. The expected
 // controls and lines are the approved plan's version repair.
 test('a deliver menu offers Yes, deliver only where the version its job asked about is the version of the decision card it shows', async () => {
-  const merge = queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION });
+  const merge = queueItem('merge', 5, { ...DELIVER_VERSION });
   const choices = (tree, item) => itemButtons(tree, item.key).map(controlName).sort();
   const versionLines = (tree) => strings(tree).filter((line) => /\bversion\b/i.test(line));
 
@@ -3400,7 +3066,7 @@ test('a deliver menu offers Yes, deliver only where the version its job asked ab
     { why: 'another identity', item: waitingMenu(3, { version: { ...DELIVER_VERSION, identity: '4'.repeat(40) } }), says: notAskedAbout },
     { why: 'a version the job could not read', item: waitingMenu(4, { versionUnread: VERSION_UNREAD }),
       says: (line) => /\bversion\b/i.test(line) && line.includes(VERSION_UNREAD) },
-    { why: 'an ask that records no version, beside a merge that carries none', item: waitingMenu(5), beside: [queueItem('merge', 5, COORDINATOR)] },
+    { why: 'an ask that records no version, beside a merge that carries none', item: waitingMenu(5), beside: [queueItem('merge', 5)] },
     { why: 'no merge of its repository and card', item: waitingMenu(6, { version: DELIVER_VERSION, repository: '/repos/b' }) },
   ];
   for (const { why, item, says, offers = ['No, put aside'], beside = [merge] } of refused) {
@@ -3427,7 +3093,7 @@ test('a deliver menu offers Yes, deliver only where the version its job asked ab
 // the version, whatever the layout.
 test('a deliver menu the hook could not record offers no yes and says why', async () => {
   const CAUSE = 'the menu must hold exactly one single-choice question offering "Yes, deliver"';
-  const merge = queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION });
+  const merge = queueItem('merge', 5, { ...DELIVER_VERSION });
   const unreadLines = (tree) => strings(tree).filter((line) => line === `The job could not read the version it asked about: ${CAUSE}`);
   const offersNothing = (tree, item, why) => {
     assert.deepEqual(itemButtons(tree, item.key).map(controlName), [], `${why}: no button, so no Yes, deliver and no send`);
@@ -3459,13 +3125,14 @@ const herdrAgent = (address, status, n) => ({
 });
 const READ_IN_DECISIONS = "Read it in Decisions";
 // A queue whose `menus` prints `printed()`, a document or raw text, as it stands at each run; every other command succeeds.
-const menusPrint = (printed) => (_program, args) => {
+const menusPrint = (/** @type {() => any} */ printed) => (/** @type {string} */ _program, /** @type {string[]} */ args) => {
   if (args[1] !== 'menus') return OK;
   const now = printed();
   return { code: 0, stdout: typeof now === 'string' ? now : `${JSON.stringify(now)}\n`, stderr: '' };
 };
 const commandsRun = (host) => ran(host).map(({ args }) => args[1]);
 
+/** @param {{ agents: any[], printed?: () => any, cache?: any, execResult?: Exec }} options */
 async function inboxScene({ agents, printed = () => ({ items: [], problems: [] }), cache = panelCache([]), execResult = menusPrint(printed) }) {
   const host = await loadPanel(execResult, {}, { lifecycle: true });
   host.agentList = agents;
@@ -3613,7 +3280,7 @@ test('a deliver ask in the inbox offers Yes only where the saved queue holds the
   const choices = (host) => itemButtons(cardOf(host.render(), deliver.key), deliver.key).map(controlName).sort();
   const cases = [
     { why: 'no saved queue', cache: null },
-    { why: 'a saved card of another version', cache: panelCache([queueItem('merge', 5, { ...COORDINATOR, version: CHANGED, head: '3'.repeat(40), identity: '4'.repeat(40) })]), line: (found) => /not the version the job asked about/i.test(found) },
+    { why: 'a saved card of another version', cache: panelCache([queueItem('merge', 5, { version: CHANGED, head: '3'.repeat(40), identity: '4'.repeat(40) })]), line: (found) => /not the version the job asked about/i.test(found) },
     { why: 'an unreadable saved queue', cache: { format: 1 }, line: (line) => line.startsWith('Queue cache unreadable') },
   ];
   for (const { why, cache, line } of cases) {
@@ -3624,7 +3291,7 @@ test('a deliver ask in the inbox offers Yes only where the saved queue holds the
     await host.click(buttonOf(host.render(), deliver.key, READ_IN_DECISIONS));
     assert.deepEqual(host.overlays, [viewSpec('decisions', undefined)], `${why}: the control opens Decisions over the window`);
   }
-  const matching = panelCache([queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION })]);
+  const matching = panelCache([queueItem('merge', 5, { ...DELIVER_VERSION })]);
   const host = await inboxScene({ agents, printed, cache: null });
   host.setCache(matching);
   await host.batch(QUEUE_FOLDER, [`${QUEUE_FOLDER}/queue.json`]);
@@ -3641,7 +3308,7 @@ test('the saved queue folder is watched again before each load of it, so a write
   host.setCache(panelCache([]));
   await host.batch(QUEUE_FOLDER, [`${QUEUE_FOLDER}/queue.json`]);
   assert.ok(host.watches.some((watch) => watch.path === QUEUE_FOLDER && !watch.settled), 'while the load a batch started is pending, the saved queue folder is watched');
-  host.setCache(panelCache([queueItem('merge', 5, { ...COORDINATOR, ...DELIVER_VERSION })]));
+  host.setCache(panelCache([queueItem('merge', 5, { ...DELIVER_VERSION })]));
   await host.batch(QUEUE_FOLDER, [`${QUEUE_FOLDER}/queue.json`]);
   host.cacheGate = null;
   release();
@@ -3660,7 +3327,7 @@ test('the Decisions view draws every waiting item once under its project in queu
     { category: 'problem', repository: '/repos/c', problem: 'corrupt record' },
     digestEntry,
   ];
-  const boards = ['b', 'c', 'a'].map((folder) => ({ repository: `/repos/${folder}`, cards: [], lead: NO_LEAD }));
+  const boards = ['b', 'c', 'a'].map((folder) => ({ repository: `/repos/${folder}`, cards: [] }));
   // A group heading is its folder name followed by its count; a card is drawn by its folder and card line.
   const drawnOrder = (tree) => {
     const lines = strings(tree);
@@ -3691,12 +3358,11 @@ test('the Decisions view draws every waiting item once under its project in queu
 test('a Decisions card answers through its command and names a refusal', async () => {
   const suggested = queueItem('suggested', 8, { scope: 'Build the thing.' });
   const presses = [
-    { item: queueItem('merge', 5, COORDINATOR), press: 'Put aside', expected: ['act', keyOf(5), 'park', versionOf(5)] },
-    { item: queueItem('merge', 5, COORDINATOR), answer: 'yes', press: sendName(5), expected: ['act', keyOf(5), 'answer', versionOf(5), 'yes'] },
+    { item: queueItem('merge', 5), press: 'Put aside', expected: ['act', keyOf(5), 'park', versionOf(5)] },
+    { item: queueItem('merge', 5), answer: 'yes', press: sendName(5), expected: ['act', keyOf(5), 'answer', versionOf(5), 'yes'] },
     { item: queueItem('question', 6, { answerable: true }), answer: 'Blue.', press: sendName(6), expected: ['act', keyOf(6), 'answer', versionOf(6), 'Blue.'] },
     { item: suggested, press: 'Accept card', expected: ['act', keyOf(8), 'keep', versionOf(8)] },
     { item: suggested, press: 'Reject', expected: ['act', keyOf(8), 'drop', versionOf(8)] },
-    { item: queueItem('failure', 10, { log: '/state/runs/lead-10.jsonl' }), press: 'Open log', expected: ['open-log', keyOf(10)] },
   ];
   for (const { item, answer, press, expected } of presses) {
     const decisions = await decisionsScene(panelCache([item]));
@@ -3707,25 +3373,25 @@ test('a Decisions card answers through its command and names a refusal', async (
 
   const refusal = 'card 5 changed since the panel drew it: refresh the queue';
   const refusedWith = { code: 1, stdout: '', stderr: `${refusal}\n` };
-  const refused = await decisionsScene(panelCache([queueItem('merge', 5, COORDINATOR)]), refusedWith);
+  const refused = await decisionsScene(panelCache([queueItem('merge', 5)]), refusedWith);
   await refused.click(buttonOf(refused.render(), keyOf(5), 'Put aside'));
   const tree = refused.render();
   assert.ok(strings(tree).includes(`Put aside failed: ${refusal}`), `the refusal names its button: ${strings(tree).join(' | ')}`);
   assert.ok(!strings(tree).includes('Put aside; the queue confirms on its next read'), 'a refused answer leaves no receipt');
   buttonOf(tree, keyOf(5), 'Put aside');
 
-  const unsent = await decisionsScene(panelCache([queueItem('merge', 5, COORDINATOR)]), refusedWith);
+  const unsent = await decisionsScene(panelCache([queueItem('merge', 5)]), refusedWith);
   unsent.type(boxOf(unsent.render(), 'Answer to card 5'), 'yes');
   await unsent.click(buttonOf(unsent.render(), keyOf(5), sendName(5)));
   const kept = unsent.render();
   assert.ok(strings(kept).includes(`Send answer failed: ${refusal}`), `the refused answer names the send: ${strings(kept).join(' | ')}`);
-  assert.ok(!strings(kept).includes(RECORDED), 'a refused answer leaves no receipt');
+  assert.ok(!strings(kept).includes(RELAYED), 'a refused answer leaves no receipt');
   assert.equal(boxOf(kept, 'Answer to card 5').state.value(), 'yes', 'a refused answer keeps its words');
 });
 
 test('a handled Decisions card stays a receipt in its place until the read confirms it', async () => {
   const parked = 'Put aside; the queue confirms on its next read';
-  const items = [queueItem('merge', 5, COORDINATOR), queueItem('merge', 6, COORDINATOR), queueItem('failure', 10)];
+  const items = [queueItem('merge', 5), queueItem('merge', 6), queueItem('failure', 10)];
   // Each card in drawn order: its folder and card line, or its receipt's card and title.
   const places = (tree) => strings(tree).filter((line) => /^a card \d+(, a\d+)?$/.test(line));
   const undos = (tree) => buttonsIn(tree).filter((button) => nameOf(button) === 'Undo');
@@ -3794,63 +3460,33 @@ test('a card the view cannot read is a problem line in its place, beside the car
   assert.equal(unreadableCard(tree).length, 1, 'the card it cannot read is one problem line naming its card and saying it cannot be read');
 });
 
-test('a project tile shows its waiting count and lead state, and says when its board entry cannot be read', async () => {
-  // A tile is the one element the Decisions view gives a 200 basis: its folder, its count, its lead line, its outline.
+test('a project tile shows its waiting count and Coordinator line, and a board entry the view cannot read fails nothing', async () => {
+  // A tile is the one element the Decisions view gives a 200 basis: its folder, its count, its Coordinator line, its outline.
   const tiles = (tree) => nodesOf(tree, 'v_flex').filter((node) => called(node, 'flex_basis').length > 0)
     .map((tile) => [...strings(tile), called(tile, 'border_color').at(-1)[0]]);
-  const board = (folder, lead) => ({ repository: `/repos/${folder}`, cards: [], lead });
-  const unreadable = 'Lead state unreadable: its board entry is not one this view can read';
-  const lead = (...states) => ({ here: states.map((state, index) => ({ terminal: `t${index}`, state })), elsewhere: [] });
-  const boards = [
-    board('empty', NO_LEAD),
-    board('cause', { hereUnread: 'the refresh was given no terminal list', elsewhere: [] }),
-    board('one', lead('working')),
-    board('waits', lead('blocked')),
-    board('many', lead('working', 'blocked', 'done', 'idle', 'unknown')),
-    null,
-    'not an entry',
-    board('nolead', undefined),
-    board('number', 5),
-    board('hereText', { here: 'working' }),
-    board('hereNull', { here: null }),
-    board('badstate', { here: [{ terminal: 't0', state: 'asleep' }] }),
-    board('badterminal', { here: [{ terminal: 0, state: 'idle' }] }),
-    board('twin', { here: [{ terminal: 't0', state: 'working' }, { terminal: 't0', state: 'working' }], elsewhere: [] }),
-    board('unreadNumber', { hereUnread: 5 }),
-    board('neither', { elsewhere: [] }),
-  ];
+  const board = (folder) => ({ repository: `/repos/${folder}`, cards: [] });
+  const noSpace = 'No Herdr space for this project';
+  const boards = [board('empty'), board('one'), board('waits'), null, 'not an entry', board('neither')];
   const items = [
     inRepository('one', 'merge', 5),
     inRepository('one', 'failure', 6),
     inRepository('waits', 'question', 3),
-    inRepository('many', 'usage-limit', 9),
-    inRepository('nolead', 'suggested', 7, { scope: 'Build the thing.' }),
     inRepository('neither', 'merge', 8),
     inRepository('elsewhere', 'merge', 4),
   ];
   const expected = (counts) => [
-    ['empty', 'Nothing for you', 'No Herdr space for this project', 'border'],
-    ['cause', 'Nothing for you', 'Lead state not read: the refresh was given no terminal list', 'border'],
-    ['one', counts.one, 'Lead: working', 'border'],
-    ['waits', '1 need you', 'Lead: waiting on you', 'blocked'],
-    ['many', '1 need you', '5 leads: working, waiting on you, done, idle, state unknown', 'blocked'],
-    ['nolead', '1 need you', unreadable, 'border'],
-    ['number', 'Nothing for you', unreadable, 'border'],
-    ['hereText', 'Nothing for you', unreadable, 'border'],
-    ['hereNull', 'Nothing for you', unreadable, 'border'],
-    ['badstate', 'Nothing for you', unreadable, 'border'],
-    ['badterminal', 'Nothing for you', unreadable, 'border'],
-    ['twin', 'Nothing for you', unreadable, 'border'],
-    ['unreadNumber', 'Nothing for you', unreadable, 'border'],
-    ['neither', '1 need you', unreadable, 'border'],
-    ['elsewhere', '1 need you', 'Lead state not in this read', 'border'],
+    ['empty', 'Nothing for you', noSpace, 'border'],
+    ['one', counts.one, noSpace, 'border'],
+    ['waits', '1 need you', noSpace, 'border'],
+    ['neither', '1 need you', noSpace, 'border'],
+    ['elsewhere', '1 need you', 'Coordinator state not in this read', 'border'],
   ];
 
   const host = await decisionsScene({ ...panelCache(items), boards });
   let tree = host.render();
-  assert.deepEqual(tiles(tree), expected({ one: '2 need you' }), 'a tile for every boarded project then the others, each with its lead line');
+  assert.deepEqual(tiles(tree), expected({ one: '2 need you' }), 'a tile for every boarded project then the others, each with its Coordinator line');
   assert.ok(!strings(tree).some((line) => line.startsWith('Queue cache unreadable')), 'a board entry the view cannot read does not fail the view');
-  for (const ref of ['one card 5', 'nolead card 7', 'neither card 8', 'elsewhere card 4']) {
+  for (const ref of ['one card 5', 'neither card 8', 'elsewhere card 4']) {
     assert.ok(strings(tree).includes(ref), `${ref} is still drawn beside the unreadable entries`);
   }
 
@@ -3861,15 +3497,23 @@ test('a project tile shows its waiting count and lead state, and says when its b
   for (const [why, shape] of [['absent', undefined], ['null', null], ['an object', { one: 1 }], ['text', 'boards']]) {
     const unread = await decisionsScene({ ...panelCache(items), boards: shape });
     assert.deepEqual(tiles(unread.render()).map((tile) => tile.slice(0, 1).concat(tile.slice(2))), [
-      ['one', 'Lead state not in this read', 'border'],
-      ['waits', 'Lead state not in this read', 'border'],
-      ['many', 'Lead state not in this read', 'border'],
-      ['nolead', 'Lead state not in this read', 'border'],
-      ['neither', 'Lead state not in this read', 'border'],
-      ['elsewhere', 'Lead state not in this read', 'border'],
-    ], `boards ${why}: a tile for each project with a waiting card, none with a lead`);
+      ['one', 'Coordinator state not in this read', 'border'],
+      ['waits', 'Coordinator state not in this read', 'border'],
+      ['neither', 'Coordinator state not in this read', 'border'],
+      ['elsewhere', 'Coordinator state not in this read', 'border'],
+    ], `boards ${why}: a tile for each project with a waiting card`);
     assert.ok(strings(unread.render()).includes('one card 5'), `boards ${why}: the cards still draw`);
   }
+});
+
+// new behaviour: the panel knows no lead, so a project tile whose board is not in the read names its Coordinator.
+test('a project tile whose board is not in the read says the Coordinator state is not in this read', async () => {
+  // The tile is the one element the Decisions view gives a 200 basis; the test above keeps its own selector, which adds the outline.
+  const tiles = (tree) => nodesOf(tree, 'v_flex').filter((node) => called(node, 'flex_basis').length > 0).map(strings);
+  const host = await decisionsScene({ ...panelCache([inRepository('one', 'merge', 5)]), boards: [] });
+  const tree = host.render();
+  assert.deepEqual(tiles(tree).map((tile) => [tile[0], tile.at(-1)]), [['one', 'Coordinator state not in this read']]);
+  assert.ok(strings(tree).includes('one card 5'), 'the card still draws');
 });
 
 // The Floor view: the same mod in a tab made with the props `{ view: 'floor' }`. It draws every project's open cards as a
@@ -3882,7 +3526,7 @@ const STAGE_NAMES = ['Suggested', 'Ready to build', 'Building', 'Awaiting your y
 const UNREADABLE_ENTRY = 'Board unreadable: its board entry is not one this view can read';
 const TILE_ID = /^fabraik-queue-floor-\/repos\/[a-z0-9]+[#@]/;
 // A board entry and a card as queue.mjs gives them, with the folder read and no job worktree.
-const floorBoard = (folder, fields) => ({ repository: `/repos/${folder}`, folder: `/repos/${folder}`, cards: [], merged: [], lead: NO_LEAD, ...fields });
+const floorBoard = (folder, fields) => ({ repository: `/repos/${folder}`, folder: `/repos/${folder}`, cards: [], merged: [], ...fields });
 const floorCard = (card, title, column, fields) => ({ card, title, column, blockers: [], claim: null, waitsOn: null, worktree: null, ...fields });
 // This computer's spaces, their tabs and the panes in them, as Herdr's `spaces()` and `panes()` give them (herdr.d.ts).
 const herdrTab = (id, name) => ({
@@ -3898,7 +3542,7 @@ const herdrPane = (pane, tab, status, program = CLAUDE_CODE) => ({
 const localTime = (day, hours, minutes = 0) => new Date(2026, 10, day, hours, minutes).toISOString();
 const NOON_12TH = new Date(2026, 10, 12, 12).getTime();
 
-async function floorScene(cache, execResult = OK) {
+async function floorScene(cache, /** @type {Exec} */ execResult = OK) {
   const host = await loadPanel(execResult, FLOOR);
   host.setCache(cache);
   await host.panel.load();
@@ -4012,6 +3656,7 @@ test('the Floor places every card of every project in the cell of its stage', as
 // focus goes back to the opening tile, or to the Floor where that tile is no longer drawn.
 const SHEET_ID = `${FLOOR_ID}sheet`;
 const SHEET_CLOSE_ID = `${FLOOR_ID}sheet-close`;
+const SHEET_SHOTS_ID = `${FLOOR_ID}sheet-shots`;
 const SHEET_CARDS = [floorCard(2, 'Build it', 'Ready'), floorCard(5, 'Ship it', 'Awaiting push', { waitsOn: 'merge' })];
 const sheetCache = (cards) => ({ ...panelCache([]), boards: [floorBoard('a', { cards, merged: [{ sha: 'm2', at: localTime(12, 0, 1), subject: 'Merged one (#10)' }] })] });
 const nodeWithId = (tree, id) => [...walk(tree)].map(([node]) => node).find((node) => node.elementId === id);
@@ -4045,11 +3690,11 @@ test('a Floor card is a button that opens its sheet over a shade', async (t) => 
 test('Esc, Close and a press outside each close the Floor sheet and give focus back to the card that opened it', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
   const host = await floorScene(sheetCache(SHEET_CARDS));
-  const closers = [
+  const closers = /** @type {[string, () => unknown][]} */ ([
     ['Esc', () => host.press('escape')],
     ['Close', () => host.click(nodeWithId(host.render(), SHEET_CLOSE_ID))],
     ['a press outside', () => called(nodeWithId(host.render(), SHEET_ID), 'on_mouse_down_out').at(-1)[0]({}, host.cx)],
-  ];
+  ]);
   for (const [name, close] of closers) {
     await host.click(cardTileOf(host.render(), 2));
     await host.press('c');
@@ -4160,7 +3805,7 @@ test('ANTI-REGRESSION: a question names its holding computer when readable and r
     }
     const answerable = await render(queueItem('question', 6, { answerable: true, heldOn: holder }));
     assert.deepEqual(questionLines(answerable), [], `a legacy answerable question, in ${view}`);
-    assert.deepEqual(nodesOf(answerable, 'input').map((box) => box.state.placeholder), ['Your answer to the a lead'],
+    assert.deepEqual(nodesOf(answerable, 'input').map((box) => box.state.placeholder), ['Your answer for a'],
       `the legacy answer box, in ${view}`);
     assert.ok(buttonsIn(answerable).some((button) => labelOf(button) === sendName(6)), `Send answer, in ${view}`);
   }
@@ -4301,6 +3946,7 @@ test('a Floor sheet follows its card to the latest read and names a card that le
 test('a Floor sheet answers through the same command as the queue and names a refusal', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
   const refusal = 'card 5 changed since the panel drew it: refresh the queue';
+  /** @type {ExecResult | Promise<ExecResult>} */
   let answer = OK;
   const cache = { ...panelCache([queueItem('merge', 5)]), boards: [floorBoard('a', { cards: [floorCard(5, 'Ship it', 'Awaiting push', { waitsOn: 'merge' })] })] };
   const host = await floorScene(cache, () => answer);
@@ -4320,15 +3966,19 @@ const SHEET_END_ID = `${FLOOR_ID}sheet-end`;
 
 test('the open Floor sheet keeps Tab and Shift-Tab inside itself, wrapping at its ends, whatever its body', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
+  /** @type {ExecResult | Promise<ExecResult>} */
   let answer = OK;
   const cache = { ...panelCache([queueItem('merge', 5)]), boards: [floorBoard('a', { cards: [floorCard(5, 'Ship it', 'Awaiting push', { waitsOn: 'merge' })] })] };
   const host = await floorScene(cache, () => answer);
 
   // The scripted window: each move records its direction and where focus was, then focus goes where `lands` says.
+  /** @type {{ focus: () => void } | null} */
   let lands = null;
   const moves = [];
-  const moveTo = (direction) => () => { moves.push([direction, focusedName()]); lands.focus(); };
+  const moveTo = (direction) => () => { moves.push([direction, focusedName()]); assert.ok(lands, 'the test says where focus lands'); lands.focus(); };
+  // @ts-expect-error a scripted window stands in for Herdr's
   globalThis.window = { focus_next: moveTo('next'), focus_prev: moveTo('prev') };
+  // @ts-expect-error the scripted window is removed again
   t.after(() => { delete globalThis.window; });
 
   await host.click(sheetTileOf(host, sheetKey(5)));
@@ -4436,6 +4086,7 @@ test('the open Floor sheet keeps Tab and Shift-Tab inside itself, wrapping at it
 // leaves the keyboard, from which the drives showed Esc and Tab work.
 test('the open Floor sheet takes the keyboard when a press replaces the control holding it, unless Close holds it', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
+  /** @type {ExecResult | Promise<ExecResult>} */
   let answer = OK;
   const waiting = (version) => ({ ...sheetCache(SHEET_CARDS), items: [queueItem('merge', 5, { version })] });
   const host = await floorScene({ ...sheetCache(SHEET_CARDS), items: [queueItem('failure', 5)] }, () => answer);
@@ -4457,7 +4108,7 @@ test('the open Floor sheet takes the keyboard when a press replaces the control 
   // 1 to 6. Each press starts with the keyboard on one handle and ends with it where the press leaves it. Steps 1 to 4
   // press a failure's Dismiss, whose receipt replaces it with Undo; a read then swaps the failure for a merge, whose
   // Put aside steps 5 and 6 press.
-  const pressFrom = async ([number, start, name, result, after, drawn]) => {
+  const pressFrom = async (/** @type {any[]} */ [number, start, name, result, after, drawn]) => {
     answer = result;
     starts[start].focus();
     await host.click(buttonOf(host.render(), keyOf(5), name));
@@ -4569,7 +4220,7 @@ test('a focused tile or outlined control gains a foreground border and a focused
   const host = await floorScene(sheetCache(SHEET_CARDS));
   await host.click(cardTileOf(host.render(), 2));
   const tree = host.render();
-  const answers = await decisionsScene(panelCache([queueItem('merge', 5, COORDINATOR)]));
+  const answers = await decisionsScene(panelCache([queueItem('merge', 5)]));
   for (const [name, node] of [['the tile of card 2', cardTileOf(tree, 2)], ["the sheet's Close", nodeWithId(tree, SHEET_CLOSE_ID)], ['the send control', named(answers.render(), sendName(5))]]) {
     assert.ok(sets(declared(node), 'border_color', 'foreground'), `${name} gains a foreground border when focused`);
     assert.notEqual(called(node, 'border_color').at(-1)?.[0], 'foreground', `${name} rests without a foreground border`);
@@ -4604,7 +4255,7 @@ test('a focused tile or outlined control gains a foreground border and a focused
 test('the Floor draws an unreadable project as its own row with its cause, never an empty row, and names each part it could not read', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
   const boards = [
-    { repository: '/repos/c', folder: '/repos/c', unreadable: 'the board read failed', lead: NO_LEAD_UNREAD_BOARD },
+    { repository: '/repos/c', folder: '/repos/c', unreadable: 'the board read failed' },
     floorBoard('d', { cards: 'none' }),
     floorBoard('e', { cards: [floorCard(1, 5, 'Ready')] }),
     null,
@@ -4667,48 +4318,37 @@ test('the Floor draws an unreadable project as its own row with its cause, never
   assert.ok(strings(formatOne.render()).some((line) => line.startsWith('Queue cache unreadable:')), 'a format 1 cache is unreadable');
 });
 
-test("the Floor names a project's lead only where it waits on you or its state is not read", async () => {
-  const lead = (state) => ({ here: [{ terminal: 't0', state }], elsewhere: [] });
-  const notRead = 'the panel could not read it';
+test("the Floor names a project's Coordinator only where its state is not read", async () => {
   const boards = [
-    floorBoard('p1', { lead: lead('working') }),
-    floorBoard('p2', { lead: lead('blocked') }),
-    floorBoard('p3', { lead: { hereUnread: notRead, elsewhere: [] } }),
-    floorBoard('p4', { lead: lead('unknown') }),
-    // The cache text leaves an undefined key out, so p5's entry has no lead.
-    floorBoard('p5', { lead: undefined }),
-    // No lead runs in p6, and two of Herdr's spaces open its folder, so whose Coordinator it is cannot be read.
+    floorBoard('p1'),
+    // Two of Herdr's spaces open p6's folder, so whose Coordinator it is cannot be read.
     floorBoard('p6'),
   ];
   const host = await floorScene({ ...panelCache([]), boards });
   host.spaceList = [herdrSpace('s1', '/repos/p6', [herdrTab('s1-coordinator', 'Coordinator')]), herdrSpace('s2', '/repos/p6', [])];
   host.paneList = [herdrPane('p1', 's1-coordinator', 'working')];
   const tree = host.render();
-  const leadLines = ['Lead: waiting on you', `Lead state not read: ${notRead}`, 'Lead: state unknown', 'Lead state unreadable: its board entry is not one this view can read'];
+  const unread = 'Coordinator state unread: two spaces open this folder';
   assert.deepEqual(floorGrid(tree).map(([project]) => project), [
     ['p1', 'Nothing for you', 'Open board'],
-    ...leadLines.map((line, index) => [`p${index + 2}`, line, 'Nothing for you', 'Open board']),
-    ['p6', 'Coordinator state unread: two spaces open this folder', 'Nothing for you', 'Open board'],
-  ], 'a working lead has no line; a lead waiting on you or not read, or a Coordinator not read, has one, between the name and the count');
-  const projects = floorRows(tree).slice(1, 1 + leadLines.length).map(([project]) => project);
-  assert.deepEqual(projects.map((project, index) => colourOf(project, leadLines[index])), ['muted', 'muted', 'muted', 'foreground'],
-    'a lead line is muted, and a board entry the view cannot read is a problem in the foreground');
+    ['p6', unread, 'Nothing for you', 'Open board'],
+  ], 'a project with no Herdr space has no line; a Coordinator not read has one, between the name and the count');
+  const [project] = floorRows(tree)[1];
+  assert.equal(colourOf(project, unread), 'muted', 'a Coordinator line not read is muted');
 });
 
-test("a board card's answered is read only as true, and any other value makes the board entry unreadable", async () => {
+test("a board card's answered is ignored whatever its value, and nothing draws You answered this version", async () => {
   const answered = (value) => floorBoard('a', { cards: [floorCard(1, 'Answered merge', 'Awaiting push', { waitsOn: 'merge', answered: value })] });
-  const admitted = (await floorScene({ ...panelCache([]), boards: [answered(true)] })).render();
-  assert.deepEqual(floorGrid(admitted), [[['a', 'Nothing for you', 'Open board'], [], [], ['#1', 'Answered merge', 'You answered this version'], [], []]],
-    'answered: true is read and drawn');
-  for (const value of ['yes', false]) {
-    const refused = (await floorScene({ ...panelCache([]), boards: [answered(value)] })).render();
-    assert.deepEqual(floorGrid(refused), [[['a', 'Open board'], [UNREADABLE_ENTRY]]], `answered: ${JSON.stringify(value)} makes the board entry unreadable`);
+  for (const value of [true, 'yes', false]) {
+    const tree = (await floorScene({ ...panelCache([]), boards: [answered(value)] })).render();
+    assert.deepEqual(floorGrid(tree), [[['a', '1 need you', 'Open board'], [], [], [], ['Merge awaiting your yes', '#1', 'Answered merge'], []]],
+      `answered: ${JSON.stringify(value)} is ignored and the merge still awaits the owner's yes`);
+    assert.ok(!strings(tree).includes('You answered this version'), `answered: ${JSON.stringify(value)} draws no answered line`);
   }
 });
 
-// The agent on a Floor card: Herdr's live terminal list ties an agent to a card by the lead's card-session name in the
-// project folder, else by the card's job worktree holding the terminal's live folder, then its launch folder; a card no
-// terminal ties shows the program its claim's runtime names. The expected marks, lines, colours and counts are worked
+// The agent on a Floor card: Herdr's live terminal list ties an agent to a card by the card's job worktree holding the
+// terminal's live folder, then its launch folder; a card no terminal ties shows the program its claim's runtime names. The expected marks, lines, colours and counts are worked
 // by hand from the plan's "Agent on a card" table and lighting rule for each fixture, never read off the panel.
 const SPINNER = 'mods/workspace-chrome/spinner.svg';
 const CLAUDE = { key: 'claude', name: 'Claude', icon: 'icons/claude.svg', tint: true, agent: true };
@@ -4718,17 +4358,20 @@ const SHELL = { key: 'shell', name: 'zsh', icon: 'icons/shell.svg', tint: true, 
 const KNOWN_AGENTS = [{ ...CLAUDE, run: ['claude'], installed: true }, { ...CODEX, run: ['codex'], installed: true }];
 const CLAUDE_MARK = { kind: 'svg', path: 'icons/claude.svg', label: 'Claude' };
 const CODEX_MARK = { kind: 'image', path: 'icons/codex.svg', label: 'Codex' };
+// A Decisions card's icon is unlabelled because its name stands beside it.
+const CLAUDE_ICON = { ...CLAUDE_MARK, label: undefined };
+const CODEX_ICON = { ...CODEX_MARK, label: undefined };
 const PLAIN = ['border', 'raised'];
 const litIn = (role) => [role, `${role}1F`];
 const worktreeIn = (project, card) => `/repos/${project}/.claude/worktrees/job-${card}`;
 // A terminal as Herdr's terminals() gives it: `cwd` is the folder it was launched in, `live` its running program's folder,
 // and a null `state` is no report.
-const agentTerminal = (address, { name = null, cwd = null, live = null, state = null, app = 'claude-code', program = CLAUDE } = {}) => ({
+const agentTerminal = (address, /** @type {{ name?: string | null, cwd?: string | null, live?: string | null, state?: string | null, app?: string, program?: any }} */ { name = null, cwd = null, live = null, state = null, app = 'claude-code', program = CLAUDE } = {}) => ({
   address, name, cwd, foreground: live === null ? null : { cwd: live }, report: state === null ? null : { state, app }, program,
 });
 
 // floorScene loads at once, and the Floor asks knownAgents() as it loads, so Herdr's two lists are set first here.
-async function agentScene(boards, terminalList, agentPrograms = KNOWN_AGENTS) {
+async function agentScene(boards, terminalList, /** @type {any} */ agentPrograms = KNOWN_AGENTS) {
   const host = await loadPanel(OK, FLOOR);
   host.terminalList = terminalList;
   host.agentPrograms = agentPrograms;
@@ -4737,21 +4380,168 @@ async function agentScene(boards, terminalList, agentPrograms = KNOWN_AGENTS) {
   return host;
 }
 
-// What a card's tile shows: its strings in order; each mark, an svg or image other than the spinner, with the label on
-// it or around it; the turn time of each spinner; and its border and fill.
+// Each mark under a node: an svg or image other than the spinner, with the label on it or around it.
+function marksIn(node) {
+  const marks = [];
+  const visit = (found, label) => {
+    const own = labelOf(found) ?? label;
+    if (['svg', 'image'].includes(found.kind) && found.path !== SPINNER) marks.push({ kind: found.kind, path: found.path, label: own });
+    for (const kid of found.kids.filter((part) => typeof part !== 'string')) visit(kid, own);
+  };
+  visit(node, undefined);
+  return marks;
+}
+
+// What a card's tile shows: its strings in order; its marks; the turn time of each spinner; and its border and fill.
 function tileView(tree, id) {
   const tile = floorTiles(tree).find((found) => found.elementId === `${FLOOR_ID}${id}`);
   assert.ok(tile, `${id} is drawn`);
-  const marks = [];
-  const visit = (node, label) => {
-    const own = labelOf(node) ?? label;
-    if (['svg', 'image'].includes(node.kind) && node.path !== SPINNER) marks.push({ kind: node.kind, path: node.path, label: own });
-    for (const kid of node.kids.filter((found) => typeof found !== 'string')) visit(kid, own);
-  };
-  visit(tile, undefined);
+  const marks = marksIn(tile);
   const spins = nodesOf(tile, 'svg').filter((node) => node.path === SPINNER).map((node) => called(node, 'spin').at(-1)?.[0]);
   return { strings: strings(tile), marks, spins, lit: [called(tile, 'border_color').at(-1)?.[0], called(tile, 'bg').at(-1)?.[0]] };
 }
+
+// The agent mark of a Decisions card: the runtime its card's newest claim names, joined through the cache's boards. The
+// expected marks, sizes and words are worked by hand from card 689's acceptance text and the design handoff's DecisionCard
+// (agent icon 18px + title), never read off the panel.
+// A card's agent marks: Herdr's program icons, not the glyphs of its controls.
+const agentMarksIn = (node) => marksIn(node).filter((mark) => mark.path.startsWith('icons/'));
+
+async function decisionsAgentScene(items, boards, agentPrograms = KNOWN_AGENTS) {
+  const host = await loadPanel(OK, DECISIONS);
+  host.agentPrograms = agentPrograms;
+  host.setCache({ ...panelCache(items), boards });
+  await host.panel.load();
+  return host;
+}
+
+test("a Decisions card leads its title with the icon of the runtime its card's claim names", async () => {
+  const claimed = (runtime) => ({ machine: 'omarchy', runtime });
+  const boards = [floorBoard('a', { cards: [
+    floorCard(5, 'Claude card', 'In review', { claim: claimed('Claude Code') }),
+    floorCard(6, 'Codex card', 'In review', { claim: claimed('Codex') }),
+    floorCard(7, 'Gemini card', 'In review', { claim: claimed('Gemini') }),
+    floorCard(8, 'Menu card', 'In review', { claim: claimed('Claude Code') }),
+  ] })];
+  const merge = queueItem('merge', 5);
+  const codex = queueItem('question', 6, { answerable: true });
+  const gemini = queueItem('question', 7, { answerable: true });
+  const menu = waitingMenu(1, { card: '8' });
+  const host = await decisionsAgentScene([merge, codex, gemini, menu], boards);
+  const tree = host.render();
+  const marks = (item) => agentMarksIn(cardOf(tree, item.key));
+  assert.deepEqual(marks(merge), [CLAUDE_ICON], 'the merge of card 5 shows the Claude mark alone');
+  assert.deepEqual(marks(codex), [CODEX_ICON], 'the question of card 6 shows the Codex mark alone');
+  assert.deepEqual(marks(menu), [CLAUDE_ICON], 'the menu, whose card is the text 8, shows the Claude mark alone');
+  assert.deepEqual(marks(gemini), [], 'Herdr gives Gemini no icon, so no mark is drawn');
+  assert.ok(strings(cardOf(tree, gemini.key)).includes('Gemini'), `the Gemini card says its runtime: ${strings(cardOf(tree, gemini.key)).join(' | ')}`);
+  assert.ok(!strings(tree).includes('Agent unknown'), 'no card says its agent is unknown');
+  const svg = nodesOf(cardOf(tree, merge.key), 'svg').find((node) => node.path === CLAUDE_MARK.path);
+  assert.deepEqual(svg && called(svg, 'size'), [[18]], 'the Claude icon is 18');
+  const image = nodesOf(cardOf(tree, codex.key), 'image').find((node) => node.path === CODEX_MARK.path);
+  assert.deepEqual(image && [called(image, 'w'), called(image, 'h')], [[[18]], [[18]]], 'the Codex icon is 18 by 18');
+
+  host.agentPrograms = new Error('herdr is starting');
+  await host.panel.load();
+  const unread = host.render();
+  assert.deepEqual(agentMarksIn(cardOf(unread, codex.key)), [], 'with Herdr unread, the Codex card draws no icon');
+  assert.ok(strings(cardOf(unread, codex.key)).includes('Codex'), 'with Herdr unread, the Codex card says its runtime by name');
+});
+
+test("a Decisions card names its agent beside the agent's icon", async () => {
+  const claimed = (runtime) => ({ machine: 'omarchy', runtime });
+  const boards = [floorBoard('a', { cards: [
+    floorCard(5, 'Claude card', 'In review', { claim: claimed('Claude Code') }),
+    floorCard(6, 'Codex card', 'In review', { claim: claimed('Codex') }),
+  ] })];
+  const merge = queueItem('merge', 5);
+  const codex = queueItem('question', 6, { answerable: true });
+  const tree = (await decisionsAgentScene([merge, codex], boards)).render();
+  for (const [item, mark, name] of [[merge, CLAUDE_ICON, 'Claude'], [codex, CODEX_ICON, 'Codex']]) {
+    const card = cardOf(tree, item.key);
+    assert.deepEqual(agentMarksIn(card), [mark], `${name}: the icon is still drawn`);
+    assert.equal(strings(card).filter((line) => line === name).length, 1, `${name}: the card names its agent once: ${strings(card).join(' | ')}`);
+    assert.ok(![...walk(card)].some(([node]) => labelOf(node) === name), `${name}: no node is labelled with the name, which the word already gives`);
+    const [titleNode, row] = [...walk(card)].find(([node]) => node.kids.includes(item.title));
+    const within = (kid) => [...walk(kid)].map(([node]) => node);
+    const place = (found) => row.kids.findIndex((kid) => typeof kid !== 'string' && within(kid).includes(found));
+    const markNode = within(row).find((node) => node.kind === 'svg' || node.kind === 'image');
+    assert.ok(place(markNode) < place(titleNode), `${name}: the agent mark comes before the title in its row`);
+  }
+  const unnamed = KNOWN_AGENTS.map((program) => (program.key === 'claude' ? { ...program, name: '' } : program));
+  const blank = cardOf((await decisionsAgentScene([merge], boards, unnamed)).render(), merge.key);
+  assert.deepEqual(agentMarksIn(blank), [CLAUDE_ICON], 'a program with no name still draws its icon');
+  assert.equal(strings(blank).filter((line) => line === 'Claude Code').length, 1, `a program with no name is named by its runtime: ${strings(blank).join(' | ')}`);
+});
+
+test('a Decisions card says its agent is unknown where its board is ambiguous or its card unread', async () => {
+  const claim = (runtime) => ({ machine: 'omarchy', runtime });
+  const boards = [
+    floorBoard('d', { cards: [floorCard(30, 'Twice read', 'In progress', { claim: claim('Claude Code') })] }),
+    floorBoard('d', { cards: [floorCard(30, 'Twice read', 'In progress', { claim: claim('Codex') })] }),
+    floorBoard('e', { cards: [floorCard(31, 'Details unread', 'In progress', { unread: 'a code fence is left open', claim: claim('Claude Code') })] }),
+    floorBoard('f', { cards: [floorCard(32, 'Blank runtime', 'In progress', { claim: claim('  ') })] }),
+  ];
+  const items = [30, 31, 32].map((card, at) => inRepository(['d', 'e', 'f'][at], 'question', card, { answerable: true }));
+  const tree = (await decisionsAgentScene(items, boards)).render();
+  for (const item of items) {
+    const card = cardOf(tree, item.key);
+    assert.ok(strings(card).includes('Agent unknown'), `${item.key} says its agent is unknown: ${strings(card).join(' | ')}`);
+    assert.deepEqual(agentMarksIn(card), [], `${item.key} draws no agent mark`);
+  }
+});
+
+test('a Decisions card says its agent is unknown where the read gives no runtime for it, and still draws', async () => {
+  const boards = [
+    floorBoard('a', { cards: [
+      floorCard(10, 'No claim', 'Ready', { claim: null }),
+      floorCard(11, 'Claim without runtime', 'In progress', { claim: { machine: 'omarchy' } }),
+      floorCard(12, 'Claim with empty runtime', 'In progress', { claim: { machine: 'omarchy', runtime: '' } }),
+      { ...floorCard(14, 'Details unread', 'In progress', { unread: 'a code fence is left open' }), claim: undefined },
+    ] }),
+    floorBoard('u', { unreadable: 'folder unreadable' }),
+    floorBoard('x', { cards: 'not a list' }),
+  ];
+  const items = [10, 11, 12, 13, 14].map((card) => queueItem('question', card, { answerable: true }));
+  items.push(
+    inRepository('u', 'question', 20, { answerable: true }),
+    inRepository('x', 'question', 21, { answerable: true }),
+    inRepository('none', 'question', 22, { answerable: true }),
+    waitingMenu(2, { repository: undefined }),
+  );
+  const tree = (await decisionsAgentScene(items, boards)).render();
+  for (const item of items) {
+    const card = cardOf(tree, item.key);
+    assert.ok(strings(card).includes('Agent unknown'), `${item.key} says its agent is unknown: ${strings(card).join(' | ')}`);
+    if (item.title !== undefined) assert.ok(strings(card).includes(item.title), `${item.key} still draws its title: ${strings(card).join(' | ')}`);
+    assert.deepEqual(agentMarksIn(card), [],`${item.key} draws no agent mark`);
+  }
+  assert.ok(!strings(tree).some((line) => line.includes('cannot be read')), `no card falls back to its problem line: ${strings(tree).join(' | ')}`);
+});
+
+test("a Decisions card takes its agent from its own project's board, not another project's card of the same number", async () => {
+  const claimed = (runtime) => ({ machine: 'omarchy', runtime });
+  const boards = [
+    floorBoard('b', { cards: [floorCard(5, 'Codex card of b', 'In review', { claim: claimed('Codex') })] }),
+    floorBoard('a', { cards: [floorCard(5, 'Claude card of a', 'In review', { claim: claimed('Claude Code') })] }),
+  ];
+  const ofA = queueItem('question', 5, { answerable: true });
+  const ofB = inRepository('b', 'question', 5, { answerable: true });
+  const tree = (await decisionsAgentScene([ofA, ofB], boards)).render();
+  assert.deepEqual(agentMarksIn(cardOf(tree, ofA.key)), [CLAUDE_ICON], "a's card 5 shows the Claude mark, though b's card 5 is listed first");
+  assert.deepEqual(agentMarksIn(cardOf(tree, ofB.key)), [CODEX_ICON], "b's card 5 shows the Codex mark");
+  const svg = nodesOf(cardOf(tree, ofA.key), 'svg').find((node) => node.path === CLAUDE_MARK.path);
+  assert.equal(svg && called(svg, 'text_color').at(-1)?.[0], 'muted', 'the Claude mark is drawn in the muted colour');
+});
+
+test('a Floor tile draws its agent mark at 13', async () => {
+  const boards = [floorBoard('p', { cards: [floorCard(20, 'Card 20', 'In progress', { claim: { machine: 'omarchy', runtime: 'Claude Code' } })] })];
+  const tree = (await agentScene(boards, [])).render();
+  const tile = floorTiles(tree).find((found) => found.elementId === `${FLOOR_ID}/repos/p#20`);
+  assert.ok(tile, 'the tile of card 20 is drawn');
+  const svg = nodesOf(tile, 'svg').find((node) => node.path === CLAUDE_MARK.path);
+  assert.deepEqual(svg && called(svg, 'size'), [[13]], 'the Claude mark on a tile is 13');
+});
 
 // A line above the grid: drawn, and not inside the table.
 function assertProblemLine(tree, line) {
@@ -4768,7 +4558,7 @@ function agentFloor() {
       cards: [
         card(20, 'In progress', { worktree: W(20), claim: { machine: 'vps', runtime: 'Codex' } }),
         card(21, 'Awaiting push', { waitsOn: 'merge', worktree: '/jobs/21' }),
-        card(22, 'In progress'),
+        card(22, 'In progress', { worktree: W(22) }),
         card(23, 'In progress', { worktree: W(23) }),
         card(24, 'Ready', { worktree: W(24), claim: { machine: 'vps', runtime: 'Codex' } }),
         card(25, 'Ready', { claim: { machine: 'vps', runtime: 'Claude Code cloud' } }),
@@ -4780,27 +4570,26 @@ function agentFloor() {
         floorCard(31, 'Proposed: Idea', 'Backlog', { waitsOn: 'suggested', worktree: W(31), claim: { machine: 'vps', runtime: 'Claude Code' } }),
       ],
     }),
-    floorBoard('q', { cards: [card(22, 'In progress')] }),
+    floorBoard('q', { cards: [card(22, 'In progress', { worktree: worktreeIn('q', 22) })] }),
   ];
   const terminals = [
     agentTerminal('t1', { cwd: '/jobs/21', live: `${W(20)}/src`, state: 'working' }),
     agentTerminal('t2', { cwd: '/jobs/21', live: '/srv/o', state: 'idle', app: 'codex', program: CODEX }),
-    agentTerminal('t3', { name: 'lead-s1-job-22-continue', cwd: '/repos/p', live: W(23), state: 'blocked' }),
+    agentTerminal('t3', { live: W(22), state: 'blocked' }),
     agentTerminal('t4', { live: W(23), state: 'done' }),
     agentTerminal('t5', { cwd: W(23), state: 'working' }),
     agentTerminal('t6', { live: W(23), state: 'error' }),
     agentTerminal('t7', { live: W(27), program: SHELL }),
     agentTerminal('remote/t8', { live: W(27), state: 'working' }),
     agentTerminal('t9', { live: W(270), state: 'working' }),
-    agentTerminal('t10', { name: 'lead-s2-job-22-start', cwd: '/repos/q', state: 'working' }),
+    agentTerminal('t10', { cwd: worktreeIn('q', 22), state: 'working' }),
     agentTerminal('t12', { live: W(29) }),
     agentTerminal('t13', { live: W(31), state: 'working' }),
-    agentTerminal('t14', { live: W(24), state: 'working', app: 'fabraik-lead' }),
   ];
   return { boards, terminals };
 }
 
-const AGENT_PROBLEMS = /^(Problem:|Agent state not read|Agent icons not read|Lead sessions not matched|Agents in job worktrees not matched)/;
+const AGENT_PROBLEMS = /^(Problem:|Agent state not read|Agent icons not read|Sessions not matched|Agents in job worktrees not matched)/;
 
 test('each Floor card shows the agent Herdr shows on it and whether it works now, else the agent its claim names, and no agent it cannot read', async () => {
   const { boards, terminals } = agentFloor();
@@ -4810,9 +4599,9 @@ test('each Floor card shows the agent Herdr shows on it and whether it works now
   for (const [id, expected, why] of [
     ['/repos/p#20', shows(['#20', 'Card 20', 'Building now'], [CLAUDE_MARK], [900], PLAIN), "its live folder under the worktree ties t1 before its launch folder in #21's, and Herdr beats the claim"],
     ['/repos/p#21', shows(['Merge awaiting your yes', '#21', 'Card 21', 'Agent idle'], [CODEX_MARK], [], litIn('blocked')), 'its launch folder ties t2 where its live folder does not'],
-    ['/repos/p#22', shows(['Agent waiting on you', '#22', 'Card 22'], [CLAUDE_MARK], [], litIn('blocked')), 'the lead name in the folder ties t3 before its live folder'],
+    ['/repos/p#22', shows(['Agent waiting on you', '#22', 'Card 22'], [CLAUDE_MARK], [], litIn('blocked')), 'its live folder in the worktree ties t3'],
     ['/repos/p#23', shows(['#23', 'Card 23', 'Building now'], [CLAUDE_MARK], [900], PLAIN), 'working outranks done and error'],
-    ['/repos/p#24', shows(['#24', 'Card 24'], [CODEX_MARK], [], PLAIN), "its claim names Codex, and the Fabraik lead's terminal t14 in its worktree takes no part"],
+    ['/repos/p#24', shows(['#24', 'Card 24'], [CODEX_MARK], [], PLAIN), "no terminal is in its worktree, so its claim names Codex"],
     ['/repos/p#25', shows(['#25', 'Card 25'], [CLAUDE_MARK], [], PLAIN), 'Claude Code cloud is the Claude program'],
     ['/repos/p#26', shows(['#26', 'Card 26'], [], [], PLAIN), 'a claim without a runtime names no agent'],
     ['/repos/p#27', shows(['#27', 'Card 27'], [], [], PLAIN), "a shell, another machine's terminal and a folder beside the worktree tie nothing"],
@@ -4820,7 +4609,7 @@ test('each Floor card shows the agent Herdr shows on it and whether it works now
     ['/repos/p#29', shows(['#29', 'Card 29', 'Merging', 'Agent state not reported'], [CLAUDE_MARK], [], PLAIN), 'a terminal with no report'],
     ['/repos/p#30', shows(['Gemini CLI', '#30', 'Card 30'], [], [], PLAIN), 'a runtime Herdr has no program for is its name'],
     ['/repos/p#31', shows(['Suggested card', '#31', 'Idea'], [], [], litIn('accent')), 'a Suggested card shows no agent'],
-    ['/repos/q#22', shows(['#22', 'Card 22', 'Building now'], [CLAUDE_MARK], [900], PLAIN), "the lead name ties t10 in q's folder, never t3 in p's"],
+    ['/repos/q#22', shows(['#22', 'Card 22', 'Building now'], [CLAUDE_MARK], [900], PLAIN), "its launch folder in q's worktree ties t10, never t3 in p's"],
   ]) {
     assert.deepEqual(tileView(tree, id), expected, `${id}: ${why}`);
   }
@@ -4847,11 +4636,16 @@ test('the Floor names every agent fact it could not read instead of showing a ca
     assertProblemLine(tree, line);
     assert.deepEqual(tileView(tree, '/repos/p#24'), { strings: ['Codex', '#24', 'Card 24'], marks: [], spins: [], lit: PLAIN }, `${why}: #24 shows its claim's runtime word`);
   }
+  // A report's app is a field no tie reads, so a sibling's malformed one leaves the terminal list readable.
+  const odd = { ...agentTerminal('t14', { live: '/srv/o', state: 'idle' }), report: { state: 'idle', app: 7 } };
+  const oddTree = (await agentScene(boards, [...terminals, odd])).render();
+  assert.ok(!strings(oddTree).some((line) => line.startsWith('Agent state not read')), `a malformed app is not an unread terminal list: ${strings(oddTree).join(' | ')}`);
+  assert.deepEqual(tileView(oddTree, '/repos/p#20'), { strings: ['#20', 'Card 20', 'Building now'], marks: [CLAUDE_MARK], spins: [900], lit: PLAIN },
+    "a sibling's malformed app leaves #20 tied to t1");
 
   const asked = (card, fields) => [floorCard(card, 'Asks', 'In progress', { waitsOn: 'question', ...fields })];
   // The cache text leaves an undefined key out, so w1's and w2's cards have no `worktree` key.
   const rows = [
-    floorBoard('s', { folder: null, cards: asked(50) }),
     floorBoard('w1', { waitsOnUnread: ['worktrees'], cards: asked(51, { worktree: undefined }) }),
     floorBoard('w2', { cards: asked(52, { worktree: undefined }) }),
     floorBoard('x1', { cards: [floorCard(53, 'Odd', 'In progress', { worktree: 7 })] }),
@@ -4860,12 +4654,11 @@ test('the Floor names every agent fact it could not read instead of showing a ca
   const tree = (await agentScene(rows, [])).render();
   const building = (card) => [[], [], ['Blocking question', `#${card}`, 'Asks'], [], []];
   assert.deepEqual(floorGrid(tree), [
-    [['s', 'At least 1 need you', "Lead sessions not matched to cards: this project's folder was not read", 'Open board'], ...building(50)],
     [['w1', 'At least 1 need you', 'What cards wait on not read: worktrees', 'Agents in job worktrees not matched to cards: the worktree list was not read', 'Open board'], ...building(51)],
     [['w2', 'At least 1 need you', "Agents in job worktrees not matched to cards: its queue reader's release predates worktree reading", 'Open board'], ...building(52)],
     [['x1', 'Open board'], [UNREADABLE_ENTRY]],
     [['x2', 'Open board'], [UNREADABLE_ENTRY]],
-  ], 'a folder or worktree list not read is named and makes the count a floor; a worktree or claim the view cannot read makes the board unreadable');
+  ], 'a worktree list not read is named and makes the count a floor; a worktree or claim the view cannot read makes the board unreadable');
 });
 
 test('the Floor lights a card whose agent waits on you and counts it once', async () => {
@@ -4909,31 +4702,33 @@ test('the Floor lights a card whose agent waits on you and counts it once', asyn
 
   const folderless = (await agentScene([floorBoard('r', { folder: null, cards })], terminals)).render();
   assert.deepEqual(tilesOf(folderless), read, 'the worktree ties hold without the folder');
-  assert.deepEqual(projectCell(folderless), ['r', 'At least 3 need you', "Lead sessions not matched to cards: this project's folder was not read", 'Open board'],
-    'a folder not read makes the count a floor and is named');
+  assert.deepEqual(projectCell(folderless), ['r', '3 need you', 'Open board'],
+    'no tie rule reads the folder, so a folder not read leaves the count exact and adds no line');
 });
 
-test("the Floor draws a card whose waiting version you answered under Building, unlit and uncounted, beside its agent's line", async () => {
+// new behaviour: a merge answer goes to the coordinator chat, so a merge awaiting push waits on the owner until it merges.
+// Card 60 carries `answered: true`, the marker an older reader still sends where a card comment recorded the answer.
+test('the Floor lights and counts a waiting merge whose answer was relayed', async () => {
   const cards = [
-    floorCard(60, 'Answered merge', 'Awaiting push', { waitsOn: 'merge', answered: true, worktree: worktreeIn('r', 60) }),
-    floorCard(61, 'Unanswered merge', 'Awaiting push', { waitsOn: 'merge' }),
+    floorCard(60, 'Relayed merge', 'Awaiting push', { waitsOn: 'merge', answered: true, worktree: worktreeIn('r', 60) }),
+    floorCard(61, 'Waiting merge', 'Awaiting push', { waitsOn: 'merge' }),
   ];
   const terminals = [agentTerminal('t1', { live: worktreeIn('r', 60), state: 'working' })];
   const tree = (await agentScene([floorBoard('r', { cards })], terminals)).render();
   assert.deepEqual(floorGrid(tree), [[
-    ['r', '1 need you', 'Open board'],
+    ['r', '2 need you', 'Open board'],
     [],
     [],
-    ['#60', 'Answered merge', 'You answered this version', 'Building now'],
-    ['Merge awaiting your yes', '#61', 'Unanswered merge'],
     [],
-  ]], 'the answered card is in Building with its answer under its title; the unanswered one stays in Awaiting your yes; only it is counted');
+    ['Merge awaiting your yes', '#60', 'Relayed merge', 'Building now', 'Merge awaiting your yes', '#61', 'Waiting merge'],
+    [],
+  ]], 'both merges stay in Awaiting your yes and both are counted');
   assert.deepEqual(tileView(tree, '/repos/r#60'), {
-    strings: ['#60', 'Answered merge', 'You answered this version', 'Building now'], marks: [CLAUDE_MARK], spins: [900], lit: PLAIN,
-  }, 'the answered tile is unlit and keeps its agent line');
+    strings: ['Merge awaiting your yes', '#60', 'Relayed merge', 'Building now'], marks: [CLAUDE_MARK], spins: [900], lit: litIn('blocked'),
+  }, 'the relayed merge is lit as a merge and keeps its agent line');
   assert.deepEqual(tileView(tree, '/repos/r#61'), {
-    strings: ['Merge awaiting your yes', '#61', 'Unanswered merge'], marks: [], spins: [], lit: litIn('blocked'),
-  }, 'the unanswered merge is lit as before');
+    strings: ['Merge awaiting your yes', '#61', 'Waiting merge'], marks: [], spins: [], lit: litIn('blocked'),
+  }, 'the other merge is lit as before');
 });
 
 const BOARD_ID = 'fabraik-queue-board-';
@@ -4947,14 +4742,14 @@ const titlesIn = (node) => buttonsIn(node).filter((button) => button.elementId?.
 const boardCardOf = (tree, card) => nodeWithId(tree, `${BOARD_ID}card-${card}`);
 const BADGE = /^(Next, card|Card) /;
 
-async function boardScene(repository, cache, execResult = OK) {
+async function boardScene(repository, cache, /** @type {Exec} */ execResult = OK) {
   const host = await loadPanel(execResult, { view: 'board', repository });
   host.setCache(cache);
   await host.panel.load();
   return host;
 }
 
-test('the Board heads its project with its lead status and places each card in its column, a proposal and an unknown column included', async () => {
+test('the Board heads its project and places each card in its column, a proposal and an unknown column included', async () => {
   const cards = [
     boardCard(1, 'Later', 'Backlog', 1),
     boardCard(2, 'Proposed: Add a thing', 'Backlog', 2, { waitsOn: 'suggested' }),
@@ -4966,14 +4761,12 @@ test('the Board heads its project with its lead status and places each card in i
     boardCard(8, 'Ship it', 'Awaiting push', 1, { waitsOn: 'merge' }),
     boardCard(9, 'Odd', 'Triage', 1),
   ];
-  const lead = { here: [{ terminal: 't1', state: 'blocked' }], elsewhere: [] };
-  const boards = [boardOf('b', [boardCard(1, 'Elsewhere', 'Ready', 1)]), boardOf('a', cards, { lead })];
+  const boards = [boardOf('b', [boardCard(1, 'Elsewhere', 'Ready', 1)]), boardOf('a', cards)];
   const tree = (await boardScene('/repos/a', { ...panelCache([]), boards })).render();
   const shown = strings(tree);
-  for (const line of ['a', 'Lead: waiting on you']) assert.ok(shown.includes(line), `the header shows ${line}: ${shown.join(' | ')}`);
+  assert.ok(shown.includes('a'), `the header shows a: ${shown.join(' | ')}`);
   assert.ok(shown.some((line) => /^Read at \d\d:\d\d$/.test(line)), 'the header shows when the queue was read');
   assert.equal(sizeOf(tree, 'a'), 16, 'the folder name is 16');
-  assert.equal(colourOf(tree, 'Lead: waiting on you'), 'muted', 'a lead status that names no problem is muted');
 
   assert.deepEqual(boardColumns(tree).map((column) => strings(column).slice(0, 2)),
     [['Needs you', '0'], ['Backlog', '4'], ['Ready to build', '1'], ['In progress', '3'], ['Merged', '0 new']], 'five columns in order, each with its count');
@@ -4990,10 +4783,6 @@ test('the Board heads its project with its lead status and places each card in i
   assert.equal(colourOf(tree, unknown), 'foreground', 'the problem line is in the foreground');
   assert.ok(!boardColumns(tree).some((column) => strings(column).includes(unknown)), 'the problem line is in no column');
   assert.ok(!titlesIn(tree).includes('Odd') && !titlesIn(tree).includes('Elsewhere'), "neither that card nor another project's is drawn");
-
-  const unreadable = 'Lead state unreadable: its board entry is not one this view can read';
-  const odd = (await boardScene('/repos/c', { ...panelCache([]), boards: [boardOf('c', [], { lead: undefined })] })).render();
-  assert.equal(colourOf(odd, unreadable), 'foreground', 'a lead status that names a problem is in the foreground');
 });
 
 // Every Coordinator line card 858's plan writes, so a test can see that a view draws exactly one of them.
@@ -5023,6 +4812,7 @@ test("ANTI-REGRESSION: a project with no lead shows its own Coordinator's state 
       herdrPane('p0', 's1-coordinator', null, SHELL_PROGRAM), herdrPane('p1', 's1-coordinator', status),
     ] };
   };
+  /** @type {[string, any, string][]} */
   const cases = [
     ['a working Coordinator', scene('working'), 'Coordinator working'],
     ['a Coordinator waiting on you', scene('blocked'), 'Coordinator waiting on you'],
@@ -5062,13 +4852,13 @@ test("ANTI-REGRESSION: a project with no lead shows its own Coordinator's state 
 
 test('ANTI-REGRESSION: a Coordinator tab holding agents in several states says working over done, and waiting on you over both', async () => {
   const spaces = [herdrSpace('s1', '/repos/a', [herdrTab('s1-coordinator', 'Coordinator')])];
-  for (const [states, line] of [
+  for (const [states, line] of /** @type {[string[], string][]} */ ([
     [['done', 'working'], 'Coordinator working'],
     [['working', 'done'], 'Coordinator working'],
     [['idle', 'done', 'working'], 'Coordinator working'],
     [['working', 'blocked'], 'Coordinator waiting on you'],
     [['done', 'working', 'blocked'], 'Coordinator waiting on you'],
-  ]) {
+  ])) {
     const board = await boardScene('/repos/a', { ...panelCache([]), boards: [boardOf('a', [])] });
     Object.assign(board, { spaceList: spaces, paneList: states.map((status, n) => herdrPane(`p${n}`, 's1-coordinator', status)) });
     const shown = strings(board.render());
@@ -5120,8 +4910,8 @@ if (process.argv.at(-1) === 'claude') {
   const already = cli('open-coordinator', repository, 'claude');
   assert.equal(already.status, 5, already.stdout + already.stderr);
   assert.match(already.stdout + already.stderr, /already open/i);
-  for (const [root, reason] of [[unlisted, /machine record does not list/], [alias, /Register the project's real root to open its Coordinator\./],
-    [escaped, /coordinator\.mjs|opener/i]]) {
+  for (const [root, reason] of /** @type {[string, RegExp][]} */ ([[unlisted, /machine record does not list/], [alias, /Register the project's real root to open its Coordinator\./],
+    [escaped, /coordinator\.mjs|opener/i]])) {
     const fail = cli('open-coordinator', root, 'codex');
     assert.equal(fail.status, 1, fail.stdout + fail.stderr);
     assert.match(fail.stdout + fail.stderr, reason);
@@ -5144,8 +4934,8 @@ if (process.argv.at(-1) === 'claude') {
     await refresh({ home: panelHome, runCollector, terminals: NO_TERMINALS });
     return panelCacheRead();
   };
-  const scene = (coordinator = saved, execResult = OK) => decisionsScene({ ...panelCache([]), boards: [
-    { ...github, repository, folder: repository, lead: NO_LEAD, coordinator },
+  const scene = (/** @type {{ runtime?: string, installed?: string[], unread?: string }} */ coordinator = saved, /** @type {Exec} */ execResult = OK) => decisionsScene({ ...panelCache([]), boards: [
+    { ...github, repository, folder: repository, coordinator },
   ] }, execResult);
   const controls = (tree) => buttonsIn(tree).filter((button) => [claude, codex].includes(controlName(button)));
   const enabled = (tree) => controls(tree).filter((button) => !isDisabled(button)).map(controlName);
@@ -5259,7 +5049,7 @@ if (process.argv.at(-1) === 'claude') {
   loading.machineList = [{ name: null, layout: 'loading' }];
   await refuses(loading, /Coordinator state unread: Herdr is still loading/);
 
-  for (const [code, cause] of [[1, 'opener could not fetch settings'], [5, 'Coordinator is already open.']]) {
+  for (const [code, cause] of /** @type {[number, string][]} */ ([[1, 'opener could not fetch settings'], [5, 'Coordinator is already open.']])) {
     const failed = await scene(saved, () => ({ code, stdout: code === 5 ? cause : '', stderr: code === 1 ? cause : '' }));
     const buttons = failed.render();
     if (code === 5) assert.deepEqual(enabled(buttons), [claude, codex]);
@@ -5344,15 +5134,17 @@ test("a Board names its project's or the machine's problem list that is not a li
   }
 });
 
-test('a Board card whose waiting version you answered does not say Awaiting your yes', async () => {
+// new behaviour: a merge answer goes to the coordinator chat, so a card awaiting push says so until it merges. Card 60
+// carries `answered: true`, the marker an older reader still sends where a card comment recorded the answer.
+test('a Board card awaiting push says Awaiting your yes', async () => {
   const cards = [
-    boardCard(60, 'Answered merge', 'Awaiting push', 1, { waitsOn: 'merge', answered: true }),
-    boardCard(61, 'Unanswered merge', 'Awaiting push', 2, { waitsOn: 'merge' }),
+    boardCard(60, 'Relayed merge', 'Awaiting push', 1, { waitsOn: 'merge', answered: true }),
+    boardCard(61, 'Waiting merge', 'Awaiting push', 2, { waitsOn: 'merge' }),
   ];
   const tree = (await boardScene('/repos/a', { ...panelCache([]), boards: [boardOf('a', cards)] })).render();
   const lines = (card) => strings(boardCardOf(tree, card)).filter((line) => line === 'You answered this version' || line === 'Awaiting your yes');
-  assert.deepEqual(lines(60), ['You answered this version'], 'the answered card says the version was answered, not that it awaits your yes');
-  assert.deepEqual(lines(61), ['Awaiting your yes'], 'the unanswered card says what it said before');
+  assert.deepEqual(lines(60), ['Awaiting your yes'], 'the relayed card still awaits your yes');
+  assert.deepEqual(lines(61), ['Awaiting your yes'], 'the other card says what it said before');
 });
 
 test('the Board badges Ready cards by build rank, proposals unranked, and marks the first as next', async () => {
@@ -5482,13 +5274,13 @@ test("the Board's Needs you claims no count and nothing waiting while some cards
   const incomplete = 'Not every card was read, so more may be waiting on you';
   const unreadCard = boardCard(3, 'Unread one', 'In progress', 1, { unread: 'its details were not read' });
   const readCard = boardCard(3, 'Read one', 'In progress', 1);
-  for (const [why, items, cards, fields, cacheFields] of [
+  for (const [why, items, cards, fields, cacheFields] of /** @type {[string, any[], any[], Record<string, any>?, Record<string, any>?][]} */ ([
     ['a card whose details were not read', [], [unreadCard]],
     ["its own project's problem item", [{ category: 'problem', repository: '/repos/a', problem: 'could not be read' }], [readCard]],
     ["its own project's problem line", [], [readCard], { problems: [A_LINE] }],
     ['a machine-wide problem line', [], [readCard], {}, { machineProblems: [RECORD_LINE] }],
     ['a source of what cards wait on that was not read', [], [readCard], { waitsOnUnread: ['worktrees'] }],
-  ]) {
+  ])) {
     const needs = boardColumnOf((await boardScene('/repos/a', { ...panelCache(items), ...cacheFields, boards: [boardOf('a', cards, fields)] })).render(), 'needs');
     const shown = strings(needs);
     assert.deepEqual(shown.slice(0, 2), ['Needs you', incomplete], `${why}: no count is drawn, the notice follows the header: ${shown.join(' | ')}`);
@@ -5547,7 +5339,7 @@ test("the Board Merged column lists the last day's merges and names a merge list
 test('a Board sheet opens from a card and gives focus back to it when it closes', async () => {
   const cards = [boardCard(2, 'Build it', 'Ready', 1), boardCard(5, 'Ship it', 'Awaiting push', 1, { waitsOn: 'merge' })];
   const host = await boardScene('/repos/a', { ...panelCache([]), boards: [boardOf('a', cards)] });
-  for (const [name, close] of [['Esc', () => host.press('escape')], ['Close', () => host.click(nodeWithId(host.render(), SHEET_CLOSE_ID))]]) {
+  for (const [name, close] of /** @type {[string, () => unknown][]} */ ([['Esc', () => host.press('escape')], ['Close', () => host.click(nodeWithId(host.render(), SHEET_CLOSE_ID))]])) {
     await host.click(titleOf(host.render(), 2));
     const tree = host.render();
     const sheet = nodeWithId(tree, SHEET_ID);
@@ -5703,7 +5495,7 @@ test('while a Board move runs or its line shows every Board move control is off,
     () => ({ code: 1, stdout: '', stderr: 'the tracker could not be reached\n' }),
   ];
   const failing = await boardScene('/repos/a', { ...moveCache(), readStartedAt: at(NOON_12TH) }, async () => (
-    lastCommand(failing) === 'move' ? OK : outcomes.shift()(failing)));
+    lastCommand(failing) === 'move' ? OK : /** @type {(scene: PanelHost) => ExecResult} */ (outcomes.shift())(failing)));
   await pressMove(failing, 'Move card 1 to Ready');
   assert.ok(strings(failing.render()).includes(MOVED_TO_READY), 'the success line shows after the move');
   assertOff(failing.render(), drawn, true, 'while the line shows');
@@ -5779,10 +5571,10 @@ test('a card with no column, drawn in Backlog, offers Move to Ready', async () =
 
 test("a Board move press keeps the keyboard on the moved card's title", async () => {
   const raised = [MOVE_CARDS[0], MOVE_CARDS[1], { ...MOVE_CARDS[3], order: 1 }, { ...MOVE_CARDS[2], order: 2 }, MOVE_CARDS[4]];
-  for (const [name, card, after, ready] of [
+  for (const [name, card, after, ready] of /** @type {[string, number, any[], string[]][]} */ ([
     ['Move card 1 to Ready', 1, READIED_CARDS, ['Top work', 'Second work', 'Later']],
     ['Move card 6 up to place 1', 6, raised, ['Second work', 'Top work']],
-  ]) {
+  ])) {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
     const host = await boardScene('/repos/a', moveCache(), async () => {
@@ -5990,12 +5782,12 @@ test('while a card is dragged over a column that would take it the column is out
 });
 
 test('a release away from a column that takes the card, Esc from the press on, or a press after a release the Board never saw ends the drag with no move', async () => {
-  for (const [why, end, drop] of [
+  for (const [why, end, drop] of /** @type {[string, (drag: any, host?: any) => unknown, boolean][]} */ ([
     ['a release outside every column', async (drag) => { drag.move(OUTSIDE); await drag.release(OUTSIDE); }, false],
     ['Esc', (_drag, host) => host.press('escape'), true],
     ['a press elsewhere on the Board', (drag) => drag.press(null, IN_READY), true],
     ['a press outside the Board', (drag) => drag.pressOutside(PAST_BOARD), true],
-  ]) {
+  ])) {
     const host = await boardScene('/repos/a', moveCache());
     const drag = dragOn(host);
     drag.press(1, centreOf(1));
@@ -6175,11 +5967,11 @@ test('ANTI-REGRESSION: a Board card shows Show me first as its read holds it, sa
   assert.equal(strings(tree).filter((text) => text === SHOW_FIRST_QUEUED).length, 1, 'only the In review card says a queued merge is not stopped');
   for (const line of [NOT_GITHUB, OLD_READER, SHOW_FIRST_OLD_READER]) assert.ok(!strings(tree).includes(line), `a board whose cards all carry their marker draws no "${line}"`);
 
-  for (const [why, cards, fields, line, switches] of [
+  for (const [why, cards, fields, line, switches] of /** @type {[string, any[], Record<string, any>, string, number[]][]} */ ([
     ['a board on another tracker', SHOW_CARDS, { moves: false }, NOT_GITHUB, []],
     ['a reader that predates moves', SHOW_CARDS, { moves: undefined }, OLD_READER, []],
     ['a reader that predates Show me first on one card', markedAs(4, undefined), {}, SHOW_FIRST_OLD_READER, [6, 7, 8]],
-  ]) {
+  ])) {
     const notes = (await boardScene('/repos/a', moveCache(cards, fields))).render();
     assert.ok(strings(notes).includes(line), `${why}: ${line} is drawn: ${strings(notes).join(' | ')}`);
     assert.equal(colourOf(notes, line), 'muted', `${why}: the line is muted`);
@@ -6263,7 +6055,7 @@ test('while Show me first runs or its line shows every Board control is off and 
     () => ({ code: 1, stdout: '', stderr: 'the tracker could not be reached\n' }),
   ];
   const failing = await boardScene('/repos/a', { ...moveCache(SHOW_CARDS), readStartedAt: at(NOON_12TH) }, async () => (
-    lastCommand(failing) === 'show-first' ? OK : outcomes.shift()(failing)));
+    lastCommand(failing) === 'show-first' ? OK : /** @type {(scene: PanelHost) => ExecResult} */ (outcomes.shift())(failing)));
   await pressSwitch(failing, switchOf(failing.render(), 6));
   assert.ok(strings(failing.render()).includes(TURNED_ON), 'the success line shows after the write');
   assert.equal(checkedOf(switchOf(failing.render(), 6)), true, 'the switch draws the written state while the line shows');
@@ -6520,7 +6312,7 @@ test('a view in an overlay takes the keyboard, keeps presses from dragging the w
   assert.deepEqual(host.closedOverlays, [], 'and leaves the overlay open');
 
   // Esc with the sheet open closes the sheet only, whether it reaches the sheet first or the root.
-  for (const [why, esc] of [['in the sheet', () => keyIn(host, 'escape')], ['at the root', () => host.press('escape')]]) {
+  for (const [why, esc] of /** @type {[string, () => unknown][]} */ ([['in the sheet', () => keyIn(host, 'escape')], ['at the root', () => host.press('escape')]])) {
     await host.click(titleOf(host.render(), 1));
     assert.ok(nodeWithId(host.render(), SHEET_ID), `${why}: the sheet is open`);
     assert.equal(nodeWithId(host.render(), 'fabraik-queue-view-close').click, null, `${why}: Close lies inert beneath the sheet`);
@@ -6577,10 +6369,10 @@ test('the merge sheet keeps the keyboard, leaves the view beneath inert and give
 
   // 1. In the Decisions view every control the plan lists is drawn beneath the sheet, and none takes a press or Tab; c
   // clears nothing while the sheet is open, and clears the digest once it is closed.
-  const items = [queueItem('merge', 5, COORDINATOR), queueItem('suggested', 8, { scope: 'Build the thing.' }),
-    queueItem('failure', 10, { log: LEAD_LOG }), queueItem('failure', 13)];
+  const items = [queueItem('merge', 5), queueItem('suggested', 8, { scope: 'Build the thing.' }),
+    queueItem('failure', 10), queueItem('failure', 13)];
   const listed = {
-    'the Decisions view': ['Accept card', 'Clear (c)', 'Dismiss', 'Open log', 'Put aside', 'Reject', 'Undo', sendName(5)],
+    'the Decisions view': ['Accept card', 'Clear (c)', 'Dismiss', 'Put aside', 'Reject', 'Undo', sendName(5)],
   };
   for (const { name, scene, opener } of MERGE_VIEWS.slice(0, 1)) {
     const host = await scene(mergeCache(MERGES, items), reply);
@@ -6611,20 +6403,28 @@ test('the merge sheet keeps the keyboard, leaves the view beneath inert and give
 
   // 2. In every view Tab and Shift+Tab stay in the sheet, the merge openers beneath take no press or Tab, and Esc, Close and
   // a press outside give focus back to the opener, or to the view once the opener is gone.
+  /** @type {PanelHost | null} */
   let shown = null;
+  /** @type {{ focus: () => void } | null} */
   let lands = null;
   const moves = [];
-  const moveFrom = (direction) => () => { moves.push([direction, shown.handles.find((handle) => handle.is_focused())]); lands.focus(); };
+  const moveFrom = (direction) => () => {
+    assert.ok(shown && lands, 'the test says which view is open and where focus lands');
+    moves.push([direction, shown.handles.find((handle) => handle.is_focused())]);
+    lands.focus();
+  };
+  // @ts-expect-error a scripted window stands in for Herdr's
   globalThis.window = { focus_next: moveFrom('next'), focus_prev: moveFrom('prev') };
+  // @ts-expect-error the scripted window is removed again
   t.after(() => { delete globalThis.window; });
   for (const { name, scene, opener } of MERGE_VIEWS) {
     const host = await scene(mergeCache(), reply);
     shown = host;
-    const closers = [
+    const closers = /** @type {[string, () => unknown][]} */ ([
       ['Esc', () => keyIn(host, 'escape')],
       ['Close', () => host.click(nodeWithId(host.render(), SHEET_CLOSE_ID))],
       ['a press outside', () => called(nodeWithId(host.render(), SHEET_ID), 'on_mouse_down_out').at(-1)[0]({}, host.cx)],
-    ];
+    ]);
     for (const [closer, close] of closers) {
       const button = opener(host.render(), merge);
       assert.ok(button, `${name}: ${merge.subject} is drawn as a button`);
@@ -6968,6 +6768,56 @@ test('the merge report shows its chip, title, what changed, why it did not wait,
   assert.equal(sheetButtons(host, 'Open pull request #12').length, 1, 'the pull request link is a control of the sheet');
 });
 
+// GPUI gives an image whose width is a share, such as w_full, its picture's own pixel height, and an image whose width is
+// in pixels the height its proportions give, so a screenshot drawn at its column's measured width has no band (#800).
+test('a merge report draws each screenshot at the measured width of its column, never at a share of it, and at most 360 high', async () => {
+  const shots = [shotOf(1, 'fabraik-queue/shots/wide.png'), shotOf(2, 'fabraik-queue/shots/tall.png')];
+  const host = await openedReport(reportOf({ screenshots: shots }));
+  const images = () => nodesOf(nodeWithId(host.render(), SHEET_ID), 'image');
+  // Gives the screenshots' column `width`, as Herdr does after layout, and says whether a redraw was asked.
+  const measure = (width) => {
+    let asked = false;
+    const cx = { ...host.cx, notify: () => { asked = true; } };
+    for (const [handler] of called(nodeWithId(host.render(), SHEET_SHOTS_ID), 'on_size_change')) handler({ width, height: 400 }, cx);
+    return asked;
+  };
+  const asked = measure(387);
+  assert.equal(images().length, 2, 'both screenshots are drawn');
+  for (const picture of images()) {
+    assert.deepEqual(called(picture, 'w'), [[387]], `${picture.path}: the screenshot takes its column's measured width in pixels`);
+    assert.deepEqual(called(picture, 'w_full'), [], `${picture.path}: no share of the width, which gives the picture's own pixel height`);
+    assert.deepEqual(called(picture, 'max_h'), [[360]], `${picture.path}: a tall screenshot is held to 360 high`);
+    for (const set of ['h', 'h_full', 'min_h', 'size']) assert.deepEqual(called(picture, set), [], `${picture.path}: no ${set} bands or crops it`);
+  }
+  assert.ok(asked, 'a new width asks for a redraw');
+  assert.ok(!measure(387), 'the same width again asks for no redraw');
+  measure(300);
+  for (const picture of images()) assert.deepEqual(called(picture, 'w'), [[300]], `${picture.path}: a narrower sheet narrows its screenshots`);
+});
+
+test('a merge report divides the measured width of its screenshots by the person\'s zoom, since Herdr scales the width it draws', async () => {
+  const shots = [shotOf(1, 'fabraik-queue/shots/wide.png'), shotOf(2, 'fabraik-queue/shots/tall.png')];
+  const host = await openedReport(reportOf({ screenshots: shots }));
+  const images = () => nodesOf(nodeWithId(host.render(), SHEET_ID), 'image');
+  const measure = (width) => {
+    for (const [handler] of called(nodeWithId(host.render(), SHEET_SHOTS_ID), 'on_size_change')) handler({ width, height: 400 }, host.cx);
+  };
+  const tenths = (calls) => calls.map(([width]) => [Math.round(width * 10) / 10]);
+  host.settingsValue = { zoom: 0.9 };
+  measure(348.3);
+  assert.equal(images().length, 2, 'both screenshots are drawn');
+  for (const picture of images()) {
+    assert.deepEqual(tenths(called(picture, 'w')), [[387]], `${picture.path}: at zoom 0.9 a measured 348.3 is drawn at 387`);
+    assert.deepEqual(called(picture, 'max_h'), [[360]], `${picture.path}: a tall screenshot is held to 360 high`);
+  }
+  host.settingsValue = { zoom: 1.25 };
+  measure(400);
+  for (const picture of images()) assert.deepEqual(tenths(called(picture, 'w')), [[320]], `${picture.path}: at zoom 1.25 a measured 400 is drawn at 320`);
+  host.settingsValue = {};
+  measure(300);
+  for (const picture of images()) assert.deepEqual(tenths(called(picture, 'w')), [[300]], `${picture.path}: with no zoom a measured 300 is drawn at 300`);
+});
+
 test('a merge with no screen shows its test results, and each report state says what it is', async () => {
   // Nothing needed the owner: each level and each screen state picks its own sentences.
   const checks = ['Passed: the focused tests', 'Failed: none', 'Untested: the owner drive'];
@@ -7117,7 +6967,7 @@ const MERGE_VIEW_PROPS = [DECISIONS, FLOOR, { view: 'board', repository: '/repos
 const REPORT_URL = 'https://github.com/o/r/pull/12';
 const UNREACHABLE = { code: 1, stdout: '', stderr: 'the reader could not reach its tracker\n' };
 // A scene as `MERGE_VIEWS` makes one, with `sharedState` in place before the panel reads, as a restarted copy finds it.
-async function seenScene(props, cache, execResult, sharedState) {
+async function seenScene(props, cache, /** @type {Exec} */ execResult, sharedState) {
   const host = await loadPanel(execResult, props);
   host.sharedState = sharedState;
   host.setCache(cache);
@@ -7155,6 +7005,7 @@ test('an unopened merge is marked New in every view until its report is read or 
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
   const [merge, other] = MERGES;
   for (const [at, view] of MERGE_VIEWS.entries()) {
+    /** @type {ExecResult | Promise<ExecResult>} */
     let reply = UNREACHABLE;
     const host = await seenScene(MERGE_VIEW_PROPS[at], mergeCache(), () => reply, {});
     const chip = (drawn, marked, when) => assertNew(chipRowOf(view, host, drawn), marked, `${view.name}: ${drawn.subject} ${when}`);
@@ -7258,6 +7109,7 @@ test('a report that loads after its sheet is closed leaves the merge New until i
   t.mock.timers.enable({ apis: ['Date'], now: NOON_12TH });
   const [merge, other] = MERGES;
   for (const [at, view] of MERGE_VIEWS.entries()) {
+    /** @type {ExecResult | Promise<ExecResult>} */
     let reply = OK;
     const host = await seenScene(MERGE_VIEW_PROPS[at], mergeCache(), () => reply, {});
     const chip = (drawn, marked, when) => assertNew(chipRowOf(view, host, drawn), marked, `${view.name}: ${drawn.subject} ${when}`);
@@ -7463,7 +7315,7 @@ test('the Merged column shows the newest three and every merge whose record does
   };
   const DISAGREES = { outcome: 'disagrees', level: 'always', holds: ['a change'] };
   // A scene whose kept reports are `kept`, each `nothing` unless `fields` gives its merge's own fields.
-  const sceneOf = async (listed, execResult, kept, fields = new Map([[m5, DISAGREES]])) => {
+  const sceneOf = async (listed, /** @type {Exec} */ execResult, kept, /** @type {Map<object, object>} */ fields = new Map([[m5, DISAGREES]])) => {
     const host = await boardScene('/repos/a', mergeCache(listed), execResult);
     for (const merge of kept) keepReport(host, merge, fields.get(merge) ?? {});
     return host;
@@ -7519,7 +7371,7 @@ test('the Merged column shows the newest three and every merge whose record does
   }
 
   // 6. A hidden merge noted unread has not been checked either, so the notice stays though every merge is noted.
-  const unread = await sceneOf(merges, () => UNREACHABLE, merges, new Map([[m4, { outcome: 'unread', level: undefined, cause: 'its card could not be read', lasting: true }], [m5, DISAGREES]]));
+  const unread = await sceneOf(merges, () => UNREACHABLE, merges, new Map(/** @type {[object, object][]} */ ([[m4, { outcome: 'unread', level: undefined, cause: 'its card could not be read', lasting: true }], [m5, DISAGREES]])));
   await readCache(unread);
   assert.deepEqual(ran(unread), [], 'every report was the kept one, so no report was run');
   assert.deepEqual(titles(unread), subjects(m1, m2, m3, m5), 'a merge noted unread is hidden, and the one that disagrees shows');
@@ -7540,6 +7392,7 @@ test('the Merged column shows the newest three and every merge whose record does
 
 // One public initialization per group supplies the opaque source fingerprint; the remaining cases clone its
 // valid journal and inject only the clock, collectors and native command boundary. No account or network is used.
+/** @typedef {any} NotificationBox one case of the fixture: a mutable record the tests read and the injected boundaries write */
 function notificationFixture(t, notificationTick) {
   const folder = realpathSync(temporaryFolder(t, 'herdr-notification-'));
   const roots = [join(folder, 'first'), join(folder, 'second')];
@@ -7580,7 +7433,8 @@ function notificationFixture(t, notificationTick) {
   assert.equal(repeated.stderr, 'queue: notification unavailable: state-unavailable\n');
   assert.deepEqual(readFileSync(initializedJournal), before);
   let serial = 0;
-  const make = ({ at = '2026-11-06T03:00:00Z', started = '2026-11-05T14:00:00Z', morningKey = null,
+  const make = (/** @type {{ at?: string, started?: string, morningKey?: string | null, lastAttemptAt?: string | number | null, events?: any[], waits?: any[], morning?: any }} */ {
+    at = '2026-11-06T03:00:00Z', started = '2026-11-05T14:00:00Z', morningKey = null,
     lastAttemptAt = null, events = [], waits = [{ card: 1, kind: 'question' }], morning = configuration.morning } = {}) => {
     writeConfiguration({ ...configuration, morning });
     const state = join(folder, `case-${++serial}`);
@@ -7593,6 +7447,7 @@ function notificationFixture(t, notificationTick) {
     const save = (value) => writeFileSync(journal, JSON.stringify(value), { mode: 0o600 });
     save(initial);
     writeFileSync(lock, '', { mode: 0o600 });
+    /** @type {NotificationBox} */
     const box = { state, directory, journal, lock, initial, save, epoch: Date.parse(at), calls: [], logs: [], collected: [],
       read: () => JSON.parse(readFileSync(journal, 'utf8')) };
     const document = collectorDocument({ notifications: { login: 'owner', waits, unavailable: null } });
@@ -7640,7 +7495,7 @@ function notificationFixture(t, notificationTick) {
     box.prompt = () => box.calls.filter(({ argv }) => argv[0] === '--bg').at(-1)?.argv.at(-1);
     return box;
   };
-  const event = (card, at, fields = {}) => ({ format: 1, root: roots[0], login: 'owner', account,
+  const event = (card, at, /** @type {Record<string, any>} */ fields = {}) => ({ format: 1, root: roots[0], login: 'owner', account,
     card, phase: 'build', disposition: 'built', at: new Date(at).toISOString(), id: sha256(`${card}/${at}/${JSON.stringify(fields)}`), ...fields });
   return { folder, roots, home, account, trustedDirectory, configuration, configHome, configPath, writeConfiguration,
     stateHome, initialState, initializedJournal, env, make, event };
@@ -7653,7 +7508,7 @@ function notificationSentence(box, expected) {
 }
 
 async function notificationRefusal(box, code, overrides) {
-  await assert.rejects(() => box.tick(overrides), (error) => {
+  await assert.rejects(() => box.tick(overrides), (/** @type {Error} */ error) => {
     assert.equal(error.constructor, Error);
     assert.equal(error.message, `notification unavailable: ${code}`);
     assert.deepEqual(Object.keys(error), [], 'private native causes and fields are not retained');
@@ -7752,11 +7607,11 @@ test('phone notifications enforce daily morning summaries and shared durable rol
       notificationSentence(box, morning(2));
     });
   }
-  for (const [name, configured, before, target, key] of [
+  for (const [name, configured, before, target, key] of /** @type {[string, { time: string, timeZone: string }, string, string, string][]} */ ([
     ['configured 08:07 first quarter-hour tick', { time: '08:07', timeZone: 'Europe/London' }, '2026-11-06T08:00:00Z', '2026-11-06T08:15:00Z', '2026-11-06'],
     ['fold uses earlier 01:30', { time: '01:30', timeZone: 'Europe/London' }, '2026-10-25T00:29:00Z', '2026-10-25T00:30:00Z', '2026-10-25'],
     ['gap advances to first valid local minute', { time: '01:30', timeZone: 'Europe/London' }, '2026-03-29T00:59:00Z', '2026-03-29T01:00:00Z', '2026-03-29'],
-  ]) {
+  ])) {
     await t.test(name, async () => {
       const box = make({ at: before, started: new Date(Date.parse(before) - 12 * 3600_000).toISOString(), waits: [], morning: configured });
       assert.deepEqual(await box.tick(), ['notification: empty']);
@@ -7803,7 +7658,7 @@ test('phone notifications enforce daily morning summaries and shared durable rol
       if (change === 'sources') {
         const third = join(fixture.folder, 'third');
         mkdirSync(third, { recursive: true });
-        writeFileSync(machinePath, JSON.stringify({ ...JSON.parse(machine), repositories: [...roots, third] }));
+        writeFileSync(machinePath, JSON.stringify({ ...JSON.parse(machine.toString()), repositories: [...roots, third] }));
       }
       const original = box.options.exec.run;
       try {
@@ -8004,7 +7859,7 @@ test('phone notifications exclude private and foreign-account evidence', async (
   });
   const entry = (box, fields = {}) => ({ id: '7a4c17cf', name: box.read().pending.name, cwd: fixture.trustedDirectory,
     kind: 'background', startedAt: 1793923200000, state: 'done', ...fields });
-  for (const [name, response] of [
+  for (const [name, response] of /** @type {[string, (box?: any) => string][]} */ ([
     ['invalid JSON', () => markers[3]],
     ['object instead of array', () => '{}'],
     ['missing identity', () => '[]'],
@@ -8014,7 +7869,7 @@ test('phone notifications exclude private and foreign-account evidence', async (
     ['invalid native timestamp', (box) => JSON.stringify([entry(box, { startedAt: '2026-11-06T00:00:00Z' })])],
     ['invalid status', (box) => JSON.stringify([entry(box, { state: 'invented' })])],
     ['foreign cwd', (box) => JSON.stringify([entry(box, { cwd: roots[0] })])],
-  ]) {
+  ])) {
     await t.test(`native ${name} never authorizes an unrelated stop`, async () => {
       const box = make();
       const native = box.options.exec.run;
@@ -8031,7 +7886,7 @@ test('phone notifications exclude private and foreign-account evidence', async (
       clean([box.logs, box.read()]);
     });
   }
-  for (const [name, response, id = null] of [
+  for (const [name, response, id = null] of /** @type {[string, (box?: any) => string, string?][]} */ ([
     ['invalid JSON', () => markers[3]],
     ['object instead of array', () => '{}'],
     ['null unrelated entry', () => '[null]'],
@@ -8048,7 +7903,7 @@ test('phone notifications exclude private and foreign-account evidence', async (
     ['reserved name directory conflict', (box) => JSON.stringify([entry(box), entry(box, { id: 'deadbeef', cwd: roots[0] })])],
     ['reserved name kind conflict', (box) => JSON.stringify([entry(box), entry(box, { id: 'deadbeef', kind: 'interactive' })])],
     ['known-ID absence', (box) => JSON.stringify([entry(box, { name: 'unrelated', id: 'deadbeef' })]), '7a4c17cf'],
-  ]) {
+  ])) {
     await t.test(`recovery ${name} retains pending and reservations without launch or stop`, async () => {
       const box = make({ at: '2026-11-06T09:00:00Z', lastAttemptAt: '2026-11-06T08:00:00Z',
         morningKey: '2026-11-06', waits: [], events: [event(10, '2026-11-05T15:00:00Z')] });
@@ -8301,7 +8156,7 @@ test('queue menus prints the waiting menus as JSON, writes nothing and refuses a
   const pipeFolder = askFolder(home, 't7', askIdOf(2));
   mkdirSync(pipeFolder, { recursive: true });
   const made = process.platform === 'win32' ? undefined : spawnSync('mkfifo', [join(pipeFolder, 'ask.json')]);
-  if (made !== undefined && made.error?.code !== 'ENOENT') {
+  if (made !== undefined && /** @type {NodeJS.ErrnoException | undefined} */ (made.error)?.code !== 'ENOENT') {
     assert.equal(made.error, undefined, 'mkfifo starts');
     assert.equal(made.status, 0, `the named pipe is made: ${made.stderr}`);
     const piped = spawnSync(process.execPath, [QUEUE, 'menus', blockedAt('t7'), '--home', home], { encoding: 'utf8', timeout: 10_000 });
@@ -8325,7 +8180,7 @@ test('queue menus prints the waiting menus as JSON, writes nothing and refuses a
     symlinkSync(askFolder(outside, 't17', askIdOf(2)), askFolder(home, 't17', askIdOf(2)), 'dir');
   } catch (error) {
     // Windows without Developer Mode or administrator rights refuses an unprivileged symlink with EPERM.
-    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
     linked = false;
   }
   if (linked) {
@@ -8347,6 +8202,7 @@ test("a menu answer reads delivered only once the job's own hook signal shows it
   const undelivered = { answerable: false, delivery: 'undelivered', words: WORDS };
   // Each ask by its number: its terminal, that terminal's state (null: not in the list), the files it holds, and what the
   // queue must show. `answerable` is checked where given; `delivery` undefined means none of the three states.
+  /** @type {Record<number, { [field: string]: any }>} */
   const asks = {
     1: { at: 't1', state: 'blocked', expect: { answerable: true } },
     2: { at: 't2', state: 'blocked', files: answered, expect: { answerable: false, delivery: 'sent' } },
@@ -8463,7 +8319,7 @@ test('an ask whose card is not a positive whole number as text is a problem line
     const repository = temporaryFolder(t, 'herdr-queue-repo-');
     const { home, cache } = releasedHome(t, [repository]);
     const id = writeAsk(home, 't1', 1, { fields: { repository, card } });
-    const merge = { card: 857, title: 'a857', category: 'merge', decisionCard: 'Ship card 857.', visual: 'none', actedOnBy: 'coordinator', version: 'e'.repeat(64) };
+    const merge = { card: 857, title: 'a857', category: 'merge', decisionCard: 'Ship card 857.', visual: 'none', version: 'e'.repeat(64) };
 
     await refresh({ home, runCollector: () => collectorDocument({ items: [merge] }), terminals: blockedAt('t1') });
     const queue = cache();
@@ -8527,7 +8383,7 @@ test("answer-menu writes only the named ask's answer and refuses a changed, answ
   // Every file under the asks store with its bytes.
   const tree = () => {
     const root = join(home, 'data', 'fabraik-asks');
-    return Object.fromEntries(readdirSync(root, { recursive: true }).sort()
+    return Object.fromEntries(readdirSync(root, { recursive: true, encoding: 'utf8' }).sort()
       .filter((name) => statSync(join(root, name)).isFile()).map((name) => [name, readFileSync(join(root, name), 'utf8')]));
   };
   const reply = (n, answers) => ({ format: 1, askId: askIdOf(n), by: 'panel', answers });
@@ -8541,7 +8397,8 @@ test("answer-menu writes only the named ask's answer and refuses a changed, answ
     'an ask that is not there': { at: 't3', id: askIdOf(90), payload: reply(90, blue) },
     'a payload that names another ask': { at: 't4', id: writeAsk(home, 't4', 4), payload: reply(2, blue) },
     'a payload that is not JSON': { at: 't5', id: writeAsk(home, 't5', 5), payload: '{"format": 1,' },
-    'a payload over the size cap': { at: 't6', id: writeAsk(home, 't6', 6), payload: `${JSON.stringify(reply(6, blue))}${' '.repeat(64 * 1024 + 1)}` },
+    // Three-byte characters pass the 64 KiB cap in bytes while the command line stays under Windows' 32,767 characters.
+    'a payload over the size cap': { at: 't6', id: writeAsk(home, 't6', 6), payload: `${JSON.stringify(reply(6, blue))}${'€'.repeat(21_846)}` },
     'a choice the ask does not offer': { at: 't7', id: writeAsk(home, 't7', 7), payload: reply(7, { [COLOUR.question]: { choices: ['Green'] } }) },
     'two choices for a single-select question': { at: 't8', id: writeAsk(home, 't8', 8), payload: reply(8, { [COLOUR.question]: { choices: ['Red', 'Blue'] } }) },
     'a question left out': { at: 't9', id: writeAsk(home, 't9', 9, { fields: { questions: [COLOUR, LETTERS] } }), payload: reply(9, blue) },
@@ -8564,6 +8421,7 @@ test("answer-menu writes only the named ask's answer and refuses a changed, answ
     const result = answerMenu(at, id, payload);
     assert.equal(result.status, 1, `${why}: exits 1, stderr: ${result.stderr}`);
     assert.match(result.stderr, /^queue: /, `${why}: stderr is a queue refusal`);
+    if (why === 'a payload over the size cap') assert.match(result.stderr, /the answer is over 65536 bytes/, `${why}: stderr names why`);
     if (why === 'an ask a newer bare record of its terminal has superseded') assert.match(result.stderr, /a newer ask of the job has replaced it/, `${why}: stderr names why`);
     assert.equal(result.stdout, '', `${why}: prints nothing`);
     assert.deepEqual(tree(), before, `${why}: writes nothing`);
@@ -8591,7 +8449,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
   // Every file under the asks store with its bytes.
   const tree = () => {
     const root = join(home, 'data', 'fabraik-asks');
-    return Object.fromEntries(readdirSync(root, { recursive: true }).sort()
+    return Object.fromEntries(readdirSync(root, { recursive: true, encoding: 'utf8' }).sort()
       .filter((name) => statSync(join(root, name)).isFile()).map((name) => [name, readFileSync(join(root, name), 'utf8')]));
   };
   const corrupt = (terminalName, n) => writeFileSync(join(askFolder(home, terminalName, askIdOf(n)), 'ask.json'), '{"format": 1,');
@@ -8601,6 +8459,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
   corrupt('t1', 3);
   writeAsk(home, 't1', 2);
   writeAsk(home, 't2', 1, { fields: PERMISSION });
+  /** @type {Record<string, { phrase: string, clear: boolean, make?: () => unknown }>} */
   const refusals = {
     t3: { phrase: 'has asked nothing', clear: true },
     t4: { phrase: 'no ask of the job can be read', clear: false, make: () => { writeAsk(home, 't4', 1, { files: {} }); corrupt('t4', 1); } },
@@ -8646,7 +8505,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
           symlinkSync(askFolder(outside, 't17', askIdOf(2)), askFolder(home, 't17', askIdOf(2)), 'dir');
         } catch (error) {
           // Windows without Developer Mode or administrator rights refuses an unprivileged symlink with EPERM.
-          if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+          if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
           delete refusals.t17;
         }
       },
@@ -8666,7 +8525,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
           symlinkSync(target, join(folder, 'ask.json'), 'file');
         } catch (error) {
           // Windows without Developer Mode or administrator rights refuses an unprivileged file symlink with EPERM.
-          if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+          if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
           rmSync(join(home, 'data', 'fabraik-asks', 't15'), { recursive: true });
           delete refusals.t15;
         }
@@ -8710,7 +8569,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
     try {
       waitingMenuIn({ home, ...args });
     } catch (error) {
-      message = error.message;
+      message = /** @type {Error} */ (error).message;
     }
     if (message === undefined) mismatches.push(`${label}: did not refuse`);
     else judge(label, message, clear);
@@ -8776,7 +8635,7 @@ test("waiting-menu prints a terminal's one waiting ask and refuses loudly where 
     judgeIn('t22', { terminal: 't22' }, false);
   } catch (error) {
     // Windows without Developer Mode or administrator rights refuses an unprivileged symlink with EPERM.
-    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    if (process.platform !== 'win32' || /** @type {NodeJS.ErrnoException} */ (error).code !== 'EPERM') throw error;
   }
 
   assert.deepEqual(mismatches, [], 'the clause ends exactly the refusals of a clear ask store');
@@ -8915,6 +8774,7 @@ test('answer-menu accepts and refuses exactly the answers the owner-menu hook ac
         looks += 1;
         assert.ok(looks <= 2, 'the hook looked a third time');
         const id = readdirSync(store).find((name) => !before.has(name));
+        assert.ok(id, 'the hook made its ask');
         if (looks === 1) writeFileSync(join(store, id, 'answer.json'), JSON.stringify(make(id)));
         else writeFileSync(join(store, id, 'end.json'), `${JSON.stringify(TAB)}\n`);
       },

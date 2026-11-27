@@ -13,112 +13,29 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  LINEAR_BACKLOG as BACKLOG,
+  LINEAR_COMMENT_PAGES as COMMENT_PAGES,
+  LINEAR_DONE as DONE,
+  LINEAR_NO_MORE as noMore,
+  LINEAR_PROGRESS as PROGRESS,
+  LINEAR_TEAM_READ as TEAM,
+  LINEAR_TEAM_STATES as TEAM_STATES,
+  LINEAR_TODO as TODO,
+  LINEAR_VALID_RULES as VALID_RULES,
+  linearBoard as board,
+  linearIssue as issue,
+  linearList as list,
+  linearRule as rule,
+  linearState as state,
+  linearTeamWith as teamWith,
+} from './board-fixtures.mjs';
 import { LINEAR_TEST_CONFIG, copyToolkit } from './board-toolkit-copy.mjs';
 
 async function loadReader(t, config = LINEAR_TEST_CONFIG) {
   const toolkit = copyToolkit(config);
   t.after(toolkit.cleanup);
   return toolkit.load('lib/board-linear.mjs');
-}
-
-const state = (id, name, type) => ({ id, name, type });
-const BACKLOG = state('s-backlog', 'Backlog', 'backlog');
-const TODO = state('s-todo', 'Todo', 'unstarted');
-const PROGRESS = state('s-progress', 'In Progress', 'started');
-const DONE = state('s-done', 'Done', 'completed');
-const CANCELED = state('s-canceled', 'Canceled', 'canceled');
-const DUPLICATE = state('s-duplicate', 'Duplicate', 'duplicate');
-const TRIAGE = state('s-triage', 'Triage', 'triage');
-
-const TEAM_STATES = [
-  BACKLOG, TODO, PROGRESS, state('s-awaiting', 'Awaiting Push', 'started'), state('s-review', 'In Review', 'started'),
-  DONE, CANCELED, DUPLICATE, TRIAGE,
-];
-
-// The default automation rules a Linear team must hold: an opened pull request starts review and a merged
-// one is done. A draft pull request moves nothing because the team holds no draft rule, which Linear's
-// settings show as "No action" (Linear refuses a default rule with no state).
-/** @param {string} event @param {string | null} stateId @param {{ branchPattern: string, isRegex: boolean } | null} [targetBranch] */
-const rule = (event, stateId, targetBranch = null) => ({ event, state: stateId && { id: stateId }, targetBranch });
-const VALID_RULES = [rule('start', 's-review'), rule('merge', 's-done')];
-
-function teamWith({ states = TEAM_STATES, rules = VALID_RULES, statesPage = { hasNextPage: false }, rulesPage = { hasNextPage: false } } = {}) {
-  return {
-    teams: {
-      nodes: [{
-        id: 'team-eng',
-        key: 'ENG',
-        states: { nodes: states, pageInfo: statesPage },
-        gitAutomationStates: { nodes: rules, pageInfo: rulesPage },
-      }],
-    },
-  };
-}
-
-const TEAM = teamWith();
-
-const noMore = { hasNextPage: false };
-const list = (nodes) => ({ nodes, pageInfo: noMore });
-
-/** @param {string} identifier @param {string} title @param {object} issueState @param {{ assignee?: string | null, parent?: string | null, labels?: string[], relations?: string[][], urls?: string[][] }} [options] */
-function issue(identifier, title, issueState, { assignee = null, parent = null, labels = [], relations = [], urls = [] } = {}) {
-  return {
-    id: `id-${identifier}`,
-    identifier,
-    title,
-    state: issueState,
-    assignee: assignee && { displayName: assignee },
-    parent: parent && { identifier: parent },
-    labels: list(labels.map((name) => ({ name }))),
-    inverseRelations: list(relations.map(([type, from, fromState]) => ({ type, issue: { identifier: from, state: { type: fromState } } }))),
-    attachments: list(urls.map(([url, linkKind]) => ({ url, metadata: { linkKind } }))),
-  };
-}
-
-const PULL = 'https://github.com/example-owner/example-repo/pull';
-
-// The board's active issues: the epic ENG-1 with its active child ENG-3, which carries a blocker of each
-// state, a related issue that blocks nothing and five attachments of which two are this repository's pull
-// requests: one Linear marks as closing and one it marks as only contributing.
-const ACTIVE = [
-  issue('ENG-1', 'Epic', TODO, { labels: ['epic'] }),
-  issue('ENG-3', 'Active child', TODO, {
-    assignee: 'alice',
-    parent: 'ENG-1',
-    labels: ['task', 'bug'],
-    relations: [['blocks', 'ENG-4', 'started'], ['blocks', 'ENG-5', 'canceled'], ['related', 'ENG-8', 'started']],
-    urls: [
-      [`${PULL}/12`, 'closes'],
-      [`${PULL}/16`, 'contributes'],
-      ['https://github.com/example-owner/other-repo/pull/13', 'closes'],
-      ['https://example.com/example-owner/example-repo/pull/14', 'closes'],
-      [`${PULL}/15/files`, 'closes'],
-    ],
-  }),
-  issue('ENG-4', 'Started', PROGRESS),
-  issue('ENG-5', 'Canceled', CANCELED),
-  issue('ENG-6', 'Duplicate', DUPLICATE),
-  issue('ENG-7', 'Triage', TRIAGE),
-  issue('ENG-8', 'Backlog', BACKLOG),
-];
-
-// Linear leaves ENG-2, the epic's archived completed child, out of every read but the children query
-// that asks for `includeArchived: true`.
-function board({ issues = ACTIVE, pageSize = issues.length } = {}) {
-  const calls = [];
-  const exec = (query, variables) => {
-    calls.push({ query, variables });
-    if (query.includes('teams(')) return TEAM;
-    if (query.includes('filter: { parent:')) {
-      const archived = { identifier: 'ENG-2', parent: { identifier: 'ENG-1' }, state: { type: 'completed' } };
-      const active = { identifier: 'ENG-3', parent: { identifier: 'ENG-1' }, state: { type: 'unstarted' } };
-      return { issues: list(query.includes('includeArchived: true') ? [archived, active] : [active]) };
-    }
-    const start = variables.after === null ? 0 : Number(variables.after);
-    const end = start + pageSize;
-    return { issues: { nodes: issues.slice(start, end), pageInfo: { hasNextPage: end < issues.length, endCursor: String(end) } } };
-  };
-  return { exec, calls };
 }
 
 test('readLinearBoard maps states to columns, canceled and duplicate to Done, an unmapped state to no Status, blockers from inverse blocks relations, closing pull requests from this repository\'s pull request attachments that Linear marks as closing only, and sub-issue counts from every child, archived ones included', async (t) => {
@@ -151,14 +68,6 @@ test('readLinearBoard maps states to columns, canceled and duplicate to Done, an
   // The seven issues came in three pages, each asked for after the cursor the last one gave.
   assert.deepEqual(calls.filter(({ query }) => !query.includes('teams(') && !query.includes('filter: { parent:')).map(({ variables }) => variables.after), [null, '3', '6']);
 });
-
-const COMMENT_PAGES = {
-  'ENG-5': [
-    { nodes: [{ id: 'c2', createdAt: '2026-01-02T00:00:00.000Z', body: 'Claim: second' }, { id: 'c1', createdAt: '2026-01-01T00:00:00.000Z', body: 'first' }], pageInfo: { hasNextPage: true, endCursor: 'p1' } },
-    { nodes: [{ id: 'c3', createdAt: '2026-01-02T00:00:00.000Z', body: 'third' }], pageInfo: noMore },
-  ],
-  'ENG-9': [{ nodes: [], pageInfo: noMore }],
-};
 
 test('linearCardDetails reads every comment page and returns the comments oldest first', async (t) => {
   const { linearCardDetails } = await loadReader(t);

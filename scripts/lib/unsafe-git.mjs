@@ -16,9 +16,8 @@
 //                                ready or have a merge queued, a ready or merge also needs neither
 //                                the saved write-up at HEAD nor the published body to hold a wait
 //                                reason, the card's show-me-first label and, at on-screen, work on
-//                                screen among them, unless the card's recorded owner answer admits
-//                                that head for a session without the Herdr job mark, and every label
-//                                of the card readable; a coordinated Claude job's push to main is held
+//                                screen among them, and every label of the card readable; a
+//                                coordinated Claude job's push to main is held
 //                                by any wait reason. Where fetched main turns Herdr on, a marked
 //                                session is a Herdr job, whose only wait reasons are check, screenshot
 //                                and the label; elsewhere the level and every wait reason hold it. A
@@ -778,7 +777,7 @@ export function blockReason(cmd, checkout, { preApproved = null, appRun = false,
   };
   // A pre-approved run session publishes only a plain delivery form, as the whole command, from its own working
   // directory. These refusals read nothing; publishCheck then reads the branch, origin, the setting, the card and, for
-  // a ready or merge, the saved write-up at HEAD and any saved card an owner answer on the card names.
+  // a ready or merge, the saved write-up at HEAD.
   const boundedReason = (s, raw) => {
     const refuse = (why) => `a pre-approved run session ${why}`;
     const kind = isPush(s) ? 'push' : GH_PR_CREATE.test(s) ? 'create' : GH_PR_READY.test(raw) ? 'ready' : 'merge';

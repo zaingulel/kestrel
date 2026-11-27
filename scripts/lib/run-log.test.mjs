@@ -16,12 +16,21 @@ import { spawn as spawnChild, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { main, parseReceipt } from '../run-log.mjs';
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../run-log.mjs');
+// The stand-in runner's environment drops the host's npm folders, since on Windows (where Git Bash spells the variable PATH)
+// the host's npm.cmd would meet it; tests that spawn real processes keep them, and the npm-resolution tests set PATH themselves.
+function withoutHostNpm(env) {
+  if (process.platform !== 'win32') return { ...env };
+  const key = Object.keys(env).find((name) => name.toUpperCase() === 'PATH');
+  if (key === undefined) return { ...env };
+  const kept = env[key].split(delimiter).filter((dir) => !['npm.cmd', 'npx.cmd'].some((name) => existsSync(join(dir.replace(/^"(.*)"$/, '$1'), name))));
+  return { ...env, [key]: kept.join(delimiter) };
+}
 const TEST_ENV = { ...process.env };
 delete TEST_ENV.RUN_LOG_RERUN_REASON;
 delete TEST_ENV.RUN_LOG_TEMP;
@@ -87,7 +96,7 @@ function runMain(dir, args, dependencies = {}) {
     log: (message) => { stdout += `${message}\n`; },
     error: (message) => { stderr += `${message}\n`; },
   };
-  const { exitCode, signal } = main(args, { spawnSync: fakeSpawn().spawnSync, env: TEST_ENV, cwd: dir, output, ...dependencies });
+  const { exitCode, signal } = main(args, { spawnSync: fakeSpawn().spawnSync, env: withoutHostNpm(TEST_ENV), cwd: dir, output, ...dependencies });
   return { exitCode, signal, stdout, stderr };
 }
 
@@ -883,7 +892,7 @@ test('local verification receipts match only the latest applicable repository st
       };
       const result = runMain(repo, ['synthetic command outcome', '--', 'npm', 'run', 'lint'], {
         spawnSync: fakeSpawn({ git: spawnSync, child: leaves }).spawnSync,
-        env: { ...TEST_ENV, RUN_LOG_TEMP: 'strict' },
+        env: withoutHostNpm({ ...TEST_ENV, RUN_LOG_TEMP: 'strict' }),
       });
       assert.equal(result.exitCode, 1, result.stderr);
       lint = false;

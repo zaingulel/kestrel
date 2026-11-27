@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, posix, relative, resolve, sep, win32 } from 'node:path';
 import { parseArgs } from 'node:util';
 import { isGithubRepository } from './factory-sync.mjs';
 import { processesUsing, runFolderPrefix, stopProcesses } from './run-folder.mjs';
@@ -146,8 +146,8 @@ export function parseCleanupArgs(args) {
 // The records of `git worktree list --porcelain -z`, the main worktree first, each { path, ...attributes } with an
 // attribute's value '' when it has none; null when any record is unreadable.
 /** @typedef {{ path: string, [attribute: string]: string | undefined }} WorktreeRecord */
-/** @param {string} stdout */
-export function parseWorktreeList(stdout) {
+/** @param {string} stdout @param {NodeJS.Platform} [platform] */
+export function parseWorktreeList(stdout, platform = process.platform) {
   const fields = stdout.split('\0');
   if (fields.pop() !== '') return null;
   /** @type {WorktreeRecord[]} */
@@ -165,7 +165,7 @@ export function parseWorktreeList(stdout) {
     const key = space === -1 ? field : field.slice(0, space);
     const value = space === -1 ? '' : field.slice(space + 1);
     if (!record) {
-      if (key !== 'worktree' || !isAbsolute(value)) return null;
+      if (key !== 'worktree' || !(platform === 'win32' ? win32.isAbsolute : isAbsolute)(value)) return null;
       record = { path: value };
     } else if (WORKTREE_ATTRIBUTES.has(key) && !(key in record)) {
       record[key] = value;

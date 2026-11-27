@@ -13,16 +13,18 @@ setting off or absent, the repository carries no file of the add-on and its work
 
 Install Herdr and its core as Herdr's own documentation says at https://herdr.dev/core/. The step is done when
 `hc --version` prints Herdr's version. Where `hc --version` already prints a version, Herdr is installed: skip the
-installer. Run the installer only from a terminal outside any agent session, since on an existing install it can restart
+installer. On Windows, install Herdr with its official PowerShell installer and follow
+[references/windows.md](references/windows.md). Run the installer only from a terminal outside any agent session, since on an existing install it can restart
 the core from the caller's environment.
 
 ## 2. Start the core with a clean environment
 
 The core keeps the environment of whoever starts it, so a core started from an agent session carries that session's
-settings into every agent it runs. Start the core from a login unit, and never from an agent session. On Linux and
+settings into every agent it runs. On Windows, follow [references/windows.md](references/windows.md) first: Herdr's Start menu
+entry opens the core and no unit applies. On Linux, start the core from a login unit, and never from an agent session. On Linux and
 macOS, any `hc` command that needs a core, `hc server status` included, starts one from the caller's environment when
 none is live, and which core it reaches depends on that environment, so in every step of this skill check for a live
-core only with `pgrep -a herdr-core`, which starts nothing.
+core only with `pgrep -a herdr-core`, which starts nothing. On Windows, follow [references/windows.md](references/windows.md) instead of `pgrep`.
 
 On a Linux machine with systemd and a graphical desktop login, first run `pgrep -a herdr-core`. A machine reached only
 over SSH never starts `graphical-session.target`, so this unit does not start its core there, and this skill gives no
@@ -90,7 +92,7 @@ repositories the panel reads, and leaving it out keeps the list the record holds
 ## 4. Set up this machine for the repository
 
 Run these at the repository's root checkout, never a job worktree, with the add-on on in fetched `main` settings, on the
-Linux machine that runs Herdr, and with a live clean core from step 2:
+Linux or Windows machine that runs Herdr, and with a live core from step 2 (on Windows, the one Herdr's Start menu entry opens):
 
 ```sh
 node <fabraik distribution>/scripts/fabraik.mjs herdr-setup [--target <dir>]
@@ -99,31 +101,31 @@ node <fabraik distribution>/scripts/fabraik.mjs herdr-check [--target <dir>]
 
 An agent may run both. `herdr-setup` reads everything first and refuses, changing nothing, where a read fails. It then
 adds the repository to the queue panel's list, keeping the repositories already listed, and opens the project's
-coordinator through `scripts/coordinator.mjs open`. It writes, enables and starts no service, and it undoes its panel
-change when the coordinator does not open. Its exit codes are 0 set up, 1 refused or rolled back, 2 usage, 3 already set
+coordinator through `scripts/coordinator.mjs open`. On Linux it writes, enables and starts no service. On Windows it then
+writes one per-user Run value, so the coordinator comes back at each logon, as [references/windows.md](references/windows.md)
+says. On both it undoes its panel change when the coordinator does not open. Its exit codes are 0 set up, 1 refused or rolled back, 2 usage, 3 already set
 up with nothing changed, and 4 incomplete, where a step failed or could not be read and the line names it.
 
-`herdr-check` changes nothing and prints one line per step, `core`, `panel`, `coordinator` and `notifications`, each
+`herdr-check` changes nothing and prints one line per step, `core`, `panel`, `coordinator` and `notifications`, and on Windows also `restart`, each
 `done`, `not done (<cause>); <fix>` or `unavailable (<cause>); <fix>`. Notifications read `on` or `off`, and off is
 not a failure. Its exit codes are 0 every step done, 1 a step not done, 2 usage and 4 a step unavailable.
-
-If an older release's standing lead still runs this project, setup refuses and leaves it running. The check reports
-the coordinator as not done. Identify the exact process and its unit or terminal before retiring it. Use
-`systemctl --user stop` and `systemctl --user disable` for its verified unit, or end its verified terminal. The check
-recognises its running Node process regardless of the unit name.
 
 ### Coordinator
 
 A project's coordinator runs cards in separate `job N` tabs. At the root checkout, with the Herdr add-on on in fetched
 `main` settings, run `node scripts/coordinator.mjs open --login <login>`. The
 [Coordinator reference](../resume/references/herdr-lead.md#coordinator) owns its cap, opens and recovery.
+Claude Code jobs start and deliver through the coordinated delivery lane on Linux and Windows the same way, and Codex
+jobs on Linux only; the coordinators' shared cap on running jobs is held under a
+lock that works on Linux, macOS and Windows, where it relies on the Windows user profile's default permissions and so
+refuses a state folder outside the profile.
 
 In Herdr, open Fabraik Queue's **Decisions** view. The project's tile shows its saved default. Under **Choose for
 this session**, pick an installed runtime once. Close an open Coordinator before choosing again. To change the
 default, set `coordinator.runtime` in `.agents/factory-settings.json` on `main` to `claude` or `codex` from the
 project's installed runtimes. The login opener uses the saved default without a prompt.
 
-To bring the coordinator back at each login, save a per-project user unit as
+On Windows, [references/windows.md](references/windows.md) says how the coordinator comes back at each logon, in place of the unit below. To bring the coordinator back at each login, save a per-project user unit as
 `~/.config/systemd/user/<project>-coordinator.service`, with full paths to `herdr-app` and `node`:
 
 ```ini
@@ -379,5 +381,6 @@ panel instead. Removing the panel is a separate machine step that removes it for
 `herdr-app do layout.switch --name main`, then delete `<Herdr home>/mods/fabraik-queue/`,
 `<Herdr home>/mods/fabraik-tabs/`, `<Herdr home>/mods/fabraik-spaces/`, `<Herdr home>/mods/fabraik-agents/`,
 `<Herdr home>/layouts/fabraik.json` and `<Herdr home>/fabraik-queue/`. The core bootstrap and coordinator login
-units stay their owner's to keep or remove, along with any legacy standing-lead unit. A live core can keep running past logout. Enabled units stay enabled until
-disabled.
+units stay their owner's to keep or remove. A live core can keep running past logout. Enabled units stay enabled until
+disabled. On Windows, remove the logon Run value with
+`reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "<name>" /f`.

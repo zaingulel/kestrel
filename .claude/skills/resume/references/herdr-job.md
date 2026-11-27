@@ -75,14 +75,16 @@ verdict.
 1. **Review, then reserve.** Rebase onto fetched `main` before dispatching the review. Reserve as
    [Deliver](deliver.md#delivery) says only once the review is settled with every finding closed, the write-up is saved
    naming its head and `node scripts/board.mjs --waits <card> --herdr` prints `merges <card>`; any other line, or a
-   failed command, is settled without the reservation. The final rebase keeps the review where it leaves the head
-   unchanged, or where it moves the head and both of these hold. First, with the head the review covered as
+   failed command, is settled without the reservation. The final rebase keeps the review where the external review
+   add-on setting, read again on the `main` that rebase used as section 6 says, requires no attempt the job has not
+   settled for the head the rebase leaves, as the add-on's own skill says, and where that head is unchanged or this
+   holds: with the head the review covered as
    `<receipt-head>`, which is the head a `Review carried from:` line names where one already stands, the comparisons of
    the Receipt reuse rule's rebase case in [Deliver](deliver.md#delivery) hold on either route: every `git range-diff`
    row is `=`, neither range holds a merge commit, and the two path lists share no path but a generated file that case
-   leaves out. Second, the external review add-on setting, read again on the `main` that rebase used as section 6 says,
-   requires no attempt the job has not settled for the new head as the add-on's own skill says. A review kept across a
-   moved head settles its convergence checks under that rule and is saved again with its screenshots in the new head's
+   leaves out. A review kept across a
+   moved head settles its convergence checks under that rule, which on the direct route leaves some to the pre-push
+   hook, and is saved again with its screenshots in the new head's
    review folder, the covered head's folder kept, its `Reviewed commit:` line naming the new head and, beside it under
    `## Evidence`, the line `Review carried from: <head the review covered>`. Where the final rebase leaves the head
    unchanged, the review folder and any `Review carried from:` line stay as they are. Any other final rebase is a

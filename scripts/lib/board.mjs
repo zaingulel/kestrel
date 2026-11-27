@@ -880,6 +880,12 @@ export function boardOpeningRequests() {
 // listing is judged first either way, so its failure is the one reported when several reads fail.
 // Every request, an opening read included, is retried through retryTransient, waiting through `pause`, all of them
 // sharing the one `budget` this read starts with; a started opening read is asked again through `exec`.
+/** @typedef {((args: string[]) => string) & { onePagePerRequest?: boolean }} GhExecutor the `gh` call: argv in, stdout out */
+
+/**
+ * @param {GhExecutor} exec
+ * @param {{ onOmission?: (advisory: string) => void, opening?: { listing?: () => string, openIssues?: () => string }, now?: number, pause?: (ms: number) => void, budget?: ReturnType<typeof retryBudget> }} [options]
+ */
 export function fetchBoard(exec, { onOmission = () => {}, opening = {}, now = Date.now(), pause = sleepSync, budget = retryBudget() } = {}) {
   const pageInfoOf = (page) => issueConnectionOf(page)?.pageInfo;
   const retrying = Object.assign((args) => retryTransient(() => exec(args), pause, undefined, budget), { onePagePerRequest: exec.onePagePerRequest });
@@ -888,9 +894,8 @@ export function fetchBoard(exec, { onOmission = () => {}, opening = {}, now = Da
     openIssues: (run) => () => readPages(run, issueWalkQuery(OPEN_ISSUES_FILTER), pageInfoOf, 'open issue walk'),
     recentIssues: (run) => () => readPages(run, issueWalkQuery(recentIssuesFilter(now)), pageInfoOf, 'recently updated issue walk'),
   };
-  const held = /** @type {{ listing?: () => unknown, openIssues?: () => unknown }} */ (opening);
   const opened = (name) => {
-    const started = held[name];
+    const started = opening[name];
     return started === undefined ? reads[name](retrying) : () => retryTransient(started, pause, reads[name](exec), budget, budget.startedAt);
   };
   // Each listed card keeps its place in the order the listing asks for; a recovered card has none.
@@ -900,7 +905,7 @@ export function fetchBoard(exec, { onOmission = () => {}, opening = {}, now = Da
   const items = [...listed, ...recovered];
   assertNoDuplicateCards(items);
   const named = recovered.map((item) => `${cardRef(item.content.number)} (${item.id})`).join(', ');
-  /** @type {(advisory: string) => void} */ (onOmission)(`GitHub's project listing left out ${recovered.length} card(s) that are on the board, read from their issues instead: ${named}. They are already on the board, so do not add them again.`);
+  onOmission(`GitHub's project listing left out ${recovered.length} card(s) that are on the board, read from their issues instead: ${named}. They are already on the board, so do not add them again.`);
   return items;
 }
 

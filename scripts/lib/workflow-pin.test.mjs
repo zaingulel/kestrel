@@ -10,7 +10,7 @@ import { gitEnvironment } from './factory-sync.mjs';
 import * as pin from './workflow-pin.mjs';
 
 const env = { ...gitEnvironment(), GIT_NO_REPLACE_OBJECTS: '1' };
-const OFF_LINUX = process.platform === 'linux' ? undefined : `the pin serves coordinated Herdr jobs, which run on Linux only (card #617), not ${process.platform}`;
+const OFF_LINUX = process.platform === 'linux' ? undefined : `the suite builds its fixtures with POSIX execute bits and symbolic links, so it runs on Linux only, not ${process.platform}`;
 
 const run = (cwd, args, options) => {
   const done = spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.safecrlf=false', ...args], { cwd, env, ...options });
@@ -212,6 +212,42 @@ test('workflow pin: refuses changed content', { skip: OFF_LINUX }, (t) => {
   assert.ok(lstatSync(link).isSymbolicLink());
   assert.notEqual(blobId(cwd, readlinkSync(link, { encoding: 'buffer' })), tree.get('link').object);
   refuses(cwd, commitId, repointed, 'link');
+});
+
+test('ANTI-REGRESSION: on Windows the workflow snapshot accepts a regular file for an executable entry and still refuses changed bytes or another kind', { skip: OFF_LINUX }, (t) => {
+  const cwd = repository(t);
+  const commitId = literalCommit(cwd);
+  const verify = (dir) => pin.verifyWorkflowSnapshot({ cwd, commit: commitId, dir, platform: 'win32' });
+  const refusesOnWindows = (dir, message) => assert.throws(() => verify(dir), (error) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, message);
+    return true;
+  });
+  assert.equal(literalTree(cwd, commitId).find((entry) => entry.path === 'run.sh').mode, '100755');
+
+  const plain = intact(cwd, commitId);
+  chmodSync(join(plain, 'run.sh'), 0o644);
+  assert.equal(lstatSync(join(plain, 'run.sh')).mode & 0o111, 0);
+  verify(plain);
+
+  const edited = intact(cwd, commitId);
+  chmodSync(join(edited, 'run.sh'), 0o644);
+  const bytes = readFileSync(join(edited, 'run.sh'));
+  bytes[0] ^= 0x01;
+  writeFileSync(join(edited, 'run.sh'), bytes);
+  refusesOnWindows(edited, /run\.sh: content \w+ differs from \w+ in /);
+
+  const linked = intact(cwd, commitId);
+  rmSync(join(linked, 'run.sh'));
+  symlinkSync('crlf.txt', join(linked, 'run.sh'));
+  assert.ok(lstatSync(join(linked, 'run.sh')).isSymbolicLink());
+  refusesOnWindows(linked, /run\.sh: mode 120000 differs from 100755/);
+
+  const regular = intact(cwd, commitId);
+  rmSync(join(regular, 'link'));
+  writeFileSync(join(regular, 'link'), 'run.sh');
+  assert.ok(lstatSync(join(regular, 'link')).isFile());
+  refusesOnWindows(regular, /link: mode 100644 differs from 120000/);
 });
 
 // Every regular file's bytes under a snapshot directory, keyed by its relative path.
